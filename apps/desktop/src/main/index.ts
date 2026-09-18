@@ -198,7 +198,7 @@ function registerIpc(): void {
     generation.updateReview(updateGenerationResultReviewInputSchema.parse(input))
   );
   ipcMain.handle('generation.results.export.v1', async (_event, input: unknown) => {
-    const { resultIds } = exportGenerationResultsInputSchema.parse(input);
+    const { resultIds, presetId } = exportGenerationResultsInputSchema.parse(input);
     const selection = await dialog.showOpenDialog({
       title: '导出生成图片',
       buttonLabel: '导出到此处',
@@ -210,7 +210,9 @@ function registerIpc(): void {
         succeeded: 0, failed: 0, files: [], failures: []
       });
     }
-    return exportService.exportToDirectory(resultIds, selection.filePaths[0]);
+    const preset = presetId ? exportPresets.list().find((item) => item.id === presetId) : undefined;
+    if (presetId && !preset) throw new Error('EXPORT_PRESET_NOT_FOUND');
+    return exportService.exportToDirectory(resultIds, selection.filePaths[0], preset);
   });
   ipcMain.handle('export.presets.list.v1', () => exportPresets.list());
   ipcMain.handle('export.presets.save.v1', (_event, input: unknown) =>

@@ -464,7 +464,8 @@ export const updateGenerationResultReviewInputSchema = z.object({
 export type UpdateGenerationResultReviewInput = z.infer<typeof updateGenerationResultReviewInputSchema>;
 
 export const exportGenerationResultsInputSchema = z.object({
-  resultIds: z.array(z.string().uuid()).min(1).max(10_000)
+  resultIds: z.array(z.string().uuid()).min(1).max(10_000),
+  presetId: z.string().uuid().nullable().default(null)
 });
 
 export type ExportGenerationResultsInput = z.infer<typeof exportGenerationResultsInputSchema>;

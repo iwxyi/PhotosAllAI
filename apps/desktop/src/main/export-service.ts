@@ -4,7 +4,7 @@ import { copyFile, link, realpath, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { exportReportSchema, type ExportReport } from '@photoallisai/contracts';
+import { exportReportSchema, type ExportPreset, type ExportReport } from '@photoallisai/contracts';
 
 interface ResultResolver {
   resolveResultFile(resultId: string): string | null;
@@ -34,7 +34,7 @@ export class ExportService {
     this.#database.close();
   }
 
-  async exportToDirectory(resultIds: readonly string[], requestedDirectory: string): Promise<ExportReport> {
+  async exportToDirectory(resultIds: readonly string[], requestedDirectory: string, preset?: ExportPreset): Promise<ExportReport> {
     const destinationDirectory = await realpath(requestedDirectory);
     if (!(await stat(destinationDirectory)).isDirectory()) throw new Error('EXPORT_DESTINATION_NOT_DIRECTORY');
     const uniqueIds = [...new Set(resultIds)];
@@ -54,7 +54,7 @@ export class ExportService {
         continue;
       }
       try {
-        const fileName = await copyWithoutOverwrite(sourcePath, destinationDirectory);
+        const fileName = await copyWithPreset(sourcePath, destinationDirectory, preset);
         files.push({ resultId, fileName });
       } catch (error) {
         failures.push({
@@ -80,7 +80,7 @@ export class ExportService {
   }
 }
 
-async function copyWithoutOverwrite(sourcePath: string, destinationDirectory: string): Promise<string> {
+async function copyWithPreset(sourcePath: string, destinationDirectory: string, preset?: ExportPreset): Promise<string> {
   const source = await stat(sourcePath);
   if (!source.isFile()) throw new Error('EXPORT_SOURCE_NOT_FILE');
   const parsed = path.parse(sourcePath);
@@ -89,8 +89,13 @@ async function copyWithoutOverwrite(sourcePath: string, destinationDirectory: st
   try {
     const copied = await stat(temporaryPath);
     if (copied.size !== source.size) throw new Error('EXPORT_SIZE_MISMATCH');
+    const version = parsed.name.match(/(?:^|[-_])(v\d+)$/i)?.[1] ?? 'original';
+    const requestedName = preset
+      ? preset.namingPattern.replaceAll('{name}', parsed.name).replaceAll('{version}', version) + parsed.ext
+      : parsed.base;
     for (let index = 0; index < 10_000; index += 1) {
-      const fileName = index === 0 ? parsed.base : `${parsed.name} (${index})${parsed.ext}`;
+      if (index > 0 && preset?.conflictPolicy === 'skip') throw new Error('EXPORT_NAME_EXISTS');
+      const fileName = index === 0 ? requestedName : `${path.parse(requestedName).name} (${index})${parsed.ext}`;
       try {
         await link(temporaryPath, path.join(destinationDirectory, fileName));
         return fileName;

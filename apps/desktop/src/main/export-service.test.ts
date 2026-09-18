@@ -48,4 +48,14 @@ describe('generation result export', () => {
     expect(await readdir(destination)).not.toContain(expect.stringContaining('.tmp'));
     service.close();
   });
+
+  it('applies a preset naming pattern and skip conflict policy', async () => {
+    const { service, destination } = await fixture();
+    const preset = { id: 'a7f8b80b-8c58-4c10-a689-2f8f14ee8a18', name: '客户交付', format: 'original' as const, conflictPolicy: 'skip' as const, namingPattern: '{name}_交付_{version}', createdAt: 0, updatedAt: 0 };
+    const first = await service.exportToDirectory([firstId], destination, preset);
+    expect(first.files[0]?.fileName).toBe('PORTRAIT__ai__v0001__A1B2C3D4_交付_original.jpg');
+    const second = await service.exportToDirectory([firstId], destination, preset);
+    expect(second).toMatchObject({ succeeded: 0, failed: 1, failures: [{ errorCode: 'EXPORT_NAME_EXISTS' }] });
+    service.close();
+  });
 });
