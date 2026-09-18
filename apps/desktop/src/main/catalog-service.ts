@@ -5,9 +5,13 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   catalogAssetSchema,
+  catalogAssetPageSchema,
   catalogFolderSchema,
+  listCatalogAssetsInputSchema,
   type CatalogAsset,
+  type CatalogAssetPage,
   type CatalogFolder,
+  type ListCatalogAssetsInput,
   type UpdateCatalogMetadataInput,
   updateCatalogMetadataInputSchema
 } from '@photoallisai/contracts';
@@ -131,12 +135,45 @@ export class CatalogService {
     return rows.map((row) => this.#toAsset(row));
   }
 
+  listAssetPage(rawInput: ListCatalogAssetsInput): CatalogAssetPage {
+    const input = listCatalogAssetsInputSchema.parse(rawInput);
+    const conditions: string[] = [];
+    const values: (string | number)[] = [];
+    if (input.folderId) {
+      conditions.push('folder_id = ?');
+      values.push(input.folderId);
+    }
+    if (input.cursor) {
+      conditions.push('(modified_at < ? OR (modified_at = ? AND id > ?))');
+      values.push(input.cursor.modifiedAt, input.cursor.modifiedAt, input.cursor.id);
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const rows = this.#database.prepare(`
+      SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, favorite
+      FROM assets ${where}
+      ORDER BY modified_at DESC, id ASC
+      LIMIT ?
+    `).all(...values, input.limit + 1) as AssetRow[];
+    const hasMore = rows.length > input.limit;
+    const pageRows = hasMore ? rows.slice(0, input.limit) : rows;
+    const count = this.#database.prepare(`
+      SELECT COUNT(*) AS value FROM assets ${input.folderId ? 'WHERE folder_id = ?' : ''}
+    `).get(...(input.folderId ? [input.folderId] : [])) as { value: number };
+    const last = pageRows.at(-1);
+    return catalogAssetPageSchema.parse({
+      items: pageRows.map((row) => this.#toAsset(row)),
+      totalCount: count.value,
+      nextCursor: hasMore && last ? { modifiedAt: last.modified_at, id: last.id } : null
+    });
+  }
+
   listFolders(): CatalogFolder[] {
     const rows = this.#database.prepare(`
       SELECT folders.id, folders.name, COUNT(assets.id) AS asset_count
       FROM folders
       LEFT JOIN assets ON assets.folder_id = folders.id
       GROUP BY folders.id, folders.name
+      HAVING COUNT(assets.id) > 0
       ORDER BY folders.name COLLATE NOCASE ASC, folders.id ASC
     `).all() as { id: string; name: string; asset_count: number }[];
     return rows.map((row) => catalogFolderSchema.parse({

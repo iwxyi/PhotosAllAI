@@ -44,6 +44,13 @@ describe('catalog image discovery', () => {
     expect(catalog.listFolders()).toEqual([{ id: assets[0]?.folderId, name: 'photos', assetCount: 2 }]);
     const updated = catalog.updateMetadata({ assetIds: assets.map((asset) => asset.id), rating: 4 });
     expect(updated.every((asset) => asset.rating === 4)).toBe(true);
+    const firstPage = catalog.listAssetPage({ folderId: null, cursor: null, limit: 1 });
+    const secondPage = catalog.listAssetPage({ folderId: null, cursor: firstPage.nextCursor, limit: 1 });
+    expect(firstPage.totalCount).toBe(2);
+    expect(firstPage.nextCursor).not.toBeNull();
+    expect(secondPage.items).toHaveLength(1);
+    expect(secondPage.items[0]?.id).not.toBe(firstPage.items[0]?.id);
+    expect(secondPage.nextCursor).toBeNull();
     expect(assets.find((asset) => asset.fileName === 'visible.jpg')?.thumbnailUrl).toMatch(/^photoasset:\/\/thumbnail/);
     expect(assets.find((asset) => asset.fileName === 'raw.NEF')?.previewUrl).toMatch(/^photoasset:\/\/preview/);
     catalog.close();

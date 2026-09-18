@@ -30,6 +30,28 @@ export const catalogAssetSchema = z.object({
 
 export type CatalogAsset = z.infer<typeof catalogAssetSchema>;
 
+export const catalogAssetCursorSchema = z.object({
+  modifiedAt: z.number().nonnegative(),
+  id: z.string().min(1)
+});
+export type CatalogAssetCursor = z.infer<typeof catalogAssetCursorSchema>;
+
+export const listCatalogAssetsInputSchema = z.object({
+  folderId: z.string().min(1).nullable().default(null),
+  cursor: catalogAssetCursorSchema.nullable().default(null),
+  limit: z.number().int().min(1).max(500).default(200)
+});
+
+export type ListCatalogAssetsInput = z.infer<typeof listCatalogAssetsInputSchema>;
+
+export const catalogAssetPageSchema = z.object({
+  items: z.array(catalogAssetSchema),
+  totalCount: z.number().int().nonnegative(),
+  nextCursor: catalogAssetCursorSchema.nullable()
+});
+
+export type CatalogAssetPage = z.infer<typeof catalogAssetPageSchema>;
+
 export const catalogFolderSchema = z.object({
   id: z.string(),
   name: z.string().min(1),
@@ -284,6 +306,7 @@ export type ExportReport = z.infer<typeof exportReportSchema>;
 export interface DesktopApi {
   getAppInfo(): Promise<AppInfo>;
   listCatalogAssets(): Promise<CatalogAsset[]>;
+  listCatalogAssetPage(input: ListCatalogAssetsInput): Promise<CatalogAssetPage>;
   listCatalogFolders(): Promise<CatalogFolder[]>;
   updateCatalogMetadata(input: UpdateCatalogMetadataInput): Promise<CatalogAsset[]>;
   importFolders(): Promise<CatalogSnapshot | null>;

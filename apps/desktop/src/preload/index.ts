@@ -5,6 +5,8 @@ const api: DesktopApi = {
   getAppInfo: () => ipcRenderer.invoke('app.info.v1') as ReturnType<DesktopApi['getAppInfo']>,
   listCatalogAssets: () =>
     ipcRenderer.invoke('catalog.assets.list.v1') as ReturnType<DesktopApi['listCatalogAssets']>,
+  listCatalogAssetPage: (input) =>
+    ipcRenderer.invoke('catalog.assets.page.v1', input) as ReturnType<DesktopApi['listCatalogAssetPage']>,
   listCatalogFolders: () =>
     ipcRenderer.invoke('catalog.folders.list.v1') as ReturnType<DesktopApi['listCatalogFolders']>,
   updateCatalogMetadata: (input) =>

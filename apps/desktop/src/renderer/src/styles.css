@@ -88,6 +88,8 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 .filmstrip { height: 123px; padding: 8px 10px 10px; overflow-x: auto; overflow-y: hidden; }
 .filmstrip-track { position: relative; height: 102px; }
 .thumb { position: absolute; top: 0; width: 130px; height: 102px; padding: 0; overflow: hidden; color: white; background: #0b0d0b; border: 1px solid transparent; border-radius: var(--radius-sm); }
+.filmstrip-more { position: absolute; top: 0; width: 130px; height: 102px; color: var(--muted); background: var(--surface-1); border: 1px dashed var(--line-strong); border-radius: var(--radius-sm); }
+.filmstrip-more:hover { color: var(--text); background: var(--surface-3); }.filmstrip-more:disabled { opacity: .6; }
 .thumb::after { content: ""; position: absolute; inset: 0; box-shadow: inset 0 0 0 1px rgb(255 255 255 / 8%); border-radius: inherit; pointer-events: none; }
 .thumb.is-selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .thumb img { position: relative; z-index: 1; width: 100%; height: 100%; display: block; object-fit: cover; opacity: .82; transition: opacity 140ms ease, transform 220ms ease; }

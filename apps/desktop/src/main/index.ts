@@ -10,6 +10,7 @@ import {
   exportGenerationResultsInputSchema,
   exportReportSchema,
   listAnalysisInputSchema,
+  listCatalogAssetsInputSchema,
   listGenerationResultsInputSchema,
   reorderTaskIdsSchema,
   savePromptTemplateInputSchema,
@@ -60,6 +61,9 @@ function registerIpc(): void {
   );
 
   ipcMain.handle('catalog.assets.list.v1', () => catalog.listAssets());
+  ipcMain.handle('catalog.assets.page.v1', (_event, input: unknown) =>
+    catalog.listAssetPage(listCatalogAssetsInputSchema.parse(input))
+  );
   ipcMain.handle('catalog.folders.list.v1', () => catalog.listFolders());
   ipcMain.handle('catalog.metadata.update.v1', (_event, input: unknown) =>
     catalog.updateMetadata(updateCatalogMetadataInputSchema.parse(input))

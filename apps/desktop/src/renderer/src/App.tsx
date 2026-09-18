@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   CatalogAsset,
+  CatalogAssetCursor,
   CatalogFolder,
   AnalysisRevision,
   GenerationResult,
@@ -244,13 +245,21 @@ function Filmstrip({
   selected,
   selection,
   onSelect,
-  collectionName
+  collectionName,
+  totalCount,
+  hasMore,
+  loading,
+  onLoadMore
 }: {
   items: Photo[];
   selected: Photo;
   selection: SelectionState;
   onSelect: (photo: Photo, intent: SelectionIntent) => void;
   collectionName: string;
+  totalCount: number;
+  hasMore: boolean;
+  loading: boolean;
+  onLoadMore: () => void;
 }): React.JSX.Element {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState({ width: 0, scrollLeft: 0 });
@@ -271,7 +280,7 @@ function Filmstrip({
   return (
     <section className="filmstrip-region">
       <div className="filmstrip-toolbar">
-        <div className="result-summary"><strong>{collectionName}</strong><span>{items.length} 张照片</span></div>
+        <div className="result-summary"><strong>{collectionName}</strong><span>{totalCount} 张照片</span></div>
         <div className="filmstrip-tools">
           <button className="quiet-button" type="button"><ListFilter size={14} /> 筛选</button>
           <button className="quiet-button" type="button">拍摄时间 <ChevronDown size={12} /></button>
@@ -281,8 +290,12 @@ function Filmstrip({
           </div>
         </div>
       </div>
-      <div className="filmstrip" role="listbox" aria-label="照片" ref={viewportRef} onScroll={(event) => setViewport((current) => ({ ...current, scrollLeft: event.currentTarget.scrollLeft }))}>
-        <div className="filmstrip-track" style={{ width: virtual.totalSize }}>
+      <div className="filmstrip" role="listbox" aria-label="照片" ref={viewportRef} onScroll={(event) => {
+        const element = event.currentTarget;
+        setViewport((current) => ({ ...current, scrollLeft: element.scrollLeft }));
+        if (hasMore && !loading && element.scrollLeft + element.clientWidth >= element.scrollWidth - itemSize * 3) onLoadMore();
+      }}>
+        <div className="filmstrip-track" style={{ width: virtual.totalSize + (hasMore ? itemSize : 0) }}>
         {visibleItems.map((photo, visibleIndex) => {
           const index = virtual.start + visibleIndex;
           return (
@@ -307,6 +320,7 @@ function Filmstrip({
           </button>
           );
         })}
+        {hasMore && <button className="filmstrip-more" type="button" style={{ left: items.length * itemSize }} onClick={onLoadMore} disabled={loading}>{loading ? '加载中' : '更多'}</button>}
         </div>
       </div>
     </section>
@@ -575,14 +589,34 @@ function TaskBar({ open, onToggle, tasks }: { open: boolean; onToggle: () => voi
   );
 }
 
-function LibraryWorkspace({ availablePhotos, catalogFolders, isDemo, onRefreshCatalog }: { availablePhotos: Photo[]; catalogFolders: CatalogFolder[]; isDemo: boolean; onRefreshCatalog: () => Promise<void> }): React.JSX.Element {
-  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
-  const visiblePhotos = selectedFolderId ? availablePhotos.filter((photo) => photo.folderId === selectedFolderId) : availablePhotos;
-  const [selectedId, setSelectedId] = useState(visiblePhotos[0]!.id);
+function LibraryWorkspace({
+  availablePhotos,
+  catalogFolders,
+  isDemo,
+  selectedFolderId,
+  totalCount,
+  hasMore,
+  loadingMore,
+  onSelectFolder,
+  onLoadMore,
+  onRefreshCatalog
+}: {
+  availablePhotos: Photo[];
+  catalogFolders: CatalogFolder[];
+  isDemo: boolean;
+  selectedFolderId: string | null;
+  totalCount: number;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onSelectFolder: (folderId: string | null) => void;
+  onLoadMore: () => void;
+  onRefreshCatalog: () => Promise<void>;
+}): React.JSX.Element {
+  const [selectedId, setSelectedId] = useState(availablePhotos[0]!.id);
   const [selection, setSelection] = useState<SelectionState>({
-    selectedIds: new Set([visiblePhotos[0]!.id]),
-    anchorId: visiblePhotos[0]!.id,
-    focusId: visiblePhotos[0]!.id
+    selectedIds: new Set([availablePhotos[0]!.id]),
+    anchorId: availablePhotos[0]!.id,
+    focusId: availablePhotos[0]!.id
   });
   const [tasksOpen, setTasksOpen] = useState(false);
   const [visionProfiles, setVisionProfiles] = useState<ProviderProfile[]>([]);
@@ -593,20 +627,19 @@ function LibraryWorkspace({ availablePhotos, catalogFolders, isDemo, onRefreshCa
   const [analysisNotice, setAnalysisNotice] = useState('');
   const [operationNotice, setOperationNotice] = useState('');
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
-  const selected = visiblePhotos.find((photo) => photo.id === selectedId) ?? visiblePhotos[0]!;
-  const orderedIds = useMemo(() => visiblePhotos.map((photo) => photo.id), [visiblePhotos]);
+  const selected = availablePhotos.find((photo) => photo.id === selectedId) ?? availablePhotos[0]!;
+  const orderedIds = useMemo(() => availablePhotos.map((photo) => photo.id), [availablePhotos]);
   const collectionName = selectedFolderId
     ? catalogFolders.find((folder) => folder.id === selectedFolderId)?.name ?? '文件夹'
     : isDemo ? '2026 人像作品' : '所有照片';
 
-  const selectFolder = (folderId: string | null) => {
-    const nextPhotos = folderId ? availablePhotos.filter((photo) => photo.folderId === folderId) : availablePhotos;
-    const first = nextPhotos[0];
+  useEffect(() => {
+    if (availablePhotos.some((photo) => photo.id === selectedId)) return;
+    const first = availablePhotos[0];
     if (!first) return;
-    setSelectedFolderId(folderId);
     setSelectedId(first.id);
     setSelection({ selectedIds: new Set([first.id]), anchorId: first.id, focusId: first.id });
-  };
+  }, [availablePhotos, selectedId]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -810,9 +843,9 @@ function LibraryWorkspace({ availablePhotos, catalogFolders, isDemo, onRefreshCa
 
   return (
     <div className="workspace">
-      <Sidebar folders={catalogFolders} totalCount={availablePhotos.length} selectedFolderId={selectedFolderId} onSelectFolder={selectFolder} isDemo={isDemo} />
+      <Sidebar folders={catalogFolders} totalCount={totalCount} selectedFolderId={selectedFolderId} onSelectFolder={onSelectFolder} isDemo={isDemo} />
       <main className="library-main">
-        <Filmstrip items={visiblePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} />
+        <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
         <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} />
       </main>
       <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onGenerate={generateSelection} />
@@ -1112,12 +1145,31 @@ export function App(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('library');
   const [catalogPhotos, setCatalogPhotos] = useState<Photo[]>([]);
   const [catalogFolders, setCatalogFolders] = useState<CatalogFolder[]>([]);
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  const [catalogTotal, setCatalogTotal] = useState(0);
+  const [nextCursor, setNextCursor] = useState<CatalogAssetCursor | null>(null);
+  const [catalogReady, setCatalogReady] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const catalogRequest = useRef(0);
 
   const refreshCatalog = useCallback(async () => {
-    const [assets, folders] = await Promise.all([window.desktopApi.listCatalogAssets(), window.desktopApi.listCatalogFolders()]);
-    setCatalogPhotos(mapCatalogAssets(assets));
-    setCatalogFolders(folders);
-  }, []);
+    const request = ++catalogRequest.current;
+    setLoadingMore(true);
+    try {
+      const [page, folders] = await Promise.all([
+        window.desktopApi.listCatalogAssetPage({ folderId: selectedFolderId, cursor: null, limit: 200 }),
+        window.desktopApi.listCatalogFolders()
+      ]);
+      if (request !== catalogRequest.current) return;
+      setCatalogPhotos(mapCatalogAssets(page.items));
+      setCatalogFolders(folders);
+      setCatalogTotal(page.totalCount);
+      setNextCursor(page.nextCursor);
+      setCatalogReady(true);
+    } finally {
+      if (request === catalogRequest.current) setLoadingMore(false);
+    }
+  }, [selectedFolderId]);
 
   useEffect(() => {
     void refreshCatalog();
@@ -1125,18 +1177,39 @@ export function App(): React.JSX.Element {
 
   const importFolders = async () => {
     const result = await window.desktopApi.importFolders();
-    if (result) {
-      setCatalogPhotos(mapCatalogAssets(result.assets));
-      setCatalogFolders(await window.desktopApi.listCatalogFolders());
+    if (result) await refreshCatalog();
+  };
+
+  const loadMoreCatalog = async () => {
+    if (!nextCursor || loadingMore) return;
+    const request = ++catalogRequest.current;
+    setLoadingMore(true);
+    try {
+      const page = await window.desktopApi.listCatalogAssetPage({
+        folderId: selectedFolderId,
+        cursor: nextCursor,
+        limit: 200
+      });
+      if (request !== catalogRequest.current) return;
+      setCatalogPhotos((current) => {
+        const known = new Set(current.map((photo) => photo.id));
+        return [...current, ...mapCatalogAssets(page.items).filter((photo) => !known.has(photo.id))];
+      });
+      setCatalogTotal(page.totalCount);
+      setNextCursor(page.nextCursor);
+    } finally {
+      if (request === catalogRequest.current) setLoadingMore(false);
     }
   };
 
-  const availablePhotos = catalogPhotos.length > 0 ? catalogPhotos : photos;
+  const isDemo = catalogReady && catalogTotal === 0 && catalogFolders.length === 0;
+  const availablePhotos = !catalogReady || isDemo ? photos : catalogPhotos;
+  const displayTotal = isDemo || !catalogReady ? 128 : catalogTotal;
 
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} onChange={setActiveTab} onImport={() => void importFolders()} />
-      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} isDemo={catalogPhotos.length === 0} onRefreshCatalog={refreshCatalog} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
+      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} totalCount={displayTotal} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={setSelectedFolderId} onLoadMore={() => void loadMoreCatalog()} onRefreshCatalog={refreshCatalog} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
     </div>
   );
 }

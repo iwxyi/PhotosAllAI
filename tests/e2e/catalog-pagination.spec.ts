@@ -1,0 +1,62 @@
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+
+import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test';
+
+import { CatalogService } from '../../apps/desktop/src/main/catalog-service';
+
+let electronApp: ElectronApplication;
+let page: Page;
+let testRoot: string;
+
+test.beforeAll(async () => {
+  testRoot = await mkdtemp(path.join(tmpdir(), 'photoallisai-pagination-e2e-'));
+  const userData = path.join(testRoot, 'user-data');
+  const libraryDirectory = path.join(userData, 'library');
+  await mkdir(libraryDirectory, { recursive: true });
+  const databasePath = path.join(libraryDirectory, 'catalog.sqlite');
+  const migration = new CatalogService(databasePath);
+  migration.close();
+  const database = new DatabaseSync(databasePath);
+  database.prepare('INSERT INTO folders (id, path, name, imported_at) VALUES (?, ?, ?, ?)')
+    .run('folder-page', '/fixture/page', 'Paged Catalog', 1);
+  const insert = database.prepare(`
+    INSERT INTO assets (id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at)
+    VALUES (?, 'folder-page', ?, ?, '.jpg', 1024, ?, 1)
+  `);
+  database.exec('BEGIN IMMEDIATE');
+  for (let index = 0; index < 205; index += 1) {
+    const name = `PAGE_${String(index).padStart(3, '0')}.jpg`;
+    insert.run(`asset-page-${String(index).padStart(3, '0')}`, `/fixture/page/${name}`, name, 10_000 - index);
+  }
+  database.exec('COMMIT');
+  database.close();
+
+  electronApp = await electron.launch({
+    args: [path.resolve('apps/desktop/out/main/index.js')],
+    env: { ...process.env, PHOTOALLISAI_USER_DATA: userData }
+  });
+  page = await electronApp.firstWindow();
+  await page.waitForLoadState('domcontentloaded');
+});
+
+test.afterAll(async () => {
+  if (electronApp) await electronApp.close();
+  await rm(testRoot, { recursive: true, force: true });
+});
+
+test('loads cursor pages at the virtualized filmstrip boundary', async () => {
+  await expect(page.getByText('205 张照片')).toBeVisible();
+  const options = page.getByRole('option');
+  expect(await options.count()).toBeLessThan(20);
+
+  const filmstrip = page.locator('.filmstrip');
+  await filmstrip.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
+  await expect(page.getByRole('button', { name: /更多|加载中/ })).toHaveCount(0);
+
+  await filmstrip.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
+  await expect(page.getByRole('option').filter({ hasText: 'PAGE_204.jpg' })).toBeVisible();
+  expect(await options.count()).toBeLessThan(20);
+});
