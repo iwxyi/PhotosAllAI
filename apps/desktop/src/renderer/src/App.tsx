@@ -14,6 +14,7 @@ import type {
   ProviderProfile,
   ExportPreset,
   ImageCacheStats,
+  DiagnosticSnapshot,
   SavePromptTemplateInput,
   SaveProviderProfileInput,
   WorkspaceSession,
@@ -1257,11 +1258,13 @@ function SettingsPage(): React.JSX.Element {
   const [cacheStats, setCacheStats] = useState<ImageCacheStats | null>(null);
   const [cacheMessage, setCacheMessage] = useState('');
   const [cacheBusy, setCacheBusy] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticSnapshot | null>(null);
 
   useEffect(() => {
     void window.desktopApi.listProviderProfiles().then(setProfiles);
     void window.desktopApi.listExportPresets().then(setPresets);
     void window.desktopApi.getImageCacheStats().then(setCacheStats);
+    void window.desktopApi.getDiagnosticSnapshot().then(setDiagnostics);
   }, []);
 
   const patchForm = <Key extends keyof SaveProviderProfileInput>(key: Key, value: SaveProviderProfileInput[Key]) => {
@@ -1357,6 +1360,10 @@ function SettingsPage(): React.JSX.Element {
         <section className="settings-section cache-section">
           <div className="settings-heading"><div><h2>预览缓存</h2><p>缓存可安全重建，不会删除原图、生成结果或分析数据。</p></div><span>{cacheStats ? `${cacheStats.files} 个文件 · ${(cacheStats.bytes / 1_073_741_824).toFixed(2)} GiB` : '正在读取'}</span></div>
           <div className="cache-actions"><button className="secondary-action" type="button" disabled={cacheBusy || !cacheStats || cacheStats.bytes === 0} onClick={async () => { setCacheBusy(true); try { const result = await window.desktopApi.pruneImageCache({ maxBytes: 0 }); setCacheMessage(`已清理 ${result.removedFiles} 个缓存文件。`); setCacheStats(await window.desktopApi.getImageCacheStats()); } catch { setCacheMessage('缓存清理失败，请稍后重试。'); } finally { setCacheBusy(false); } }}>{cacheBusy ? '清理中…' : '清理全部可重建缓存'}</button><span role="status">{cacheMessage}</span></div>
+        </section>
+        <section className="settings-section diagnostics-section">
+          <div className="settings-heading"><div><h2>诊断摘要</h2><p>仅包含运行统计，不包含路径、密钥、图片内容或模型响应。</p></div><span><ShieldCheck size={14} />可安全提交给支持团队</span></div>
+          {diagnostics ? <div className="diagnostic-grid"><span>版本<strong>{diagnostics.appVersion}</strong></span><span>图库<strong>{diagnostics.catalog.assets} 张 · 离线 {diagnostics.catalog.offline}</strong></span><span>模型<strong>{diagnostics.providers.enabled}/{diagnostics.providers.total} 已启用</strong></span><span>缓存<strong>{(diagnostics.cache.bytes / 1_073_741_824).toFixed(2)} GiB</strong></span></div> : <small>正在读取诊断摘要…</small>}
         </section>
       </main>
     </div>

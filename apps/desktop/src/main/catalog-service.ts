@@ -231,6 +231,14 @@ export class CatalogService {
     return this.#toAssets(rows);
   }
 
+  getStats(): { assets: number; offline: number } {
+    const row = this.#database.prepare(`
+      SELECT COUNT(*) AS assets, SUM(CASE WHEN offline_at IS NOT NULL THEN 1 ELSE 0 END) AS offline
+      FROM assets WHERE removed_at IS NULL
+    `).get() as { assets: number; offline: number | null };
+    return { assets: row.assets, offline: row.offline ?? 0 };
+  }
+
   listAssetPage(rawInput: ListCatalogAssetsInput): CatalogAssetPage {
     const input = listCatalogAssetsInputSchema.parse(rawInput);
     const baseConditions: string[] = ['removed_at IS NULL'];

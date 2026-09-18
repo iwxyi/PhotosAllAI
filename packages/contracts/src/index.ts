@@ -8,6 +8,16 @@ export const appInfoSchema = z.object({
 
 export type AppInfo = z.infer<typeof appInfoSchema>;
 
+export const diagnosticSnapshotSchema = z.object({
+  appVersion: z.string(),
+  platform: z.enum(['darwin', 'win32', 'linux']),
+  catalog: z.object({ assets: z.number().int().nonnegative(), offline: z.number().int().nonnegative() }),
+  providers: z.object({ total: z.number().int().nonnegative(), enabled: z.number().int().nonnegative() }),
+  tasks: z.record(z.string(), z.number().int().nonnegative()),
+  cache: z.object({ files: z.number().int().nonnegative(), bytes: z.number().int().nonnegative() })
+});
+export type DiagnosticSnapshot = z.infer<typeof diagnosticSnapshotSchema>;
+
 export const workspaceTabSchema = z.enum(['library', 'templates', 'tasks', 'settings']);
 export type WorkspaceTab = z.infer<typeof workspaceTabSchema>;
 
@@ -507,6 +517,7 @@ export const pruneImageCacheInputSchema = z.object({ maxBytes: z.number().int().
 
 export interface DesktopApi {
   getAppInfo(): Promise<AppInfo>;
+  getDiagnosticSnapshot(): Promise<DiagnosticSnapshot>;
   getWorkspaceSession(): Promise<WorkspaceSession>;
   saveWorkspaceSession(session: WorkspaceSession): Promise<WorkspaceSession>;
   listCatalogAssets(): Promise<CatalogAsset[]>;

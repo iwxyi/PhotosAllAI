@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, net, protocol, safeStorage, shell } from 'electron';
 import {
   appInfoSchema,
+  diagnosticSnapshotSchema,
   catalogAssetRemovalInputSchema,
   catalogAssetRemovalReportSchema,
   catalogSnapshotSchema,
@@ -87,6 +88,21 @@ function registerIpc(): void {
       platform: process.platform
     })
   );
+  ipcMain.handle('app.diagnostics.v1', async () => {
+    const [profiles, cache] = await Promise.all([providers.list(), imageCache.getStats()]);
+    const taskCounts = tasks.list().reduce<Record<string, number>>((counts, task) => {
+      counts[task.status] = (counts[task.status] ?? 0) + 1;
+      return counts;
+    }, {});
+    return diagnosticSnapshotSchema.parse({
+      appVersion: app.getVersion(),
+      platform: process.platform,
+      catalog: catalog.getStats(),
+      providers: { total: profiles.length, enabled: profiles.filter((profile) => profile.enabled).length },
+      tasks: taskCounts,
+      cache
+    });
+  });
   ipcMain.handle('workspace.session.get.v1', () => workspace.get());
   ipcMain.handle('workspace.session.save.v1', (_event, input: unknown) =>
     workspace.save(workspaceSessionSchema.parse(input))
