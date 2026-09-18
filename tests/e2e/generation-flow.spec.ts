@@ -105,6 +105,11 @@ test('analyzes, generates, persists, and displays a managed result', async () =>
   await page.getByRole('tab', { name: '图库' }).click();
   await page.getByRole('button', { name: '开始分析' }).click();
   await expect(page.getByText('可清理背景的人像')).toBeVisible({ timeout: 10_000 });
+  await page.getByLabel('搜索图库').fill('自然光');
+  await expect(page.getByText('搜索：自然光')).toBeVisible();
+  await expect(page.getByText('ORIGINAL.jpg', { exact: true }).first()).toBeVisible();
+  await page.getByLabel('搜索图库').fill('');
+  await expect(page.getByText('所有照片', { exact: true }).first()).toBeVisible();
 
   await page.getByRole('button', { name: '减少生成数量' }).click();
   await page.getByRole('button', { name: '减少生成数量' }).click();

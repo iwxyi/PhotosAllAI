@@ -11,6 +11,7 @@ import {
 
 import type { ImageCacheService } from './image-cache-service';
 import type { ProviderService } from './provider-service';
+import { normalizeSearchText, tokenizeSearchText } from './search-index';
 
 type ProviderResolver = Pick<ProviderService, 'resolve'>;
 type AnalysisImageSource = Pick<ImageCacheService, 'getOrCreate'>;
@@ -50,6 +51,16 @@ export class AnalysisService {
       );
       CREATE INDEX IF NOT EXISTS analysis_asset_idx
         ON analysis_revisions(asset_id, created_at DESC);
+      CREATE TABLE IF NOT EXISTS asset_search (
+        asset_id TEXT PRIMARY KEY,
+        normalized_content TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS asset_search_tokens (
+        asset_id TEXT NOT NULL,
+        token TEXT NOT NULL,
+        PRIMARY KEY (asset_id, token)
+      );
+      CREATE INDEX IF NOT EXISTS asset_search_token_idx ON asset_search_tokens(token, asset_id);
     `);
   }
 
@@ -114,14 +125,42 @@ export class AnalysisService {
     const revision: AnalysisRevision = {
       id: randomUUID(), assetId, providerProfileId, result, createdAt: Date.now()
     };
-    this.#database.prepare(`
-      INSERT INTO analysis_revisions (
-        id, asset_id, provider_profile_id, schema_version, result_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      revision.id, assetId, providerProfileId, result.schemaVersion,
-      JSON.stringify(result), revision.createdAt
-    );
+    const searchContent = [
+      result.summary,
+      result.catalog.shortDescription,
+      result.catalog.longDescription,
+      ...result.catalog.scenes,
+      ...result.catalog.subjects,
+      ...result.catalog.objects,
+      ...result.catalog.mood,
+      ...result.catalog.colors,
+      ...result.catalog.keywords,
+      result.catalog.ocrText
+    ].filter(Boolean).join('\n');
+    const normalizedContent = normalizeSearchText(searchContent);
+    const searchTokens = tokenizeSearchText(searchContent);
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      this.#database.prepare(`
+        INSERT INTO analysis_revisions (
+          id, asset_id, provider_profile_id, schema_version, result_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        revision.id, assetId, providerProfileId, result.schemaVersion,
+        JSON.stringify(result), revision.createdAt
+      );
+      this.#database.prepare('DELETE FROM asset_search_tokens WHERE asset_id = ?').run(assetId);
+      this.#database.prepare(`
+        INSERT INTO asset_search (asset_id, normalized_content) VALUES (?, ?)
+        ON CONFLICT(asset_id) DO UPDATE SET normalized_content = excluded.normalized_content
+      `).run(assetId, normalizedContent);
+      const insertToken = this.#database.prepare('INSERT INTO asset_search_tokens (asset_id, token) VALUES (?, ?)');
+      for (const token of searchTokens) insertToken.run(assetId, token);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
     return analysisRevisionSchema.parse(revision);
   }
 

@@ -16,6 +16,8 @@ import {
   updateCatalogMetadataInputSchema
 } from '@photoallisai/contracts';
 
+import { tokenizeSearchText } from './search-index';
+
 const SUPPORTED_EXTENSIONS = new Set([
   '.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif',
   '.dng', '.cr2', '.cr3', '.nef', '.nrw', '.arw', '.raf', '.rw2', '.orf', '.pef'
@@ -115,6 +117,24 @@ export class CatalogService {
         COMMIT;
       `);
     }
+    const metadataVersion = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (metadataVersion.user_version < 3) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS asset_search (
+          asset_id TEXT PRIMARY KEY,
+          normalized_content TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS asset_search_tokens (
+          asset_id TEXT NOT NULL,
+          token TEXT NOT NULL,
+          PRIMARY KEY (asset_id, token)
+        );
+        CREATE INDEX IF NOT EXISTS asset_search_token_idx ON asset_search_tokens(token, asset_id);
+        PRAGMA user_version = 3;
+        COMMIT;
+      `);
+    }
   }
 
   close(): void {
@@ -137,12 +157,34 @@ export class CatalogService {
 
   listAssetPage(rawInput: ListCatalogAssetsInput): CatalogAssetPage {
     const input = listCatalogAssetsInputSchema.parse(rawInput);
-    const conditions: string[] = [];
-    const values: (string | number)[] = [];
+    const baseConditions: string[] = [];
+    const baseValues: (string | number)[] = [];
     if (input.folderId) {
-      conditions.push('folder_id = ?');
-      values.push(input.folderId);
+      baseConditions.push('folder_id = ?');
+      baseValues.push(input.folderId);
     }
+    const query = input.query.trim();
+    if (query) {
+      const tokens = tokenizeSearchText(query);
+      if (tokens.length > 0) {
+        const tokenPlaceholders = tokens.map(() => '?').join(', ');
+        baseConditions.push(`(
+          file_name LIKE ? ESCAPE '\\'
+          OR id IN (
+            SELECT asset_id FROM asset_search_tokens
+            WHERE token IN (${tokenPlaceholders})
+            GROUP BY asset_id
+            HAVING COUNT(DISTINCT token) = ?
+          )
+        )`);
+        baseValues.push(`%${escapeLike(query)}%`, ...tokens, tokens.length);
+      } else {
+        baseConditions.push(`file_name LIKE ? ESCAPE '\\'`);
+        baseValues.push(`%${escapeLike(query)}%`);
+      }
+    }
+    const conditions = [...baseConditions];
+    const values = [...baseValues];
     if (input.cursor) {
       conditions.push('(modified_at < ? OR (modified_at = ? AND id > ?))');
       values.push(input.cursor.modifiedAt, input.cursor.modifiedAt, input.cursor.id);
@@ -156,9 +198,10 @@ export class CatalogService {
     `).all(...values, input.limit + 1) as AssetRow[];
     const hasMore = rows.length > input.limit;
     const pageRows = hasMore ? rows.slice(0, input.limit) : rows;
+    const countWhere = baseConditions.length > 0 ? `WHERE ${baseConditions.join(' AND ')}` : '';
     const count = this.#database.prepare(`
-      SELECT COUNT(*) AS value FROM assets ${input.folderId ? 'WHERE folder_id = ?' : ''}
-    `).get(...(input.folderId ? [input.folderId] : [])) as { value: number };
+      SELECT COUNT(*) AS value FROM assets ${countWhere}
+    `).get(...baseValues) as { value: number };
     const last = pageRows.at(-1);
     return catalogAssetPageSchema.parse({
       items: pageRows.map((row) => this.#toAsset(row)),
@@ -297,4 +340,8 @@ export class CatalogService {
       previewUrl: `photoasset://preview/${row.id}`
     });
   }
+}
+
+function escapeLike(value: string): string {
+  return value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
 }

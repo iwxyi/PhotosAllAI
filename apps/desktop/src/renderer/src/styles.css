@@ -42,7 +42,7 @@ button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px
 .workspace-tab:hover .tab-close { opacity: .65; }
 .header-actions { height: 47px; padding: 0 12px 7px; display: flex; align-items: end; justify-content: flex-end; gap: 7px; -webkit-app-region: no-drag; }
 .search-trigger { height: 30px; width: 200px; padding: 0 8px; display: flex; align-items: center; gap: 7px; color: var(--muted); background: #0e100e; border: 1px solid var(--line); border-radius: var(--radius-md); }
-.search-trigger span { flex: 1; text-align: left; }
+.search-trigger input { min-width: 0; flex: 1; padding: 0; color: var(--text); background: transparent; border: 0; outline: 0; }.search-trigger input::placeholder { color: var(--muted); }
 kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border: 1px solid var(--line-strong); border-radius: 3px; font: 10px/16px inherit; }
 .icon-button { width: 29px; height: 29px; display: inline-grid; place-items: center; flex: 0 0 auto; padding: 0; border: 0; border-radius: var(--radius-sm); color: var(--muted); background: transparent; cursor: default; }
 .icon-button:hover { color: var(--text); background: var(--surface-3); }
@@ -74,6 +74,8 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 .meter i { display: block; width: 37%; height: 100%; background: var(--accent); }
 
 .library-main { min-width: 0; min-height: 0; display: grid; grid-template-rows: 160px minmax(0, 1fr); background: var(--bg); }
+.empty-library-main { min-width: 0; min-height: 0; display: grid; place-content: center; justify-items: center; color: var(--dim); text-align: center; background: var(--bg); }.empty-library-main h2 { margin: 13px 0 5px; color: var(--text); font-size: 14px; }.empty-library-main p { margin: 0; }
+.empty-library-inspector { min-height: 0; padding: 28px 18px; display: flex; align-items: start; gap: 9px; color: var(--dim); background: var(--surface-1); border-left: 1px solid var(--line); }
 .filmstrip-region { min-width: 0; background: var(--surface-2); border-bottom: 1px solid var(--line); }
 .filmstrip-toolbar { height: 36px; padding: 0 11px 0 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #242824; }
 .result-summary { display: flex; gap: 9px; align-items: baseline; }

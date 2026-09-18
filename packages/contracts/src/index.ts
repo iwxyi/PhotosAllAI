@@ -38,11 +38,12 @@ export type CatalogAssetCursor = z.infer<typeof catalogAssetCursorSchema>;
 
 export const listCatalogAssetsInputSchema = z.object({
   folderId: z.string().min(1).nullable().default(null),
+  query: z.string().max(500).default(''),
   cursor: catalogAssetCursorSchema.nullable().default(null),
   limit: z.number().int().min(1).max(500).default(200)
 });
 
-export type ListCatalogAssetsInput = z.infer<typeof listCatalogAssetsInputSchema>;
+export type ListCatalogAssetsInput = z.input<typeof listCatalogAssetsInputSchema>;
 
 export const catalogAssetPageSchema = z.object({
   items: z.array(catalogAssetSchema),

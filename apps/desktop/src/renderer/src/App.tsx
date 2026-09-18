@@ -140,7 +140,18 @@ function AppTabs({ active, onChange }: { active: WorkspaceTab; onChange: (id: Wo
   );
 }
 
-function AppHeader({ active, onChange, onImport }: { active: WorkspaceTab; onChange: (id: WorkspaceTab) => void; onImport: () => void }) {
+function AppHeader({ active, onChange, onImport, search, onSearchChange }: { active: WorkspaceTab; onChange: (id: WorkspaceTab) => void; onImport: () => void; search: string; onSearchChange: (value: string) => void }) {
+  const searchRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const focusSearch = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', focusSearch);
+    return () => window.removeEventListener('keydown', focusSearch);
+  }, []);
   return (
     <header className="app-header">
       <div className="titlebar-drag" />
@@ -150,11 +161,11 @@ function AppHeader({ active, onChange, onImport }: { active: WorkspaceTab; onCha
       </div>
       <AppTabs active={active} onChange={onChange} />
       <div className="header-actions">
-        <button className="search-trigger" type="button">
+        <label className="search-trigger">
           <Search size={14} />
-          <span>搜索图库</span>
+          <input ref={searchRef} aria-label="搜索图库" value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="搜索图库" />
           <kbd>⌘ K</kbd>
-        </button>
+        </label>
         <IconButton label="导入文件夹" onClick={onImport}>
           <FolderOpen size={16} />
         </IconButton>
@@ -589,18 +600,7 @@ function TaskBar({ open, onToggle, tasks }: { open: boolean; onToggle: () => voi
   );
 }
 
-function LibraryWorkspace({
-  availablePhotos,
-  catalogFolders,
-  isDemo,
-  selectedFolderId,
-  totalCount,
-  hasMore,
-  loadingMore,
-  onSelectFolder,
-  onLoadMore,
-  onRefreshCatalog
-}: {
+type LibraryWorkspaceProps = {
   availablePhotos: Photo[];
   catalogFolders: CatalogFolder[];
   isDemo: boolean;
@@ -610,8 +610,39 @@ function LibraryWorkspace({
   loadingMore: boolean;
   onSelectFolder: (folderId: string | null) => void;
   onLoadMore: () => void;
+  searchQuery: string;
   onRefreshCatalog: () => Promise<void>;
-}): React.JSX.Element {
+};
+
+function LibraryWorkspace(props: LibraryWorkspaceProps): React.JSX.Element {
+  if (props.availablePhotos.length > 0) return <PopulatedLibraryWorkspace {...props} />;
+  return (
+    <div className="workspace">
+      <Sidebar folders={props.catalogFolders} totalCount={props.totalCount} selectedFolderId={props.selectedFolderId} onSelectFolder={props.onSelectFolder} isDemo={props.isDemo} />
+      <main className="empty-library-main">
+        <Search size={30} />
+        <h2>{props.searchQuery ? '没有匹配的照片' : '此集合为空'}</h2>
+        <p>{props.searchQuery ? '尝试其他文件名、场景、主体或 AI 关键词。' : '从其他目录选择照片，或导入新的照片文件夹。'}</p>
+      </main>
+      <aside className="empty-library-inspector"><Info size={18} /><span>选择照片后显示分析和版本信息</span></aside>
+      <TaskBar open={false} onToggle={() => undefined} tasks={[]} />
+    </div>
+  );
+}
+
+function PopulatedLibraryWorkspace({
+  availablePhotos,
+  catalogFolders,
+  isDemo,
+  selectedFolderId,
+  totalCount,
+  hasMore,
+  loadingMore,
+  onSelectFolder,
+  onLoadMore,
+  searchQuery,
+  onRefreshCatalog
+}: LibraryWorkspaceProps): React.JSX.Element {
   const [selectedId, setSelectedId] = useState(availablePhotos[0]!.id);
   const [selection, setSelection] = useState<SelectionState>({
     selectedIds: new Set([availablePhotos[0]!.id]),
@@ -631,7 +662,7 @@ function LibraryWorkspace({
   const orderedIds = useMemo(() => availablePhotos.map((photo) => photo.id), [availablePhotos]);
   const collectionName = selectedFolderId
     ? catalogFolders.find((folder) => folder.id === selectedFolderId)?.name ?? '文件夹'
-    : isDemo ? '2026 人像作品' : '所有照片';
+    : isDemo ? '2026 人像作品' : searchQuery ? `搜索：${searchQuery}` : '所有照片';
 
   useEffect(() => {
     if (availablePhotos.some((photo) => photo.id === selectedId)) return;
@@ -1150,6 +1181,8 @@ export function App(): React.JSX.Element {
   const [nextCursor, setNextCursor] = useState<CatalogAssetCursor | null>(null);
   const [catalogReady, setCatalogReady] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [searchDraft, setSearchDraft] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
   const catalogRequest = useRef(0);
 
   const refreshCatalog = useCallback(async () => {
@@ -1157,7 +1190,7 @@ export function App(): React.JSX.Element {
     setLoadingMore(true);
     try {
       const [page, folders] = await Promise.all([
-        window.desktopApi.listCatalogAssetPage({ folderId: selectedFolderId, cursor: null, limit: 200 }),
+        window.desktopApi.listCatalogAssetPage({ folderId: selectedFolderId, query: searchQuery, cursor: null, limit: 200 }),
         window.desktopApi.listCatalogFolders()
       ]);
       if (request !== catalogRequest.current) return;
@@ -1169,11 +1202,16 @@ export function App(): React.JSX.Element {
     } finally {
       if (request === catalogRequest.current) setLoadingMore(false);
     }
-  }, [selectedFolderId]);
+  }, [searchQuery, selectedFolderId]);
 
   useEffect(() => {
     void refreshCatalog();
   }, [refreshCatalog]);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setSearchQuery(searchDraft.trim()), 250);
+    return () => window.clearTimeout(timeout);
+  }, [searchDraft]);
 
   const importFolders = async () => {
     const result = await window.desktopApi.importFolders();
@@ -1187,6 +1225,7 @@ export function App(): React.JSX.Element {
     try {
       const page = await window.desktopApi.listCatalogAssetPage({
         folderId: selectedFolderId,
+        query: searchQuery,
         cursor: nextCursor,
         limit: 200
       });
@@ -1208,8 +1247,8 @@ export function App(): React.JSX.Element {
 
   return (
     <div className="app-shell">
-      <AppHeader active={activeTab} onChange={setActiveTab} onImport={() => void importFolders()} />
-      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} totalCount={displayTotal} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={setSelectedFolderId} onLoadMore={() => void loadMoreCatalog()} onRefreshCatalog={refreshCatalog} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
+      <AppHeader active={activeTab} onChange={setActiveTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
+      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} totalCount={displayTotal} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={setSelectedFolderId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
     </div>
   );
 }

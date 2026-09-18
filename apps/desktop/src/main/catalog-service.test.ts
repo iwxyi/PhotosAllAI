@@ -1,6 +1,7 @@
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -35,7 +36,8 @@ describe('catalog image discovery', () => {
     await writeFile(path.join(photosDirectory, 'notes.txt'), 'not-an-image');
     await writeFile(path.join(ignoredDirectory, 'generated.jpg'), 'managed-result');
 
-    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    const databasePath = path.join(root, 'catalog.sqlite');
+    const catalog = new CatalogService(databasePath);
     const imported = await catalog.importFolders([photosDirectory]);
     const assets = catalog.listAssets();
 
@@ -51,6 +53,19 @@ describe('catalog image discovery', () => {
     expect(secondPage.items).toHaveLength(1);
     expect(secondPage.items[0]?.id).not.toBe(firstPage.items[0]?.id);
     expect(secondPage.nextCursor).toBeNull();
+    const database = new DatabaseSync(databasePath);
+    const searchableId = assets.find((asset) => asset.fileName === 'visible.jpg')!.id;
+    database.prepare('INSERT INTO asset_search (asset_id, normalized_content) VALUES (?, ?)')
+      .run(searchableId, '城市 夜景 人像');
+    const insertToken = database.prepare('INSERT INTO asset_search_tokens (asset_id, token) VALUES (?, ?)');
+    for (const token of ['夜', '景', '夜景']) insertToken.run(searchableId, token);
+    database.close();
+    expect(catalog.listAssetPage({ folderId: null, query: '夜景', cursor: null, limit: 20 }).items)
+      .toHaveLength(1);
+    expect(catalog.listAssetPage({ folderId: null, query: 'visible', cursor: null, limit: 20 }).items[0]?.fileName)
+      .toBe('visible.jpg');
+    expect(catalog.listAssetPage({ folderId: null, query: 'missing', cursor: null, limit: 20 }).totalCount)
+      .toBe(0);
     expect(assets.find((asset) => asset.fileName === 'visible.jpg')?.thumbnailUrl).toMatch(/^photoasset:\/\/thumbnail/);
     expect(assets.find((asset) => asset.fileName === 'raw.NEF')?.previewUrl).toMatch(/^photoasset:\/\/preview/);
     catalog.close();
