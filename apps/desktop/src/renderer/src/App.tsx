@@ -266,11 +266,22 @@ function Filmstrip({
   );
 }
 
-function Viewer({ photo, results, isDemo }: { photo: Photo; results: GenerationResult[]; isDemo: boolean }): React.JSX.Element {
+function Viewer({
+  photo,
+  results,
+  isDemo,
+  onExport
+}: {
+  photo: Photo;
+  results: GenerationResult[];
+  isDemo: boolean;
+  onExport: (resultIds: string[]) => Promise<string>;
+}): React.JSX.Element {
   const [compareMode, setCompareMode] = useState<CompareMode>('single');
   const [split, setSplit] = useState(52);
   const [showOriginal, setShowOriginal] = useState(false);
   const [selectedResultId, setSelectedResultId] = useState<string | null>(results[0]?.id ?? null);
+  const [exportNotice, setExportNotice] = useState('');
   const latestResultId = results[0]?.id ?? null;
   const selectedResult = selectedResultId ? results.find((result) => result.id === selectedResultId) : undefined;
   const generatedSource = isDemo ? photo.src : selectedResult?.resultUrl;
@@ -364,7 +375,11 @@ function Viewer({ photo, results, isDemo }: { photo: Photo; results: GenerationR
           {isDemo ? <><button type="button">V1</button><button className="is-current" type="button">V2</button></> : [...results].reverse().map((result) => (
             <button className={selectedResult?.id === result.id ? 'is-current' : ''} type="button" key={result.id} onClick={() => setSelectedResultId(result.id)}>V{result.version}</button>
           ))}
-          <button type="button"><Plus size={13} /></button>
+          <button type="button" title="导出当前版本" aria-label="导出当前版本" disabled={!selectedResult || isDemo} onClick={() => {
+            if (!selectedResult) return;
+            void onExport([selectedResult.id]).then(setExportNotice);
+          }}><Download size={13} /></button>
+          {exportNotice && <em className="viewer-notice" role="status">{exportNotice}</em>}
         </div>
         <div className="file-meta"><span>{photo.format}</span><span>{photo.dimensions}</span></div>
       </div>
@@ -519,6 +534,7 @@ function LibraryWorkspace({ availablePhotos, isDemo }: { availablePhotos: Photo[
   const [analysisRevision, setAnalysisRevision] = useState<AnalysisRevision>();
   const [generationResults, setGenerationResults] = useState<GenerationResult[]>([]);
   const [analysisNotice, setAnalysisNotice] = useState('');
+  const [operationNotice, setOperationNotice] = useState('');
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
   const selected = availablePhotos.find((photo) => photo.id === selectedId) ?? availablePhotos[0]!;
   const orderedIds = useMemo(() => availablePhotos.map((photo) => photo.id), [availablePhotos]);
@@ -668,12 +684,37 @@ function LibraryWorkspace({ availablePhotos, isDemo }: { availablePhotos: Photo[
       : `已加入 ${queued} 个生成任务。`;
   };
 
+  const exportResults = async (resultIds: string[]): Promise<string> => {
+    try {
+      const report = await window.desktopApi.exportGenerationResults({ resultIds });
+      if (report.canceled) return '已取消导出';
+      return report.failed > 0
+        ? `已导出 ${report.succeeded} 个文件，${report.failed} 个失败`
+        : `已导出 ${report.succeeded} 个文件`;
+    } catch {
+      return '导出失败，请检查目录权限和可用空间。';
+    }
+  };
+
+  const exportLatestSelection = async () => {
+    const targetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+    const lists = await Promise.all(targetIds.map((assetId) =>
+      assetId === selected.id ? Promise.resolve(generationResults) : window.desktopApi.listGenerationResults(assetId)
+    ));
+    const resultIds = lists.flatMap((items) => items[0] ? [items[0].id] : []);
+    if (resultIds.length === 0) {
+      setOperationNotice('所选照片还没有可导出的生成版本。');
+      return;
+    }
+    setOperationNotice(await exportResults(resultIds));
+  };
+
   return (
     <div className="workspace">
       <Sidebar />
       <main className="library-main">
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} />
-        <Viewer photo={selected} results={generationResults} isDemo={isDemo} />
+        <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} />
       </main>
       <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onGenerate={generateSelection} />
       {selection.selectedIds.size > 1 && (
@@ -684,10 +725,11 @@ function LibraryWorkspace({ availablePhotos, isDemo }: { availablePhotos: Photo[
           <button type="button"><Tags size={14} />标签</button>
           <button type="button" onClick={() => void analyzeSelection()}><Sparkles size={14} />AI 分析</button>
           <button type="button" onClick={() => void generateSelection({ providerProfileId: generationProfiles[0]?.id ?? '', template: null, count: 1, instruction: '', disabledActionIds: new Set() })} disabled={generationProfiles.length === 0}><WandSparkles size={14} />批量生成</button>
-          <button type="button"><Download size={14} />导出</button>
+          <button type="button" onClick={() => void exportLatestSelection()}><Download size={14} />导出</button>
           <IconButton label="清除选择" onClick={() => setSelection({ selectedIds: new Set(), anchorId: null, focusId: selected.id })}><X size={14} /></IconButton>
         </div>
       )}
+      {operationNotice && <div className="operation-toast" role="status">{operationNotice}<button type="button" aria-label="关闭提示" onClick={() => setOperationNotice('')}><X size={13} /></button></div>}
       <TaskBar open={tasksOpen} onToggle={() => setTasksOpen((value) => !value)} tasks={isDemo ? null : taskItems} />
     </div>
   );

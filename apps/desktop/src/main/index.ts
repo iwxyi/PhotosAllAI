@@ -7,6 +7,8 @@ import {
   appInfoSchema,
   catalogSnapshotSchema,
   enqueueTaskInputSchema,
+  exportGenerationResultsInputSchema,
+  exportReportSchema,
   listAnalysisInputSchema,
   listGenerationResultsInputSchema,
   reorderTaskIdsSchema,
@@ -19,6 +21,7 @@ import { CatalogService } from './catalog-service';
 import { AnalysisService } from './analysis-service';
 import { ImageCacheService, type ImageVariant } from './image-cache-service';
 import { GenerationService } from './generation-service';
+import { ExportService } from './export-service';
 import { ProviderService } from './provider-service';
 import { TaskService } from './task-service';
 import { TaskRunner } from './task-runner';
@@ -32,6 +35,7 @@ let tasks: TaskService;
 let templates: TemplateService;
 let analysis: AnalysisService;
 let generation: GenerationService;
+let exportService: ExportService;
 let taskRunner: TaskRunner;
 
 protocol.registerSchemesAsPrivileged([
@@ -101,6 +105,21 @@ function registerIpc(): void {
     const { assetId } = listGenerationResultsInputSchema.parse(input);
     return generation.list(assetId);
   });
+  ipcMain.handle('generation.results.export.v1', async (_event, input: unknown) => {
+    const { resultIds } = exportGenerationResultsInputSchema.parse(input);
+    const selection = await dialog.showOpenDialog({
+      title: '导出生成图片',
+      buttonLabel: '导出到此处',
+      properties: ['openDirectory', 'createDirectory']
+    });
+    if (selection.canceled || !selection.filePaths[0]) {
+      return exportReportSchema.parse({
+        id: null, canceled: true, total: resultIds.length,
+        succeeded: 0, failed: 0, files: [], failures: []
+      });
+    }
+    return exportService.exportToDirectory(resultIds, selection.filePaths[0]);
+  });
 }
 
 function createWindow(): BrowserWindow {
@@ -166,6 +185,7 @@ app.whenReady().then(() => {
     imageCache,
     catalog
   );
+  exportService = new ExportService(databasePath, generation);
   taskRunner = new TaskRunner(tasks, analysis, generation);
 
   protocol.handle('photoasset', async (request) => {
@@ -216,6 +236,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   taskRunner?.stop();
   generation?.close();
+  exportService?.close();
   analysis?.close();
   templates?.close();
   tasks?.close();

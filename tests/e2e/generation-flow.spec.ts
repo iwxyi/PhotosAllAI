@@ -13,6 +13,7 @@ let page: Page;
 let mockServer: Server;
 let testRoot: string;
 let sourcePath: string;
+let originalBytes: Buffer;
 
 const analysis: AnalysisResult = {
   schemaVersion: '1.0',
@@ -44,6 +45,7 @@ test.beforeAll(async () => {
   await Promise.all([mkdir(sourceDirectory, { recursive: true }), mkdir(libraryDirectory, { recursive: true })]);
   sourcePath = path.join(sourceDirectory, 'ORIGINAL.jpg');
   await copyFile(path.resolve('apps/desktop/src/renderer/public/demo/portrait.jpg'), sourcePath);
+  originalBytes = await readFile(sourcePath);
   const generatedJpeg = await readFile(path.resolve('apps/desktop/src/renderer/public/demo/coast.jpg'));
 
   mockServer = createServer((request, response) => {
@@ -112,7 +114,17 @@ test('analyzes, generates, persists, and displays a managed result', async () =>
   const generated = page.locator('.generated-layer img');
   await expect(generated).toHaveAttribute('src', /^photoresult:\/\/result\//);
   await expect.poll(() => generated.evaluate((image) => image.naturalWidth)).toBeGreaterThan(0);
-  expect((await readFile(sourcePath)).byteLength).toBeGreaterThan(0);
+
+  const exportDirectory = path.join(testRoot, 'exported');
+  await mkdir(exportDirectory, { recursive: true });
+  await electronApp.evaluate(({ dialog }, directory) => {
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory], bookmarks: [] });
+  }, exportDirectory);
+  await page.getByRole('button', { name: '关闭任务抽屉' }).click();
+  await page.getByRole('button', { name: '导出当前版本' }).click();
+  await expect(page.getByText('已导出 1 个文件')).toBeVisible();
+  expect((await readdir(exportDirectory)).filter((name) => name.endsWith('.jpg'))).toHaveLength(1);
+  expect(await readFile(sourcePath)).toEqual(originalBytes);
 
   const generatedRoot = path.join(testRoot, 'user-data', 'library', 'generated');
   const firstLevel = await readdir(generatedRoot);

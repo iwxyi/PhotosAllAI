@@ -31,7 +31,9 @@ const api: DesktopApi = {
   listAnalysisRevisions: (assetId) =>
     ipcRenderer.invoke('analysis.list.v1', { assetId }) as ReturnType<DesktopApi['listAnalysisRevisions']>,
   listGenerationResults: (assetId) =>
-    ipcRenderer.invoke('generation.results.list.v1', { assetId }) as ReturnType<DesktopApi['listGenerationResults']>
+    ipcRenderer.invoke('generation.results.list.v1', { assetId }) as ReturnType<DesktopApi['listGenerationResults']>,
+  exportGenerationResults: (input) =>
+    ipcRenderer.invoke('generation.results.export.v1', input) as ReturnType<DesktopApi['exportGenerationResults']>
 };
 
 contextBridge.exposeInMainWorld('desktopApi', Object.freeze(api));

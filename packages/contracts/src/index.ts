@@ -242,6 +242,24 @@ export const generationResultSchema = z.object({
 
 export type GenerationResult = z.infer<typeof generationResultSchema>;
 
+export const exportGenerationResultsInputSchema = z.object({
+  resultIds: z.array(z.string().uuid()).min(1).max(10_000)
+});
+
+export type ExportGenerationResultsInput = z.infer<typeof exportGenerationResultsInputSchema>;
+
+export const exportReportSchema = z.object({
+  id: z.string().uuid().nullable(),
+  canceled: z.boolean(),
+  total: z.number().int().nonnegative(),
+  succeeded: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  files: z.array(z.object({ resultId: z.string().uuid(), fileName: z.string().min(1) })),
+  failures: z.array(z.object({ resultId: z.string().uuid(), errorCode: z.string().min(1) }))
+});
+
+export type ExportReport = z.infer<typeof exportReportSchema>;
+
 export interface DesktopApi {
   getAppInfo(): Promise<AppInfo>;
   listCatalogAssets(): Promise<CatalogAsset[]>;
@@ -258,4 +276,5 @@ export interface DesktopApi {
   savePromptTemplate(input: SavePromptTemplateInput): Promise<PromptTemplate>;
   listAnalysisRevisions(assetId: string): Promise<AnalysisRevision[]>;
   listGenerationResults(assetId: string): Promise<GenerationResult[]>;
+  exportGenerationResults(input: ExportGenerationResultsInput): Promise<ExportReport>;
 }
