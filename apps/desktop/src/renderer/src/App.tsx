@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   CatalogAsset,
   CatalogAlbum,
+  CatalogSmartCollection,
   CatalogAssetCursor,
   CatalogFolder,
   CatalogTag,
@@ -218,10 +219,13 @@ function Sidebar({
   totalCount,
   selectedFolderId,
   selectedAlbumId,
+  smartCollections,
+  selectedSmartCollection,
   tags,
   selectedTagId,
   onSelectFolder,
   onSelectAlbum,
+  onSelectSmartCollection,
   onRefreshAlbums,
   onSelectTag,
   isDemo
@@ -231,10 +235,13 @@ function Sidebar({
   totalCount: number;
   selectedFolderId: string | null;
   selectedAlbumId: string | null;
+  smartCollections: CatalogSmartCollection[];
+  selectedSmartCollection: CatalogSmartCollection['id'] | null;
   tags: CatalogTag[];
   selectedTagId: string | null;
   onSelectFolder: (folderId: string | null) => void;
   onSelectAlbum: (albumId: string | null) => void;
+  onSelectSmartCollection: (id: CatalogSmartCollection['id'] | null) => void;
   onRefreshAlbums: () => Promise<void>;
   onSelectTag: (tagId: string | null) => void;
   isDemo: boolean;
@@ -286,9 +293,7 @@ function Sidebar({
 
         <div className="sidebar-section">
           <div className="section-heading"><span>智能集合</span></div>
-          <div className="nav-row"><Sparkles size={15} /><span>等待 AI 分析</span><span className="row-count">43</span></div>
-          <div className="nav-row"><CircleAlert size={15} /><span>背景需要清理</span><span className="row-count">18</span></div>
-          <div className="nav-row"><FolderHeart size={15} /><span>已生成未选择</span><span className="row-count">27</span></div>
+          {(isDemo ? [{ id: 'unanalyzed', assetCount: 43 }, { id: 'favorites', assetCount: 86 }, { id: 'generated', assetCount: 27 }] : smartCollections).map((collection) => { const label = collection.id === 'favorites' ? '首选照片' : collection.id === 'unrated' ? '未评分' : collection.id === 'unanalyzed' ? '等待 AI 分析' : '已生成'; const Icon = collection.id === 'favorites' ? Star : collection.id === 'generated' ? FolderHeart : collection.id === 'unrated' ? CircleAlert : Sparkles; return <button className={`nav-row${selectedSmartCollection === collection.id ? ' is-active' : ''}`} type="button" key={collection.id} onClick={() => onSelectSmartCollection(selectedSmartCollection === collection.id ? null : collection.id as CatalogSmartCollection['id'])}><Icon size={15} /><span>{label}</span><span className="row-count">{collection.assetCount}</span></button>; })}
         </div>
 
         <div className="sidebar-section">
@@ -672,16 +677,19 @@ type LibraryWorkspaceProps = {
   availablePhotos: Photo[];
   catalogFolders: CatalogFolder[];
   catalogAlbums: CatalogAlbum[];
+  catalogSmartCollections: CatalogSmartCollection[];
   catalogTags: CatalogTag[];
   isDemo: boolean;
   selectedFolderId: string | null;
   selectedAlbumId: string | null;
+  selectedSmartCollection: CatalogSmartCollection['id'] | null;
   selectedTagId: string | null;
   totalCount: number;
   hasMore: boolean;
   loadingMore: boolean;
   onSelectFolder: (folderId: string | null) => void;
   onSelectAlbum: (albumId: string | null) => void;
+  onSelectSmartCollection: (id: CatalogSmartCollection['id'] | null) => void;
   onRefreshAlbums: () => Promise<void>;
   onSelectTag: (tagId: string | null) => void;
   onLoadMore: () => void;
@@ -698,7 +706,7 @@ function LibraryWorkspace(props: LibraryWorkspaceProps): React.JSX.Element {
   }
   return (
     <div className="workspace">
-      <Sidebar folders={props.catalogFolders} albums={props.catalogAlbums} totalCount={props.totalCount} selectedFolderId={props.selectedFolderId} selectedAlbumId={props.selectedAlbumId} tags={props.catalogTags} selectedTagId={props.selectedTagId} onSelectFolder={props.onSelectFolder} onSelectAlbum={props.onSelectAlbum} onRefreshAlbums={props.onRefreshAlbums} onSelectTag={props.onSelectTag} isDemo={props.isDemo} />
+      <Sidebar folders={props.catalogFolders} albums={props.catalogAlbums} smartCollections={props.catalogSmartCollections} totalCount={props.totalCount} selectedFolderId={props.selectedFolderId} selectedAlbumId={props.selectedAlbumId} selectedSmartCollection={props.selectedSmartCollection} tags={props.catalogTags} selectedTagId={props.selectedTagId} onSelectFolder={props.onSelectFolder} onSelectAlbum={props.onSelectAlbum} onSelectSmartCollection={props.onSelectSmartCollection} onRefreshAlbums={props.onRefreshAlbums} onSelectTag={props.onSelectTag} isDemo={props.isDemo} />
       <main className="empty-library-main">
         <Search size={30} />
         <h2>{props.searchQuery ? '没有匹配的照片' : '此集合为空'}</h2>
@@ -720,16 +728,19 @@ function PopulatedLibraryWorkspace({
   availablePhotos,
   catalogFolders,
   catalogAlbums,
+  catalogSmartCollections,
   catalogTags,
   isDemo,
   selectedFolderId,
   selectedAlbumId,
+  selectedSmartCollection,
   selectedTagId,
   totalCount,
   hasMore,
   loadingMore,
   onSelectFolder,
   onSelectAlbum,
+  onSelectSmartCollection,
   onRefreshAlbums,
   onSelectTag,
   onLoadMore,
@@ -1114,7 +1125,7 @@ function PopulatedLibraryWorkspace({
 
   return (
     <div className="workspace">
-      <Sidebar folders={catalogFolders} albums={catalogAlbums} totalCount={totalCount} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={onSelectFolder} onSelectAlbum={onSelectAlbum} onRefreshAlbums={onRefreshAlbums} onSelectTag={onSelectTag} isDemo={isDemo} />
+      <Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={totalCount} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={onSelectFolder} onSelectAlbum={onSelectAlbum} onSelectSmartCollection={onSelectSmartCollection} onRefreshAlbums={onRefreshAlbums} onSelectTag={onSelectTag} isDemo={isDemo} />
       <main className="library-main">
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
         <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} />
@@ -1490,9 +1501,11 @@ export function App(): React.JSX.Element {
   const [catalogPhotos, setCatalogPhotos] = useState<Photo[]>([]);
   const [catalogFolders, setCatalogFolders] = useState<CatalogFolder[]>([]);
   const [catalogAlbums, setCatalogAlbums] = useState<CatalogAlbum[]>([]);
+  const [catalogSmartCollections, setCatalogSmartCollections] = useState<CatalogSmartCollection[]>([]);
   const [catalogTags, setCatalogTags] = useState<CatalogTag[]>([]);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(null);
+  const [selectedSmartCollection, setSelectedSmartCollection] = useState<CatalogSmartCollection['id'] | null>(null);
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [catalogTotal, setCatalogTotal] = useState(0);
@@ -1537,17 +1550,19 @@ export function App(): React.JSX.Element {
     const request = ++catalogRequest.current;
     setLoadingMore(true);
     try {
-      const [page, folders, tags, albums] = await Promise.all([
-        window.desktopApi.listCatalogAssetPage({ folderId: selectedFolderId, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: null, query: searchQuery, cursor: null, limit: 200 }),
+      const [page, folders, tags, albums, smartCollections] = await Promise.all([
+        window.desktopApi.listCatalogAssetPage({ folderId: selectedFolderId, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: selectedSmartCollection, query: searchQuery, cursor: null, limit: 200 }),
         window.desktopApi.listCatalogFolders(),
         window.desktopApi.listCatalogTags(),
-        window.desktopApi.listCatalogAlbums()
+        window.desktopApi.listCatalogAlbums(),
+        window.desktopApi.listCatalogSmartCollections()
       ]);
       if (request !== catalogRequest.current) return;
       setCatalogPhotos(mapCatalogAssets(page.items));
       setCatalogFolders(folders);
       setCatalogTags(tags);
       setCatalogAlbums(albums);
+      setCatalogSmartCollections(smartCollections);
       if (selectedFolderId && !folders.some((folder) => folder.id === selectedFolderId)) setSelectedFolderId(null);
       if (selectedTagId && !tags.some((tag) => tag.id === selectedTagId)) setSelectedTagId(null);
       if (selectedAlbumId && !albums.some((album) => album.id === selectedAlbumId)) setSelectedAlbumId(null);
@@ -1557,7 +1572,7 @@ export function App(): React.JSX.Element {
     } finally {
       if (request === catalogRequest.current) setLoadingMore(false);
     }
-  }, [searchQuery, selectedAlbumId, selectedFolderId, selectedTagId]);
+  }, [searchQuery, selectedAlbumId, selectedFolderId, selectedSmartCollection, selectedTagId]);
 
   useEffect(() => {
     if (!sessionReady) return;
@@ -1612,7 +1627,7 @@ export function App(): React.JSX.Element {
         folderId: selectedFolderId,
         tagId: selectedTagId,
         albumId: selectedAlbumId,
-        smartCollection: null,
+        smartCollection: selectedSmartCollection,
         query: searchQuery,
         cursor: nextCursor,
         limit: 200
@@ -1636,7 +1651,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
-      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogTags={catalogTags} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
+      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
     </div>
   );
 }

@@ -59,6 +59,9 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await page.getByRole('button', { name: /客户交付 0/ }).click();
   await expect(page.getByText('此集合为空')).toBeVisible();
   await page.getByRole('button', { name: /所有照片/ }).click();
+  await page.getByRole('button', { name: /未评分 1/ }).click();
+  await expect(page.getByText('MOVE_ME.jpg', { exact: true }).first()).toBeVisible();
+  await page.getByRole('button', { name: /未评分 1/ }).click();
   await page.getByRole('button', { name: '移动到文件夹' }).click();
 
   const dialog = page.getByRole('dialog', { name: '移动 1 张照片' });
