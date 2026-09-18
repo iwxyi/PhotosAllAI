@@ -21,6 +21,12 @@ const api: DesktopApi = {
     ipcRenderer.invoke('catalog.assets.copy.v1', input) as ReturnType<DesktopApi['copyCatalogAssets']>,
   renameCatalogAsset: (input) =>
     ipcRenderer.invoke('catalog.asset.rename.v1', input) as ReturnType<DesktopApi['renameCatalogAsset']>,
+  removeCatalogAssets: (input) =>
+    ipcRenderer.invoke('catalog.assets.remove.v1', input) as ReturnType<DesktopApi['removeCatalogAssets']>,
+  trashCatalogAssets: (input) =>
+    ipcRenderer.invoke('catalog.assets.trash.v1', input) as ReturnType<DesktopApi['trashCatalogAssets']>,
+  listFileOperationHistory: () =>
+    ipcRenderer.invoke('files.operations.list.v1') as ReturnType<DesktopApi['listFileOperationHistory']>,
   importFolders: () =>
     ipcRenderer.invoke('catalog.folders.import.v1') as ReturnType<
       DesktopApi['importFolders']

@@ -5,6 +5,8 @@ import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, net, protocol, safeStorage, shell } from 'electron';
 import {
   appInfoSchema,
+  catalogAssetRemovalInputSchema,
+  catalogAssetRemovalReportSchema,
   catalogSnapshotSchema,
   copyCatalogAssetsInputSchema,
   copyCatalogAssetsReportSchema,
@@ -96,6 +98,17 @@ function registerIpc(): void {
       await fileOperations.rename(renameCatalogAssetInputSchema.parse(input))
     )
   );
+  ipcMain.handle('catalog.assets.remove.v1', async (_event, input: unknown) =>
+    catalogAssetRemovalReportSchema.parse(
+      await fileOperations.removeFromCatalog(catalogAssetRemovalInputSchema.parse(input))
+    )
+  );
+  ipcMain.handle('catalog.assets.trash.v1', async (_event, input: unknown) =>
+    catalogAssetRemovalReportSchema.parse(
+      await fileOperations.moveToSystemTrash(catalogAssetRemovalInputSchema.parse(input))
+    )
+  );
+  ipcMain.handle('files.operations.list.v1', () => fileOperations.listHistory());
 
   ipcMain.handle('catalog.folders.import.v1', async () => {
     const result = await dialog.showOpenDialog({
@@ -210,7 +223,9 @@ app.whenReady().then(async () => {
   mkdirSync(libraryDirectory, { recursive: true });
   const databasePath = join(libraryDirectory, 'catalog.sqlite');
   catalog = new CatalogService(databasePath);
-  fileOperations = new FileOperationService(databasePath);
+  fileOperations = new FileOperationService(databasePath, undefined, {
+    trashItem: (filePath) => shell.trashItem(filePath)
+  });
   await fileOperations.recoverInterruptedOperations();
   tasks = new TaskService(databasePath);
   templates = new TemplateService(databasePath);

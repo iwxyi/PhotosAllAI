@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { CatalogService } from './catalog-service';
 import { FileOperationService } from './file-operation-service';
+import { TaskService } from './task-service';
 
 const services: Array<{ close(): void }> = [];
 
@@ -428,3 +429,119 @@ describe('catalog copies and renames', () => {
 function normalizeForTest(value: string): string {
   return value.normalize('NFC').toLocaleLowerCase('en-US');
 }
+
+describe('catalog removal and system trash', () => {
+  it('soft-removes an asset while preserving its file and restores the same identity on rescan', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    context.catalog.updateMetadata({ assetIds: [asset.id], rating: 4 });
+    context.catalog.updateTags({ assetIds: [asset.id], addTags: ['保留数据'], removeTagIds: [] });
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    const report = await service.removeFromCatalog({ assetIds: [asset.id] });
+
+    expect(report).toMatchObject({ kind: 'remove', status: 'completed', succeeded: 1, failed: 0 });
+    expect(context.catalog.listAssets()).toEqual([]);
+    expect(context.catalog.resolveAssetFile(asset.id)).toBeNull();
+    expect(await readFile(path.join(context.source, 'photo.jpg'), 'utf8')).toBe('content:photo.jpg');
+
+    await context.catalog.importFolders([context.source]);
+    const restored = context.catalog.listAssets()[0]!;
+    expect(restored).toMatchObject({ id: asset.id, rating: 4 });
+    expect(restored.tags.map((tag) => tag.name)).toEqual(['保留数据']);
+  });
+
+  it('rejects removal while an AI task for the asset is active', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const tasks = new TaskService(context.databasePath);
+    services.push(tasks);
+    tasks.enqueue({
+      kind: 'analysis', assetId: asset.id,
+      payload: { providerProfileId: randomUUID(), mode: 'full' }
+    });
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    await expect(service.removeFromCatalog({ assetIds: [asset.id] })).rejects.toThrow('ASSET_HAS_ACTIVE_TASKS');
+    expect(context.catalog.listAssets()).toHaveLength(1);
+  });
+
+  it('moves an original to the injected system trash and retains its catalog history', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const trashDirectory = path.join(context.root, 'system-trash');
+    await mkdir(trashDirectory);
+    const service = new FileOperationService(context.databasePath, undefined, {
+      trashItem: async (filePath) => rename(filePath, path.join(trashDirectory, path.basename(filePath)))
+    });
+    services.push(service);
+
+    const report = await service.moveToSystemTrash({ assetIds: [asset.id] });
+
+    expect(report).toMatchObject({ kind: 'trash', status: 'completed', succeeded: 1, failed: 0 });
+    expect(context.catalog.listAssets()).toEqual([]);
+    expect(await readFile(path.join(trashDirectory, 'photo.jpg'), 'utf8')).toBe('content:photo.jpg');
+    const history = service.listHistory();
+    expect(history[0]).toMatchObject({ id: report.operationId, kind: 'trash', status: 'completed', total: 1, succeeded: 1 });
+    expect(history[0]?.fileNames).toEqual(['photo.jpg']);
+    expect(JSON.stringify(history)).not.toContain(context.source);
+  });
+
+  it('reports partial system-trash success and keeps failed assets active', async () => {
+    const context = await fixture(['a.jpg', 'b.jpg']);
+    const assets = context.catalog.listAssets().sort((left, right) => left.fileName.localeCompare(right.fileName));
+    const trashDirectory = path.join(context.root, 'partial-trash');
+    await mkdir(trashDirectory);
+    const service = new FileOperationService(context.databasePath, undefined, {
+      trashItem: async (filePath) => {
+        if (filePath.endsWith(`${path.sep}b.jpg`)) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+        await rename(filePath, path.join(trashDirectory, path.basename(filePath)));
+      }
+    });
+    services.push(service);
+
+    const report = await service.moveToSystemTrash({ assetIds: assets.map((item) => item.id) });
+
+    expect(report).toMatchObject({ status: 'partial', succeeded: 1, failed: 1 });
+    expect(report.failures).toEqual([{ assetId: assets[1]!.id, errorCode: 'EBUSY' }]);
+    expect(context.catalog.listAssets().map((item) => item.fileName)).toEqual(['b.jpg']);
+    expect(await readFile(path.join(context.source, 'b.jpg'), 'utf8')).toBe('content:b.jpg');
+  });
+
+  it('finishes catalog removal after an interrupted trash operation', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const bootstrap = new FileOperationService(context.databasePath);
+    bootstrap.close();
+    const trashDirectory = path.join(context.root, 'recovery-trash');
+    await mkdir(trashDirectory);
+    const sourcePath = path.join(context.source, 'photo.jpg');
+    await rename(sourcePath, path.join(trashDirectory, 'photo.jpg'));
+    const operationId = randomUUID();
+    const itemId = randomUUID();
+    const database = new DatabaseSync(context.databasePath);
+    database.prepare(`
+      INSERT INTO file_operations (id, kind, status, target_folder_id, created_at)
+      VALUES (?, 'trash', 'executing', ?, ?)
+    `).run(operationId, asset.folderId, Date.now());
+    database.prepare(`
+      INSERT INTO file_operation_items (
+        id, operation_id, ordinal, asset_id, source_folder_id, destination_folder_id,
+        source_path, destination_path, temporary_path, original_file_name,
+        destination_file_name, size_bytes, status
+      ) VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, 'photo.jpg', 'photo.jpg', ?, 'trashing')
+    `).run(
+      itemId, operationId, asset.id, asset.folderId, asset.folderId,
+      sourcePath, sourcePath, sourcePath, asset.sizeBytes
+    );
+    database.close();
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    expect(await service.recoverInterruptedOperations()).toBe(1);
+    expect(context.catalog.listAssets()).toEqual([]);
+    expect(service.listHistory()[0]).toMatchObject({ kind: 'trash', status: 'completed', succeeded: 1 });
+  });
+});

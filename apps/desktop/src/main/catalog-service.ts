@@ -159,6 +159,17 @@ export class CatalogService {
         COMMIT;
       `);
     }
+    const removalVersion = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (removalVersion.user_version < 5) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE assets ADD COLUMN removed_at INTEGER;
+        ALTER TABLE assets ADD COLUMN trashed_at INTEGER;
+        CREATE INDEX assets_active_folder_idx ON assets(removed_at, folder_id);
+        PRAGMA user_version = 5;
+        COMMIT;
+      `);
+    }
   }
 
   close(): void {
@@ -170,7 +181,7 @@ export class CatalogService {
     const rows = this.#database
       .prepare(`
         SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, favorite
-        FROM assets
+        FROM assets WHERE removed_at IS NULL
         ORDER BY modified_at DESC, id ASC
         LIMIT ?
       `)
@@ -181,7 +192,7 @@ export class CatalogService {
 
   listAssetPage(rawInput: ListCatalogAssetsInput): CatalogAssetPage {
     const input = listCatalogAssetsInputSchema.parse(rawInput);
-    const baseConditions: string[] = [];
+    const baseConditions: string[] = ['removed_at IS NULL'];
     const baseValues: (string | number)[] = [];
     if (input.folderId) {
       baseConditions.push('folder_id = ?');
@@ -243,7 +254,7 @@ export class CatalogService {
     const rows = this.#database.prepare(`
       SELECT folders.id, folders.name, COUNT(assets.id) AS asset_count
       FROM folders
-      LEFT JOIN assets ON assets.folder_id = folders.id
+      LEFT JOIN assets ON assets.folder_id = folders.id AND assets.removed_at IS NULL
       GROUP BY folders.id, folders.name
       ORDER BY folders.name COLLATE NOCASE ASC, folders.id ASC
     `).all() as { id: string; name: string; asset_count: number }[];
@@ -259,6 +270,7 @@ export class CatalogService {
       SELECT tags.id, tags.name, COUNT(asset_tags.asset_id) AS asset_count
       FROM tags
       LEFT JOIN asset_tags ON asset_tags.tag_id = tags.id
+        AND asset_tags.asset_id IN (SELECT id FROM assets WHERE removed_at IS NULL)
       GROUP BY tags.id, tags.name
       HAVING COUNT(asset_tags.asset_id) > 0
       ORDER BY tags.name COLLATE NOCASE ASC, tags.id ASC
@@ -283,7 +295,7 @@ export class CatalogService {
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       const result = this.#database.prepare(`
-        UPDATE assets SET ${assignments.join(', ')} WHERE id IN (${placeholders})
+        UPDATE assets SET ${assignments.join(', ')} WHERE removed_at IS NULL AND id IN (${placeholders})
       `).run(...values, ...uniqueIds);
       if (result.changes !== uniqueIds.length) throw new Error('CATALOG_ASSET_SET_MISMATCH');
       this.#database.exec('COMMIT');
@@ -303,7 +315,7 @@ export class CatalogService {
     const assetIds = [...new Set(input.assetIds)];
     const assetPlaceholders = assetIds.map(() => '?').join(', ');
     const existing = this.#database.prepare(`
-      SELECT COUNT(*) AS value FROM assets WHERE id IN (${assetPlaceholders})
+      SELECT COUNT(*) AS value FROM assets WHERE removed_at IS NULL AND id IN (${assetPlaceholders})
     `).get(...assetIds) as { value: number };
     if (existing.value !== assetIds.length) throw new Error('CATALOG_ASSET_SET_MISMATCH');
 
@@ -370,7 +382,9 @@ export class CatalogService {
             file_name = excluded.file_name,
             extension = excluded.extension,
             size_bytes = excluded.size_bytes,
-            modified_at = excluded.modified_at
+            modified_at = excluded.modified_at,
+            removed_at = NULL,
+            trashed_at = NULL
         `);
 
         for await (const filePath of walkImages(folderPath)) {
@@ -403,7 +417,7 @@ export class CatalogService {
 
   resolveAssetFile(assetId: string): { path: string; fileName: string; modifiedAt: number } | null {
     const row = this.#database
-      .prepare('SELECT path, file_name, modified_at FROM assets WHERE id = ?')
+      .prepare('SELECT path, file_name, modified_at FROM assets WHERE id = ? AND removed_at IS NULL')
       .get(assetId) as Pick<AssetRow, 'path' | 'file_name' | 'modified_at'> | undefined;
     if (!row) return null;
     return { path: row.path, fileName: row.file_name, modifiedAt: row.modified_at };

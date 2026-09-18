@@ -93,4 +93,27 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await expect(page.getByText('RENAMED.jpg', { exact: true }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: /source 1/ })).toBeVisible();
   await expect(page.getByRole('button', { name: /target 1/ })).toBeVisible();
+
+  await page.getByRole('button', { name: /source 1/ }).click();
+  await page.getByRole('button', { name: '仅从图库移除' }).click();
+  const removalDialog = page.getByRole('alertdialog', { name: /从图库移除 1 张照片/ });
+  await expect(removalDialog).toBeVisible();
+  await page.screenshot({ path: 'test-results/catalog-remove-dialog.png', animations: 'disabled' });
+  await removalDialog.getByRole('button', { name: '仅从图库移除', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('磁盘文件保持不变');
+  expect(await readFile(path.join(sourceDirectory, 'MOVE_ME.jpg'))).not.toHaveLength(0);
+  await expect(page.getByRole('button', { name: /source 0/ })).toBeVisible();
+
+  await page.getByRole('button', { name: /target 1/ }).click();
+  await page.getByRole('button', { name: '移到系统回收站' }).click();
+  const trashDialog = page.getByRole('alertdialog', { name: /移到系统回收站 1 张照片/ });
+  await expect(trashDialog).toBeVisible();
+  await page.screenshot({ path: 'test-results/catalog-trash-dialog.png', animations: 'disabled' });
+  await page.keyboard.press('Escape');
+  await expect(trashDialog).toBeHidden();
+  expect(await readFile(path.join(targetDirectory, 'RENAMED.jpg'))).not.toHaveLength(0);
+
+  await page.getByRole('tab', { name: /任务中心/ }).click();
+  await expect(page.getByText('文件操作', { exact: true })).toBeVisible();
+  await expect(page.getByText('从图库移除', { exact: true })).toBeVisible();
 });

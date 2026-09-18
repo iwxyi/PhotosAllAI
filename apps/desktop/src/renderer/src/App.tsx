@@ -6,6 +6,7 @@ import type {
   CatalogTag,
   AnalysisRevision,
   GenerationResult,
+  FileOperationHistoryItem,
   PersistedTask,
   PromptTemplate,
   ProviderProfile,
@@ -34,10 +35,12 @@ import {
   FolderOpen,
   GalleryHorizontalEnd,
   Grid2X2,
+  History,
   Image,
   Info,
   KeyRound,
   Layers3,
+  LibraryBig,
   ListFilter,
   Maximize2,
   PanelBottomOpen,
@@ -52,6 +55,7 @@ import {
   Star,
   ShieldCheck,
   Tags,
+  Trash2,
   WandSparkles,
   X,
   ZoomIn,
@@ -359,7 +363,9 @@ function Viewer({
   onEditTags,
   onMove,
   onCopy,
-  onRename
+  onRename,
+  onRemove,
+  onTrash
 }: {
   photo: Photo;
   results: GenerationResult[];
@@ -371,6 +377,8 @@ function Viewer({
   onMove: () => void;
   onCopy: () => void;
   onRename: () => void;
+  onRemove: () => void;
+  onTrash: () => void;
 }): React.JSX.Element {
   const [compareMode, setCompareMode] = useState<CompareMode>('single');
   const [split, setSplit] = useState(52);
@@ -460,7 +468,7 @@ function Viewer({
         </div>
       </div>
       <div className="viewer-footer">
-        <div className="viewer-meta-actions"><div className="rating">{[1, 2, 3, 4, 5].map((value) => <button type="button" aria-label={`设置评分 ${value}`} key={value} onClick={() => onRate(photo.rating === value ? 0 : value)}><Star size={13} fill={value <= photo.rating ? 'currentColor' : 'none'} /></button>)}</div>{!isDemo && <><IconButton label="重命名照片" onClick={onRename}><FilePenLine size={13} /></IconButton><IconButton label="复制到文件夹" onClick={onCopy}><Copy size={13} /></IconButton><IconButton label="移动到文件夹" onClick={onMove}><FolderInput size={13} /></IconButton></>}<IconButton label="添加标签" onClick={onEditTags}><Tags size={13} /></IconButton></div>
+        <div className="viewer-meta-actions"><div className="rating">{[1, 2, 3, 4, 5].map((value) => <button type="button" aria-label={`设置评分 ${value}`} key={value} onClick={() => onRate(photo.rating === value ? 0 : value)}><Star size={13} fill={value <= photo.rating ? 'currentColor' : 'none'} /></button>)}</div>{!isDemo && <><IconButton label="重命名照片" onClick={onRename}><FilePenLine size={13} /></IconButton><IconButton label="复制到文件夹" onClick={onCopy}><Copy size={13} /></IconButton><IconButton label="移动到文件夹" onClick={onMove}><FolderInput size={13} /></IconButton><IconButton label="仅从图库移除" onClick={onRemove}><LibraryBig size={13} /></IconButton><IconButton label="移到系统回收站" onClick={onTrash}><Trash2 size={13} /></IconButton></>}<IconButton label="添加标签" onClick={onEditTags}><Tags size={13} /></IconButton></div>
         <div className="version-switcher">
           <button type="button" onMouseDown={() => setShowOriginal(true)} onMouseUp={() => setShowOriginal(false)} onMouseLeave={() => setShowOriginal(false)}>
             按住查看原图 <kbd>O</kbd>
@@ -637,7 +645,10 @@ type LibraryWorkspaceProps = {
 };
 
 function LibraryWorkspace(props: LibraryWorkspaceProps): React.JSX.Element {
-  if (props.availablePhotos.length > 0) return <PopulatedLibraryWorkspace {...props} />;
+  const [operationNotice, setOperationNotice] = useState('');
+  if (props.availablePhotos.length > 0) {
+    return <PopulatedLibraryWorkspace {...props} operationNotice={operationNotice} setOperationNotice={setOperationNotice} />;
+  }
   return (
     <div className="workspace">
       <Sidebar folders={props.catalogFolders} totalCount={props.totalCount} selectedFolderId={props.selectedFolderId} tags={props.catalogTags} selectedTagId={props.selectedTagId} onSelectFolder={props.onSelectFolder} onSelectTag={props.onSelectTag} isDemo={props.isDemo} />
@@ -647,10 +658,16 @@ function LibraryWorkspace(props: LibraryWorkspaceProps): React.JSX.Element {
         <p>{props.searchQuery ? '尝试其他文件名、场景、主体或 AI 关键词。' : '从其他目录选择照片，或导入新的照片文件夹。'}</p>
       </main>
       <aside className="empty-library-inspector"><Info size={18} /><span>选择照片后显示分析和版本信息</span></aside>
+      {operationNotice && <div className="operation-toast" role="status">{operationNotice}<button type="button" aria-label="关闭提示" onClick={() => setOperationNotice('')}><X size={13} /></button></div>}
       <TaskBar open={false} onToggle={() => undefined} tasks={[]} />
     </div>
   );
 }
+
+type PopulatedLibraryWorkspaceProps = LibraryWorkspaceProps & {
+  operationNotice: string;
+  setOperationNotice: (notice: string) => void;
+};
 
 function PopulatedLibraryWorkspace({
   availablePhotos,
@@ -666,8 +683,10 @@ function PopulatedLibraryWorkspace({
   onSelectTag,
   onLoadMore,
   searchQuery,
-  onRefreshCatalog
-}: LibraryWorkspaceProps): React.JSX.Element {
+  onRefreshCatalog,
+  operationNotice,
+  setOperationNotice
+}: PopulatedLibraryWorkspaceProps): React.JSX.Element {
   const [selectedId, setSelectedId] = useState(availablePhotos[0]!.id);
   const [selection, setSelection] = useState<SelectionState>({
     selectedIds: new Set([availablePhotos[0]!.id]),
@@ -681,7 +700,6 @@ function PopulatedLibraryWorkspace({
   const [analysisRevision, setAnalysisRevision] = useState<AnalysisRevision>();
   const [generationResults, setGenerationResults] = useState<GenerationResult[]>([]);
   const [analysisNotice, setAnalysisNotice] = useState('');
-  const [operationNotice, setOperationNotice] = useState('');
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
   const [tagEditorOpen, setTagEditorOpen] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
@@ -692,6 +710,8 @@ function PopulatedLibraryWorkspace({
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameDraft, setRenameDraft] = useState('');
   const [renameBusy, setRenameBusy] = useState(false);
+  const [removalMode, setRemovalMode] = useState<'remove' | 'trash' | null>(null);
+  const [removalBusy, setRemovalBusy] = useState(false);
   const selected = availablePhotos.find((photo) => photo.id === selectedId) ?? availablePhotos[0]!;
   const orderedIds = useMemo(() => availablePhotos.map((photo) => photo.id), [availablePhotos]);
   const collectionName = selectedFolderId
@@ -979,22 +999,47 @@ function PopulatedLibraryWorkspace({
     }
   };
 
+  const executeRemoval = async () => {
+    if (!removalMode || removalBusy) return;
+    const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+    setRemovalBusy(true);
+    try {
+      const report = removalMode === 'remove'
+        ? await window.desktopApi.removeCatalogAssets({ assetIds })
+        : await window.desktopApi.trashCatalogAssets({ assetIds });
+      if (report.status === 'completed') {
+        setOperationNotice(removalMode === 'remove'
+          ? `已从图库移除 ${report.succeeded} 张照片，磁盘文件保持不变。`
+          : `已将 ${report.succeeded} 张原图移到系统回收站。`);
+      } else {
+        setOperationNotice(`${removalMode === 'remove' ? '移除' : '回收'}完成 ${report.succeeded} 张，失败 ${report.failed} 张。`);
+      }
+      setRemovalMode(null);
+      await onRefreshCatalog();
+    } catch {
+      setOperationNotice('操作未执行：请先取消所选照片的活动任务，并确认文件仍可访问。');
+    } finally {
+      setRemovalBusy(false);
+    }
+  };
+
   useEffect(() => {
-    if (!moveDialogOpen && !renameDialogOpen) return;
+    if (!moveDialogOpen && !renameDialogOpen && !removalMode) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !moveBusy) setMoveDialogOpen(false);
       if (event.key === 'Escape' && !renameBusy) setRenameDialogOpen(false);
+      if (event.key === 'Escape' && !removalBusy) setRemovalMode(null);
     };
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [moveBusy, moveDialogOpen, renameBusy, renameDialogOpen]);
+  }, [moveBusy, moveDialogOpen, removalBusy, removalMode, renameBusy, renameDialogOpen]);
 
   return (
     <div className="workspace">
       <Sidebar folders={catalogFolders} totalCount={totalCount} selectedFolderId={selectedFolderId} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={onSelectFolder} onSelectTag={onSelectTag} isDemo={isDemo} />
       <main className="library-main">
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
-        <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} />
+        <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} />
       </main>
       <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onGenerate={generateSelection} />
       {selection.selectedIds.size > 1 && (
@@ -1007,6 +1052,7 @@ function PopulatedLibraryWorkspace({
           <button type="button" onClick={() => void analyzeSelection()}><Sparkles size={14} />AI 分析</button>
           <button type="button" onClick={() => void generateSelection({ providerProfileId: generationProfiles[0]?.id ?? '', template: null, count: 1, instruction: '', disabledActionIds: new Set() })} disabled={generationProfiles.length === 0}><WandSparkles size={14} />批量生成</button>
           <button type="button" onClick={() => void exportLatestSelection()}><Download size={14} />导出</button>
+          {!isDemo && <><button type="button" onClick={() => setRemovalMode('remove')}><LibraryBig size={14} />移除</button><button className="is-danger" type="button" onClick={() => setRemovalMode('trash')}><Trash2 size={14} />回收站</button></>}
           <IconButton label="清除选择" onClick={() => setSelection({ selectedIds: new Set(), anchorId: null, focusId: selected.id })}><X size={14} /></IconButton>
         </div>
       )}
@@ -1034,6 +1080,15 @@ function PopulatedLibraryWorkspace({
             <label className="rename-field"><span>文件名</span><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} aria-label="新文件名" spellCheck={false} /></label>
             <footer><span>必须保留原扩展名，且不会覆盖同名文件。</span><div><button className="quiet-button" type="button" disabled={renameBusy} onClick={() => setRenameDialogOpen(false)}>取消</button><button className="primary-action compact" type="submit" disabled={!renameDraft || renameDraft === selected.fileName || renameBusy}>{renameBusy ? '正在重命名…' : '重命名'}</button></div></footer>
           </form>
+        </div>
+      )}
+      {removalMode && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !removalBusy) setRemovalMode(null); }}>
+          <section className={`removal-dialog${removalMode === 'trash' ? ' is-destructive' : ''}`} role="alertdialog" aria-modal="true" aria-labelledby="removal-dialog-title">
+            <header><span className="dialog-icon">{removalMode === 'remove' ? <LibraryBig size={17} /> : <Trash2 size={17} />}</span><div><h2 id="removal-dialog-title">{removalMode === 'remove' ? '从图库移除' : '移到系统回收站'} {selection.selectedIds.size || 1} 张照片？</h2><p>{removalMode === 'remove' ? '磁盘原文件不会改变。重新扫描同一路径可恢复评分、标签、分析和 AI 版本。' : '原文件将进入操作系统回收站，应用会保留关联记录；恢复原文件后可重新导入。'}</p></div></header>
+            <div className="removal-impact"><CircleAlert size={15} /><span>{removalMode === 'remove' ? '照片会立即从当前图库、文件夹计数和搜索结果中隐藏。' : '此操作可能由系统要求额外权限，批量处理会逐项报告失败。'}</span></div>
+            <footer><button className="quiet-button" type="button" disabled={removalBusy} onClick={() => setRemovalMode(null)}>取消</button><button className={removalMode === 'trash' ? 'danger-action' : 'primary-action compact'} type="button" disabled={removalBusy} onClick={() => void executeRemoval()}>{removalBusy ? '正在处理…' : removalMode === 'remove' ? '仅从图库移除' : '移到回收站'}</button></footer>
+          </section>
         </div>
       )}
       {operationNotice && <div className="operation-toast" role="status">{operationNotice}<button type="button" aria-label="关闭提示" onClick={() => setOperationNotice('')}><X size={13} /></button></div>}
@@ -1163,14 +1218,32 @@ const statusLabels: Record<PersistedTask['status'], string> = {
   failed: '失败', canceled: '已取消'
 };
 
+const fileOperationLabels: Record<FileOperationHistoryItem['kind'], string> = {
+  move: '移动原图', copy: '复制原图', rename: '重命名', remove: '从图库移除', trash: '移到系统回收站'
+};
+
+const fileOperationStatusLabels: Record<FileOperationHistoryItem['status'], string> = {
+  planned: '已计划', executing: '执行中', compensating: '恢复中', completed: '已完成',
+  partial: '部分完成', failed: '失败', compensation_failed: '需处理'
+};
+
 function TaskCenterPage(): React.JSX.Element {
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
+  const [fileOperations, setFileOperations] = useState<FileOperationHistoryItem[]>([]);
   const [message, setMessage] = useState('');
 
   const refresh = () => window.desktopApi.listTasks().then(setTaskItems);
   useEffect(() => {
     let active = true;
-    const poll = () => { void window.desktopApi.listTasks().then((items) => { if (active) setTaskItems(items); }); };
+    const poll = () => {
+      void Promise.all([window.desktopApi.listTasks(), window.desktopApi.listFileOperationHistory()])
+        .then(([items, operations]) => {
+          if (active) {
+            setTaskItems(items);
+            setFileOperations(operations);
+          }
+        });
+    };
     poll();
     const interval = window.setInterval(poll, 1_000);
     return () => { active = false; window.clearInterval(interval); };
@@ -1235,6 +1308,21 @@ function TaskCenterPage(): React.JSX.Element {
           </div>
         ))}
       </div>
+      <section className="operation-history">
+        <header><div><History size={15} /><span><strong>文件操作</strong><small>最近 {fileOperations.length} 条</small></span></div></header>
+        {fileOperations.length === 0 ? <div className="operation-history-empty">暂无文件操作</div> : (
+          <div className="operation-history-list">
+            {fileOperations.map((operation) => (
+              <div className="operation-history-row" key={operation.id}>
+                <span><strong>{fileOperationLabels[operation.kind]}</strong><small>{operation.fileNames.join('、')}{operation.total > operation.fileNames.length ? ` 等 ${operation.total} 项` : ''}</small></span>
+                <span className={`operation-state state-${operation.status}`}>{fileOperationStatusLabels[operation.status]}</span>
+                <span>{operation.succeeded}/{operation.total}</span>
+                <time>{new Date(operation.createdAt).toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</time>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
     </div>
   );
 }

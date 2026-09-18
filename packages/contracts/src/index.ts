@@ -130,6 +130,36 @@ export const renameCatalogAssetReportSchema = z.object({
 });
 export type RenameCatalogAssetReport = z.infer<typeof renameCatalogAssetReportSchema>;
 
+export const catalogAssetRemovalInputSchema = z.object({
+  assetIds: z.array(z.string().min(1)).min(1).max(10_000)
+});
+export type CatalogAssetRemovalInput = z.infer<typeof catalogAssetRemovalInputSchema>;
+
+export const catalogAssetRemovalReportSchema = z.object({
+  operationId: z.string().uuid(),
+  kind: z.enum(['remove', 'trash']),
+  status: z.enum(['completed', 'partial', 'failed']),
+  total: z.number().int().nonnegative(),
+  succeeded: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  failures: z.array(z.object({ assetId: z.string().min(1), errorCode: z.string().min(1) }))
+});
+export type CatalogAssetRemovalReport = z.infer<typeof catalogAssetRemovalReportSchema>;
+
+export const fileOperationHistoryItemSchema = z.object({
+  id: z.string().uuid(),
+  kind: z.enum(['move', 'copy', 'rename', 'remove', 'trash']),
+  status: z.enum(['planned', 'executing', 'compensating', 'completed', 'partial', 'failed', 'compensation_failed']),
+  total: z.number().int().nonnegative(),
+  succeeded: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  fileNames: z.array(z.string().min(1)),
+  createdAt: z.number().nonnegative(),
+  completedAt: z.number().nonnegative().nullable(),
+  errorCode: z.string().nullable()
+});
+export type FileOperationHistoryItem = z.infer<typeof fileOperationHistoryItemSchema>;
+
 export const updateCatalogMetadataInputSchema = z.object({
   assetIds: z.array(z.string().min(1)).min(1).max(10_000),
   rating: z.number().int().min(0).max(5).optional(),
@@ -393,6 +423,9 @@ export interface DesktopApi {
   moveCatalogAssets(input: MoveCatalogAssetsInput): Promise<MoveCatalogAssetsReport>;
   copyCatalogAssets(input: CopyCatalogAssetsInput): Promise<CopyCatalogAssetsReport>;
   renameCatalogAsset(input: RenameCatalogAssetInput): Promise<RenameCatalogAssetReport>;
+  removeCatalogAssets(input: CatalogAssetRemovalInput): Promise<CatalogAssetRemovalReport>;
+  trashCatalogAssets(input: CatalogAssetRemovalInput): Promise<CatalogAssetRemovalReport>;
+  listFileOperationHistory(): Promise<FileOperationHistoryItem[]>;
   importFolders(): Promise<CatalogSnapshot | null>;
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;

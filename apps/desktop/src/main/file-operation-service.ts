@@ -13,14 +13,20 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  catalogAssetRemovalInputSchema,
+  catalogAssetRemovalReportSchema,
   copyCatalogAssetsInputSchema,
   copyCatalogAssetsReportSchema,
+  fileOperationHistoryItemSchema,
   moveCatalogAssetsInputSchema,
   moveCatalogAssetsReportSchema,
   renameCatalogAssetInputSchema,
   renameCatalogAssetReportSchema,
+  type CatalogAssetRemovalInput,
+  type CatalogAssetRemovalReport,
   type CopyCatalogAssetsInput,
   type CopyCatalogAssetsReport,
+  type FileOperationHistoryItem,
   type MoveCatalogAssetsInput,
   type MoveCatalogAssetsReport,
   type RenameCatalogAssetInput,
@@ -35,6 +41,10 @@ type FileSystemPort = {
   rename?: typeof rename;
   stat: typeof stat;
   unlink: typeof unlink;
+};
+
+type SystemTrashPort = {
+  trashItem(path: string): Promise<void>;
 };
 
 type PlannedItem = {
@@ -67,12 +77,18 @@ const nodeFileSystem: FileSystemPort = { copyFile, link, readdir, realpath, rena
 export class FileOperationService {
   readonly #database: DatabaseSync;
   readonly #fileSystem: FileSystemPort;
+  readonly #systemTrash: SystemTrashPort | null;
   #pending: Promise<void> = Promise.resolve();
 
-  constructor(databasePath: string, fileSystem: FileSystemPort = nodeFileSystem) {
+  constructor(
+    databasePath: string,
+    fileSystem: FileSystemPort = nodeFileSystem,
+    systemTrash: SystemTrashPort | null = null
+  ) {
     this.#database = new DatabaseSync(databasePath);
     this.#database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.#fileSystem = fileSystem;
+    this.#systemTrash = systemTrash;
     this.#migrate();
   }
 
@@ -95,6 +111,51 @@ export class FileOperationService {
     return this.#serialize(() => this.#executeRename(input));
   }
 
+  async removeFromCatalog(rawInput: CatalogAssetRemovalInput): Promise<CatalogAssetRemovalReport> {
+    const input = catalogAssetRemovalInputSchema.parse(rawInput);
+    return this.#serialize(() => this.#executeRemoval(input, 'remove'));
+  }
+
+  async moveToSystemTrash(rawInput: CatalogAssetRemovalInput): Promise<CatalogAssetRemovalReport> {
+    const input = catalogAssetRemovalInputSchema.parse(rawInput);
+    return this.#serialize(() => this.#executeRemoval(input, 'trash'));
+  }
+
+  listHistory(limit = 100): FileOperationHistoryItem[] {
+    const rows = this.#database.prepare(`
+      SELECT operations.id, operations.kind, operations.status, operations.created_at,
+        operations.completed_at, operations.error_code, COUNT(items.id) AS total,
+        SUM(CASE WHEN items.status IN ('moved', 'copied', 'removed', 'trashed', 'skipped') THEN 1 ELSE 0 END) AS succeeded,
+        SUM(CASE WHEN items.status IN ('failed', 'compensation_failed') THEN 1 ELSE 0 END) AS failed
+      FROM file_operations operations
+      LEFT JOIN file_operation_items items ON items.operation_id = operations.id
+      GROUP BY operations.id
+      ORDER BY operations.created_at DESC
+      LIMIT ?
+    `).all(Math.max(1, Math.min(limit, 500))) as Array<{
+      id: string; kind: FileOperationHistoryItem['kind']; status: FileOperationHistoryItem['status'];
+      created_at: number; completed_at: number | null; error_code: string | null;
+      total: number; succeeded: number; failed: number;
+    }>;
+    const names = this.#database.prepare(`
+      SELECT destination_file_name FROM file_operation_items
+      WHERE operation_id = ? ORDER BY ordinal ASC LIMIT 4
+    `);
+    return rows.map((row) => fileOperationHistoryItemSchema.parse({
+      id: row.id,
+      kind: row.kind,
+      status: row.status,
+      total: row.total,
+      succeeded: row.succeeded ?? 0,
+      failed: row.failed ?? 0,
+      fileNames: (names.all(row.id) as { destination_file_name: string }[])
+        .map((item) => item.destination_file_name),
+      createdAt: row.created_at,
+      completedAt: row.completed_at,
+      errorCode: row.error_code
+    }));
+  }
+
   async #serialize<Result>(operation: () => Promise<Result>): Promise<Result> {
     const previous = this.#pending;
     let release!: () => void;
@@ -111,9 +172,13 @@ export class FileOperationService {
     const operations = this.#database.prepare(`
       SELECT id, kind FROM file_operations WHERE status IN ('planned', 'executing', 'compensating')
       ORDER BY created_at ASC
-    `).all() as { id: string; kind: 'move' | 'copy' | 'rename' }[];
+    `).all() as { id: string; kind: FileOperationHistoryItem['kind'] }[];
     for (const operation of operations) {
       const items = this.#readOperationItems(operation.id).reverse();
+      if (operation.kind === 'trash') {
+        await this.#recoverInterruptedTrashOperation(operation.id, items);
+        continue;
+      }
       let recovered = true;
       for (const item of items) {
         const recoverableStatuses = operation.kind === 'copy'
@@ -141,11 +206,11 @@ export class FileOperationService {
     const existing = this.#database.prepare(`
       SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'file_operations'
     `).get() as { sql: string } | undefined;
-    if (existing && !existing.sql.includes("'copy'")) this.#upgradeOperationTables();
+    if (existing && !existing.sql.includes("'trash'")) this.#upgradeOperationTables();
     this.#database.exec(`
       CREATE TABLE IF NOT EXISTS file_operations (
         id TEXT PRIMARY KEY,
-        kind TEXT NOT NULL CHECK(kind IN ('move', 'copy', 'rename')),
+        kind TEXT NOT NULL CHECK(kind IN ('move', 'copy', 'rename', 'remove', 'trash')),
         status TEXT NOT NULL,
         target_folder_id TEXT NOT NULL,
         created_at INTEGER NOT NULL,
@@ -176,11 +241,15 @@ export class FileOperationService {
   }
 
   #upgradeOperationTables(): void {
+    const itemColumns = this.#database.prepare('PRAGMA table_info(file_operation_items)').all() as { name: string }[];
+    const resultAssetExpression = itemColumns.some((column) => column.name === 'result_asset_id')
+      ? 'result_asset_id'
+      : 'NULL';
     this.#database.exec(`
       BEGIN IMMEDIATE;
       CREATE TABLE file_operations_new (
         id TEXT PRIMARY KEY,
-        kind TEXT NOT NULL CHECK(kind IN ('move', 'copy', 'rename')),
+        kind TEXT NOT NULL CHECK(kind IN ('move', 'copy', 'rename', 'remove', 'trash')),
         status TEXT NOT NULL,
         target_folder_id TEXT NOT NULL,
         created_at INTEGER NOT NULL,
@@ -209,10 +278,10 @@ export class FileOperationService {
       INSERT INTO file_operation_items_new (
         id, operation_id, ordinal, asset_id, source_folder_id, destination_folder_id,
         source_path, destination_path, temporary_path, original_file_name,
-        destination_file_name, size_bytes, status, error_code
+        destination_file_name, size_bytes, result_asset_id, status, error_code
       ) SELECT id, operation_id, ordinal, asset_id, source_folder_id, destination_folder_id,
         source_path, destination_path, temporary_path, original_file_name,
-        destination_file_name, size_bytes, status, error_code FROM file_operation_items;
+        destination_file_name, size_bytes, ${resultAssetExpression}, status, error_code FROM file_operation_items;
       DROP TABLE file_operation_items;
       DROP TABLE file_operations;
       ALTER TABLE file_operations_new RENAME TO file_operations;
@@ -349,6 +418,126 @@ export class FileOperationService {
     }
   }
 
+  async #executeRemoval(
+    input: CatalogAssetRemovalInput,
+    kind: 'remove' | 'trash'
+  ): Promise<CatalogAssetRemovalReport> {
+    if (kind === 'trash' && !this.#systemTrash) throw new Error('SYSTEM_TRASH_UNAVAILABLE');
+    const operationId = randomUUID();
+    const items = this.#planRemoval(operationId, input, kind);
+    if (kind === 'remove') {
+      this.#database.exec('BEGIN IMMEDIATE');
+      try {
+        const now = Date.now();
+        const markRemoved = this.#database.prepare(`
+          UPDATE assets SET removed_at = ?, trashed_at = NULL WHERE id = ? AND removed_at IS NULL
+        `);
+        const markItem = this.#database.prepare(`
+          UPDATE file_operation_items SET status = 'removed', error_code = NULL WHERE id = ?
+        `);
+        for (const item of items) {
+          if (markRemoved.run(now, item.assetId).changes !== 1) throw new Error('CATALOG_CONCURRENT_CHANGE');
+          markItem.run(item.id);
+        }
+        this.#database.prepare(`
+          UPDATE file_operations SET status = 'completed', completed_at = ?, error_code = NULL WHERE id = ?
+        `).run(now, operationId);
+        this.#database.exec('COMMIT');
+      } catch (error) {
+        this.#database.exec('ROLLBACK');
+        throw error;
+      }
+      return catalogAssetRemovalReportSchema.parse({
+        operationId, kind, status: 'completed', total: items.length,
+        succeeded: items.length, failed: 0, failures: []
+      });
+    }
+
+    this.#database.prepare('UPDATE file_operations SET status = ? WHERE id = ?').run('executing', operationId);
+    const failures: { assetId: string; errorCode: string }[] = [];
+    let succeeded = 0;
+    for (const item of items) {
+      this.#setItemStatus(item.id, 'trashing', null);
+      let physicallyTrashed = false;
+      try {
+        await this.#systemTrash!.trashItem(item.sourcePath);
+        physicallyTrashed = true;
+        this.#setItemStatus(item.id, 'trashed', null);
+        this.#markAssetRemoved(item.assetId, true);
+        succeeded += 1;
+      } catch (error) {
+        const code = errorCode(error);
+        if (physicallyTrashed) {
+          this.#database.prepare('UPDATE file_operations SET error_code = ? WHERE id = ?')
+            .run('CATALOG_COMMIT_PENDING', operationId);
+          throw error;
+        }
+        failures.push({ assetId: item.assetId, errorCode: code });
+        this.#setItemStatus(item.id, 'failed', code);
+      }
+    }
+    const status = succeeded === items.length ? 'completed' : succeeded === 0 ? 'failed' : 'partial';
+    const operationError = failures.length > 0 ? 'ITEM_FAILURES' : null;
+    this.#database.prepare(`
+      UPDATE file_operations SET status = ?, completed_at = ?, error_code = ? WHERE id = ?
+    `).run(status, Date.now(), operationError, operationId);
+    return catalogAssetRemovalReportSchema.parse({
+      operationId, kind, status, total: items.length,
+      succeeded, failed: failures.length, failures
+    });
+  }
+
+  #planRemoval(
+    operationId: string,
+    input: CatalogAssetRemovalInput,
+    kind: 'remove' | 'trash'
+  ): PlannedItem[] {
+    const assetIds = [...new Set(input.assetIds)];
+    if (assetIds.length !== input.assetIds.length) throw new Error('DUPLICATE_ASSET_ID');
+    const placeholders = assetIds.map(() => '?').join(', ');
+    const rows = this.#database.prepare(`
+      SELECT id, folder_id, path, file_name, size_bytes FROM assets
+      WHERE removed_at IS NULL AND id IN (${placeholders})
+    `).all(...assetIds) as AssetLocationRow[];
+    if (rows.length !== assetIds.length) throw new Error('CATALOG_ASSET_SET_MISMATCH');
+    this.#assertNoActiveTasks(assetIds);
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const items = assetIds.map((assetId): PlannedItem => {
+      const asset = byId.get(assetId)!;
+      return {
+        id: randomUUID(), assetId, sourcePath: asset.path, destinationPath: asset.path,
+        temporaryPath: asset.path, sourceFolderId: asset.folder_id,
+        destinationFolderId: asset.folder_id, previousFileName: asset.file_name,
+        fileName: asset.file_name, sizeBytes: asset.size_bytes, skipped: false,
+        status: 'planned', resultAssetId: null
+      };
+    });
+    this.#persistPlan(operationId, kind, items[0]!.sourceFolderId, items);
+    return items;
+  }
+
+  #assertNoActiveTasks(assetIds: string[]): void {
+    const taskTable = this.#database.prepare(`
+      SELECT 1 AS value FROM sqlite_master WHERE type = 'table' AND name = 'tasks'
+    `).get() as { value: number } | undefined;
+    if (!taskTable) return;
+    const placeholders = assetIds.map(() => '?').join(', ');
+    const active = this.#database.prepare(`
+      SELECT COUNT(*) AS value FROM tasks
+      WHERE asset_id IN (${placeholders})
+        AND status IN ('draft', 'queued', 'preparing', 'uploading', 'processing', 'downloading', 'saving')
+    `).get(...assetIds) as { value: number };
+    if (active.value > 0) throw new Error('ASSET_HAS_ACTIVE_TASKS');
+  }
+
+  #markAssetRemoved(assetId: string, trashed: boolean): void {
+    const now = Date.now();
+    const result = this.#database.prepare(`
+      UPDATE assets SET removed_at = ?, trashed_at = ? WHERE id = ? AND removed_at IS NULL
+    `).run(now, trashed ? now : null, assetId);
+    if (result.changes !== 1) throw new Error('CATALOG_CONCURRENT_CHANGE');
+  }
+
   async #planCopy(operationId: string, input: CopyCatalogAssetsInput): Promise<PlannedItem[]> {
     const assetIds = [...new Set(input.assetIds)];
     if (assetIds.length !== input.assetIds.length) throw new Error('DUPLICATE_ASSET_ID');
@@ -359,7 +548,8 @@ export class FileOperationService {
     if (!(await this.#fileSystem.stat(targetPath)).isDirectory()) throw new Error('TARGET_NOT_DIRECTORY');
     const placeholders = assetIds.map(() => '?').join(', ');
     const rows = this.#database.prepare(`
-      SELECT id, folder_id, path, file_name, size_bytes FROM assets WHERE id IN (${placeholders})
+      SELECT id, folder_id, path, file_name, size_bytes FROM assets
+      WHERE removed_at IS NULL AND id IN (${placeholders})
     `).all(...assetIds) as AssetLocationRow[];
     if (rows.length !== assetIds.length) throw new Error('CATALOG_ASSET_SET_MISMATCH');
     const byId = new Map(rows.map((row) => [row.id, row]));
@@ -383,7 +573,7 @@ export class FileOperationService {
 
   async #planRename(operationId: string, input: RenameCatalogAssetInput): Promise<PlannedItem> {
     const asset = this.#database.prepare(`
-      SELECT id, folder_id, path, file_name, size_bytes FROM assets WHERE id = ?
+      SELECT id, folder_id, path, file_name, size_bytes FROM assets WHERE id = ? AND removed_at IS NULL
     `).get(input.assetId) as AssetLocationRow | undefined;
     if (!asset) throw new Error('CATALOG_ASSET_NOT_FOUND');
     const fileName = validateRenamedFileName(input.fileName, asset.file_name);
@@ -406,7 +596,12 @@ export class FileOperationService {
     return item;
   }
 
-  #persistPlan(operationId: string, kind: 'copy' | 'rename', targetFolderId: string, items: PlannedItem[]): void {
+  #persistPlan(
+    operationId: string,
+    kind: 'copy' | 'rename' | 'remove' | 'trash',
+    targetFolderId: string,
+    items: PlannedItem[]
+  ): void {
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       this.#database.prepare(`
@@ -444,7 +639,8 @@ export class FileOperationService {
 
     const placeholders = assetIds.map(() => '?').join(', ');
     const rows = this.#database.prepare(`
-      SELECT id, folder_id, path, file_name, size_bytes FROM assets WHERE id IN (${placeholders})
+      SELECT id, folder_id, path, file_name, size_bytes FROM assets
+      WHERE removed_at IS NULL AND id IN (${placeholders})
     `).all(...assetIds) as AssetLocationRow[];
     if (rows.length !== assetIds.length) throw new Error('CATALOG_ASSET_SET_MISMATCH');
     const byId = new Map(rows.map((row) => [row.id, row]));
@@ -588,7 +784,8 @@ export class FileOperationService {
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       const update = this.#database.prepare(`
-        UPDATE assets SET folder_id = ?, path = ?, file_name = ? WHERE id = ? AND path = ?
+        UPDATE assets SET folder_id = ?, path = ?, file_name = ?
+        WHERE id = ? AND path = ? AND removed_at IS NULL
       `);
       for (const item of items) {
         const result = update.run(
@@ -614,7 +811,8 @@ export class FileOperationService {
           id, folder_id, path, file_name, extension, size_bytes, modified_at,
           imported_at, rating, favorite
         )
-        SELECT ?, ?, ?, ?, extension, ?, ?, ?, rating, favorite FROM assets WHERE id = ?
+        SELECT ?, ?, ?, ?, extension, ?, ?, ?, rating, favorite FROM assets
+        WHERE id = ? AND removed_at IS NULL
       `);
       const copyTags = this.#database.prepare(`
         INSERT INTO asset_tags (asset_id, tag_id, created_at)
@@ -777,6 +975,43 @@ export class FileOperationService {
       return;
     }
     throw new Error('RECOVERY_DESTINATION_CONFLICT');
+  }
+
+  async #recoverInterruptedTrashOperation(operationId: string, items: PlannedItem[]): Promise<void> {
+    let succeeded = 0;
+    let failed = 0;
+    for (const item of items) {
+      if (!['trashing', 'trashed'].includes(item.status)) {
+        this.#setItemStatus(item.id, 'failed', 'APP_INTERRUPTED');
+        failed += 1;
+        continue;
+      }
+      try {
+        if (await exists(this.#fileSystem, item.sourcePath)) {
+          this.#setItemStatus(item.id, 'failed', 'TRASH_NOT_COMPLETED');
+          failed += 1;
+        } else {
+          this.#ensureAssetRemoved(item.assetId, true);
+          this.#setItemStatus(item.id, 'trashed', null);
+          succeeded += 1;
+        }
+      } catch (error) {
+        this.#setItemStatus(item.id, 'failed', errorCode(error));
+        failed += 1;
+      }
+    }
+    const status = failed === 0 ? 'completed' : succeeded === 0 ? 'failed' : 'partial';
+    this.#database.prepare(`
+      UPDATE file_operations SET status = ?, completed_at = ?, error_code = ? WHERE id = ?
+    `).run(status, Date.now(), failed > 0 ? 'INTERRUPTED_RECOVERED' : null, operationId);
+  }
+
+  #ensureAssetRemoved(assetId: string, trashed: boolean): void {
+    const row = this.#database.prepare('SELECT removed_at FROM assets WHERE id = ?')
+      .get(assetId) as { removed_at: number | null } | undefined;
+    if (!row) throw new Error('CATALOG_ASSET_NOT_FOUND');
+    if (row.removed_at !== null) return;
+    this.#markAssetRemoved(assetId, trashed);
   }
 
   #setItemStatus(itemId: string, status: string, code: string | null): void {
