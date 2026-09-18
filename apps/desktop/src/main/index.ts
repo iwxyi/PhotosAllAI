@@ -16,6 +16,8 @@ import {
   exportReportSchema,
   saveExportPresetInputSchema,
   exportPresetSchema,
+  imageCacheStatsSchema,
+  pruneImageCacheInputSchema,
   listAnalysisInputSchema,
   listCatalogAssetsInputSchema,
   listGenerationResultsInputSchema,
@@ -220,6 +222,11 @@ function registerIpc(): void {
   );
   ipcMain.handle('export.presets.delete.v1', (_event, input: unknown) => {
     exportPresets.delete(String(input));
+  });
+  ipcMain.handle('cache.stats.get.v1', async () => imageCacheStatsSchema.parse(await imageCache.getStats()));
+  ipcMain.handle('cache.prune.v1', async (_event, input: unknown) => {
+    const result = await imageCache.prune(pruneImageCacheInputSchema.parse(input).maxBytes);
+    return result;
   });
 }
 

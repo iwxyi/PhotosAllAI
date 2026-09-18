@@ -498,6 +498,13 @@ export const exportReportSchema = z.object({
 
 export type ExportReport = z.infer<typeof exportReportSchema>;
 
+export const imageCacheStatsSchema = z.object({
+  files: z.number().int().nonnegative(),
+  bytes: z.number().int().nonnegative()
+});
+export type ImageCacheStats = z.infer<typeof imageCacheStatsSchema>;
+export const pruneImageCacheInputSchema = z.object({ maxBytes: z.number().int().nonnegative().max(100 * 1024 * 1024 * 1024) });
+
 export interface DesktopApi {
   getAppInfo(): Promise<AppInfo>;
   getWorkspaceSession(): Promise<WorkspaceSession>;
@@ -538,4 +545,6 @@ export interface DesktopApi {
   listExportPresets(): Promise<ExportPreset[]>;
   saveExportPreset(input: SaveExportPresetInput): Promise<ExportPreset>;
   deleteExportPreset(presetId: string): Promise<void>;
+  getImageCacheStats(): Promise<ImageCacheStats>;
+  pruneImageCache(input: z.input<typeof pruneImageCacheInputSchema>): Promise<{ removedFiles: number; removedBytes: number }>;
 }

@@ -13,6 +13,7 @@ import type {
   PromptTemplate,
   ProviderProfile,
   ExportPreset,
+  ImageCacheStats,
   SavePromptTemplateInput,
   SaveProviderProfileInput,
   WorkspaceSession,
@@ -1253,10 +1254,14 @@ function SettingsPage(): React.JSX.Element {
   const [presets, setPresets] = useState<ExportPreset[]>([]);
   const [presetName, setPresetName] = useState('');
   const [presetMessage, setPresetMessage] = useState('');
+  const [cacheStats, setCacheStats] = useState<ImageCacheStats | null>(null);
+  const [cacheMessage, setCacheMessage] = useState('');
+  const [cacheBusy, setCacheBusy] = useState(false);
 
   useEffect(() => {
     void window.desktopApi.listProviderProfiles().then(setProfiles);
     void window.desktopApi.listExportPresets().then(setPresets);
+    void window.desktopApi.getImageCacheStats().then(setCacheStats);
   }, []);
 
   const patchForm = <Key extends keyof SaveProviderProfileInput>(key: Key, value: SaveProviderProfileInput[Key]) => {
@@ -1348,6 +1353,10 @@ function SettingsPage(): React.JSX.Element {
           <div className="preset-row"><input aria-label="导出预设名称" placeholder="例如：客户交付" value={presetName} onChange={(event) => { setPresetName(event.target.value); setPresetMessage(''); }} /><button className="primary-action compact" type="button" disabled={!presetName.trim()} onClick={async () => { try { const saved = await window.desktopApi.saveExportPreset({ name: presetName.trim(), format: 'original', conflictPolicy: 'auto-rename', namingPattern: '{name}_{version}' }); setPresets((current) => [...current.filter((item) => item.id !== saved.id), saved]); setPresetName(''); setPresetMessage('预设已保存'); } catch { setPresetMessage('名称已存在或保存失败'); } }}>保存预设</button></div>
           <div className="preset-list">{presets.length === 0 ? <small>暂无导出预设</small> : presets.map((preset) => <div className="preset-item" key={preset.id}><span><strong>{preset.name}</strong><small>{preset.namingPattern} · {preset.conflictPolicy === 'skip' ? '跳过同名' : '自动编号'}</small></span><button type="button" aria-label={`删除导出预设 ${preset.name}`} onClick={async () => { await window.desktopApi.deleteExportPreset(preset.id); setPresets((current) => current.filter((item) => item.id !== preset.id)); }}>删除</button></div>)}</div>
           {presetMessage && <div className="form-feedback" role="status">{presetMessage}</div>}
+        </section>
+        <section className="settings-section cache-section">
+          <div className="settings-heading"><div><h2>预览缓存</h2><p>缓存可安全重建，不会删除原图、生成结果或分析数据。</p></div><span>{cacheStats ? `${cacheStats.files} 个文件 · ${(cacheStats.bytes / 1_073_741_824).toFixed(2)} GiB` : '正在读取'}</span></div>
+          <div className="cache-actions"><button className="secondary-action" type="button" disabled={cacheBusy || !cacheStats || cacheStats.bytes === 0} onClick={async () => { setCacheBusy(true); try { const result = await window.desktopApi.pruneImageCache({ maxBytes: 0 }); setCacheMessage(`已清理 ${result.removedFiles} 个缓存文件。`); setCacheStats(await window.desktopApi.getImageCacheStats()); } catch { setCacheMessage('缓存清理失败，请稍后重试。'); } finally { setCacheBusy(false); } }}>{cacheBusy ? '清理中…' : '清理全部可重建缓存'}</button><span role="status">{cacheMessage}</span></div>
         </section>
       </main>
     </div>
