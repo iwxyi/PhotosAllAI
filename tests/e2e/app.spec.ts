@@ -79,6 +79,16 @@ test('opens the task drawer and application tabs', async () => {
   await expect(page.getByRole('heading', { name: '提示词模板' })).toBeVisible();
   await expect(page.getByText('尚未创建模板')).toBeVisible();
   await expect(page.getByText('{{analysis.generative_actions}}', { exact: true })).toBeVisible();
+  await page.getByLabel('模板名称').fill('E2E 人像清洁');
+  await page.getByLabel('简短描述').fill('移除背景干扰并保持主体自然。');
+  await page.getByRole('button', { name: '创建模板' }).click();
+  await expect(page.getByText('E2E 人像清洁', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '预览模板' }).click();
+  await expect(page.getByRole('dialog', { name: 'E2E 人像清洁' })).toBeVisible();
+  await expect(page.getByRole('dialog').getByText('移除背景干扰并保持主体自然。')).toBeVisible();
+  await expect(page.getByRole('dialog').locator('pre')).toContainText('{{analysis.generative_actions}}');
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.screenshot({ path: 'test-results/prompt-templates.png', animations: 'disabled' });
 
   await page.getByRole('tab', { name: /设置/ }).click();

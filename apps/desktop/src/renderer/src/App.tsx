@@ -1508,9 +1508,19 @@ const emptyTemplateForm: SavePromptTemplateInput = {
 function TemplatePage(): React.JSX.Element {
   const [templateItems, setTemplateItems] = useState<PromptTemplate[]>([]);
   const [form, setForm] = useState<SavePromptTemplateInput>(emptyTemplateForm);
+  const [previewTemplate, setPreviewTemplate] = useState<PromptTemplate | null>(null);
   const [message, setMessage] = useState('');
 
   useEffect(() => { void window.desktopApi.listPromptTemplates().then(setTemplateItems); }, []);
+
+  useEffect(() => {
+    if (!previewTemplate) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPreviewTemplate(null);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [previewTemplate]);
 
   const patchTemplate = <Key extends keyof SavePromptTemplateInput>(key: Key, value: SavePromptTemplateInput[Key]) => {
     setForm((current) => ({ ...current, [key]: value }));
@@ -1558,7 +1568,7 @@ function TemplatePage(): React.JSX.Element {
           )}
         </section>
         <form className="template-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
-          <div className="template-editor-head"><div><strong>{form.id ? '编辑模板' : '创建模板'}</strong><small>保存修改会创建新版本</small></div>{form.id && <span>不可变版本</span>}</div>
+          <div className="template-editor-head"><div><strong>{form.id ? '编辑模板' : '创建模板'}</strong><small>保存修改会创建新版本</small></div><div className="template-editor-head-actions">{form.id && <button className="secondary-action compact" type="button" onClick={() => setPreviewTemplate(templateItems.find((template) => template.id === form.id) ?? null)}><Maximize2 size={13} />预览模板</button>}{form.id && <span>不可变版本</span>}</div></div>
           <label><span>模板名称</span><input required maxLength={120} value={form.name} placeholder="例如：自然人像 · 清洁背景" onChange={(event) => patchTemplate('name', event.target.value)} /></label>
           <div className="form-grid two-columns"><label><span>分类</span><select value={form.category} onChange={(event) => patchTemplate('category', event.target.value)}><option>人像</option><option>风光</option><option>商品</option><option>建筑</option><option>其他</option></select></label><label><span>示例图片</span><select value={form.exampleId} onChange={(event) => patchTemplate('exampleId', event.target.value as SavePromptTemplateInput['exampleId'])}><option value="portrait">人像示例</option><option value="street">街拍示例</option><option value="coast">海岸示例</option><option value="none">不使用示例</option></select></label></div>
           <label><span>简短描述</span><input maxLength={2_000} value={form.description} placeholder="说明适用场景和效果" onChange={(event) => patchTemplate('description', event.target.value)} /></label>
@@ -1567,6 +1577,7 @@ function TemplatePage(): React.JSX.Element {
           <div className="template-editor-footer"><span role="status">{message}</span><button className="primary-action compact" type="submit">{form.id ? '保存新版本' : '创建模板'}</button></div>
         </form>
       </div>
+      {previewTemplate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPreviewTemplate(null); }}><section className="template-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="template-preview-title"><header><div><span className="dialog-icon"><WandSparkles size={16} /></span><div><h2 id="template-preview-title">{previewTemplate.name}</h2><p>{previewTemplate.category} · 版本 {previewTemplate.version}</p></div></div><IconButton label="关闭模板预览" onClick={() => setPreviewTemplate(null)}><X size={15} /></IconButton></header><div className="template-preview-content">{previewTemplate.exampleId === 'none' ? <div className="template-preview-placeholder"><Image size={28} /><span>未设置示例图片</span></div> : <img className="template-preview-hero" src={`./demo/${previewTemplate.exampleId}.jpg`} alt={`${previewTemplate.name} 示例图片`} />}<div className="template-preview-meta"><span className="template-preview-category">{previewTemplate.category}</span><span>版本 {previewTemplate.version}</span></div><p className="template-preview-description">{previewTemplate.description || '暂无描述'}</p><div className="template-preview-body"><strong>模板正文</strong><pre>{previewTemplate.body}</pre></div></div><footer><button className="quiet-button" type="button" onClick={() => setPreviewTemplate(null)}>关闭</button><button className="primary-action compact" type="button" onClick={() => { setForm({ id: previewTemplate.id, name: previewTemplate.name, description: previewTemplate.description, category: previewTemplate.category, body: previewTemplate.body, exampleId: previewTemplate.exampleId }); setPreviewTemplate(null); }}>编辑模板</button></footer></section></div>}
     </div>
   );
 }
