@@ -280,6 +280,7 @@ app.whenReady().then(async () => {
   tasks = new TaskService(databasePath);
   templates = new TemplateService(databasePath);
   imageCache = new ImageCacheService(join(app.getPath('userData'), 'cache', 'images'), catalog);
+  void imageCache.prune(5 * 1024 * 1024 * 1024);
   providers = new ProviderService(join(app.getPath('userData'), 'settings', 'providers.json'), {
     available: () => safeStorage.isEncryptionAvailable(),
     encrypt: (value) => safeStorage.encryptString(value).toString('base64'),

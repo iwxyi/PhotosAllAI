@@ -1,4 +1,4 @@
-import { access, mkdir, rename, writeFile } from 'node:fs/promises';
+import { access, mkdir, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { nativeImage } from 'electron';
@@ -20,6 +20,49 @@ export class ImageCacheService {
   constructor(cacheDirectory: string, catalog: CatalogService) {
     this.#cacheDirectory = cacheDirectory;
     this.#catalog = catalog;
+  }
+
+  async getStats(): Promise<{ files: number; bytes: number }> {
+    const files = await this.#listFiles();
+    let bytes = 0;
+    for (const file of files) bytes += file.size;
+    return { files: files.length, bytes };
+  }
+
+  async prune(maxBytes: number): Promise<{ removedFiles: number; removedBytes: number }> {
+    const target = Math.max(0, Math.trunc(maxBytes));
+    const files = await this.#listFiles();
+    let total = files.reduce((sum, file) => sum + file.size, 0);
+    let removedFiles = 0;
+    let removedBytes = 0;
+    files.sort((left, right) => left.modifiedAt - right.modifiedAt);
+    for (const file of files) {
+      if (total <= target) break;
+      await unlink(file.path).catch(() => undefined);
+      total -= file.size;
+      removedFiles += 1;
+      removedBytes += file.size;
+    }
+    return { removedFiles, removedBytes };
+  }
+
+  async #listFiles(): Promise<{ path: string; size: number; modifiedAt: number }[]> {
+    const result: { path: string; size: number; modifiedAt: number }[] = [];
+    const directories = [this.#cacheDirectory];
+    while (directories.length > 0) {
+      const directory = directories.pop();
+      if (!directory) continue;
+      const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        const filePath = path.join(directory, entry.name);
+        if (entry.isDirectory()) directories.push(filePath);
+        else if (entry.isFile() && entry.name.endsWith('.jpg')) {
+          const metadata = await stat(filePath).catch(() => null);
+          if (metadata) result.push({ path: filePath, size: metadata.size, modifiedAt: metadata.mtimeMs });
+        }
+      }
+    }
+    return result;
   }
 
   async getOrCreate(assetId: string, variant: ImageVariant): Promise<string | null> {
