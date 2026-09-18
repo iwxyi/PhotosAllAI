@@ -14,7 +14,16 @@ const api: DesktopApi = {
   saveProviderProfile: (input) =>
     ipcRenderer.invoke('providers.save.v1', input) as ReturnType<DesktopApi['saveProviderProfile']>,
   testProviderConnection: (input) =>
-    ipcRenderer.invoke('providers.test.v1', input) as ReturnType<DesktopApi['testProviderConnection']>
+    ipcRenderer.invoke('providers.test.v1', input) as ReturnType<DesktopApi['testProviderConnection']>,
+  listTasks: () => ipcRenderer.invoke('tasks.list.v1') as ReturnType<DesktopApi['listTasks']>,
+  enqueueTask: (input) =>
+    ipcRenderer.invoke('tasks.enqueue.v1', input) as ReturnType<DesktopApi['enqueueTask']>,
+  cancelTask: (taskId) =>
+    ipcRenderer.invoke('tasks.cancel.v1', taskId) as ReturnType<DesktopApi['cancelTask']>,
+  retryTask: (taskId) =>
+    ipcRenderer.invoke('tasks.retry.v1', taskId) as ReturnType<DesktopApi['retryTask']>,
+  reorderTasks: (taskIds) =>
+    ipcRenderer.invoke('tasks.reorder.v1', taskIds) as ReturnType<DesktopApi['reorderTasks']>
 };
 
 contextBridge.exposeInMainWorld('desktopApi', Object.freeze(api));

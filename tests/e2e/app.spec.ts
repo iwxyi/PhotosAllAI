@@ -71,6 +71,10 @@ test('opens the task drawer and application tabs', async () => {
   await expect(page.getByText('当前任务')).toBeVisible();
   await expect(page.getByText('正在生成 · 64%')).toBeVisible();
 
+  await page.getByRole('tab', { name: /任务中心/ }).click();
+  await expect(page.getByRole('heading', { name: '任务中心' })).toBeVisible();
+  await expect(page.getByText('暂无任务')).toBeVisible();
+
   await page.getByRole('tab', { name: /设置/ }).click();
   await expect(page.getByRole('heading', { name: 'AI 模型' })).toBeVisible();
   await expect(page.getByLabel('Base URL')).toBeVisible();

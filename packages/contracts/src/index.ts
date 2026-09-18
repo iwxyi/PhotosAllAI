@@ -71,6 +71,38 @@ export const connectionTestSchema = z.object({
 
 export type ConnectionTest = z.infer<typeof connectionTestSchema>;
 
+export const taskKindSchema = z.enum(['analysis', 'generation', 'export']);
+export const taskStatusSchema = z.enum([
+  'draft', 'queued', 'preparing', 'uploading', 'processing',
+  'downloading', 'saving', 'completed', 'failed', 'canceled'
+]);
+
+export const persistedTaskSchema = z.object({
+  id: z.string().uuid(),
+  kind: taskKindSchema,
+  assetId: z.string().nullable(),
+  status: taskStatusSchema,
+  position: z.number().int().nonnegative(),
+  progress: z.number().min(0).max(1),
+  attempt: z.number().int().nonnegative(),
+  payload: z.record(z.string(), z.unknown()),
+  errorCode: z.string().nullable(),
+  createdAt: z.number().nonnegative(),
+  updatedAt: z.number().nonnegative()
+});
+
+export type PersistedTask = z.infer<typeof persistedTaskSchema>;
+
+export const enqueueTaskInputSchema = z.object({
+  kind: taskKindSchema,
+  assetId: z.string().nullable().default(null),
+  payload: z.record(z.string(), z.unknown()).default({})
+});
+
+export type EnqueueTaskInput = z.infer<typeof enqueueTaskInputSchema>;
+export const taskIdSchema = z.string().uuid();
+export const reorderTaskIdsSchema = z.array(taskIdSchema).max(10_000);
+
 export interface DesktopApi {
   getAppInfo(): Promise<AppInfo>;
   listCatalogAssets(): Promise<CatalogAsset[]>;
@@ -78,4 +110,9 @@ export interface DesktopApi {
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;
   testProviderConnection(input: SaveProviderProfileInput): Promise<ConnectionTest>;
+  listTasks(): Promise<PersistedTask[]>;
+  enqueueTask(input: EnqueueTaskInput): Promise<PersistedTask>;
+  cancelTask(taskId: string): Promise<PersistedTask>;
+  retryTask(taskId: string): Promise<PersistedTask>;
+  reorderTasks(taskIds: string[]): Promise<PersistedTask[]>;
 }

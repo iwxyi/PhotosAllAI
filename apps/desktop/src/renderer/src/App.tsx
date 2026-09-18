@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { CatalogAsset, ProviderProfile, SaveProviderProfileInput } from '@photoallisai/contracts';
+import type { CatalogAsset, PersistedTask, ProviderProfile, SaveProviderProfileInput } from '@photoallisai/contracts';
 import { selectAll, updateSelection, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
 import {
   Aperture,
@@ -603,6 +603,70 @@ function SettingsPage(): React.JSX.Element {
   );
 }
 
+const taskLabels: Record<PersistedTask['kind'], string> = {
+  analysis: '视觉分析',
+  generation: '图片生成',
+  export: '导出'
+};
+
+const statusLabels: Record<PersistedTask['status'], string> = {
+  draft: '草稿', queued: '等待中', preparing: '准备输入', uploading: '上传中',
+  processing: '处理中', downloading: '下载中', saving: '保存中', completed: '已完成',
+  failed: '失败', canceled: '已取消'
+};
+
+function TaskCenterPage(): React.JSX.Element {
+  const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
+
+  const refresh = () => window.desktopApi.listTasks().then(setTaskItems);
+  useEffect(() => { void window.desktopApi.listTasks().then(setTaskItems); }, []);
+
+  const cancel = async (taskId: string) => {
+    await window.desktopApi.cancelTask(taskId);
+    await refresh();
+  };
+  const retry = async (taskId: string) => {
+    await window.desktopApi.retryTask(taskId);
+    await refresh();
+  };
+
+  const waiting = taskItems.filter((task) => task.status === 'queued').length;
+  const failed = taskItems.filter((task) => task.status === 'failed').length;
+
+  return (
+    <div className="task-center-page">
+      <div className="task-center-heading">
+        <div><h1>任务中心</h1><p>生成任务默认串行执行，等待任务可以调整或取消。</p></div>
+        <div className="task-summary"><span><i className="task-dot queued" />等待 {waiting}</span><span><i className="task-dot failed" />失败 {failed}</span></div>
+      </div>
+      <div className="task-table">
+        <div className="task-table-head"><span>任务</span><span>状态</span><span>进度</span><span>尝试</span><span>更新时间</span><span /></div>
+        {taskItems.length === 0 ? (
+          <div className="task-empty"><Clock3 size={30} /><h2>暂无任务</h2><p>从图库选择照片并执行 AI 分析或生成后，任务会出现在这里。</p></div>
+        ) : taskItems.map((task) => (
+          <div className="task-table-row" key={task.id}>
+            <span className="task-kind"><i><TaskKindIcon kind={task.kind} /></i><span><strong>{taskLabels[task.kind]}</strong><small>{task.assetId ?? '批量任务'}</small></span></span>
+            <span className={`task-state state-${task.status}`}>{statusLabels[task.status]}</span>
+            <span className="table-progress"><i style={{ width: `${Math.round(task.progress * 100)}%` }} /><em>{Math.round(task.progress * 100)}%</em></span>
+            <span>{task.attempt + 1}</span>
+            <span>{new Date(task.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+            <span className="task-row-actions">
+              {(task.status === 'queued' || task.status === 'preparing' || task.status === 'uploading' || task.status === 'processing' || task.status === 'downloading') && <button type="button" onClick={() => void cancel(task.id)}>取消</button>}
+              {(task.status === 'failed' || task.status === 'canceled') && <button type="button" onClick={() => void retry(task.id)}>重试</button>}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TaskKindIcon({ kind }: { kind: PersistedTask['kind'] }): React.JSX.Element {
+  if (kind === 'analysis') return <Bot size={15} />;
+  if (kind === 'generation') return <WandSparkles size={15} />;
+  return <Download size={15} />;
+}
+
 export function App(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('library');
   const [catalogPhotos, setCatalogPhotos] = useState<Photo[]>([]);
@@ -621,7 +685,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} onChange={setActiveTab} onImport={() => void importFolders()} />
-      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} /> : activeTab === 'settings' ? <SettingsPage /> : <PlaceholderPage type={activeTab} />}
+      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <PlaceholderPage type={activeTab} />}
     </div>
   );
 }

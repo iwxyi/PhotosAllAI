@@ -3,16 +3,25 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { app, BrowserWindow, dialog, ipcMain, net, protocol, safeStorage, shell } from 'electron';
-import { appInfoSchema, catalogSnapshotSchema, saveProviderProfileInputSchema } from '@photoallisai/contracts';
+import {
+  appInfoSchema,
+  catalogSnapshotSchema,
+  enqueueTaskInputSchema,
+  reorderTaskIdsSchema,
+  saveProviderProfileInputSchema,
+  taskIdSchema
+} from '@photoallisai/contracts';
 
 import { CatalogService } from './catalog-service';
 import { ImageCacheService, type ImageVariant } from './image-cache-service';
 import { ProviderService } from './provider-service';
+import { TaskService } from './task-service';
 
 const APP_ORIGIN = 'app://photoallisai';
 let catalog: CatalogService;
 let imageCache: ImageCacheService;
 let providers: ProviderService;
+let tasks: TaskService;
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -49,6 +58,15 @@ function registerIpc(): void {
   );
   ipcMain.handle('providers.test.v1', (_event, input: unknown) =>
     providers.test(saveProviderProfileInputSchema.parse(input))
+  );
+  ipcMain.handle('tasks.list.v1', () => tasks.list());
+  ipcMain.handle('tasks.enqueue.v1', (_event, input: unknown) =>
+    tasks.enqueue(enqueueTaskInputSchema.parse(input))
+  );
+  ipcMain.handle('tasks.cancel.v1', (_event, taskId: unknown) => tasks.cancel(taskIdSchema.parse(taskId)));
+  ipcMain.handle('tasks.retry.v1', (_event, taskId: unknown) => tasks.retry(taskIdSchema.parse(taskId)));
+  ipcMain.handle('tasks.reorder.v1', (_event, taskIds: unknown) =>
+    tasks.reorder(reorderTaskIdsSchema.parse(taskIds))
   );
 }
 
@@ -97,7 +115,9 @@ if (customUserData) app.setPath('userData', customUserData);
 app.whenReady().then(() => {
   const libraryDirectory = join(app.getPath('userData'), 'library');
   mkdirSync(libraryDirectory, { recursive: true });
-  catalog = new CatalogService(join(libraryDirectory, 'catalog.sqlite'));
+  const databasePath = join(libraryDirectory, 'catalog.sqlite');
+  catalog = new CatalogService(databasePath);
+  tasks = new TaskService(databasePath);
   imageCache = new ImageCacheService(join(app.getPath('userData'), 'cache', 'images'), catalog);
   providers = new ProviderService(join(app.getPath('userData'), 'settings', 'providers.json'), {
     available: () => safeStorage.isEncryptionAvailable(),
@@ -140,5 +160,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  tasks?.close();
   catalog?.close();
 });
