@@ -1,0 +1,28 @@
+appId: com.photoallisai.desktop
+productName: PhotoAllIsAI
+artifactName: PhotoAllIsAI-${version}-${os}-${arch}.${ext}
+directories:
+  output: ../../release
+  buildResources: build
+files:
+  - out/**
+  - package.json
+asar: true
+compression: maximum
+mac:
+  category: public.app-category.photography
+  target:
+    - dmg
+    - zip
+  hardenedRuntime: true
+  gatekeeperAssess: false
+win:
+  target:
+    - nsis
+    - zip
+  requestedExecutionLevel: asInvoker
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+publish: null

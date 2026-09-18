@@ -20,3 +20,6 @@ PhotoAllIsAI 是一款面向 macOS 与 Windows 的 AI 原生图片管理和生�
 - [质量、安全与发布规范](docs/quality-security.md)
 - [架构决策记录](docs/adr/README.md)
 
+## 本地打包
+
+`pnpm package:dir` 会构建当前平台的未签名可运行目录。macOS 和 Windows 的安装包分别使用 `pnpm package:mac`、`pnpm package:win`；签名、公证和证书由发布环境注入，仓库不包含任何证书或私钥。

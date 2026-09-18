@@ -2,6 +2,8 @@
   "name": "@photoallisai/desktop",
   "version": "0.1.0",
   "private": true,
+  "description": "Local-first AI photo management and generative editing workspace",
+  "author": "PhotoAllIsAI",
   "type": "module",
   "main": "./out/main/index.js",
   "scripts": {
@@ -29,4 +31,3 @@
     "vite": "^7.1.4"
   }
 }
-
