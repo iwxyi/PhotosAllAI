@@ -115,6 +115,10 @@ test('analyzes, generates, persists, and displays a managed result', async () =>
   await expect(generated).toHaveAttribute('src', /^photoresult:\/\/result\//);
   await expect.poll(() => generated.evaluate((image) => image.naturalWidth)).toBeGreaterThan(0);
 
+  await page.getByRole('button', { name: '关闭任务抽屉' }).click();
+  await page.getByRole('button', { name: '按当前方案再次生成' }).click();
+  await expect(page.getByText('V2', { exact: true })).toBeVisible({ timeout: 10_000 });
+
   const exportDirectory = path.join(testRoot, 'exported');
   await mkdir(exportDirectory, { recursive: true });
   await electronApp.evaluate(({ dialog }, directory) => {

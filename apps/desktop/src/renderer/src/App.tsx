@@ -296,13 +296,15 @@ function Viewer({
   results,
   isDemo,
   onExport,
-  onRate
+  onRate,
+  onRegenerate
 }: {
   photo: Photo;
   results: GenerationResult[];
   isDemo: boolean;
   onExport: (resultIds: string[]) => Promise<string>;
   onRate: (rating: number) => void;
+  onRegenerate: (result: GenerationResult) => Promise<string>;
 }): React.JSX.Element {
   const [compareMode, setCompareMode] = useState<CompareMode>('single');
   const [split, setSplit] = useState(52);
@@ -402,6 +404,10 @@ function Viewer({
           {isDemo ? <><button type="button">V1</button><button className="is-current" type="button">V2</button></> : [...results].reverse().map((result) => (
             <button className={selectedResult?.id === result.id ? 'is-current' : ''} type="button" key={result.id} onClick={() => setSelectedResultId(result.id)}>V{result.version}</button>
           ))}
+          <button type="button" title="按当前方案再次生成" aria-label="按当前方案再次生成" disabled={!selectedResult || isDemo} onClick={() => {
+            if (!selectedResult) return;
+            void onRegenerate(selectedResult).then(setExportNotice);
+          }}><RotateCcw size={13} /></button>
           <button type="button" title="导出当前版本" aria-label="导出当前版本" disabled={!selectedResult || isDemo} onClick={() => {
             if (!selectedResult) return;
             void onExport([selectedResult.id]).then(setExportNotice);
@@ -763,12 +769,29 @@ function LibraryWorkspace({ availablePhotos, catalogFolders, isDemo, onRefreshCa
     setOperationNotice(await exportResults(resultIds));
   };
 
+  const regenerate = async (result: GenerationResult): Promise<string> => {
+    await window.desktopApi.enqueueTask({
+      kind: 'generation',
+      assetId: result.assetId,
+      payload: {
+        providerProfileId: result.providerProfileId,
+        batchId: crypto.randomUUID(),
+        prompt: result.prompt,
+        templateId: result.templateId,
+        templateVersion: result.templateVersion,
+        resultIndex: 1
+      }
+    });
+    setTasksOpen(true);
+    return '已按当前方案加入 1 个生成任务。';
+  };
+
   return (
     <div className="workspace">
       <Sidebar folders={catalogFolders} totalCount={availablePhotos.length} selectedFolderId={selectedFolderId} onSelectFolder={selectFolder} isDemo={isDemo} />
       <main className="library-main">
         <Filmstrip items={visiblePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} />
-        <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} />
+        <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} />
       </main>
       <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onGenerate={generateSelection} />
       {selection.selectedIds.size > 1 && (
