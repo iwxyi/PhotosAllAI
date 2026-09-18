@@ -1,4 +1,4 @@
-import { access, mkdir, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { execFile as nodeExecFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
@@ -8,7 +8,8 @@ import { nativeImage } from 'electron';
 import type { CatalogService } from './catalog-service';
 
 export type ImageVariant = 'thumbnail' | 'preview';
-type DecoderProbe = () => Promise<boolean>;
+type DecoderCapabilities = { imageMagick: boolean; sips: boolean };
+type DecoderProbe = () => Promise<DecoderCapabilities>;
 
 const variants: Record<ImageVariant, { width: number; height: number; quality: number }> = {
   thumbnail: { width: 384, height: 384, quality: 82 },
@@ -21,7 +22,7 @@ export class ImageCacheService {
   readonly #cacheDirectory: string;
   readonly #catalog: CatalogService;
   readonly #decoderProbe: DecoderProbe;
-  #decoderAvailability: Promise<boolean> | null = null;
+  #decoderAvailability: Promise<DecoderCapabilities> | null = null;
   #hits = 0;
   #misses = 0;
   #decodes = 0;
@@ -49,9 +50,9 @@ export class ImageCacheService {
     };
   }
 
-  async getDecoderCapabilities(): Promise<{ nativeImage: boolean; imageMagick: boolean }> {
+  async getDecoderCapabilities(): Promise<{ nativeImage: boolean; imageMagick: boolean; sips: boolean }> {
     this.#decoderAvailability ??= this.#decoderProbe();
-    return { nativeImage: true, imageMagick: await this.#decoderAvailability };
+    return { nativeImage: true, ...(await this.#decoderAvailability) };
   }
 
   async prune(maxBytes: number): Promise<{ removedFiles: number; removedBytes: number }> {
@@ -139,7 +140,7 @@ export class ImageCacheService {
         quality: 'best'
       });
     } else {
-      encoded = await this.#decodeWithImageMagick(sourcePath, specification);
+      encoded = await this.#decodeWithExternalTools(sourcePath, destination, specification);
       if (!encoded) {
         image = await nativeImage.createThumbnailFromPath(sourcePath, {
           width: specification.width,
@@ -164,6 +165,12 @@ export class ImageCacheService {
     return destination;
   }
 
+  async #decodeWithExternalTools(sourcePath: string, destination: string, specification: { width: number; height: number; quality: number }): Promise<Buffer | null> {
+    const imageMagick = await this.#decodeWithImageMagick(sourcePath, specification);
+    if (imageMagick) return imageMagick;
+    return this.#decodeWithSips(sourcePath, destination, specification);
+  }
+
   async #decodeWithImageMagick(sourcePath: string, specification: { width: number; height: number; quality: number }): Promise<Buffer | null> {
     try {
       const result = await execFile('magick', [
@@ -179,13 +186,36 @@ export class ImageCacheService {
       return null;
     }
   }
+
+  async #decodeWithSips(sourcePath: string, destination: string, specification: { width: number; height: number; quality: number }): Promise<Buffer | null> {
+    if (process.platform !== 'darwin') return null;
+    const temporaryPath = `${destination}.${process.pid}.${Date.now()}.sips.jpg`;
+    try {
+      await execFile('sips', [
+        '-s', 'format', 'jpeg',
+        '-Z', String(Math.max(specification.width, specification.height)),
+        sourcePath,
+        '--out', temporaryPath
+      ], { timeout: 30_000, windowsHide: true });
+      const output = await readFile(temporaryPath);
+      return output.length > 0 && output.length <= 20 * 1024 * 1024 ? output : null;
+    } catch {
+      return null;
+    } finally {
+      await unlink(temporaryPath).catch(() => undefined);
+    }
+  }
 }
 
-async function defaultDecoderProbe(): Promise<boolean> {
-  try {
-    await execFile('magick', ['-version'], { timeout: 5_000, windowsHide: true });
-    return true;
-  } catch {
-    return false;
-  }
+async function defaultDecoderProbe(): Promise<DecoderCapabilities> {
+  const probe = async (command: string): Promise<boolean> => {
+    try {
+      await execFile(command, ['-version'], { timeout: 5_000, windowsHide: true });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const [imageMagick, sips] = await Promise.all([probe('magick'), process.platform === 'darwin' ? probe('sips') : Promise.resolve(false)]);
+  return { imageMagick, sips };
 }
