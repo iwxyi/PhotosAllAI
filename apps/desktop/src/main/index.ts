@@ -14,6 +14,8 @@ import {
   enqueueTaskInputSchema,
   exportGenerationResultsInputSchema,
   exportReportSchema,
+  saveExportPresetInputSchema,
+  exportPresetSchema,
   listAnalysisInputSchema,
   listCatalogAssetsInputSchema,
   listGenerationResultsInputSchema,
@@ -38,6 +40,7 @@ import { AnalysisService } from './analysis-service';
 import { ImageCacheService, type ImageVariant } from './image-cache-service';
 import { GenerationService } from './generation-service';
 import { ExportService } from './export-service';
+import { ExportPresetService } from './export-preset-service';
 import { FileOperationService } from './file-operation-service';
 import { ProviderService } from './provider-service';
 import { TaskService } from './task-service';
@@ -54,6 +57,7 @@ let templates: TemplateService;
 let analysis: AnalysisService;
 let generation: GenerationService;
 let exportService: ExportService;
+let exportPresets: ExportPresetService;
 let fileOperations: FileOperationService;
 let taskRunner: TaskRunner;
 let workspace: WorkspaceService;
@@ -200,6 +204,13 @@ function registerIpc(): void {
     }
     return exportService.exportToDirectory(resultIds, selection.filePaths[0]);
   });
+  ipcMain.handle('export.presets.list.v1', () => exportPresets.list());
+  ipcMain.handle('export.presets.save.v1', (_event, input: unknown) =>
+    exportPresetSchema.parse(exportPresets.save(saveExportPresetInputSchema.parse(input)))
+  );
+  ipcMain.handle('export.presets.delete.v1', (_event, input: unknown) => {
+    exportPresets.delete(String(input));
+  });
 }
 
 function createWindow(): BrowserWindow {
@@ -271,6 +282,7 @@ app.whenReady().then(async () => {
     catalog
   );
   exportService = new ExportService(databasePath, generation);
+  exportPresets = new ExportPresetService(databasePath);
   taskRunner = new TaskRunner(tasks, analysis, generation);
 
   protocol.handle('photoasset', async (request) => {
@@ -323,6 +335,7 @@ app.on('before-quit', () => {
   workspace?.close();
   generation?.close();
   exportService?.close();
+  exportPresets?.close();
   analysis?.close();
   templates?.close();
   tasks?.close();

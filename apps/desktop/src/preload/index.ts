@@ -71,7 +71,10 @@ const api: DesktopApi = {
   updateGenerationResultReview: (input) =>
     ipcRenderer.invoke('generation.result.review.update.v1', input) as ReturnType<DesktopApi['updateGenerationResultReview']>,
   exportGenerationResults: (input) =>
-    ipcRenderer.invoke('generation.results.export.v1', input) as ReturnType<DesktopApi['exportGenerationResults']>
+    ipcRenderer.invoke('generation.results.export.v1', input) as ReturnType<DesktopApi['exportGenerationResults']>,
+  listExportPresets: () => ipcRenderer.invoke('export.presets.list.v1') as ReturnType<DesktopApi['listExportPresets']>,
+  saveExportPreset: (input) => ipcRenderer.invoke('export.presets.save.v1', input) as ReturnType<DesktopApi['saveExportPreset']>,
+  deleteExportPreset: (presetId) => ipcRenderer.invoke('export.presets.delete.v1', presetId) as ReturnType<DesktopApi['deleteExportPreset']>
 };
 
 contextBridge.exposeInMainWorld('desktopApi', Object.freeze(api));

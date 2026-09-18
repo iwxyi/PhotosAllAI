@@ -457,6 +457,22 @@ export const exportGenerationResultsInputSchema = z.object({
 
 export type ExportGenerationResultsInput = z.infer<typeof exportGenerationResultsInputSchema>;
 
+export const exportPresetSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(1).max(80),
+  format: z.literal('original'),
+  conflictPolicy: z.enum(['auto-rename', 'skip']),
+  namingPattern: z.string().min(1).max(160),
+  createdAt: z.number().int().nonnegative(),
+  updatedAt: z.number().int().nonnegative()
+});
+export type ExportPreset = z.infer<typeof exportPresetSchema>;
+
+export const saveExportPresetInputSchema = exportPresetSchema.omit({ id: true, createdAt: true, updatedAt: true }).extend({
+  id: z.string().uuid().optional()
+});
+export type SaveExportPresetInput = z.input<typeof saveExportPresetInputSchema>;
+
 export const exportReportSchema = z.object({
   id: z.string().uuid().nullable(),
   canceled: z.boolean(),
@@ -505,4 +521,7 @@ export interface DesktopApi {
   listGenerationResults(assetId: string): Promise<GenerationResult[]>;
   updateGenerationResultReview(input: UpdateGenerationResultReviewInput): Promise<GenerationResult>;
   exportGenerationResults(input: ExportGenerationResultsInput): Promise<ExportReport>;
+  listExportPresets(): Promise<ExportPreset[]>;
+  saveExportPreset(input: SaveExportPresetInput): Promise<ExportPreset>;
+  deleteExportPreset(presetId: string): Promise<void>;
 }

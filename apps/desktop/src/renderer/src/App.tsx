@@ -14,6 +14,7 @@ import type {
   ProviderProfile,
   SavePromptTemplateInput,
   SaveProviderProfileInput,
+  ExportPreset,
   WorkspaceSession,
   WorkspaceTab
 } from '@photoallisai/contracts';
@@ -1219,9 +1220,13 @@ function SettingsPage(): React.JSX.Element {
   const [form, setForm] = useState<SaveProviderProfileInput>(emptyProviderForm);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState<'save' | 'test' | null>(null);
+  const [presets, setPresets] = useState<ExportPreset[]>([]);
+  const [presetName, setPresetName] = useState('');
+  const [presetMessage, setPresetMessage] = useState('');
 
   useEffect(() => {
     void window.desktopApi.listProviderProfiles().then(setProfiles);
+    void window.desktopApi.listExportPresets().then(setPresets);
   }, []);
 
   const patchForm = <Key extends keyof SaveProviderProfileInput>(key: Key, value: SaveProviderProfileInput[Key]) => {
@@ -1307,6 +1312,12 @@ function SettingsPage(): React.JSX.Element {
             <div className="form-feedback" role="status">{message}</div>
             <div className="form-actions"><button className="secondary-action" type="button" disabled={busy !== null} onClick={() => void testConnection()}>{busy === 'test' ? '测试中…' : '测试连接'}</button><button className="primary-action compact" type="submit" disabled={busy !== null}>{busy === 'save' ? '保存中…' : '保存配置'}</button></div>
           </form>
+        </section>
+        <section className="settings-section export-presets-section">
+          <div className="settings-heading"><div><h2>导出预设</h2><p>保存常用的命名和冲突策略，导出时可复用。当前版本保留原始生成格式。</p></div><span><Download size={14} />受管结果可随时导出</span></div>
+          <div className="preset-row"><input aria-label="导出预设名称" placeholder="例如：客户交付" value={presetName} onChange={(event) => { setPresetName(event.target.value); setPresetMessage(''); }} /><button className="primary-action compact" type="button" disabled={!presetName.trim()} onClick={async () => { try { const saved = await window.desktopApi.saveExportPreset({ name: presetName.trim(), format: 'original', conflictPolicy: 'auto-rename', namingPattern: '{name}_{version}' }); setPresets((current) => [...current.filter((item) => item.id !== saved.id), saved]); setPresetName(''); setPresetMessage('预设已保存'); } catch { setPresetMessage('名称已存在或保存失败'); } }}>保存预设</button></div>
+          <div className="preset-list">{presets.length === 0 ? <small>暂无导出预设</small> : presets.map((preset) => <div className="preset-item" key={preset.id}><span><strong>{preset.name}</strong><small>{preset.namingPattern} · {preset.conflictPolicy === 'skip' ? '跳过同名' : '自动编号'}</small></span><button type="button" aria-label={`删除导出预设 ${preset.name}`} onClick={async () => { await window.desktopApi.deleteExportPreset(preset.id); setPresets((current) => current.filter((item) => item.id !== preset.id)); }}>删除</button></div>)}</div>
+          {presetMessage && <div className="form-feedback" role="status">{presetMessage}</div>}
         </section>
       </main>
     </div>
