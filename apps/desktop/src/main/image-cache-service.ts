@@ -1,4 +1,6 @@
 import { access, mkdir, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { execFile as nodeExecFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import path from 'node:path';
 
 import { nativeImage } from 'electron';
@@ -11,6 +13,7 @@ const variants: Record<ImageVariant, { width: number; height: number; quality: n
   thumbnail: { width: 384, height: 384, quality: 82 },
   preview: { width: 2560, height: 2560, quality: 90 }
 };
+const execFile = promisify(nodeExecFile);
 
 export class ImageCacheService {
   readonly #inFlight = new Map<string, Promise<string>>();
@@ -97,6 +100,7 @@ export class ImageCacheService {
   ): Promise<string> {
     await mkdir(path.dirname(destination), { recursive: true });
     let image = nativeImage.createFromPath(sourcePath);
+    let encoded: Buffer | null = null;
     if (!image.isEmpty()) {
       const size = image.getSize();
       const scale = Math.min(specification.width / size.width, specification.height / size.height, 1);
@@ -106,15 +110,18 @@ export class ImageCacheService {
         quality: 'best'
       });
     } else {
-      image = await nativeImage.createThumbnailFromPath(sourcePath, {
-        width: specification.width,
-        height: specification.height
-      });
+      encoded = await this.#decodeWithImageMagick(sourcePath, specification);
+      if (!encoded) {
+        image = await nativeImage.createThumbnailFromPath(sourcePath, {
+          width: specification.width,
+          height: specification.height
+        });
+      }
     }
-    if (image.isEmpty()) throw new Error('IMAGE_PREVIEW_UNAVAILABLE');
+    if (image.isEmpty() && !encoded) throw new Error('IMAGE_PREVIEW_UNAVAILABLE');
 
     const temporaryPath = `${destination}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(temporaryPath, image.toJPEG(specification.quality), { flag: 'wx' });
+    await writeFile(temporaryPath, encoded ?? image.toJPEG(specification.quality), { flag: 'wx' });
     try {
       await rename(temporaryPath, destination);
     } catch (error) {
@@ -126,5 +133,21 @@ export class ImageCacheService {
       }
     }
     return destination;
+  }
+
+  async #decodeWithImageMagick(sourcePath: string, specification: { width: number; height: number; quality: number }): Promise<Buffer | null> {
+    try {
+      const result = await execFile('magick', [
+        sourcePath,
+        '-auto-orient',
+        '-resize', `${specification.width}x${specification.height}>`,
+        '-quality', String(specification.quality),
+        'jpg:-'
+      ], { encoding: 'buffer', maxBuffer: 20 * 1024 * 1024, timeout: 30_000, windowsHide: true });
+      const output = Buffer.from(result.stdout);
+      return output.length > 0 && output.length <= 20 * 1024 * 1024 ? output : null;
+    } catch {
+      return null;
+    }
   }
 }
