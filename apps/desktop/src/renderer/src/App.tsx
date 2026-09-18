@@ -12,6 +12,8 @@ import type {
 import { composeGenerationPrompt, selectAll, updateSelection, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
 import {
   Aperture,
+  ArrowDown,
+  ArrowUp,
   Bot,
   Check,
   ChevronDown,
@@ -39,6 +41,7 @@ import {
   Search,
   Server,
   Settings,
+  RotateCcw,
   Sparkles,
   Star,
   ShieldCheck,
@@ -84,12 +87,14 @@ function IconButton({
   label,
   children,
   active = false,
-  onClick
+  onClick,
+  disabled = false
 }: {
   label: string;
   children: React.ReactNode;
   active?: boolean;
   onClick?: () => void;
+  disabled?: boolean;
 }): React.JSX.Element {
   return (
     <button
@@ -97,6 +102,7 @@ function IconButton({
       title={label}
       aria-label={label}
       onClick={onClick}
+      disabled={disabled}
       type="button"
     >
       {children}
@@ -858,9 +864,16 @@ const statusLabels: Record<PersistedTask['status'], string> = {
 
 function TaskCenterPage(): React.JSX.Element {
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
+  const [message, setMessage] = useState('');
 
   const refresh = () => window.desktopApi.listTasks().then(setTaskItems);
-  useEffect(() => { void window.desktopApi.listTasks().then(setTaskItems); }, []);
+  useEffect(() => {
+    let active = true;
+    const poll = () => { void window.desktopApi.listTasks().then((items) => { if (active) setTaskItems(items); }); };
+    poll();
+    const interval = window.setInterval(poll, 1_000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, []);
 
   const cancel = async (taskId: string) => {
     await window.desktopApi.cancelTask(taskId);
@@ -870,15 +883,37 @@ function TaskCenterPage(): React.JSX.Element {
     await window.desktopApi.retryTask(taskId);
     await refresh();
   };
+  const moveQueued = async (taskId: string, direction: -1 | 1) => {
+    const queuedIds = taskItems.filter((task) => task.status === 'queued').map((task) => task.id);
+    const index = queuedIds.indexOf(taskId);
+    const destination = index + direction;
+    if (index < 0 || destination < 0 || destination >= queuedIds.length) return;
+    [queuedIds[index], queuedIds[destination]] = [queuedIds[destination]!, queuedIds[index]!];
+    setTaskItems(await window.desktopApi.reorderTasks(queuedIds));
+  };
+  const retryFailedGeneration = async () => {
+    const failedIds = taskItems
+      .filter((task) => task.kind === 'generation' && task.status === 'failed')
+      .map((task) => task.id);
+    for (const taskId of failedIds) await window.desktopApi.retryTask(taskId);
+    setMessage(`已重新排队 ${failedIds.length} 个生成任务。`);
+    await refresh();
+  };
 
   const waiting = taskItems.filter((task) => task.status === 'queued').length;
   const failed = taskItems.filter((task) => task.status === 'failed').length;
+  const failedGeneration = taskItems.filter((task) => task.kind === 'generation' && task.status === 'failed').length;
+  const queuedIds = taskItems.filter((task) => task.status === 'queued').map((task) => task.id);
 
   return (
     <div className="task-center-page">
       <div className="task-center-heading">
         <div><h1>任务中心</h1><p>生成任务默认串行执行，等待任务可以调整或取消。</p></div>
-        <div className="task-summary"><span><i className="task-dot queued" />等待 {waiting}</span><span><i className="task-dot failed" />失败 {failed}</span></div>
+        <div className="task-heading-actions">
+          {message && <span className="task-feedback" role="status">{message}</span>}
+          <button className="secondary-action" type="button" disabled={failedGeneration === 0} onClick={() => void retryFailedGeneration()}><RotateCcw size={13} />重试失败生成 ({failedGeneration})</button>
+          <div className="task-summary"><span><i className="task-dot queued" />等待 {waiting}</span><span><i className="task-dot failed" />失败 {failed}</span></div>
+        </div>
       </div>
       <div className="task-table">
         <div className="task-table-head"><span>任务</span><span>状态</span><span>进度</span><span>尝试</span><span>更新时间</span><span /></div>
@@ -892,6 +927,7 @@ function TaskCenterPage(): React.JSX.Element {
             <span>{task.attempt + 1}</span>
             <span>{new Date(task.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
             <span className="task-row-actions">
+              {task.status === 'queued' && <><IconButton label="任务上移" disabled={queuedIds.indexOf(task.id) === 0} onClick={() => void moveQueued(task.id, -1)}><ArrowUp size={13} /></IconButton><IconButton label="任务下移" disabled={queuedIds.indexOf(task.id) === queuedIds.length - 1} onClick={() => void moveQueued(task.id, 1)}><ArrowDown size={13} /></IconButton></>}
               {(task.status === 'queued' || task.status === 'preparing' || task.status === 'uploading' || task.status === 'processing' || task.status === 'downloading') && <button type="button" onClick={() => void cancel(task.id)}>取消</button>}
               {(task.status === 'failed' || task.status === 'canceled') && <button type="button" onClick={() => void retry(task.id)}>重试</button>}
             </span>
