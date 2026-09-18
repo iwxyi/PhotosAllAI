@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+out/
+release/
+coverage/
+playwright-report/
+test-results/
+
+# Runtime data
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.cache/
+.temp/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Rust
+target/
+
