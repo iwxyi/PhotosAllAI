@@ -84,8 +84,10 @@ describe('managed generation results', () => {
     expect(service.list('asset-1').map((item) => item.version)).toEqual([2, 1]);
     expect(await readFile(sourcePath, 'utf8')).toBe('untouched-original');
     const batchDirectory = path.join(directory, 'managed', 'generated', 'as', 'asset-1', batchId);
-    const manifest = JSON.parse(await readFile(path.join(batchDirectory, 'manifest.json'), 'utf8')) as { results: unknown[] };
+    const manifest = JSON.parse(await readFile(path.join(batchDirectory, 'manifest.json'), 'utf8')) as { source: { fileName: string; modifiedAt: number }; results: Array<{ byteSize: number; sha256: string; format: string }> };
+    expect(manifest.source.fileName).toBe('IMG_1024.CR3');
     expect(manifest.results).toHaveLength(2);
+    expect(manifest.results[0]).toMatchObject({ byteSize: png.byteLength, format: 'png', sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
     expect((await readdir(batchDirectory)).filter((name) => name.endsWith('.png'))).toHaveLength(2);
     service.close();
   });

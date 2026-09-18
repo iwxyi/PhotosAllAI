@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { access, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
@@ -219,13 +219,27 @@ export class GenerationService {
 
   async #writeManifest(directory: string, assetId: string, batchId: string, profile: ProviderProfile, storageMode: 'managed' | 'portable'): Promise<void> {
     const rows = this.#database.prepare(`
-      SELECT id, version, file_name, created_at FROM generation_results
+      SELECT id, version, file_name, file_path, created_at FROM generation_results
       WHERE batch_id = ? ORDER BY version ASC
-    `).all(batchId);
+    `).all(batchId) as Array<{ id: string; version: number; file_name: string; file_path: string; created_at: number }>;
+    const results = await Promise.all(rows.map(async (row) => {
+      const resultBytes = await readFile(row.file_path);
+      return {
+        id: row.id,
+        version: row.version,
+        fileName: row.file_name,
+        format: path.extname(row.file_name).slice(1),
+        byteSize: resultBytes.byteLength,
+        sha256: createHash('sha256').update(resultBytes).digest('hex'),
+        createdAt: row.created_at
+      };
+    }));
+    const source = this.#catalog.resolveAssetFile(assetId);
     const manifest = {
       schemaVersion: '1.0', assetId, batchId, storageMode,
+      source: source ? { fileName: source.fileName, modifiedAt: source.modifiedAt } : null,
       provider: { profileId: profile.id, modelId: profile.modelId },
-      results: rows
+      results
     };
     const destination = path.join(directory, 'manifest.json');
     const temporary = `${destination}.${process.pid}.tmp`;
