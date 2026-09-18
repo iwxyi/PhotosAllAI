@@ -68,7 +68,7 @@ export const listCatalogAssetsInputSchema = z.object({
   folderId: z.string().min(1).nullable().default(null),
   tagId: z.string().uuid().nullable().default(null),
   albumId: z.string().uuid().nullable().default(null),
-  smartCollection: z.enum(['favorites', 'unrated', 'unanalyzed', 'generated']).nullable().default(null),
+  smartCollection: z.enum(['favorites', 'unrated', 'unanalyzed', 'generated', 'to-review']).nullable().default(null),
   favoriteOnly: z.boolean().default(false),
   query: z.string().max(500).default(''),
   cursor: catalogAssetCursorSchema.nullable().default(null),
@@ -116,7 +116,7 @@ export const updateCatalogAlbumAssetsInputSchema = z.object({
 export type UpdateCatalogAlbumAssetsInput = z.infer<typeof updateCatalogAlbumAssetsInputSchema>;
 
 export const catalogSmartCollectionSchema = z.object({
-  id: z.enum(['favorites', 'unrated', 'unanalyzed', 'generated']),
+  id: z.enum(['favorites', 'unrated', 'unanalyzed', 'generated', 'to-review']),
   assetCount: z.number().int().nonnegative()
 });
 export type CatalogSmartCollection = z.infer<typeof catalogSmartCollectionSchema>;

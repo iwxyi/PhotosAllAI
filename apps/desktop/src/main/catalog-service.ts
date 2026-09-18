@@ -246,6 +246,11 @@ export class CatalogService {
         ? 'id IN (SELECT asset_id FROM generation_results)'
         : '0');
     }
+    if (input.smartCollection === 'to-review') {
+      baseConditions.push(this.#tableExists('generation_results')
+        ? "id IN (SELECT asset_id FROM generation_results WHERE review_state = 'undecided')"
+        : '0');
+    }
     if (input.favoriteOnly) baseConditions.push('favorite = 1');
     const query = input.query.trim();
     if (query) {
@@ -349,6 +354,10 @@ export class CatalogService {
       catalogSmartCollectionSchema.parse({
         id: 'generated',
         assetCount: hasGeneration ? count('id IN (SELECT asset_id FROM generation_results)') : 0
+      }),
+      catalogSmartCollectionSchema.parse({
+        id: 'to-review',
+        assetCount: hasGeneration ? count("id IN (SELECT asset_id FROM generation_results WHERE review_state = 'undecided')") : 0
       })
     ];
   }

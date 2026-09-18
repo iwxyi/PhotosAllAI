@@ -97,11 +97,17 @@ describe('catalog image discovery', () => {
     const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
     await catalog.importFolders([photosDirectory]);
     const assets = catalog.listAssets();
+    const database = new DatabaseSync(path.join(root, 'catalog.sqlite'));
+    database.exec("CREATE TABLE generation_results (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, review_state TEXT NOT NULL)");
+    database.prepare("INSERT INTO generation_results (id, asset_id, review_state) VALUES (?, ?, 'undecided')").run('result-1', assets[0]!.id);
+    database.close();
     catalog.updateMetadata({ assetIds: [assets[0]!.id], favorite: true });
     const album = catalog.saveAlbum({ name: '交付候选' });
     expect(catalog.updateAlbumAssets({ albumId: album.id, assetIds: [assets[0]!.id], mode: 'add' })).toMatchObject({ assetCount: 1 });
     expect(catalog.listAssetPage({ albumId: album.id, cursor: null, limit: 20 }).items).toHaveLength(1);
     expect(catalog.listSmartCollections().find((item) => item.id === 'favorites')?.assetCount).toBe(1);
+    expect(catalog.listSmartCollections().find((item) => item.id === 'to-review')?.assetCount).toBe(1);
+    expect(catalog.listAssetPage({ smartCollection: 'to-review', cursor: null, limit: 20 }).items).toHaveLength(1);
     expect(catalog.updateAlbumAssets({ albumId: album.id, assetIds: [assets[0]!.id], mode: 'remove' })).toMatchObject({ assetCount: 0 });
     catalog.deleteAlbum(album.id);
     catalog.close();
