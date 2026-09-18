@@ -211,10 +211,36 @@ export const analysisRevisionSchema = z.object({
 export type AnalysisRevision = z.infer<typeof analysisRevisionSchema>;
 
 export const listAnalysisInputSchema = z.object({ assetId: z.string().min(1) });
+export const listGenerationResultsInputSchema = z.object({ assetId: z.string().min(1) });
 export const analysisTaskPayloadSchema = z.object({
   providerProfileId: z.string().uuid(),
   mode: z.enum(['catalog', 'full']).default('full')
 });
+
+export const generationTaskPayloadSchema = z.object({
+  providerProfileId: z.string().uuid(),
+  batchId: z.string().uuid(),
+  prompt: z.string().min(1).max(50_000),
+  templateId: z.string().uuid().nullable().default(null),
+  templateVersion: z.number().int().positive().nullable().default(null),
+  resultIndex: z.number().int().positive()
+});
+
+export const generationResultSchema = z.object({
+  id: z.string().uuid(),
+  assetId: z.string(),
+  batchId: z.string().uuid(),
+  version: z.number().int().positive(),
+  fileName: z.string().min(1),
+  resultUrl: z.string(),
+  prompt: z.string(),
+  providerProfileId: z.string().uuid(),
+  templateId: z.string().uuid().nullable(),
+  templateVersion: z.number().int().positive().nullable(),
+  createdAt: z.number().nonnegative()
+});
+
+export type GenerationResult = z.infer<typeof generationResultSchema>;
 
 export interface DesktopApi {
   getAppInfo(): Promise<AppInfo>;
@@ -231,4 +257,5 @@ export interface DesktopApi {
   listPromptTemplates(): Promise<PromptTemplate[]>;
   savePromptTemplate(input: SavePromptTemplateInput): Promise<PromptTemplate>;
   listAnalysisRevisions(assetId: string): Promise<AnalysisRevision[]>;
+  listGenerationResults(assetId: string): Promise<GenerationResult[]>;
 }

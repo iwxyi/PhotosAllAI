@@ -29,7 +29,9 @@ const api: DesktopApi = {
   savePromptTemplate: (input) =>
     ipcRenderer.invoke('templates.save.v1', input) as ReturnType<DesktopApi['savePromptTemplate']>,
   listAnalysisRevisions: (assetId) =>
-    ipcRenderer.invoke('analysis.list.v1', { assetId }) as ReturnType<DesktopApi['listAnalysisRevisions']>
+    ipcRenderer.invoke('analysis.list.v1', { assetId }) as ReturnType<DesktopApi['listAnalysisRevisions']>,
+  listGenerationResults: (assetId) =>
+    ipcRenderer.invoke('generation.results.list.v1', { assetId }) as ReturnType<DesktopApi['listGenerationResults']>
 };
 
 contextBridge.exposeInMainWorld('desktopApi', Object.freeze(api));

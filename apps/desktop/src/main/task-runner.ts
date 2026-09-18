@@ -1,4 +1,8 @@
-import { analysisTaskPayloadSchema, type PersistedTask } from '@photoallisai/contracts';
+import {
+  analysisTaskPayloadSchema,
+  generationTaskPayloadSchema,
+  type PersistedTask
+} from '@photoallisai/contracts';
 import type { TaskStatus } from '@photoallisai/domain';
 
 interface TaskQueue {
@@ -11,15 +15,21 @@ interface AnalysisProcessor {
   analyze(assetId: string, providerProfileId: string): Promise<unknown>;
 }
 
+interface GenerationProcessor {
+  generate(assetId: string, payload: unknown): Promise<unknown>;
+}
+
 export class TaskRunner {
   #running = false;
   #stopped = false;
   readonly #tasks: TaskQueue;
   readonly #analysis: AnalysisProcessor;
+  readonly #generation: GenerationProcessor;
 
-  constructor(tasks: TaskQueue, analysis: AnalysisProcessor) {
+  constructor(tasks: TaskQueue, analysis: AnalysisProcessor, generation: GenerationProcessor) {
     this.#tasks = tasks;
     this.#analysis = analysis;
+    this.#generation = generation;
   }
 
   start(): void {
@@ -40,27 +50,35 @@ export class TaskRunner {
   async #drain(): Promise<void> {
     try {
       while (!this.#stopped) {
-        const task = this.#tasks.claimNext(['analysis']);
+        const task = this.#tasks.claimNext(['analysis', 'generation']);
         if (!task) break;
         try {
-          const payload = analysisTaskPayloadSchema.parse(task.payload);
           if (!task.assetId) throw new Error('TASK_ASSET_MISSING');
           this.#tasks.advance(task.id, 'processing', 0.1);
-          await this.#analysis.analyze(task.assetId, payload.providerProfileId);
+          if (task.kind === 'analysis') {
+            const payload = analysisTaskPayloadSchema.parse(task.payload);
+            await this.#analysis.analyze(task.assetId, payload.providerProfileId);
+          } else {
+            const payload = generationTaskPayloadSchema.parse(task.payload);
+            await this.#generation.generate(task.assetId, payload);
+          }
           this.#tasks.advance(task.id, 'downloading', 0.85);
           this.#tasks.advance(task.id, 'saving', 0.95);
           this.#tasks.advance(task.id, 'completed', 1);
         } catch (error) {
           const current = this.#tasks.list().find((item) => item.id === task.id);
           if (current && current.status !== 'canceled' && current.status !== 'failed') {
-            const errorCode = error instanceof Error ? error.message.slice(0, 200) : 'ANALYSIS_FAILED';
+            const fallback = task.kind === 'generation' ? 'GENERATION_FAILED' : 'ANALYSIS_FAILED';
+            const errorCode = error instanceof Error ? error.message.slice(0, 200) : fallback;
             this.#tasks.advance(task.id, 'failed', current.progress, errorCode);
           }
         }
       }
     } finally {
       this.#running = false;
-      if (!this.#stopped && this.#tasks.list().some((task) => task.kind === 'analysis' && task.status === 'queued')) {
+      if (!this.#stopped && this.#tasks.list().some((task) =>
+        (task.kind === 'analysis' || task.kind === 'generation') && task.status === 'queued'
+      )) {
         this.wake();
       }
     }

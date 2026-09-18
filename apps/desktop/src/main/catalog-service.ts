@@ -171,12 +171,12 @@ export class CatalogService {
     return importedCount;
   }
 
-  resolveAssetFile(assetId: string): { path: string; modifiedAt: number } | null {
+  resolveAssetFile(assetId: string): { path: string; fileName: string; modifiedAt: number } | null {
     const row = this.#database
-      .prepare('SELECT path, modified_at FROM assets WHERE id = ?')
-      .get(assetId) as Pick<AssetRow, 'path' | 'modified_at'> | undefined;
+      .prepare('SELECT path, file_name, modified_at FROM assets WHERE id = ?')
+      .get(assetId) as Pick<AssetRow, 'path' | 'file_name' | 'modified_at'> | undefined;
     if (!row) return null;
-    return { path: row.path, modifiedAt: row.modified_at };
+    return { path: row.path, fileName: row.file_name, modifiedAt: row.modified_at };
   }
 
   #toAsset(row: AssetRow): CatalogAsset {

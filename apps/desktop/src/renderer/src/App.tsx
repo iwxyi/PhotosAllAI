@@ -2,13 +2,14 @@ import { useEffect, useMemo, useState } from 'react';
 import type {
   CatalogAsset,
   AnalysisRevision,
+  GenerationResult,
   PersistedTask,
   PromptTemplate,
   ProviderProfile,
   SavePromptTemplateInput,
   SaveProviderProfileInput
 } from '@photoallisai/contracts';
-import { selectAll, updateSelection, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
+import { composeGenerationPrompt, selectAll, updateSelection, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
 import {
   Aperture,
   Bot,
@@ -265,17 +266,39 @@ function Filmstrip({
   );
 }
 
-function Viewer({ photo }: { photo: Photo }): React.JSX.Element {
+function Viewer({ photo, results, isDemo }: { photo: Photo; results: GenerationResult[]; isDemo: boolean }): React.JSX.Element {
   const [compareMode, setCompareMode] = useState<CompareMode>('single');
   const [split, setSplit] = useState(52);
   const [showOriginal, setShowOriginal] = useState(false);
+  const [selectedResultId, setSelectedResultId] = useState<string | null>(results[0]?.id ?? null);
+  const latestResultId = results[0]?.id ?? null;
+  const selectedResult = selectedResultId ? results.find((result) => result.id === selectedResultId) : undefined;
+  const generatedSource = isDemo ? photo.src : selectedResult?.resultUrl;
+
+  useEffect(() => {
+    setSelectedResultId(latestResultId);
+  }, [photo.id, latestResultId]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+      if (event.key.toLowerCase() === 'o') setShowOriginal(event.type === 'keydown');
+    };
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('keyup', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', onKey);
+    };
+  }, []);
 
   return (
     <section className="viewer">
       <div className="viewer-toolbar">
         <div className="viewer-title">
           <span>{photo.fileName}</span>
-          <i>生成版本 2</i>
+          <i>{selectedResult ? `生成版本 ${selectedResult.version}` : isDemo ? '生成版本 2' : '原图'}</i>
         </div>
         <div className="viewer-actions">
           <div className="segmented-control labeled">
@@ -304,12 +327,12 @@ function Viewer({ photo }: { photo: Photo }): React.JSX.Element {
         <div className={`photo-canvas${compareMode === 'split' ? ' is-comparing' : ''}`}>
           <div className="preview-unavailable"><Image size={36} /><strong>预览暂不可用</strong><span>图像服务将在后台生成屏幕预览</span></div>
           {photo.src ? <img className="base-image" src={photo.src} alt={photo.fileName} onError={(event) => { event.currentTarget.style.display = 'none'; }} /> : null}
-          {photo.src && !showOriginal && (
+          {generatedSource && !showOriginal && (
             <div
               className="generated-layer"
               style={compareMode === 'split' ? { clipPath: `inset(0 ${100 - split}% 0 0)` } : undefined}
             >
-              <img src={photo.src} alt="AI 生成版本" onError={(event) => { event.currentTarget.style.display = 'none'; }} />
+              <img src={generatedSource} alt="AI 生成版本" onError={(event) => { event.currentTarget.style.display = 'none'; }} />
             </div>
           )}
           {compareMode === 'split' && (
@@ -337,9 +360,10 @@ function Viewer({ photo }: { photo: Photo }): React.JSX.Element {
             按住查看原图 <kbd>O</kbd>
           </button>
           <span />
-          <button type="button">原图</button>
-          <button type="button">V1</button>
-          <button className="is-current" type="button">V2</button>
+          <button className={!selectedResult && !isDemo ? 'is-current' : ''} type="button" onClick={() => setSelectedResultId(null)}>原图</button>
+          {isDemo ? <><button type="button">V1</button><button className="is-current" type="button">V2</button></> : [...results].reverse().map((result) => (
+            <button className={selectedResult?.id === result.id ? 'is-current' : ''} type="button" key={result.id} onClick={() => setSelectedResultId(result.id)}>V{result.version}</button>
+          ))}
           <button type="button"><Plus size={13} /></button>
         </div>
         <div className="file-meta"><span>{photo.format}</span><span>{photo.dimensions}</span></div>
@@ -352,15 +376,26 @@ function AiPanel({
   revision,
   isDemo,
   notice,
-  onAnalyze
+  onAnalyze,
+  generationProfiles,
+  templates,
+  onGenerate
 }: {
   revision: AnalysisRevision | undefined;
   isDemo: boolean;
   notice: string;
   onAnalyze: () => void;
+  generationProfiles: ProviderProfile[];
+  templates: PromptTemplate[];
+  onGenerate: (input: { providerProfileId: string; template: PromptTemplate | null; count: number; instruction: string; disabledActionIds: Set<string> }) => Promise<string>;
 }): React.JSX.Element {
   const [actions, setActions] = useState({ people: true, light: true, texture: false });
   const [disabledActions, setDisabledActions] = useState<Set<string>>(new Set());
+  const [generationCount, setGenerationCount] = useState(3);
+  const [templateId, setTemplateId] = useState('');
+  const [instruction, setInstruction] = useState('保持自然皮肤纹理，不要过度磨皮。');
+  const [generationNotice, setGenerationNotice] = useState('');
+  const [generating, setGenerating] = useState(false);
 
   const toggle = (key: keyof typeof actions) => setActions((current) => ({ ...current, [key]: !current[key] }));
   const result = revision?.result;
@@ -370,6 +405,28 @@ function AiPanel({
   const enabledActionCount = isDemo
     ? Object.values(actions).filter(Boolean).length
     : result?.generativeActions.filter((action) => action.enabled && !disabledActions.has(action.id)).length ?? 0;
+  const selectedTemplate = templates.find((template) => template.id === templateId) ?? null;
+
+  const queueGeneration = async () => {
+    if (isDemo) return;
+    const profile = generationProfiles[0];
+    if (!profile) {
+      setGenerationNotice('请先在设置中添加并启用图片生成模型。');
+      return;
+    }
+    setGenerating(true);
+    try {
+      setGenerationNotice(await onGenerate({
+        providerProfileId: profile.id,
+        template: selectedTemplate,
+        count: generationCount,
+        instruction,
+        disabledActionIds: disabledActions
+      }));
+    } finally {
+      setGenerating(false);
+    }
+  };
 
   return (
     <aside className="inspector">
@@ -395,20 +452,22 @@ function AiPanel({
 
         <div className="inspector-section">
           <div className="inspector-heading"><span>提示词模板</span><button type="button">浏览模板</button></div>
-          <button className="template-choice" type="button">
-            <span className="template-preview"><img src="./demo/portrait.jpg" alt="" /></span>
-            <span><strong>自然人像 · 清洁背景</strong><small>保留身份、服装与真实光线</small></span>
-            <ChevronRight size={15} />
-          </button>
+          {isDemo ? <button className="template-choice" type="button"><span className="template-preview"><img src="./demo/portrait.jpg" alt="" /></span><span><strong>自然人像 · 清洁背景</strong><small>保留身份、服装与真实光线</small></span><ChevronRight size={15} /></button> : (
+            <select className="template-select" aria-label="生成提示词模板" value={templateId} onChange={(event) => setTemplateId(event.target.value)}>
+              <option value="">通用 AI 修图</option>
+              {templates.map((template) => <option value={template.id} key={template.id}>{template.name} · V{template.version}</option>)}
+            </select>
+          )}
           <label className="instruction-field">
             <span>补充要求</span>
-            <textarea defaultValue="保持自然皮肤纹理，不要过度磨皮。" rows={3} />
+            <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} rows={3} />
           </label>
+          {!isDemo && generationNotice && <p className="generation-notice">{generationNotice}</p>}
         </div>
       </div>
       <div className="generate-footer">
-        <div className="generation-count"><span>生成数量</span><div><button type="button">−</button><strong>3</strong><button type="button">+</button></div></div>
-        <button className="primary-action" type="button" disabled={!isDemo && !result}><Sparkles size={16} />加入生成队列</button>
+        <div className="generation-count"><span>生成数量</span><div><button type="button" aria-label="减少生成数量" onClick={() => setGenerationCount((value) => Math.max(1, value - 1))}>−</button><strong>{generationCount}</strong><button type="button" aria-label="增加生成数量" onClick={() => setGenerationCount((value) => Math.min(8, value + 1))}>+</button></div></div>
+        <button className="primary-action" type="button" onClick={() => void queueGeneration()} disabled={!isDemo && (!result || generating)}><Sparkles size={16} />{generating ? '正在加入…' : '加入生成队列'}</button>
       </div>
     </aside>
   );
@@ -455,7 +514,10 @@ function LibraryWorkspace({ availablePhotos, isDemo }: { availablePhotos: Photo[
   });
   const [tasksOpen, setTasksOpen] = useState(false);
   const [visionProfiles, setVisionProfiles] = useState<ProviderProfile[]>([]);
+  const [generationProfiles, setGenerationProfiles] = useState<ProviderProfile[]>([]);
+  const [templateItems, setTemplateItems] = useState<PromptTemplate[]>([]);
   const [analysisRevision, setAnalysisRevision] = useState<AnalysisRevision>();
+  const [generationResults, setGenerationResults] = useState<GenerationResult[]>([]);
   const [analysisNotice, setAnalysisNotice] = useState('');
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
   const selected = availablePhotos.find((photo) => photo.id === selectedId) ?? availablePhotos[0]!;
@@ -476,9 +538,11 @@ function LibraryWorkspace({ availablePhotos, isDemo }: { availablePhotos: Photo[
 
   useEffect(() => {
     if (isDemo) return;
-    void window.desktopApi.listProviderProfiles().then((items) =>
-      setVisionProfiles(items.filter((profile) => profile.purpose === 'vision' && profile.enabled))
-    );
+    void Promise.all([window.desktopApi.listProviderProfiles(), window.desktopApi.listPromptTemplates()]).then(([profiles, savedTemplates]) => {
+      setVisionProfiles(profiles.filter((profile) => profile.purpose === 'vision' && profile.enabled));
+      setGenerationProfiles(profiles.filter((profile) => profile.purpose === 'generation' && profile.enabled));
+      setTemplateItems(savedTemplates);
+    });
   }, [isDemo]);
 
   useEffect(() => {
@@ -492,6 +556,20 @@ function LibraryWorkspace({ availablePhotos, isDemo }: { availablePhotos: Photo[
     setAnalysisRevision(undefined);
     refresh();
     const interval = window.setInterval(refresh, 2_000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [isDemo, selected.id]);
+
+  useEffect(() => {
+    if (isDemo) return;
+    let active = true;
+    const refresh = () => {
+      void window.desktopApi.listGenerationResults(selected.id).then((items) => {
+        if (active) setGenerationResults(items);
+      });
+    };
+    setGenerationResults([]);
+    refresh();
+    const interval = window.setInterval(refresh, 1_000);
     return () => { active = false; window.clearInterval(interval); };
   }, [isDemo, selected.id]);
 
@@ -524,14 +602,80 @@ function LibraryWorkspace({ availablePhotos, isDemo }: { availablePhotos: Photo[
     setAnalysisNotice(`已将 ${targetIds.length} 张照片加入分析队列。`);
   };
 
+  const generateSelection = async ({
+    providerProfileId,
+    template,
+    count,
+    instruction,
+    disabledActionIds
+  }: {
+    providerProfileId: string;
+    template: PromptTemplate | null;
+    count: number;
+    instruction: string;
+    disabledActionIds: Set<string>;
+  }): Promise<string> => {
+    const targetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+    const batchId = crypto.randomUUID();
+    let queued = 0;
+    let skipped = 0;
+    for (const assetId of targetIds) {
+      const revisions = assetId === selected.id && analysisRevision
+        ? [analysisRevision]
+        : await window.desktopApi.listAnalysisRevisions(assetId);
+      const revision = revisions[0];
+      if (!revision) {
+        skipped += 1;
+        continue;
+      }
+      const analysis = {
+        ...revision.result,
+        generativeActions: revision.result.generativeActions.map((action) => ({
+          ...action,
+          enabled: action.enabled && (assetId !== selected.id || !disabledActionIds.has(action.id))
+        }))
+      };
+      const prompt = composeGenerationPrompt({
+        templateBody: template?.body ?? [
+          '请基于原图进行专业且写实的修图。',
+          '画面分析：{{analysis.summary}}',
+          '编辑动作：\n{{analysis.generative_actions}}',
+          '补充要求：{{user_instruction}}',
+          '必须保留：\n{{preservation_rules}}'
+        ].join('\n'),
+        analysis,
+        userInstruction: instruction
+      });
+      for (let resultIndex = 1; resultIndex <= count; resultIndex += 1) {
+        await window.desktopApi.enqueueTask({
+          kind: 'generation',
+          assetId,
+          payload: {
+            providerProfileId,
+            batchId,
+            prompt,
+            templateId: template?.id ?? null,
+            templateVersion: template?.version ?? null,
+            resultIndex
+          }
+        });
+        queued += 1;
+      }
+    }
+    setTasksOpen(true);
+    return skipped > 0
+      ? `已加入 ${queued} 个生成任务；${skipped} 张照片因尚未分析而跳过。`
+      : `已加入 ${queued} 个生成任务。`;
+  };
+
   return (
     <div className="workspace">
       <Sidebar />
       <main className="library-main">
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} />
-        <Viewer photo={selected} />
+        <Viewer photo={selected} results={generationResults} isDemo={isDemo} />
       </main>
-      <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} />
+      <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onGenerate={generateSelection} />
       {selection.selectedIds.size > 1 && (
         <div className="batch-actionbar">
           <strong>已选择 {selection.selectedIds.size} 张</strong>
@@ -539,7 +683,7 @@ function LibraryWorkspace({ availablePhotos, isDemo }: { availablePhotos: Photo[
           <button type="button"><Star size={14} />评分</button>
           <button type="button"><Tags size={14} />标签</button>
           <button type="button" onClick={() => void analyzeSelection()}><Sparkles size={14} />AI 分析</button>
-          <button type="button"><WandSparkles size={14} />批量生成</button>
+          <button type="button" onClick={() => void generateSelection({ providerProfileId: generationProfiles[0]?.id ?? '', template: null, count: 1, instruction: '', disabledActionIds: new Set() })} disabled={generationProfiles.length === 0}><WandSparkles size={14} />批量生成</button>
           <button type="button"><Download size={14} />导出</button>
           <IconButton label="清除选择" onClick={() => setSelection({ selectedIds: new Set(), anchorId: null, focusId: selected.id })}><X size={14} /></IconButton>
         </div>

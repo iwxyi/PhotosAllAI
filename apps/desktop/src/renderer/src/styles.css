@@ -163,6 +163,8 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 .template-choice > span:nth-child(2) { min-width: 0; display: grid; gap: 4px; }.template-choice strong, .template-choice small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.template-choice small { color: var(--dim); font-size: 9px; }
 .instruction-field { margin-top: 12px; display: grid; gap: 6px; color: var(--muted); font-size: 10px; }
 .instruction-field textarea { width: 100%; padding: 8px; resize: vertical; color: #cbd0c7; line-height: 1.45; background: #101210; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.template-select { width: 100%; height: 36px; padding: 0 9px; color: var(--text); background: #101210; border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.generation-notice { margin: 9px 0 0; color: var(--cyan); font-size: 9px; line-height: 1.45; }
 .generate-footer { padding: 10px 12px 12px; background: #151815; border-top: 1px solid var(--line); box-shadow: 0 -8px 20px rgb(0 0 0 / 10%); }
 .generation-count { height: 28px; display: flex; align-items: center; justify-content: space-between; color: var(--muted); }
 .generation-count div { display: flex; align-items: center; gap: 8px; }.generation-count button { width: 20px; height: 20px; padding: 0; color: var(--muted); background: var(--surface-3); border: 1px solid var(--line); border-radius: 3px; }

@@ -25,7 +25,7 @@ describe('analysis task runner', () => {
     const queue = await tasks();
     const analyze = vi.fn().mockResolvedValue({});
     queue.enqueue({ kind: 'analysis', assetId: 'asset-1', payload: { providerProfileId, mode: 'full' } });
-    const runner = new TaskRunner(queue, { analyze });
+    const runner = new TaskRunner(queue, { analyze }, { generate: vi.fn() });
     runner.start();
 
     await vi.waitFor(() => expect(queue.list()[0]?.status).toBe('completed'));
@@ -37,7 +37,11 @@ describe('analysis task runner', () => {
   it('records a stable failure code and leaves the task retryable', async () => {
     const queue = await tasks();
     queue.enqueue({ kind: 'analysis', assetId: 'asset-1', payload: { providerProfileId, mode: 'full' } });
-    const runner = new TaskRunner(queue, { analyze: vi.fn().mockRejectedValue(new Error('PROVIDER_HTTP_429')) });
+    const runner = new TaskRunner(
+      queue,
+      { analyze: vi.fn().mockRejectedValue(new Error('PROVIDER_HTTP_429')) },
+      { generate: vi.fn() }
+    );
     runner.start();
 
     await vi.waitFor(() => expect(queue.list()[0]?.status).toBe('failed'));
@@ -45,5 +49,23 @@ describe('analysis task runner', () => {
     runner.stop();
     queue.close();
   });
-});
 
+  it('processes generation work in the shared serial queue', async () => {
+    const queue = await tasks();
+    const generate = vi.fn().mockResolvedValue({});
+    const payload = {
+      providerProfileId,
+      batchId: '4fdbbb8a-8c33-484a-9719-2d36d61c4f66',
+      prompt: 'Remove pedestrians',
+      resultIndex: 1
+    };
+    queue.enqueue({ kind: 'generation', assetId: 'asset-2', payload });
+    const runner = new TaskRunner(queue, { analyze: vi.fn() }, { generate });
+    runner.start();
+
+    await vi.waitFor(() => expect(queue.list()[0]?.status).toBe('completed'));
+    expect(generate).toHaveBeenCalledWith('asset-2', expect.objectContaining(payload));
+    runner.stop();
+    queue.close();
+  });
+});

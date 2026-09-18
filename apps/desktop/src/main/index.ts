@@ -8,6 +8,7 @@ import {
   catalogSnapshotSchema,
   enqueueTaskInputSchema,
   listAnalysisInputSchema,
+  listGenerationResultsInputSchema,
   reorderTaskIdsSchema,
   savePromptTemplateInputSchema,
   saveProviderProfileInputSchema,
@@ -17,6 +18,7 @@ import {
 import { CatalogService } from './catalog-service';
 import { AnalysisService } from './analysis-service';
 import { ImageCacheService, type ImageVariant } from './image-cache-service';
+import { GenerationService } from './generation-service';
 import { ProviderService } from './provider-service';
 import { TaskService } from './task-service';
 import { TaskRunner } from './task-runner';
@@ -29,11 +31,16 @@ let providers: ProviderService;
 let tasks: TaskService;
 let templates: TemplateService;
 let analysis: AnalysisService;
+let generation: GenerationService;
 let taskRunner: TaskRunner;
 
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'photoasset',
+    privileges: { standard: true, secure: true, supportFetchAPI: true }
+  },
+  {
+    scheme: 'photoresult',
     privileges: { standard: true, secure: true, supportFetchAPI: true }
   }
 ]);
@@ -74,7 +81,11 @@ function registerIpc(): void {
     return task;
   });
   ipcMain.handle('tasks.cancel.v1', (_event, taskId: unknown) => tasks.cancel(taskIdSchema.parse(taskId)));
-  ipcMain.handle('tasks.retry.v1', (_event, taskId: unknown) => tasks.retry(taskIdSchema.parse(taskId)));
+  ipcMain.handle('tasks.retry.v1', (_event, taskId: unknown) => {
+    const task = tasks.retry(taskIdSchema.parse(taskId));
+    taskRunner.wake();
+    return task;
+  });
   ipcMain.handle('tasks.reorder.v1', (_event, taskIds: unknown) =>
     tasks.reorder(reorderTaskIdsSchema.parse(taskIds))
   );
@@ -85,6 +96,10 @@ function registerIpc(): void {
   ipcMain.handle('analysis.list.v1', (_event, input: unknown) => {
     const { assetId } = listAnalysisInputSchema.parse(input);
     return analysis.list(assetId);
+  });
+  ipcMain.handle('generation.results.list.v1', (_event, input: unknown) => {
+    const { assetId } = listGenerationResultsInputSchema.parse(input);
+    return generation.list(assetId);
   });
 }
 
@@ -144,7 +159,14 @@ app.whenReady().then(() => {
     decrypt: (value) => safeStorage.decryptString(Buffer.from(value, 'base64'))
   });
   analysis = new AnalysisService(databasePath, providers, imageCache);
-  taskRunner = new TaskRunner(tasks, analysis);
+  generation = new GenerationService(
+    databasePath,
+    join(libraryDirectory, 'generated'),
+    providers,
+    imageCache,
+    catalog
+  );
+  taskRunner = new TaskRunner(tasks, analysis, generation);
 
   protocol.handle('photoasset', async (request) => {
     const url = new URL(request.url);
@@ -161,6 +183,16 @@ app.whenReady().then(() => {
     } catch {
       return new Response('Preview unavailable', { status: 422 });
     }
+  });
+
+  protocol.handle('photoresult', (request) => {
+    const url = new URL(request.url);
+    if (url.host !== 'result') return new Response('Not found', { status: 404 });
+    const resultId = url.pathname.slice(1);
+    if (!/^[0-9a-f-]{36}$/i.test(resultId)) return new Response('Invalid result', { status: 400 });
+    const resultPath = generation.resolveResultFile(resultId);
+    if (!resultPath) return new Response('Not found', { status: 404 });
+    return net.fetch(pathToFileURL(resultPath).toString());
   });
 
   registerIpc();
@@ -183,6 +215,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   taskRunner?.stop();
+  generation?.close();
   analysis?.close();
   templates?.close();
   tasks?.close();
