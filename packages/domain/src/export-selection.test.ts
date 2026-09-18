@@ -13,6 +13,7 @@ const result = (id: string, reviewState: 'undecided' | 'accepted' | 'rejected' |
   providerProfileId: 'provider-1',
   templateId: null,
   templateVersion: null,
+  storageMode: 'managed' as const,
   reviewState,
   createdAt: version
 });

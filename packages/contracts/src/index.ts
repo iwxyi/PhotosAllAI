@@ -18,6 +18,11 @@ export const diagnosticSnapshotSchema = z.object({
 });
 export type DiagnosticSnapshot = z.infer<typeof diagnosticSnapshotSchema>;
 
+export const appSettingsSchema = z.object({
+  generationStorageMode: z.enum(['managed', 'portable']).default('managed')
+});
+export type AppSettings = z.infer<typeof appSettingsSchema>;
+
 export const workspaceTabSchema = z.enum(['library', 'templates', 'tasks', 'settings']);
 export type WorkspaceTab = z.infer<typeof workspaceTabSchema>;
 
@@ -454,7 +459,8 @@ export const generationTaskPayloadSchema = z.object({
   prompt: z.string().min(1).max(50_000),
   templateId: z.string().uuid().nullable().default(null),
   templateVersion: z.number().int().positive().nullable().default(null),
-  resultIndex: z.number().int().positive()
+  resultIndex: z.number().int().positive(),
+  storageMode: z.enum(['managed', 'portable']).default('managed')
 });
 
 export const generationResultSchema = z.object({
@@ -468,6 +474,7 @@ export const generationResultSchema = z.object({
   providerProfileId: z.string().uuid(),
   templateId: z.string().uuid().nullable(),
   templateVersion: z.number().int().positive().nullable(),
+  storageMode: z.enum(['managed', 'portable']).default('managed'),
   reviewState: z.enum(['undecided', 'accepted', 'rejected', 'preferred']),
   createdAt: z.number().nonnegative()
 });
@@ -524,6 +531,8 @@ export const pruneImageCacheInputSchema = z.object({ maxBytes: z.number().int().
 
 export interface DesktopApi {
   getAppInfo(): Promise<AppInfo>;
+  getAppSettings(): Promise<AppSettings>;
+  saveAppSettings(input: AppSettings): Promise<AppSettings>;
   getDiagnosticSnapshot(): Promise<DiagnosticSnapshot>;
   getWorkspaceSession(): Promise<WorkspaceSession>;
   saveWorkspaceSession(session: WorkspaceSession): Promise<WorkspaceSession>;

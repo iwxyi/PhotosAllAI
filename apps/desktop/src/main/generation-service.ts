@@ -32,6 +32,7 @@ type ResultRow = {
   provider_profile_id: string;
   template_id: string | null;
   template_version: number | null;
+  storage_mode: 'managed' | 'portable';
   review_state: GenerationResult['reviewState'];
   created_at: number;
 };
@@ -79,6 +80,9 @@ export class GenerationService {
     const columns = this.#database.prepare('PRAGMA table_info(generation_results)').all() as { name: string }[];
     if (!columns.some((column) => column.name === 'review_state')) {
       this.#database.exec("ALTER TABLE generation_results ADD COLUMN review_state TEXT NOT NULL DEFAULT 'undecided' CHECK(review_state IN ('undecided', 'accepted', 'rejected', 'preferred'))");
+    }
+    if (!columns.some((column) => column.name === 'storage_mode')) {
+      this.#database.exec("ALTER TABLE generation_results ADD COLUMN storage_mode TEXT NOT NULL DEFAULT 'managed' CHECK(storage_mode IN ('managed', 'portable'))");
     }
   }
 
@@ -137,7 +141,9 @@ export class GenerationService {
     const originalStem = sanitizeFileStem(path.parse(source.fileName).name);
     const shortId = id.replaceAll('-', '').slice(0, 8).toUpperCase();
     const fileName = `${originalStem}__ai__v${String(version).padStart(4, '0')}__${shortId}.${format}`;
-    const batchDirectory = path.join(this.#generatedDirectory, assetId.slice(0, 2), assetId, payload.batchId);
+    const batchDirectory = payload.storageMode === 'portable'
+      ? path.join(path.dirname(source.path), '_PhotoAllIsAI', `${originalStem}__${assetId.replaceAll('-', '').slice(0, 8).toUpperCase()}`, payload.batchId)
+      : path.join(this.#generatedDirectory, assetId.slice(0, 2), assetId, payload.batchId);
     const filePath = path.join(batchDirectory, fileName);
     await mkdir(batchDirectory, { recursive: true });
     const temporaryPath = `${filePath}.${process.pid}.tmp`;
@@ -150,13 +156,13 @@ export class GenerationService {
       this.#database.prepare(`
         INSERT INTO generation_results (
           id, asset_id, batch_id, version, file_name, file_path, prompt,
-          provider_profile_id, template_id, template_version, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          provider_profile_id, template_id, template_version, storage_mode, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id, assetId, payload.batchId, version, fileName, filePath, payload.prompt,
-        payload.providerProfileId, payload.templateId, payload.templateVersion, createdAt
+        payload.providerProfileId, payload.templateId, payload.templateVersion, payload.storageMode, createdAt
       );
-      await this.#writeManifest(batchDirectory, assetId, payload.batchId, provider.profile);
+      await this.#writeManifest(batchDirectory, assetId, payload.batchId, provider.profile, payload.storageMode);
     } catch (error) {
       this.#database.prepare('DELETE FROM generation_results WHERE id = ?').run(id);
       await unlink(filePath).catch(() => undefined);
@@ -167,17 +173,18 @@ export class GenerationService {
       id, assetId, batchId: payload.batchId, version, fileName,
       resultUrl: `photoresult://result/${id}`, prompt: payload.prompt,
       providerProfileId: payload.providerProfileId, templateId: payload.templateId,
-      templateVersion: payload.templateVersion, reviewState: 'undecided', createdAt
+      templateVersion: payload.templateVersion, storageMode: payload.storageMode,
+      reviewState: 'undecided', createdAt
     });
   }
 
-  async #writeManifest(directory: string, assetId: string, batchId: string, profile: ProviderProfile): Promise<void> {
+  async #writeManifest(directory: string, assetId: string, batchId: string, profile: ProviderProfile, storageMode: 'managed' | 'portable'): Promise<void> {
     const rows = this.#database.prepare(`
       SELECT id, version, file_name, created_at FROM generation_results
       WHERE batch_id = ? ORDER BY version ASC
     `).all(batchId);
     const manifest = {
-      schemaVersion: '1.0', assetId, batchId,
+      schemaVersion: '1.0', assetId, batchId, storageMode,
       provider: { profileId: profile.id, modelId: profile.modelId },
       results: rows
     };
@@ -193,6 +200,7 @@ export class GenerationService {
       fileName: row.file_name, resultUrl: `photoresult://result/${row.id}`,
       prompt: row.prompt, providerProfileId: row.provider_profile_id,
       templateId: row.template_id, templateVersion: row.template_version, reviewState: row.review_state, createdAt: row.created_at
+      , storageMode: row.storage_mode
     });
   }
 }

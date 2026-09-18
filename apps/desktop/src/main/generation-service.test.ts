@@ -96,6 +96,19 @@ describe('managed generation results', () => {
     service.close();
   });
 
+  it('writes portable results beside the original and records the strategy', async () => {
+    const { service, directory, sourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const original = await readFile(sourcePath);
+    const result = await service.generate('asset-1', { ...payload(), storageMode: 'portable' });
+    const portableDirectory = path.join(directory, '_PhotoAllIsAI', 'IMG_1024__ASSET1', batchId);
+    expect(result.storageMode).toBe('portable');
+    expect(service.list('asset-1')[0]?.storageMode).toBe('portable');
+    expect(await readFile(sourcePath)).toEqual(original);
+    expect(await readdir(portableDirectory)).toEqual(expect.arrayContaining(['manifest.json', result.fileName]));
+    expect(await readdir(directory)).not.toContain('managed');
+    service.close();
+  });
+
   it('persists review state and keeps a single preferred result per asset', async () => {
     const { service } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
     const first = await service.generate('asset-1', payload());

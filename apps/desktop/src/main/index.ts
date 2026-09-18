@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, net, protocol, safeStorage, shell } from 'electron';
 import {
   appInfoSchema,
+  appSettingsSchema,
   diagnosticSnapshotSchema,
   catalogAssetRemovalInputSchema,
   catalogAssetRemovalReportSchema,
@@ -54,6 +55,7 @@ import { TaskService } from './task-service';
 import { TaskRunner } from './task-runner';
 import { TemplateService } from './template-service';
 import { WorkspaceService } from './workspace-service';
+import { AppSettingsService } from './app-settings-service';
 
 const APP_ORIGIN = 'app://photoallisai';
 let catalog: CatalogService;
@@ -69,6 +71,7 @@ let exportPresets: ExportPresetService;
 let fileOperations: FileOperationService;
 let taskRunner: TaskRunner;
 let workspace: WorkspaceService;
+let appSettings: AppSettingsService;
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -88,6 +91,10 @@ function registerIpc(): void {
       version: app.getVersion(),
       platform: process.platform
     })
+  );
+  ipcMain.handle('app.settings.get.v1', () => appSettings.get());
+  ipcMain.handle('app.settings.save.v1', (_event, input: unknown) =>
+    appSettings.save(appSettingsSchema.parse(input))
   );
   ipcMain.handle('app.diagnostics.v1', async () => {
     const [profiles, cache] = await Promise.all([providers.list(), imageCache.getStats()]);
@@ -297,6 +304,7 @@ app.whenReady().then(async () => {
   mkdirSync(libraryDirectory, { recursive: true });
   const databasePath = join(libraryDirectory, 'catalog.sqlite');
   workspace = new WorkspaceService(databasePath);
+  appSettings = new AppSettingsService(join(app.getPath('userData'), 'settings', 'app.json'));
   catalog = new CatalogService(databasePath);
   catalogWatcher = new CatalogWatcher(catalog);
   catalogWatcher.watchFolders(catalog.listFolderPaths());

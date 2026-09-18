@@ -3,6 +3,8 @@ import type { DesktopApi } from '@photoallisai/contracts';
 
 const api: DesktopApi = {
   getAppInfo: () => ipcRenderer.invoke('app.info.v1') as ReturnType<DesktopApi['getAppInfo']>,
+  getAppSettings: () => ipcRenderer.invoke('app.settings.get.v1') as ReturnType<DesktopApi['getAppSettings']>,
+  saveAppSettings: (input) => ipcRenderer.invoke('app.settings.save.v1', input) as ReturnType<DesktopApi['saveAppSettings']>,
   getDiagnosticSnapshot: () => ipcRenderer.invoke('app.diagnostics.v1') as ReturnType<DesktopApi['getDiagnosticSnapshot']>,
   getWorkspaceSession: () =>
     ipcRenderer.invoke('workspace.session.get.v1') as ReturnType<DesktopApi['getWorkspaceSession']>,

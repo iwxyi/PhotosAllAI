@@ -18,7 +18,8 @@ import type {
   SavePromptTemplateInput,
   SaveProviderProfileInput,
   WorkspaceSession,
-  WorkspaceTab
+  WorkspaceTab,
+  AppSettings
 } from '@photoallisai/contracts';
 import { computeHorizontalWindow, composeGenerationPrompt, pickExportResult, selectAll, updateSelection, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
 import {
@@ -827,6 +828,7 @@ function PopulatedLibraryWorkspace({
   const [tasksOpen, setTasksOpen] = useState(false);
   const [visionProfiles, setVisionProfiles] = useState<ProviderProfile[]>([]);
   const [generationProfiles, setGenerationProfiles] = useState<ProviderProfile[]>([]);
+  const [generationStorageMode, setGenerationStorageMode] = useState<AppSettings['generationStorageMode']>('managed');
   const [templateItems, setTemplateItems] = useState<PromptTemplate[]>([]);
   const [analysisRevision, setAnalysisRevision] = useState<AnalysisRevision>();
   const [generationResults, setGenerationResults] = useState<GenerationResult[]>([]);
@@ -889,10 +891,11 @@ function PopulatedLibraryWorkspace({
 
   useEffect(() => {
     if (isDemo) return;
-    void Promise.all([window.desktopApi.listProviderProfiles(), window.desktopApi.listPromptTemplates()]).then(([profiles, savedTemplates]) => {
+    void Promise.all([window.desktopApi.listProviderProfiles(), window.desktopApi.listPromptTemplates(), window.desktopApi.getAppSettings()]).then(([profiles, savedTemplates, settings]) => {
       setVisionProfiles(profiles.filter((profile) => profile.purpose === 'vision' && profile.enabled));
       setGenerationProfiles(profiles.filter((profile) => profile.purpose === 'generation' && profile.enabled));
       setTemplateItems(savedTemplates);
+      setGenerationStorageMode(settings.generationStorageMode);
     });
   }, [isDemo]);
 
@@ -1015,7 +1018,8 @@ function PopulatedLibraryWorkspace({
             prompt,
             templateId: template?.id ?? null,
             templateVersion: template?.version ?? null,
-            resultIndex
+            resultIndex,
+            storageMode: generationStorageMode
           }
         });
         queued += 1;
@@ -1062,7 +1066,8 @@ function PopulatedLibraryWorkspace({
         prompt: result.prompt,
         templateId: result.templateId,
         templateVersion: result.templateVersion,
-        resultIndex: 1
+        resultIndex: 1,
+        storageMode: result.storageMode
       }
     });
     setTasksOpen(true);
@@ -1313,13 +1318,32 @@ function SettingsPage(): React.JSX.Element {
   const [cacheMessage, setCacheMessage] = useState('');
   const [cacheBusy, setCacheBusy] = useState(false);
   const [diagnostics, setDiagnostics] = useState<DiagnosticSnapshot | null>(null);
+  const [generationStorageMode, setGenerationStorageMode] = useState<AppSettings['generationStorageMode']>('managed');
+  const [storageMessage, setStorageMessage] = useState('');
+  const [storageBusy, setStorageBusy] = useState(false);
 
   useEffect(() => {
     void window.desktopApi.listProviderProfiles().then(setProfiles);
     void window.desktopApi.listExportPresets().then(setPresets);
     void window.desktopApi.getImageCacheStats().then(setCacheStats);
     void window.desktopApi.getDiagnosticSnapshot().then(setDiagnostics);
+    void window.desktopApi.getAppSettings().then((settings) => setGenerationStorageMode(settings.generationStorageMode));
   }, []);
+
+  const saveStorageMode = async (value: AppSettings['generationStorageMode']) => {
+    setGenerationStorageMode(value);
+    setStorageBusy(true);
+    setStorageMessage('');
+    try {
+      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode: value });
+      setGenerationStorageMode(saved.generationStorageMode);
+      setStorageMessage('存储策略已保存，新加入队列的任务将使用该策略。');
+    } catch {
+      setStorageMessage('存储策略保存失败，请检查应用权限。');
+    } finally {
+      setStorageBusy(false);
+    }
+  };
 
   const patchForm = <Key extends keyof SaveProviderProfileInput>(key: Key, value: SaveProviderProfileInput[Key]) => {
     setForm((current) => ({ ...current, [key]: value }));
@@ -1410,6 +1434,14 @@ function SettingsPage(): React.JSX.Element {
           <div className="preset-row"><input aria-label="导出预设名称" placeholder="例如：客户交付" value={presetName} onChange={(event) => { setPresetName(event.target.value); setPresetMessage(''); }} /><button className="primary-action compact" type="button" disabled={!presetName.trim()} onClick={async () => { try { const saved = await window.desktopApi.saveExportPreset({ name: presetName.trim(), format: 'original', conflictPolicy: 'auto-rename', namingPattern: '{name}_{version}' }); setPresets((current) => [...current.filter((item) => item.id !== saved.id), saved]); setPresetName(''); setPresetMessage('预设已保存'); } catch { setPresetMessage('名称已存在或保存失败'); } }}>保存预设</button></div>
           <div className="preset-list">{presets.length === 0 ? <small>暂无导出预设</small> : presets.map((preset) => <div className="preset-item" key={preset.id}><span><strong>{preset.name}</strong><small>{preset.namingPattern} · {preset.conflictPolicy === 'skip' ? '跳过同名' : '自动编号'}</small></span><button type="button" aria-label={`删除导出预设 ${preset.name}`} onClick={async () => { await window.desktopApi.deleteExportPreset(preset.id); setPresets((current) => current.filter((item) => item.id !== preset.id)); }}>删除</button></div>)}</div>
           {presetMessage && <div className="form-feedback" role="status">{presetMessage}</div>}
+        </section>
+        <section className="settings-section storage-section">
+          <div className="settings-heading"><div><h2>生成结果存储</h2><p>原图始终保持不变。策略会写入每个任务，重试和导出时可追溯。</p></div><span><Folder size={14} />不会覆盖原图</span></div>
+          <div className="storage-options" aria-label="生成结果存储策略">
+            <label className={generationStorageMode === 'managed' ? 'is-selected' : ''}><input type="radio" name="generation-storage" checked={generationStorageMode === 'managed'} disabled={storageBusy} onChange={() => void saveStorageMode('managed')} /><span><strong>集中受管（默认）</strong><small>保存到应用图库的 generated 目录，适合统一管理和批量导出。</small></span><Check size={15} /></label>
+            <label className={generationStorageMode === 'portable' ? 'is-selected' : ''}><input type="radio" name="generation-storage" checked={generationStorageMode === 'portable'} disabled={storageBusy} onChange={() => void saveStorageMode('portable')} /><span><strong>原图旁便携目录</strong><small>在原图目录创建 _PhotoAllIsAI，不扫描回图库，也不会自动回退。</small></span><Check size={15} /></label>
+          </div>
+          <div className="form-feedback" role="status">{storageMessage || '便携模式需要原图目录具有写入权限；失败时任务会明确报错。'}</div>
         </section>
         <section className="settings-section cache-section">
           <div className="settings-heading"><div><h2>预览缓存</h2><p>缓存可安全重建，不会删除原图、生成结果或分析数据。</p></div><span>{cacheStats ? `${cacheStats.files} 个文件 · ${(cacheStats.bytes / 1_073_741_824).toFixed(2)} GiB` : '正在读取'}</span></div>
