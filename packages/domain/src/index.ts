@@ -80,3 +80,5 @@ export function selectAll(orderedIds: readonly string[]): SelectionState {
     focusId: orderedIds[0] ?? null
   };
 }
+
+export { composeGenerationPrompt, type ComposePromptInput } from './prompt-composer';

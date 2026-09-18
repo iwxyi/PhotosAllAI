@@ -103,6 +103,103 @@ export type EnqueueTaskInput = z.infer<typeof enqueueTaskInputSchema>;
 export const taskIdSchema = z.string().uuid();
 export const reorderTaskIdsSchema = z.array(taskIdSchema).max(10_000);
 
+export const normalizedRegionSchema = z.object({
+  kind: z.literal('normalized_box'),
+  x: z.number().min(0).max(1),
+  y: z.number().min(0).max(1),
+  width: z.number().positive().max(1),
+  height: z.number().positive().max(1)
+}).refine((region) => region.x + region.width <= 1.001 && region.y + region.height <= 1.001, {
+  message: 'Region must fit inside normalized image bounds'
+});
+
+export const analysisIssueSchema = z.object({
+  type: z.string().min(1).max(100),
+  severity: z.number().min(0).max(1),
+  confidence: z.number().min(0).max(1),
+  description: z.string().min(1).max(2_000)
+});
+
+export const adjustmentSuggestionSchema = z.object({
+  parameter: z.string().min(1).max(100),
+  value: z.number(),
+  unit: z.string().max(30),
+  confidence: z.number().min(0).max(1),
+  reason: z.string().min(1).max(1_000)
+});
+
+export const generativeActionSchema = z.object({
+  id: z.string().min(1).max(100),
+  type: z.enum([
+    'remove_object', 'replace_background', 'relight', 'outpaint',
+    'repair', 'recompose', 'other'
+  ]),
+  target: z.string().min(1).max(1_000),
+  region: normalizedRegionSchema.nullable(),
+  instruction: z.string().min(1).max(4_000),
+  preserve: z.array(z.string().min(1).max(500)).max(50),
+  risk: z.enum(['low', 'medium', 'high']),
+  confidence: z.number().min(0).max(1),
+  enabled: z.boolean()
+});
+
+export const catalogAnnotationSchema = z.object({
+  shortDescription: z.string().min(1).max(500),
+  longDescription: z.string().max(5_000),
+  scenes: z.array(z.string().min(1).max(100)).max(50),
+  subjects: z.array(z.string().min(1).max(100)).max(50),
+  objects: z.array(z.string().min(1).max(100)).max(100),
+  mood: z.array(z.string().min(1).max(100)).max(30),
+  colors: z.array(z.string().min(1).max(100)).max(30),
+  keywords: z.array(z.string().min(1).max(100)).max(100),
+  ocrText: z.string().max(10_000).default('')
+});
+
+export const analysisResultSchema = z.object({
+  schemaVersion: z.literal('1.0'),
+  summary: z.string().min(1).max(1_000),
+  report: z.string().min(1).max(20_000),
+  quality: z.object({
+    overallScore: z.number().min(0).max(100),
+    issues: z.array(analysisIssueSchema).max(100)
+  }),
+  adjustments: z.object({
+    global: z.array(adjustmentSuggestionSchema).max(100),
+    local: z.array(adjustmentSuggestionSchema.extend({
+      target: z.string().min(1).max(500),
+      region: normalizedRegionSchema.nullable()
+    })).max(100)
+  }),
+  generativeActions: z.array(generativeActionSchema).max(100),
+  catalog: catalogAnnotationSchema,
+  generationRecommendation: z.object({
+    recommended: z.boolean(),
+    templateId: z.string().nullable(),
+    reason: z.string().max(2_000)
+  })
+});
+
+export type AnalysisResult = z.infer<typeof analysisResultSchema>;
+
+export const promptTemplateSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(1).max(120),
+  description: z.string().max(2_000),
+  category: z.string().min(1).max(100),
+  body: z.string().min(1).max(20_000),
+  version: z.number().int().positive(),
+  createdAt: z.number().nonnegative(),
+  updatedAt: z.number().nonnegative()
+});
+
+export type PromptTemplate = z.infer<typeof promptTemplateSchema>;
+
+export const savePromptTemplateInputSchema = promptTemplateSchema.omit({
+  id: true, version: true, createdAt: true, updatedAt: true
+}).extend({ id: z.string().uuid().optional() });
+
+export type SavePromptTemplateInput = z.infer<typeof savePromptTemplateInputSchema>;
+
 export interface DesktopApi {
   getAppInfo(): Promise<AppInfo>;
   listCatalogAssets(): Promise<CatalogAsset[]>;
@@ -115,4 +212,6 @@ export interface DesktopApi {
   cancelTask(taskId: string): Promise<PersistedTask>;
   retryTask(taskId: string): Promise<PersistedTask>;
   reorderTasks(taskIds: string[]): Promise<PersistedTask[]>;
+  listPromptTemplates(): Promise<PromptTemplate[]>;
+  savePromptTemplate(input: SavePromptTemplateInput): Promise<PromptTemplate>;
 }

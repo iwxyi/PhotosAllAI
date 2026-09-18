@@ -19,7 +19,7 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-  await electronApp.close();
+  if (electronApp) await electronApp.close();
   await rm(userDataDirectory, { recursive: true, force: true });
 });
 
@@ -74,6 +74,12 @@ test('opens the task drawer and application tabs', async () => {
   await page.getByRole('tab', { name: /任务中心/ }).click();
   await expect(page.getByRole('heading', { name: '任务中心' })).toBeVisible();
   await expect(page.getByText('暂无任务')).toBeVisible();
+
+  await page.getByRole('tab', { name: /提示词模板/ }).click();
+  await expect(page.getByRole('heading', { name: '提示词模板' })).toBeVisible();
+  await expect(page.getByText('尚未创建模板')).toBeVisible();
+  await expect(page.getByText('{{analysis.generative_actions}}', { exact: true })).toBeVisible();
+  await page.screenshot({ path: 'test-results/prompt-templates.png', animations: 'disabled' });
 
   await page.getByRole('tab', { name: /设置/ }).click();
   await expect(page.getByRole('heading', { name: 'AI 模型' })).toBeVisible();

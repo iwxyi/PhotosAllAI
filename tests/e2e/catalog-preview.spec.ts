@@ -37,7 +37,7 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-  await electronApp.close();
+  if (electronApp) await electronApp.close();
   await rm(testRoot, { recursive: true, force: true });
 });
 

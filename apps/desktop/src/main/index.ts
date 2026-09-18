@@ -8,6 +8,7 @@ import {
   catalogSnapshotSchema,
   enqueueTaskInputSchema,
   reorderTaskIdsSchema,
+  savePromptTemplateInputSchema,
   saveProviderProfileInputSchema,
   taskIdSchema
 } from '@photoallisai/contracts';
@@ -16,12 +17,14 @@ import { CatalogService } from './catalog-service';
 import { ImageCacheService, type ImageVariant } from './image-cache-service';
 import { ProviderService } from './provider-service';
 import { TaskService } from './task-service';
+import { TemplateService } from './template-service';
 
 const APP_ORIGIN = 'app://photoallisai';
 let catalog: CatalogService;
 let imageCache: ImageCacheService;
 let providers: ProviderService;
 let tasks: TaskService;
+let templates: TemplateService;
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -67,6 +70,10 @@ function registerIpc(): void {
   ipcMain.handle('tasks.retry.v1', (_event, taskId: unknown) => tasks.retry(taskIdSchema.parse(taskId)));
   ipcMain.handle('tasks.reorder.v1', (_event, taskIds: unknown) =>
     tasks.reorder(reorderTaskIdsSchema.parse(taskIds))
+  );
+  ipcMain.handle('templates.list.v1', () => templates.list());
+  ipcMain.handle('templates.save.v1', (_event, input: unknown) =>
+    templates.save(savePromptTemplateInputSchema.parse(input))
   );
 }
 
@@ -118,6 +125,7 @@ app.whenReady().then(() => {
   const databasePath = join(libraryDirectory, 'catalog.sqlite');
   catalog = new CatalogService(databasePath);
   tasks = new TaskService(databasePath);
+  templates = new TemplateService(databasePath);
   imageCache = new ImageCacheService(join(app.getPath('userData'), 'cache', 'images'), catalog);
   providers = new ProviderService(join(app.getPath('userData'), 'settings', 'providers.json'), {
     available: () => safeStorage.isEncryptionAvailable(),
@@ -160,6 +168,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  templates?.close();
   tasks?.close();
   catalog?.close();
 });

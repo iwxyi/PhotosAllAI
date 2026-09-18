@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { CatalogAsset, PersistedTask, ProviderProfile, SaveProviderProfileInput } from '@photoallisai/contracts';
+import type {
+  CatalogAsset,
+  PersistedTask,
+  PromptTemplate,
+  ProviderProfile,
+  SavePromptTemplateInput,
+  SaveProviderProfileInput
+} from '@photoallisai/contracts';
 import { selectAll, updateSelection, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
 import {
   Aperture,
@@ -30,7 +37,6 @@ import {
   Search,
   Server,
   Settings,
-  SlidersHorizontal,
   Sparkles,
   Star,
   ShieldCheck,
@@ -472,28 +478,6 @@ function LibraryWorkspace({ availablePhotos }: { availablePhotos: Photo[] }): Re
   );
 }
 
-function PlaceholderPage({ type }: { type: Exclude<WorkspaceTab, 'library'> }): React.JSX.Element {
-  const data = useMemo(() => ({
-    templates: { icon: WandSparkles, title: '提示词模板', copy: '管理描述、示例图片、模型能力和版本。', action: '新建模板' },
-    tasks: { icon: Clock3, title: '任务中心', copy: '查看生成历史、失败原因、调用状态和批量操作。', action: '查看运行任务' },
-    settings: { icon: SlidersHorizontal, title: '设置', copy: '配置分析模型、生成模型、受管存储、缓存和快捷键。', action: '添加模型配置' }
-  })[type], [type]);
-  const Icon = data.icon;
-
-  return (
-    <div className="placeholder-page">
-      <div className="placeholder-rail">
-        <strong>{data.title}</strong>
-        {['概览', '模型与能力', '存储与缓存', '外观与快捷键'].map((item, index) => <button className={index === 0 ? 'is-active' : ''} key={item} type="button">{item}</button>)}
-      </div>
-      <div className="placeholder-content">
-        <div className="page-heading"><div><span className="page-icon"><Icon size={22} /></span><div><h1>{data.title}</h1><p>{data.copy}</p></div></div><button className="primary-action compact" type="button"><Plus size={15} />{data.action}</button></div>
-        <div className="empty-surface"><Icon size={32} /><h2>{data.title}工作区已就绪</h2><p>这个标签页将在对应里程碑接入真实数据和完整交互。</p></div>
-      </div>
-    </div>
-  );
-}
-
 const emptyProviderForm: SaveProviderProfileInput = {
   name: '',
   kind: 'openai-compatible',
@@ -667,6 +651,77 @@ function TaskKindIcon({ kind }: { kind: PersistedTask['kind'] }): React.JSX.Elem
   return <Download size={15} />;
 }
 
+const emptyTemplateForm: SavePromptTemplateInput = {
+  name: '',
+  description: '',
+  category: '人像',
+  body: '{{analysis.summary}}\n\n需要执行：\n{{analysis.generative_actions}}\n\n用户补充：\n{{user_instruction}}\n\n必须保留：\n{{preservation_rules}}'
+};
+
+function TemplatePage(): React.JSX.Element {
+  const [templateItems, setTemplateItems] = useState<PromptTemplate[]>([]);
+  const [form, setForm] = useState<SavePromptTemplateInput>(emptyTemplateForm);
+  const [message, setMessage] = useState('');
+
+  useEffect(() => { void window.desktopApi.listPromptTemplates().then(setTemplateItems); }, []);
+
+  const patchTemplate = <Key extends keyof SavePromptTemplateInput>(key: Key, value: SavePromptTemplateInput[Key]) => {
+    setForm((current) => ({ ...current, [key]: value }));
+    setMessage('');
+  };
+
+  const save = async () => {
+    try {
+      const saved = await window.desktopApi.savePromptTemplate(form);
+      setTemplateItems((current) => [saved, ...current.filter((template) => template.id !== saved.id)]);
+      setForm({ ...saved });
+      setMessage(`已保存版本 ${saved.version}`);
+    } catch {
+      setMessage('保存失败，请检查模板名称和正文');
+    }
+  };
+
+  return (
+    <div className="template-page">
+      <div className="template-page-heading">
+        <div><h1>提示词模板</h1><p>模板与 AI 分析动作组合，入队时保存具体版本快照。</p></div>
+        <button className="primary-action compact" type="button" onClick={() => { setForm(emptyTemplateForm); setMessage(''); }}><Plus size={15} />新建模板</button>
+      </div>
+      <div className="template-workspace">
+        <section className="template-browser">
+          <div className="template-browser-tools"><div className="inline-search"><Search size={14} /><input placeholder="搜索模板" /></div><button type="button"><ListFilter size={14} />全部分类</button></div>
+          {templateItems.length === 0 ? (
+            <div className="template-empty"><WandSparkles size={30} /><h2>尚未创建模板</h2><p>创建第一个模板，把常用修图要求和保护规则保存下来。</p></div>
+          ) : (
+            <div className="template-grid">
+              {templateItems.map((template, index) => (
+                <button className={`template-card${form.id === template.id ? ' is-selected' : ''}`} key={template.id} type="button" onClick={() => setForm({
+                  id: template.id,
+                  name: template.name,
+                  description: template.description,
+                  category: template.category,
+                  body: template.body
+                })}>
+                  <span className="template-card-image"><img src={`./demo/${['portrait', 'street', 'coast'][index % 3]}.jpg`} alt="" /><i>{template.category}</i></span>
+                  <span className="template-card-copy"><strong>{template.name}</strong><small>{template.description || '暂无描述'}</small><em>版本 {template.version}</em></span>
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
+        <form className="template-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+          <div className="template-editor-head"><div><strong>{form.id ? '编辑模板' : '创建模板'}</strong><small>保存修改会创建新版本</small></div>{form.id && <span>不可变版本</span>}</div>
+          <label><span>模板名称</span><input required maxLength={120} value={form.name} placeholder="例如：自然人像 · 清洁背景" onChange={(event) => patchTemplate('name', event.target.value)} /></label>
+          <div className="form-grid two-columns"><label><span>分类</span><select value={form.category} onChange={(event) => patchTemplate('category', event.target.value)}><option>人像</option><option>风光</option><option>商品</option><option>建筑</option><option>其他</option></select></label><label><span>简短描述</span><input maxLength={2_000} value={form.description} placeholder="说明适用场景和效果" onChange={(event) => patchTemplate('description', event.target.value)} /></label></div>
+          <label className="template-body-field"><span>模板正文</span><textarea required value={form.body} onChange={(event) => patchTemplate('body', event.target.value)} /></label>
+          <div className="template-variables"><span>可用变量</span>{['analysis.summary', 'analysis.generative_actions', 'catalog.subjects', 'user_instruction', 'preservation_rules'].map((variable) => <code key={variable}>{`{{${variable}}}`}</code>)}</div>
+          <div className="template-editor-footer"><span role="status">{message}</span><button className="primary-action compact" type="submit">{form.id ? '保存新版本' : '创建模板'}</button></div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 export function App(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('library');
   const [catalogPhotos, setCatalogPhotos] = useState<Photo[]>([]);
@@ -685,7 +740,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} onChange={setActiveTab} onImport={() => void importFolders()} />
-      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <PlaceholderPage type={activeTab} />}
+      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
     </div>
   );
 }

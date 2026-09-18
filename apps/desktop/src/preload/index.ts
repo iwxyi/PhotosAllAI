@@ -23,7 +23,11 @@ const api: DesktopApi = {
   retryTask: (taskId) =>
     ipcRenderer.invoke('tasks.retry.v1', taskId) as ReturnType<DesktopApi['retryTask']>,
   reorderTasks: (taskIds) =>
-    ipcRenderer.invoke('tasks.reorder.v1', taskIds) as ReturnType<DesktopApi['reorderTasks']>
+    ipcRenderer.invoke('tasks.reorder.v1', taskIds) as ReturnType<DesktopApi['reorderTasks']>,
+  listPromptTemplates: () =>
+    ipcRenderer.invoke('templates.list.v1') as ReturnType<DesktopApi['listPromptTemplates']>,
+  savePromptTemplate: (input) =>
+    ipcRenderer.invoke('templates.save.v1', input) as ReturnType<DesktopApi['savePromptTemplate']>
 };
 
 contextBridge.exposeInMainWorld('desktopApi', Object.freeze(api));
