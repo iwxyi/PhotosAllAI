@@ -10,7 +10,6 @@ const SUPPORTED_EXTENSIONS = new Set([
   '.dng', '.cr2', '.cr3', '.nef', '.nrw', '.arw', '.raf', '.rw2', '.orf', '.pef'
 ]);
 
-const DIRECT_PREVIEW_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
 const IGNORED_DIRECTORIES = new Set(['_PhotoAllIsAI', '.git', 'node_modules']);
 
 type AssetRow = {
@@ -172,12 +171,12 @@ export class CatalogService {
     return importedCount;
   }
 
-  resolvePreviewPath(assetId: string): string | null {
+  resolveAssetFile(assetId: string): { path: string; modifiedAt: number } | null {
     const row = this.#database
-      .prepare('SELECT path, extension FROM assets WHERE id = ?')
-      .get(assetId) as Pick<AssetRow, 'path' | 'extension'> | undefined;
-    if (!row || !DIRECT_PREVIEW_EXTENSIONS.has(row.extension)) return null;
-    return row.path;
+      .prepare('SELECT path, modified_at FROM assets WHERE id = ?')
+      .get(assetId) as Pick<AssetRow, 'path' | 'modified_at'> | undefined;
+    if (!row) return null;
+    return { path: row.path, modifiedAt: row.modified_at };
   }
 
   #toAsset(row: AssetRow): CatalogAsset {
@@ -187,10 +186,8 @@ export class CatalogService {
       format: row.extension.slice(1).toUpperCase(),
       sizeBytes: row.size_bytes,
       modifiedAt: row.modified_at,
-      previewUrl: DIRECT_PREVIEW_EXTENSIONS.has(row.extension)
-        ? `photoasset://asset/${row.id}`
-        : ''
+      thumbnailUrl: `photoasset://thumbnail/${row.id}`,
+      previewUrl: `photoasset://preview/${row.id}`
     });
   }
 }
-

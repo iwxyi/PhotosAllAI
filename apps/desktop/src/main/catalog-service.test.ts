@@ -41,9 +41,8 @@ describe('catalog image discovery', () => {
 
     expect(imported).toBe(2);
     expect(assets.map((asset) => asset.fileName).sort()).toEqual(['raw.NEF', 'visible.jpg']);
-    expect(assets.find((asset) => asset.fileName === 'visible.jpg')?.previewUrl).toMatch(/^photoasset:/);
-    expect(assets.find((asset) => asset.fileName === 'raw.NEF')?.previewUrl).toBe('');
+    expect(assets.find((asset) => asset.fileName === 'visible.jpg')?.thumbnailUrl).toMatch(/^photoasset:\/\/thumbnail/);
+    expect(assets.find((asset) => asset.fileName === 'raw.NEF')?.previewUrl).toMatch(/^photoasset:\/\/preview/);
     catalog.close();
   });
 });
-

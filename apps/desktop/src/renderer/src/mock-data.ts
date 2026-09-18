@@ -2,6 +2,7 @@ export type Photo = {
   id: string;
   fileName: string;
   src: string;
+  thumbnailSrc?: string;
   format: string;
   dimensions: string;
   rating: number;

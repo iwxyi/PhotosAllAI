@@ -59,6 +59,7 @@ function mapCatalogAssets(assets: CatalogAsset[]): Photo[] {
     id: asset.id,
     fileName: asset.fileName,
     src: asset.previewUrl,
+    thumbnailSrc: asset.thumbnailUrl,
     format: asset.format,
     dimensions: `${(asset.sizeBytes / 1_048_576).toFixed(1)} MB`,
     rating: 0
@@ -202,9 +203,11 @@ function Sidebar(): React.JSX.Element {
 }
 
 function Filmstrip({
+  items,
   selected,
   onSelect
 }: {
+  items: Photo[];
   selected: Photo;
   onSelect: (photo: Photo) => void;
 }): React.JSX.Element {
@@ -222,7 +225,7 @@ function Filmstrip({
         </div>
       </div>
       <div className="filmstrip" role="listbox" aria-label="照片">
-        {photos.map((photo, index) => (
+        {items.map((photo, index) => (
           <button
             className={`thumb${selected.id === photo.id ? ' is-selected' : ''}`}
             key={photo.id}
@@ -231,7 +234,8 @@ function Filmstrip({
             aria-selected={selected.id === photo.id}
             type="button"
           >
-            {photo.src ? <img src={photo.src} alt="" /> : <span className="raw-placeholder"><Image size={22} /><small>{photo.format}</small></span>}
+            <span className="raw-placeholder"><Image size={22} /><small>{photo.format}</small></span>
+            {photo.thumbnailSrc || photo.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" onError={(event) => { event.currentTarget.style.display = 'none'; }} /> : null}
             <span className="thumb-index">{index + 1}</span>
             {photo.status && <i className={`status-dot status-${photo.status}`} />}
             <span className="thumb-name">{photo.fileName}</span>
@@ -279,13 +283,14 @@ function Viewer({ photo }: { photo: Photo }): React.JSX.Element {
       </div>
       <div className="canvas-wrap">
         <div className={`photo-canvas${compareMode === 'split' ? ' is-comparing' : ''}`}>
-          {photo.src ? <img className="base-image" src={photo.src} alt={photo.fileName} /> : <div className="preview-unavailable"><Image size={36} /><strong>RAW 预览待生成</strong><span>图像服务将在后台提取内嵌预览</span></div>}
+          <div className="preview-unavailable"><Image size={36} /><strong>预览暂不可用</strong><span>图像服务将在后台生成屏幕预览</span></div>
+          {photo.src ? <img className="base-image" src={photo.src} alt={photo.fileName} onError={(event) => { event.currentTarget.style.display = 'none'; }} /> : null}
           {photo.src && !showOriginal && (
             <div
               className="generated-layer"
               style={compareMode === 'split' ? { clipPath: `inset(0 ${100 - split}% 0 0)` } : undefined}
             >
-              <img src={photo.src} alt="AI 生成版本" />
+              <img src={photo.src} alt="AI 生成版本" onError={(event) => { event.currentTarget.style.display = 'none'; }} />
             </div>
           )}
           {compareMode === 'split' && (
@@ -410,7 +415,7 @@ function LibraryWorkspace({ availablePhotos }: { availablePhotos: Photo[] }): Re
     <div className="workspace">
       <Sidebar />
       <main className="library-main">
-        <Filmstrip selected={selected} onSelect={(photo) => setSelectedId(photo.id)} />
+        <Filmstrip items={availablePhotos} selected={selected} onSelect={(photo) => setSelectedId(photo.id)} />
         <Viewer photo={selected} />
       </main>
       <AiPanel />

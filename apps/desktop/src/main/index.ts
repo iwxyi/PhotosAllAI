@@ -6,9 +6,11 @@ import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from 'elect
 import { appInfoSchema, catalogSnapshotSchema } from '@photoallisai/contracts';
 
 import { CatalogService } from './catalog-service';
+import { ImageCacheService, type ImageVariant } from './image-cache-service';
 
 const APP_ORIGIN = 'app://photoallisai';
 let catalog: CatalogService;
+let imageCache: ImageCacheService;
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -86,14 +88,23 @@ app.whenReady().then(() => {
   const libraryDirectory = join(app.getPath('userData'), 'library');
   mkdirSync(libraryDirectory, { recursive: true });
   catalog = new CatalogService(join(libraryDirectory, 'catalog.sqlite'));
+  imageCache = new ImageCacheService(join(app.getPath('userData'), 'cache', 'images'), catalog);
 
-  protocol.handle('photoasset', (request) => {
+  protocol.handle('photoasset', async (request) => {
     const url = new URL(request.url);
-    if (url.host !== 'asset') return new Response('Not found', { status: 404 });
+    if (url.host !== 'thumbnail' && url.host !== 'preview') {
+      return new Response('Not found', { status: 404 });
+    }
     const assetId = url.pathname.slice(1);
-    const previewPath = catalog.resolvePreviewPath(assetId);
-    if (!previewPath) return new Response('Preview unavailable', { status: 404 });
-    return net.fetch(pathToFileURL(previewPath).toString());
+    if (!/^[0-9a-f-]{20,40}$/i.test(assetId)) return new Response('Invalid asset', { status: 400 });
+
+    try {
+      const imagePath = await imageCache.getOrCreate(assetId, url.host as ImageVariant);
+      if (!imagePath) return new Response('Not found', { status: 404 });
+      return net.fetch(pathToFileURL(imagePath).toString());
+    } catch {
+      return new Response('Preview unavailable', { status: 422 });
+    }
   });
 
   registerIpc();

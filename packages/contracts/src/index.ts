@@ -21,6 +21,7 @@ export const catalogAssetSchema = z.object({
   format: z.string(),
   sizeBytes: z.number().nonnegative(),
   modifiedAt: z.number().nonnegative(),
+  thumbnailUrl: z.string(),
   previewUrl: z.string()
 });
 
