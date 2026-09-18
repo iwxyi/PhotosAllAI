@@ -8,6 +8,7 @@ import { nativeImage } from 'electron';
 import type { CatalogService } from './catalog-service';
 
 export type ImageVariant = 'thumbnail' | 'preview';
+type DecoderProbe = () => Promise<boolean>;
 
 const variants: Record<ImageVariant, { width: number; height: number; quality: number }> = {
   thumbnail: { width: 384, height: 384, quality: 82 },
@@ -19,14 +20,17 @@ export class ImageCacheService {
   readonly #inFlight = new Map<string, Promise<string>>();
   readonly #cacheDirectory: string;
   readonly #catalog: CatalogService;
+  readonly #decoderProbe: DecoderProbe;
+  #decoderAvailability: Promise<boolean> | null = null;
   #hits = 0;
   #misses = 0;
   #decodes = 0;
   #decodeMsTotal = 0;
 
-  constructor(cacheDirectory: string, catalog: CatalogService) {
+  constructor(cacheDirectory: string, catalog: CatalogService, decoderProbe: DecoderProbe = defaultDecoderProbe) {
     this.#cacheDirectory = cacheDirectory;
     this.#catalog = catalog;
+    this.#decoderProbe = decoderProbe;
   }
 
   async getStats(): Promise<{ files: number; bytes: number }> {
@@ -43,6 +47,11 @@ export class ImageCacheService {
       decodes: this.#decodes,
       decodeMsTotal: Math.round(this.#decodeMsTotal * 100) / 100
     };
+  }
+
+  async getDecoderCapabilities(): Promise<{ nativeImage: boolean; imageMagick: boolean }> {
+    this.#decoderAvailability ??= this.#decoderProbe();
+    return { nativeImage: true, imageMagick: await this.#decoderAvailability };
   }
 
   async prune(maxBytes: number): Promise<{ removedFiles: number; removedBytes: number }> {
@@ -169,5 +178,14 @@ export class ImageCacheService {
     } catch {
       return null;
     }
+  }
+}
+
+async function defaultDecoderProbe(): Promise<boolean> {
+  try {
+    await execFile('magick', ['-version'], { timeout: 5_000, windowsHide: true });
+    return true;
+  } catch {
+    return false;
   }
 }

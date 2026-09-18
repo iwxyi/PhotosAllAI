@@ -28,6 +28,8 @@ describe('image cache governance', () => {
     await utimes(newest, newTime, newTime);
     const service = new ImageCacheService(directory, {} as never);
     expect(service.getPerformanceStats()).toEqual({ hits: 0, misses: 0, decodes: 0, decodeMsTotal: 0 });
+    await expect(new ImageCacheService(directory, {} as never, async () => true).getDecoderCapabilities()).resolves.toEqual({ nativeImage: true, imageMagick: true });
+    await expect(new ImageCacheService(directory, {} as never, async () => false).getDecoderCapabilities()).resolves.toEqual({ nativeImage: true, imageMagick: false });
     expect(await service.getStats()).toEqual({ files: 2, bytes: 30 });
     expect(await service.prune(20)).toEqual({ removedFiles: 1, removedBytes: 10 });
     expect(await service.getStats()).toEqual({ files: 1, bytes: 20 });

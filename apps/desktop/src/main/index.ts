@@ -107,7 +107,7 @@ function registerIpc(): void {
     appSettings.save(appSettingsSchema.parse(input))
   );
   ipcMain.handle('app.diagnostics.v1', async () => {
-    const [profiles, cacheStats] = await Promise.all([providers.list(), imageCache.getStats()]);
+    const [profiles, cacheStats, raw] = await Promise.all([providers.list(), imageCache.getStats(), imageCache.getDecoderCapabilities()]);
     const taskCounts = tasks.list().reduce<Record<string, number>>((counts, task) => {
       counts[task.status] = (counts[task.status] ?? 0) + 1;
       return counts;
@@ -118,7 +118,7 @@ function registerIpc(): void {
       catalog: catalog.getStats(),
       providers: { total: profiles.length, enabled: profiles.filter((profile) => profile.enabled).length },
       tasks: taskCounts,
-      cache: { ...cacheStats, performance: imageCache.getPerformanceStats() }
+      cache: { ...cacheStats, performance: imageCache.getPerformanceStats(), raw }
     });
   });
   ipcMain.handle('workspace.session.get.v1', () => workspace.get());

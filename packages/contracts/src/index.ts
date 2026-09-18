@@ -22,7 +22,8 @@ export const diagnosticSnapshotSchema = z.object({
       misses: z.number().int().nonnegative(),
       decodes: z.number().int().nonnegative(),
       decodeMsTotal: z.number().nonnegative()
-    })
+    }),
+    raw: z.object({ nativeImage: z.boolean(), imageMagick: z.boolean() })
   })
 });
 export type DiagnosticSnapshot = z.infer<typeof diagnosticSnapshotSchema>;
