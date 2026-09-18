@@ -106,6 +106,7 @@ export class AnalysisService {
     const envelope: unknown = JSON.parse(text);
     const content = extractContent(envelope);
     const result = analysisResultSchema.parse(JSON.parse(stripCodeFence(content)) as unknown);
+    signal?.throwIfAborted();
     return this.#save(assetId, providerProfileId, result);
   }
 

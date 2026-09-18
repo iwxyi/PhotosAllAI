@@ -89,7 +89,11 @@ function registerIpc(): void {
     taskRunner.wake();
     return task;
   });
-  ipcMain.handle('tasks.cancel.v1', (_event, taskId: unknown) => tasks.cancel(taskIdSchema.parse(taskId)));
+  ipcMain.handle('tasks.cancel.v1', (_event, taskId: unknown) => {
+    const id = taskIdSchema.parse(taskId);
+    taskRunner.cancel(id);
+    return tasks.cancel(id);
+  });
   ipcMain.handle('tasks.retry.v1', (_event, taskId: unknown) => {
     const task = tasks.retry(taskIdSchema.parse(taskId));
     taskRunner.wake();

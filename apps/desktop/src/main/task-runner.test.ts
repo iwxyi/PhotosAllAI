@@ -29,7 +29,8 @@ describe('analysis task runner', () => {
     runner.start();
 
     await vi.waitFor(() => expect(queue.list()[0]?.status).toBe('completed'));
-    expect(analyze).toHaveBeenCalledWith('asset-1', providerProfileId);
+    expect(analyze).toHaveBeenCalledWith('asset-1', providerProfileId, expect.any(AbortSignal));
+    expect(analyze.mock.calls[0]?.[2].aborted).toBe(false);
     runner.stop();
     queue.close();
   });
@@ -64,7 +65,40 @@ describe('analysis task runner', () => {
     runner.start();
 
     await vi.waitFor(() => expect(queue.list()[0]?.status).toBe('completed'));
-    expect(generate).toHaveBeenCalledWith('asset-2', expect.objectContaining(payload));
+    expect(generate).toHaveBeenCalledWith('asset-2', expect.objectContaining(payload), expect.any(AbortSignal));
+    expect(generate.mock.calls[0]?.[2].aborted).toBe(false);
+    runner.stop();
+    queue.close();
+  });
+
+  it('aborts active generation without completing or failing the canceled task', async () => {
+    const queue = await tasks();
+    let receivedSignal: AbortSignal | undefined;
+    const generate = vi.fn((_assetId: string, _payload: unknown, signal?: AbortSignal) => {
+      receivedSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+      });
+    });
+    queue.enqueue({
+      kind: 'generation',
+      assetId: 'asset-3',
+      payload: {
+        providerProfileId,
+        batchId: '4fdbbb8a-8c33-484a-9719-2d36d61c4f66',
+        prompt: 'Remove pedestrians',
+        resultIndex: 1
+      }
+    });
+    const runner = new TaskRunner(queue, { analyze: vi.fn() }, { generate });
+    runner.start();
+    await vi.waitFor(() => expect(generate).toHaveBeenCalled());
+
+    runner.cancel(queue.list()[0]!.id);
+    queue.cancel(queue.list()[0]!.id);
+    await vi.waitFor(() => expect(receivedSignal?.aborted).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(queue.list()[0]?.status).toBe('canceled');
     runner.stop();
     queue.close();
   });

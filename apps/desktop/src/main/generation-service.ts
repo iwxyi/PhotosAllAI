@@ -100,6 +100,7 @@ export class GenerationService {
     const inputImage = await readFile(previewPath);
 
     const bytes = await requestGeneratedImage(provider, payload.prompt, inputImage, signal);
+    signal?.throwIfAborted();
     const format = detectImageFormat(bytes);
     const id = randomUUID();
     const maximum = this.#database.prepare(`
@@ -118,6 +119,7 @@ export class GenerationService {
 
     const createdAt = Date.now();
     try {
+      signal?.throwIfAborted();
       this.#database.prepare(`
         INSERT INTO generation_results (
           id, asset_id, batch_id, version, file_name, file_path, prompt,
