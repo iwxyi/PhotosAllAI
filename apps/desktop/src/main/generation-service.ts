@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { lookup } from 'node:dns/promises';
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -232,6 +233,10 @@ async function requestGeneratedImage(
   const url = new URL(candidate.url);
   const local = ['localhost', '127.0.0.1', '::1'].includes(url.hostname);
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) throw new Error('GENERATED_IMAGE_URL_UNSAFE');
+  if (!local) {
+    const addresses = await lookup(url.hostname, { all: true });
+    if (addresses.some((address) => isPrivateAddress(address.address))) throw new Error('GENERATED_IMAGE_URL_PRIVATE');
+  }
   const download = await fetch(url, { redirect: 'error', signal: signal ?? null });
   if (!download.ok) throw new Error(`GENERATED_IMAGE_HTTP_${download.status}`);
   const length = Number(download.headers.get('content-length') ?? '0');
@@ -239,6 +244,16 @@ async function requestGeneratedImage(
   const bytes = Buffer.from(await download.arrayBuffer());
   if (bytes.byteLength === 0 || bytes.byteLength > MAX_RESULT_BYTES) throw new Error('GENERATED_IMAGE_INVALID_SIZE');
   return bytes;
+}
+
+function isPrivateAddress(address: string): boolean {
+  const normalized = address.toLowerCase();
+  if (normalized === '::1' || normalized === 'localhost' || normalized.startsWith('fe80:') || normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
+  const parts = normalized.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const first = parts[0] ?? -1;
+  const second = parts[1] ?? -1;
+  return first === 10 || first === 127 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168) || (first === 169 && second === 254);
 }
 
 function extractImageCandidate(value: unknown): { base64?: string; url?: string } {

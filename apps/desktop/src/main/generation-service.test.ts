@@ -113,6 +113,12 @@ describe('managed generation results', () => {
     service.close();
   });
 
+  it('rejects HTTPS result URLs resolving to private networks', async () => {
+    const { service } = await fixture(() => ({ data: [{ url: 'https://192.168.1.10/result.png' }] }));
+    await expect(service.generate('asset-1', payload())).rejects.toThrow('GENERATED_IMAGE_URL_PRIVATE');
+    service.close();
+  });
+
   it('rejects content without a supported image signature', async () => {
     const { service } = await fixture(() => ({ data: [{ b64_json: Buffer.from('not-an-image').toString('base64') }] }));
     await expect(service.generate('asset-1', payload())).rejects.toThrow('GENERATED_IMAGE_FORMAT_UNSUPPORTED');
