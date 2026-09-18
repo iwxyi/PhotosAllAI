@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { CatalogAsset } from '@photoallisai/contracts';
+import { selectAll, updateSelection, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
 import {
   Aperture,
   Bot,
@@ -9,6 +10,7 @@ import {
   CircleAlert,
   Clock3,
   Columns2,
+  Download,
   Folder,
   FolderHeart,
   FolderOpen,
@@ -205,11 +207,13 @@ function Sidebar(): React.JSX.Element {
 function Filmstrip({
   items,
   selected,
+  selection,
   onSelect
 }: {
   items: Photo[];
   selected: Photo;
-  onSelect: (photo: Photo) => void;
+  selection: SelectionState;
+  onSelect: (photo: Photo, intent: SelectionIntent) => void;
 }): React.JSX.Element {
   return (
     <section className="filmstrip-region">
@@ -229,15 +233,19 @@ function Filmstrip({
           <button
             className={`thumb${selected.id === photo.id ? ' is-selected' : ''}`}
             key={photo.id}
-            onClick={() => onSelect(photo)}
+            onClick={(event) => onSelect(
+              photo,
+              event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace'
+            )}
             role="option"
-            aria-selected={selected.id === photo.id}
+            aria-selected={selection.selectedIds.has(photo.id)}
             type="button"
           >
             <span className="raw-placeholder"><Image size={22} /><small>{photo.format}</small></span>
             {photo.thumbnailSrc || photo.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" onError={(event) => { event.currentTarget.style.display = 'none'; }} /> : null}
             <span className="thumb-index">{index + 1}</span>
             {photo.status && <i className={`status-dot status-${photo.status}`} />}
+            {selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={11} /></span>}
             <span className="thumb-name">{photo.fileName}</span>
           </button>
         ))}
@@ -408,17 +416,53 @@ function TaskBar({ open, onToggle }: { open: boolean; onToggle: () => void }): R
 
 function LibraryWorkspace({ availablePhotos }: { availablePhotos: Photo[] }): React.JSX.Element {
   const [selectedId, setSelectedId] = useState(availablePhotos[0]!.id);
+  const [selection, setSelection] = useState<SelectionState>({
+    selectedIds: new Set([availablePhotos[0]!.id]),
+    anchorId: availablePhotos[0]!.id,
+    focusId: availablePhotos[0]!.id
+  });
   const [tasksOpen, setTasksOpen] = useState(false);
   const selected = availablePhotos.find((photo) => photo.id === selectedId) ?? availablePhotos[0]!;
+  const orderedIds = useMemo(() => availablePhotos.map((photo) => photo.id), [availablePhotos]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
+        const target = event.target;
+        if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+        event.preventDefault();
+        setSelection(selectAll(orderedIds));
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [orderedIds]);
+
+  const selectPhoto = (photo: Photo, intent: SelectionIntent) => {
+    setSelectedId(photo.id);
+    setSelection((current) => updateSelection(current, orderedIds, photo.id, intent));
+  };
 
   return (
     <div className="workspace">
       <Sidebar />
       <main className="library-main">
-        <Filmstrip items={availablePhotos} selected={selected} onSelect={(photo) => setSelectedId(photo.id)} />
+        <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} />
         <Viewer photo={selected} />
       </main>
       <AiPanel />
+      {selection.selectedIds.size > 1 && (
+        <div className="batch-actionbar">
+          <strong>已选择 {selection.selectedIds.size} 张</strong>
+          <span />
+          <button type="button"><Star size={14} />评分</button>
+          <button type="button"><Tags size={14} />标签</button>
+          <button type="button"><Sparkles size={14} />AI 分析</button>
+          <button type="button"><WandSparkles size={14} />批量生成</button>
+          <button type="button"><Download size={14} />导出</button>
+          <IconButton label="清除选择" onClick={() => setSelection({ selectedIds: new Set(), anchorId: null, focusId: selected.id })}><X size={14} /></IconButton>
+        </div>
+      )}
       <TaskBar open={tasksOpen} onToggle={() => setTasksOpen((value) => !value)} />
     </div>
   );

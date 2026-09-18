@@ -51,6 +51,21 @@ test('switches photos and comparison modes', async () => {
   await expect(page.getByLabel('调整原图和生成图分割线')).toBeVisible();
 });
 
+test('supports additive, range, and select-all interactions', async () => {
+  const options = page.getByRole('option');
+  await options.nth(0).click();
+  await options.nth(2).click({ modifiers: ['Meta'] });
+  await expect(page.getByText('已选择 2 张')).toBeVisible();
+
+  await options.nth(4).click({ modifiers: ['Shift'] });
+  await expect(page.getByText('已选择 3 张')).toBeVisible();
+
+  await page.keyboard.press('Meta+A');
+  await expect(page.getByText('已选择 6 张')).toBeVisible();
+  await expect(page.getByRole('button', { name: /批量生成/ })).toBeVisible();
+  await page.getByRole('button', { name: '清除选择' }).click();
+});
+
 test('opens the task drawer and application tabs', async () => {
   await page.getByRole('button', { name: /生成中 1/ }).click();
   await expect(page.getByText('当前任务')).toBeVisible();
