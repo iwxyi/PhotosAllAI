@@ -25,7 +25,9 @@ import {
   Clock3,
   Columns2,
   Command,
+  Copy,
   Download,
+  FilePenLine,
   Folder,
   FolderHeart,
   FolderInput,
@@ -355,7 +357,9 @@ function Viewer({
   onRate,
   onRegenerate,
   onEditTags,
-  onMove
+  onMove,
+  onCopy,
+  onRename
 }: {
   photo: Photo;
   results: GenerationResult[];
@@ -365,6 +369,8 @@ function Viewer({
   onRegenerate: (result: GenerationResult) => Promise<string>;
   onEditTags: () => void;
   onMove: () => void;
+  onCopy: () => void;
+  onRename: () => void;
 }): React.JSX.Element {
   const [compareMode, setCompareMode] = useState<CompareMode>('single');
   const [split, setSplit] = useState(52);
@@ -454,7 +460,7 @@ function Viewer({
         </div>
       </div>
       <div className="viewer-footer">
-        <div className="viewer-meta-actions"><div className="rating">{[1, 2, 3, 4, 5].map((value) => <button type="button" aria-label={`设置评分 ${value}`} key={value} onClick={() => onRate(photo.rating === value ? 0 : value)}><Star size={13} fill={value <= photo.rating ? 'currentColor' : 'none'} /></button>)}</div>{!isDemo && <IconButton label="移动到文件夹" onClick={onMove}><FolderInput size={13} /></IconButton>}<IconButton label="添加标签" onClick={onEditTags}><Tags size={13} /></IconButton></div>
+        <div className="viewer-meta-actions"><div className="rating">{[1, 2, 3, 4, 5].map((value) => <button type="button" aria-label={`设置评分 ${value}`} key={value} onClick={() => onRate(photo.rating === value ? 0 : value)}><Star size={13} fill={value <= photo.rating ? 'currentColor' : 'none'} /></button>)}</div>{!isDemo && <><IconButton label="重命名照片" onClick={onRename}><FilePenLine size={13} /></IconButton><IconButton label="复制到文件夹" onClick={onCopy}><Copy size={13} /></IconButton><IconButton label="移动到文件夹" onClick={onMove}><FolderInput size={13} /></IconButton></>}<IconButton label="添加标签" onClick={onEditTags}><Tags size={13} /></IconButton></div>
         <div className="version-switcher">
           <button type="button" onMouseDown={() => setShowOriginal(true)} onMouseUp={() => setShowOriginal(false)} onMouseLeave={() => setShowOriginal(false)}>
             按住查看原图 <kbd>O</kbd>
@@ -680,8 +686,12 @@ function PopulatedLibraryWorkspace({
   const [tagEditorOpen, setTagEditorOpen] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
   const [moveDialogOpen, setMoveDialogOpen] = useState(false);
+  const [folderAction, setFolderAction] = useState<'move' | 'copy'>('move');
   const [moveTargetFolderId, setMoveTargetFolderId] = useState('');
   const [moveBusy, setMoveBusy] = useState(false);
+  const [renameDialogOpen, setRenameDialogOpen] = useState(false);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [renameBusy, setRenameBusy] = useState(false);
   const selected = availablePhotos.find((photo) => photo.id === selectedId) ?? availablePhotos[0]!;
   const orderedIds = useMemo(() => availablePhotos.map((photo) => photo.id), [availablePhotos]);
   const collectionName = selectedFolderId
@@ -907,50 +917,84 @@ function PopulatedLibraryWorkspace({
     await onRefreshCatalog();
   };
 
-  const openMoveDialog = () => {
+  const openFolderDialog = (action: 'move' | 'copy') => {
     const firstTarget = catalogFolders.find((folder) => folder.id !== selected.folderId);
+    setFolderAction(action);
     setMoveTargetFolderId(firstTarget?.id ?? catalogFolders[0]?.id ?? '');
     setMoveDialogOpen(true);
   };
 
-  const moveSelection = async () => {
+  const executeFolderOperation = async () => {
     if (!moveTargetFolderId || moveBusy) return;
     const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
     setMoveBusy(true);
     try {
-      const report = await window.desktopApi.moveCatalogAssets({ assetIds, targetFolderId: moveTargetFolderId });
+      const report = folderAction === 'move'
+        ? await window.desktopApi.moveCatalogAssets({ assetIds, targetFolderId: moveTargetFolderId })
+        : await window.desktopApi.copyCatalogAssets({ assetIds, targetFolderId: moveTargetFolderId });
       if (report.status === 'completed') {
-        const renamed = report.files.filter((item) => item.fileName !== item.previousFileName).length;
-        setOperationNotice(`已移动 ${report.moved} 张照片${report.skipped ? `，跳过 ${report.skipped} 张` : ''}${renamed ? `，${renamed} 张已自动避让重名` : ''}。`);
+        if ('moved' in report) {
+          const renamed = report.files.filter((item) => item.fileName !== item.previousFileName).length;
+          setOperationNotice(`已移动 ${report.moved} 张照片${report.skipped ? `，跳过 ${report.skipped} 张` : ''}${renamed ? `，${renamed} 张已自动避让重名` : ''}。`);
+        } else {
+          setOperationNotice(`已复制 ${report.copied} 张照片。`);
+        }
         setMoveDialogOpen(false);
         await onRefreshCatalog();
       } else {
         setOperationNotice(report.rolledBack
-          ? `移动失败，文件已恢复原位（${report.errorCode ?? '未知错误'}）。`
-          : `移动失败且未能完整恢复，请记录操作号 ${report.operationId}。`);
+          ? `${folderAction === 'move' ? '移动' : '复制'}失败，文件系统已恢复（${report.errorCode ?? '未知错误'}）。`
+          : `${folderAction === 'move' ? '移动' : '复制'}失败且未能完整恢复，请记录操作号 ${report.operationId}。`);
       }
     } catch {
-      setOperationNotice('无法开始移动，请确认目标文件夹仍然可用。');
+      setOperationNotice(`无法开始${folderAction === 'move' ? '移动' : '复制'}，请确认目标文件夹仍然可用。`);
     } finally {
       setMoveBusy(false);
     }
   };
 
+  const openRenameDialog = () => {
+    setRenameDraft(selected.fileName);
+    setRenameDialogOpen(true);
+  };
+
+  const renameSelected = async () => {
+    if (!renameDraft || renameBusy) return;
+    setRenameBusy(true);
+    try {
+      const report = await window.desktopApi.renameCatalogAsset({ assetId: selected.id, fileName: renameDraft });
+      if (report.status === 'completed') {
+        setOperationNotice(`已重命名为 ${report.fileName}。`);
+        setRenameDialogOpen(false);
+        await onRefreshCatalog();
+      } else {
+        setOperationNotice(report.rolledBack
+          ? `重命名失败，文件已恢复原名（${report.errorCode ?? '未知错误'}）。`
+          : `重命名失败且未能恢复，请记录操作号 ${report.operationId}。`);
+      }
+    } catch {
+      setOperationNotice('无法重命名：请保留原扩展名，并避免重名或系统保留名称。');
+    } finally {
+      setRenameBusy(false);
+    }
+  };
+
   useEffect(() => {
-    if (!moveDialogOpen) return;
+    if (!moveDialogOpen && !renameDialogOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !moveBusy) setMoveDialogOpen(false);
+      if (event.key === 'Escape' && !renameBusy) setRenameDialogOpen(false);
     };
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [moveBusy, moveDialogOpen]);
+  }, [moveBusy, moveDialogOpen, renameBusy, renameDialogOpen]);
 
   return (
     <div className="workspace">
       <Sidebar folders={catalogFolders} totalCount={totalCount} selectedFolderId={selectedFolderId} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={onSelectFolder} onSelectTag={onSelectTag} isDemo={isDemo} />
       <main className="library-main">
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
-        <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={openMoveDialog} />
+        <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} />
       </main>
       <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onGenerate={generateSelection} />
       {selection.selectedIds.size > 1 && (
@@ -959,7 +1003,7 @@ function PopulatedLibraryWorkspace({
           <span />
           <button type="button" onClick={() => void rateSelection(5)}><Star size={14} />5 星</button>
           <button type="button" onClick={() => setTagEditorOpen(true)}><Tags size={14} />标签</button>
-          {!isDemo && <button type="button" onClick={openMoveDialog}><FolderInput size={14} />移动</button>}
+          {!isDemo && <><button type="button" onClick={() => openFolderDialog('copy')}><Copy size={14} />复制</button><button type="button" onClick={() => openFolderDialog('move')}><FolderInput size={14} />移动</button></>}
           <button type="button" onClick={() => void analyzeSelection()}><Sparkles size={14} />AI 分析</button>
           <button type="button" onClick={() => void generateSelection({ providerProfileId: generationProfiles[0]?.id ?? '', template: null, count: 1, instruction: '', disabledActionIds: new Set() })} disabled={generationProfiles.length === 0}><WandSparkles size={14} />批量生成</button>
           <button type="button" onClick={() => void exportLatestSelection()}><Download size={14} />导出</button>
@@ -970,7 +1014,7 @@ function PopulatedLibraryWorkspace({
       {moveDialogOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !moveBusy) setMoveDialogOpen(false); }}>
           <section className="move-dialog" role="dialog" aria-modal="true" aria-labelledby="move-dialog-title">
-            <header><div><span className="dialog-icon"><FolderInput size={16} /></span><div><h2 id="move-dialog-title">移动 {selection.selectedIds.size || 1} 张照片</h2><p>原图将移动到已导入的目标文件夹，AI 版本保持不变。</p></div></div><IconButton label="关闭移动窗口" disabled={moveBusy} onClick={() => setMoveDialogOpen(false)}><X size={15} /></IconButton></header>
+            <header><div><span className="dialog-icon">{folderAction === 'move' ? <FolderInput size={16} /> : <Copy size={16} />}</span><div><h2 id="move-dialog-title">{folderAction === 'move' ? '移动' : '复制'} {selection.selectedIds.size || 1} 张照片</h2><p>{folderAction === 'move' ? '原图将移动到已导入的目标文件夹，AI 版本保持不变。' : '将创建独立原图副本，并继承评分、收藏和用户标签。'}</p></div></div><IconButton label={`关闭${folderAction === 'move' ? '移动' : '复制'}窗口`} disabled={moveBusy} onClick={() => setMoveDialogOpen(false)}><X size={15} /></IconButton></header>
             <div className="move-folder-list" role="radiogroup" aria-label="目标文件夹">
               {catalogFolders.map((folder) => (
                 <label className={moveTargetFolderId === folder.id ? 'is-selected' : ''} key={folder.id}>
@@ -979,8 +1023,17 @@ function PopulatedLibraryWorkspace({
                 </label>
               ))}
             </div>
-            <footer><span>重名文件会自动增加编号，不会覆盖已有文件。</span><div><button className="quiet-button" type="button" disabled={moveBusy} onClick={() => setMoveDialogOpen(false)}>取消</button><button className="primary-action compact" type="button" disabled={!moveTargetFolderId || moveBusy} onClick={() => void moveSelection()}>{moveBusy ? '正在移动…' : '移动'}</button></div></footer>
+            <footer><span>重名文件会自动增加编号，不会覆盖已有文件。</span><div><button className="quiet-button" type="button" disabled={moveBusy} onClick={() => setMoveDialogOpen(false)}>取消</button><button className="primary-action compact" type="button" disabled={!moveTargetFolderId || moveBusy} onClick={() => void executeFolderOperation()}>{moveBusy ? `正在${folderAction === 'move' ? '移动' : '复制'}…` : folderAction === 'move' ? '移动' : '复制'}</button></div></footer>
           </section>
+        </div>
+      )}
+      {renameDialogOpen && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !renameBusy) setRenameDialogOpen(false); }}>
+          <form className="rename-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-dialog-title" onSubmit={(event) => { event.preventDefault(); void renameSelected(); }}>
+            <header><div><span className="dialog-icon"><FilePenLine size={16} /></span><div><h2 id="rename-dialog-title">重命名照片</h2><p>Asset 身份、分析记录和生成版本不会改变。</p></div></div><IconButton label="关闭重命名窗口" disabled={renameBusy} onClick={() => setRenameDialogOpen(false)}><X size={15} /></IconButton></header>
+            <label className="rename-field"><span>文件名</span><input autoFocus value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} aria-label="新文件名" spellCheck={false} /></label>
+            <footer><span>必须保留原扩展名，且不会覆盖同名文件。</span><div><button className="quiet-button" type="button" disabled={renameBusy} onClick={() => setRenameDialogOpen(false)}>取消</button><button className="primary-action compact" type="submit" disabled={!renameDraft || renameDraft === selected.fileName || renameBusy}>{renameBusy ? '正在重命名…' : '重命名'}</button></div></footer>
+          </form>
         </div>
       )}
       {operationNotice && <div className="operation-toast" role="status">{operationNotice}<button type="button" aria-label="关闭提示" onClick={() => setOperationNotice('')}><X size={13} /></button></div>}

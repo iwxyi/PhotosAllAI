@@ -6,6 +6,8 @@ import { app, BrowserWindow, dialog, ipcMain, net, protocol, safeStorage, shell 
 import {
   appInfoSchema,
   catalogSnapshotSchema,
+  copyCatalogAssetsInputSchema,
+  copyCatalogAssetsReportSchema,
   enqueueTaskInputSchema,
   exportGenerationResultsInputSchema,
   exportReportSchema,
@@ -14,6 +16,8 @@ import {
   listGenerationResultsInputSchema,
   moveCatalogAssetsInputSchema,
   moveCatalogAssetsReportSchema,
+  renameCatalogAssetInputSchema,
+  renameCatalogAssetReportSchema,
   reorderTaskIdsSchema,
   savePromptTemplateInputSchema,
   saveProviderProfileInputSchema,
@@ -80,6 +84,16 @@ function registerIpc(): void {
   ipcMain.handle('catalog.assets.move.v1', async (_event, input: unknown) =>
     moveCatalogAssetsReportSchema.parse(
       await fileOperations.move(moveCatalogAssetsInputSchema.parse(input))
+    )
+  );
+  ipcMain.handle('catalog.assets.copy.v1', async (_event, input: unknown) =>
+    copyCatalogAssetsReportSchema.parse(
+      await fileOperations.copy(copyCatalogAssetsInputSchema.parse(input))
+    )
+  );
+  ipcMain.handle('catalog.asset.rename.v1', async (_event, input: unknown) =>
+    renameCatalogAssetReportSchema.parse(
+      await fileOperations.rename(renameCatalogAssetInputSchema.parse(input))
     )
   );
 

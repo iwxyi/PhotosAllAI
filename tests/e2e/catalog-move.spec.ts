@@ -46,7 +46,7 @@ test.afterAll(async () => {
   await rm(testRoot, { recursive: true, force: true });
 });
 
-test('moves an original through the folder chooser and persists it after reload', async () => {
+test('moves, copies, and renames originals through safe file dialogs', async () => {
   await expect(page.getByText('MOVE_ME.jpg', { exact: true }).first()).toBeVisible();
   await page.getByRole('button', { name: '移动到文件夹' }).click();
 
@@ -69,4 +69,28 @@ test('moves an original through the folder chooser and persists it after reload'
   await expect(page.getByRole('button', { name: /target 1/ })).toBeVisible();
   await page.getByRole('button', { name: /target 1/ }).click();
   await expect(page.getByText('1 张照片', { exact: true })).toBeVisible();
+
+  await page.getByRole('button', { name: '复制到文件夹' }).click();
+  const copyDialog = page.getByRole('dialog', { name: '复制 1 张照片' });
+  await expect(copyDialog).toBeVisible();
+  await copyDialog.getByText('source', { exact: true }).click();
+  await page.screenshot({ path: 'test-results/catalog-copy-dialog.png', animations: 'disabled' });
+  await copyDialog.getByRole('button', { name: '复制', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('已复制 1 张照片');
+  expect(await readFile(path.join(sourceDirectory, 'MOVE_ME.jpg'))).not.toHaveLength(0);
+
+  await page.getByRole('button', { name: '重命名照片' }).click();
+  const renameDialog = page.getByRole('dialog', { name: '重命名照片' });
+  await expect(renameDialog).toBeVisible();
+  await renameDialog.getByLabel('新文件名').fill('RENAMED.jpg');
+  await page.screenshot({ path: 'test-results/catalog-rename-dialog.png', animations: 'disabled' });
+  await renameDialog.getByRole('button', { name: '重命名', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('已重命名为 RENAMED.jpg');
+  expect(await readFile(path.join(targetDirectory, 'RENAMED.jpg'))).not.toHaveLength(0);
+  await expect(stat(path.join(targetDirectory, 'MOVE_ME.jpg'))).rejects.toMatchObject({ code: 'ENOENT' });
+
+  await page.reload();
+  await expect(page.getByText('RENAMED.jpg', { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('button', { name: /source 1/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /target 1/ })).toBeVisible();
 });

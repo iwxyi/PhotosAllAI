@@ -95,6 +95,41 @@ export const moveCatalogAssetsReportSchema = z.object({
 
 export type MoveCatalogAssetsReport = z.infer<typeof moveCatalogAssetsReportSchema>;
 
+export const copyCatalogAssetsInputSchema = moveCatalogAssetsInputSchema;
+export type CopyCatalogAssetsInput = z.infer<typeof copyCatalogAssetsInputSchema>;
+
+export const copyCatalogAssetsReportSchema = z.object({
+  operationId: z.string().uuid(),
+  status: z.enum(['completed', 'failed']),
+  total: z.number().int().nonnegative(),
+  copied: z.number().int().nonnegative(),
+  rolledBack: z.boolean(),
+  files: z.array(z.object({
+    sourceAssetId: z.string().min(1),
+    assetId: z.string().min(1),
+    fileName: z.string().min(1)
+  })),
+  errorCode: z.string().min(1).nullable()
+});
+export type CopyCatalogAssetsReport = z.infer<typeof copyCatalogAssetsReportSchema>;
+
+export const renameCatalogAssetInputSchema = z.object({
+  assetId: z.string().min(1),
+  fileName: z.string().min(1).max(255)
+});
+export type RenameCatalogAssetInput = z.infer<typeof renameCatalogAssetInputSchema>;
+
+export const renameCatalogAssetReportSchema = z.object({
+  operationId: z.string().uuid(),
+  status: z.enum(['completed', 'failed']),
+  assetId: z.string().min(1),
+  previousFileName: z.string().min(1),
+  fileName: z.string().min(1),
+  rolledBack: z.boolean(),
+  errorCode: z.string().min(1).nullable()
+});
+export type RenameCatalogAssetReport = z.infer<typeof renameCatalogAssetReportSchema>;
+
 export const updateCatalogMetadataInputSchema = z.object({
   assetIds: z.array(z.string().min(1)).min(1).max(10_000),
   rating: z.number().int().min(0).max(5).optional(),
@@ -356,6 +391,8 @@ export interface DesktopApi {
   updateCatalogMetadata(input: UpdateCatalogMetadataInput): Promise<CatalogAsset[]>;
   updateCatalogTags(input: UpdateCatalogTagsInput): Promise<CatalogTag[]>;
   moveCatalogAssets(input: MoveCatalogAssetsInput): Promise<MoveCatalogAssetsReport>;
+  copyCatalogAssets(input: CopyCatalogAssetsInput): Promise<CopyCatalogAssetsReport>;
+  renameCatalogAsset(input: RenameCatalogAssetInput): Promise<RenameCatalogAssetReport>;
   importFolders(): Promise<CatalogSnapshot | null>;
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;

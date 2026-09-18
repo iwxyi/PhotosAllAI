@@ -123,6 +123,28 @@ describe('safe catalog file moves', () => {
     await expect(stat(path.join(context.source, 'photo.jpg'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('preserves a source modified during cross-volume copy and removes the stale destination', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    let linkAttempt = 0;
+    const service = new FileOperationService(context.databasePath, {
+      copyFile, readdir, realpath, stat, unlink,
+      link: async (source, destination) => {
+        linkAttempt += 1;
+        if (linkAttempt === 1) throw Object.assign(new Error('cross device'), { code: 'EXDEV' });
+        await writeFile(path.join(context.source, 'photo.jpg'), 'new-content-written-during-copy');
+        await link(source, destination);
+      }
+    });
+    services.push(service);
+
+    const report = await service.move({ assetIds: [asset.id], targetFolderId: context.targetFolderId });
+
+    expect(report).toMatchObject({ status: 'failed', errorCode: 'FILE_CHANGED_DURING_COPY', rolledBack: true });
+    expect(await readFile(path.join(context.source, 'photo.jpg'), 'utf8')).toBe('new-content-written-during-copy');
+    expect(await readdir(context.target)).toEqual([]);
+  });
+
   it('reports a permission failure without changing files or catalog state', async () => {
     const context = await fixture();
     const asset = context.catalog.listAssets()[0]!;
@@ -210,3 +232,199 @@ describe('safe catalog file moves', () => {
     expect(await readFile(generated, 'utf8')).toBe('generated-version');
   });
 });
+
+describe('catalog copies and renames', () => {
+  it('creates an independent asset copy with user metadata but no shared inode', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    context.catalog.updateMetadata({ assetIds: [asset.id], rating: 5, favorite: true });
+    context.catalog.updateTags({ assetIds: [asset.id], addTags: ['交付'], removeTagIds: [] });
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    const report = await service.copy({ assetIds: [asset.id], targetFolderId: context.targetFolderId });
+
+    expect(report).toMatchObject({ status: 'completed', copied: 1, rolledBack: false });
+    const copied = context.catalog.listAssets().find((item) => item.id === report.files[0]?.assetId);
+    expect(copied).toMatchObject({ folderId: context.targetFolderId, fileName: 'photo.jpg', rating: 5, favorite: true });
+    expect(copied?.tags.map((tag) => tag.name)).toEqual(['交付']);
+    expect(await readFile(path.join(context.source, 'photo.jpg'), 'utf8')).toBe('content:photo.jpg');
+    expect(await readFile(path.join(context.target, 'photo.jpg'), 'utf8')).toBe('content:photo.jpg');
+    await writeFile(path.join(context.source, 'photo.jpg'), 'source-changed');
+    expect(await readFile(path.join(context.target, 'photo.jpg'), 'utf8')).toBe('content:photo.jpg');
+  });
+
+  it('copies within one folder using a deterministic conflict suffix', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    const report = await service.copy({ assetIds: [asset.id], targetFolderId: asset.folderId });
+
+    expect(report.files[0]?.fileName).toBe('photo (1).jpg');
+    expect(await readFile(path.join(context.source, 'photo (1).jpg'), 'utf8')).toBe('content:photo.jpg');
+  });
+
+  it('removes earlier copies when a later batch item fails', async () => {
+    const context = await fixture(['a.jpg', 'b.jpg']);
+    const assets = context.catalog.listAssets().sort((left, right) => left.fileName.localeCompare(right.fileName));
+    const service = new FileOperationService(context.databasePath, {
+      link, readdir, realpath, stat, unlink,
+      copyFile: async (source, destination, mode) => {
+        if (String(source).endsWith(`${path.sep}b.jpg`)) {
+          throw Object.assign(new Error('denied'), { code: 'EACCES' });
+        }
+        await copyFile(source, destination, mode);
+      }
+    });
+    services.push(service);
+
+    const report = await service.copy({
+      assetIds: assets.map((item) => item.id), targetFolderId: context.targetFolderId
+    });
+
+    expect(report).toMatchObject({ status: 'failed', copied: 0, rolledBack: true, errorCode: 'EACCES' });
+    expect(await readdir(context.target)).toEqual([]);
+    expect(context.catalog.listAssets()).toHaveLength(2);
+  });
+
+  it('removes a verified copy interrupted before catalog commit', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const bootstrap = new FileOperationService(context.databasePath);
+    bootstrap.close();
+    const sourcePath = path.join(context.source, 'photo.jpg');
+    const destinationPath = path.join(context.target, 'photo.jpg');
+    await copyFile(sourcePath, destinationPath);
+    const operationId = randomUUID();
+    const itemId = randomUUID();
+    const database = new DatabaseSync(context.databasePath);
+    database.prepare(`
+      INSERT INTO file_operations (id, kind, status, target_folder_id, created_at)
+      VALUES (?, 'copy', 'executing', ?, ?)
+    `).run(operationId, context.targetFolderId, Date.now());
+    database.prepare(`
+      INSERT INTO file_operation_items (
+        id, operation_id, ordinal, asset_id, source_folder_id, destination_folder_id,
+        source_path, destination_path, temporary_path, original_file_name,
+        destination_file_name, size_bytes, result_asset_id, status
+      ) VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, 'photo.jpg', 'photo.jpg', ?, ?, 'copying')
+    `).run(
+      itemId, operationId, asset.id, asset.folderId, context.targetFolderId,
+      sourcePath, destinationPath, path.join(context.target, '.copy-recovery.tmp'),
+      asset.sizeBytes, randomUUID()
+    );
+    database.close();
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    expect(await service.recoverInterruptedOperations()).toBe(1);
+    await expect(stat(destinationPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(sourcePath, 'utf8')).toBe('content:photo.jpg');
+    expect(context.catalog.listAssets()).toHaveLength(1);
+  });
+
+  it('renames an asset without changing its identity', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    const report = await service.rename({ assetId: asset.id, fileName: 'portrait-final.jpg' });
+
+    expect(report).toMatchObject({ status: 'completed', assetId: asset.id, previousFileName: 'photo.jpg', fileName: 'portrait-final.jpg' });
+    expect(await readFile(path.join(context.source, 'portrait-final.jpg'), 'utf8')).toBe('content:photo.jpg');
+    await expect(stat(path.join(context.source, 'photo.jpg'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(context.catalog.resolveAssetFile(asset.id)?.fileName).toBe('portrait-final.jpg');
+  });
+
+  it('supports a case-only rename while preserving the asset id', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    const report = await service.rename({ assetId: asset.id, fileName: 'PHOTO.jpg' });
+
+    expect(report.status).toBe('completed');
+    expect(context.catalog.resolveAssetFile(asset.id)?.fileName).toBe('PHOTO.jpg');
+  });
+
+  it('recovers a case-only rename without deleting the shared filesystem entry', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const bootstrap = new FileOperationService(context.databasePath);
+    bootstrap.close();
+    const sourcePath = path.join(context.source, 'photo.jpg');
+    const destinationPath = path.join(context.source, 'PHOTO.jpg');
+    await rename(sourcePath, destinationPath);
+    const operationId = randomUUID();
+    const itemId = randomUUID();
+    const database = new DatabaseSync(context.databasePath);
+    database.prepare(`
+      INSERT INTO file_operations (id, kind, status, target_folder_id, created_at)
+      VALUES (?, 'rename', 'executing', ?, ?)
+    `).run(operationId, asset.folderId, Date.now());
+    database.prepare(`
+      INSERT INTO file_operation_items (
+        id, operation_id, ordinal, asset_id, source_folder_id, destination_folder_id,
+        source_path, destination_path, temporary_path, original_file_name,
+        destination_file_name, size_bytes, status
+      ) VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, 'photo.jpg', 'PHOTO.jpg', ?, 'moving')
+    `).run(
+      itemId, operationId, asset.id, asset.folderId, asset.folderId,
+      sourcePath, destinationPath, path.join(context.source, '.rename-recovery.tmp'), asset.sizeBytes
+    );
+    database.close();
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    expect(await service.recoverInterruptedOperations()).toBe(1);
+    expect(await readFile(sourcePath, 'utf8')).toBe('content:photo.jpg');
+    expect((await readdir(context.source)).filter((name) => normalizeForTest(name) === 'photo.jpg')).toHaveLength(1);
+  });
+
+  it('rejects conflicts, extension changes, and platform-invalid names without touching the source', async () => {
+    const context = await fixture();
+    await writeFile(path.join(context.source, 'existing.jpg'), 'existing');
+    const asset = context.catalog.listAssets()[0]!;
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    await expect(service.rename({ assetId: asset.id, fileName: 'existing.jpg' })).rejects.toThrow('EEXIST');
+    await expect(service.rename({ assetId: asset.id, fileName: 'photo.png' })).rejects.toThrow('FILE_EXTENSION_CHANGE_NOT_ALLOWED');
+    await expect(service.rename({ assetId: asset.id, fileName: 'CON.jpg' })).rejects.toThrow('INVALID_FILE_NAME');
+    expect(await readFile(path.join(context.source, 'photo.jpg'), 'utf8')).toBe('content:photo.jpg');
+  });
+
+  it('upgrades the move-only operation log before executing newer operations', async () => {
+    const context = await fixture();
+    const database = new DatabaseSync(context.databasePath);
+    database.exec(`
+      CREATE TABLE file_operations (
+        id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('move')), status TEXT NOT NULL,
+        target_folder_id TEXT NOT NULL, created_at INTEGER NOT NULL, completed_at INTEGER, error_code TEXT
+      );
+      CREATE TABLE file_operation_items (
+        id TEXT PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES file_operations(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL, asset_id TEXT NOT NULL, source_folder_id TEXT NOT NULL,
+        destination_folder_id TEXT NOT NULL, source_path TEXT NOT NULL, destination_path TEXT NOT NULL,
+        temporary_path TEXT NOT NULL, original_file_name TEXT NOT NULL, destination_file_name TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL, status TEXT NOT NULL, error_code TEXT, UNIQUE(operation_id, ordinal)
+      );
+    `);
+    database.close();
+    const asset = context.catalog.listAssets()[0]!;
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    const report = await service.copy({ assetIds: [asset.id], targetFolderId: context.targetFolderId });
+
+    expect(report.status).toBe('completed');
+  });
+});
+
+function normalizeForTest(value: string): string {
+  return value.normalize('NFC').toLocaleLowerCase('en-US');
+}

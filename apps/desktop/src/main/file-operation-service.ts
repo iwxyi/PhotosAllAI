@@ -5,6 +5,7 @@ import {
   link,
   readdir,
   realpath,
+  rename,
   stat,
   unlink
 } from 'node:fs/promises';
@@ -12,10 +13,18 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  copyCatalogAssetsInputSchema,
+  copyCatalogAssetsReportSchema,
   moveCatalogAssetsInputSchema,
   moveCatalogAssetsReportSchema,
+  renameCatalogAssetInputSchema,
+  renameCatalogAssetReportSchema,
+  type CopyCatalogAssetsInput,
+  type CopyCatalogAssetsReport,
   type MoveCatalogAssetsInput,
-  type MoveCatalogAssetsReport
+  type MoveCatalogAssetsReport,
+  type RenameCatalogAssetInput,
+  type RenameCatalogAssetReport
 } from '@photoallisai/contracts';
 
 type FileSystemPort = {
@@ -23,6 +32,7 @@ type FileSystemPort = {
   link: typeof link;
   readdir: typeof readdir;
   realpath: typeof realpath;
+  rename?: typeof rename;
   stat: typeof stat;
   unlink: typeof unlink;
 };
@@ -40,6 +50,8 @@ type PlannedItem = {
   sizeBytes: number;
   skipped: boolean;
   status: string;
+  resultAssetId: string | null;
+  modifiedAt?: number;
 };
 
 type AssetLocationRow = {
@@ -50,7 +62,7 @@ type AssetLocationRow = {
   size_bytes: number;
 };
 
-const nodeFileSystem: FileSystemPort = { copyFile, link, readdir, realpath, stat, unlink };
+const nodeFileSystem: FileSystemPort = { copyFile, link, readdir, realpath, rename, stat, unlink };
 
 export class FileOperationService {
   readonly #database: DatabaseSync;
@@ -70,12 +82,26 @@ export class FileOperationService {
 
   async move(rawInput: MoveCatalogAssetsInput): Promise<MoveCatalogAssetsReport> {
     const input = moveCatalogAssetsInputSchema.parse(rawInput);
+    return this.#serialize(() => this.#executeMove(input));
+  }
+
+  async copy(rawInput: CopyCatalogAssetsInput): Promise<CopyCatalogAssetsReport> {
+    const input = copyCatalogAssetsInputSchema.parse(rawInput);
+    return this.#serialize(() => this.#executeCopy(input));
+  }
+
+  async rename(rawInput: RenameCatalogAssetInput): Promise<RenameCatalogAssetReport> {
+    const input = renameCatalogAssetInputSchema.parse(rawInput);
+    return this.#serialize(() => this.#executeRename(input));
+  }
+
+  async #serialize<Result>(operation: () => Promise<Result>): Promise<Result> {
     const previous = this.#pending;
     let release!: () => void;
     this.#pending = new Promise<void>((resolve) => { release = resolve; });
     await previous;
     try {
-      return await this.#executeMove(input);
+      return await operation();
     } finally {
       release();
     }
@@ -83,16 +109,21 @@ export class FileOperationService {
 
   async recoverInterruptedOperations(): Promise<number> {
     const operations = this.#database.prepare(`
-      SELECT id FROM file_operations WHERE status IN ('planned', 'executing', 'compensating')
+      SELECT id, kind FROM file_operations WHERE status IN ('planned', 'executing', 'compensating')
       ORDER BY created_at ASC
-    `).all() as { id: string }[];
+    `).all() as { id: string; kind: 'move' | 'copy' | 'rename' }[];
     for (const operation of operations) {
       const items = this.#readOperationItems(operation.id).reverse();
       let recovered = true;
       for (const item of items) {
-        if (item.skipped || !['moving', 'moved', 'compensation_failed'].includes(item.status)) continue;
+        const recoverableStatuses = operation.kind === 'copy'
+          ? ['copying', 'copied', 'compensation_failed']
+          : ['moving', 'moved', 'compensation_failed'];
+        if (item.skipped || !recoverableStatuses.includes(item.status)) continue;
         try {
-          await this.#recoverItem(item);
+          if (operation.kind === 'copy') await this.#recoverCopyItem(item);
+          else if (operation.kind === 'rename') await this.#recoverRenameItem(item);
+          else await this.#recoverItem(item);
           this.#setItemStatus(item.id, 'rolled_back', null);
         } catch (error) {
           recovered = false;
@@ -107,10 +138,14 @@ export class FileOperationService {
   }
 
   #migrate(): void {
+    const existing = this.#database.prepare(`
+      SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'file_operations'
+    `).get() as { sql: string } | undefined;
+    if (existing && !existing.sql.includes("'copy'")) this.#upgradeOperationTables();
     this.#database.exec(`
       CREATE TABLE IF NOT EXISTS file_operations (
         id TEXT PRIMARY KEY,
-        kind TEXT NOT NULL CHECK(kind IN ('move')),
+        kind TEXT NOT NULL CHECK(kind IN ('move', 'copy', 'rename')),
         status TEXT NOT NULL,
         target_folder_id TEXT NOT NULL,
         created_at INTEGER NOT NULL,
@@ -130,12 +165,60 @@ export class FileOperationService {
         original_file_name TEXT NOT NULL,
         destination_file_name TEXT NOT NULL,
         size_bytes INTEGER NOT NULL,
+        result_asset_id TEXT,
         status TEXT NOT NULL,
         error_code TEXT,
         UNIQUE(operation_id, ordinal)
       );
       CREATE INDEX IF NOT EXISTS file_operation_items_operation_idx
         ON file_operation_items(operation_id, ordinal);
+    `);
+  }
+
+  #upgradeOperationTables(): void {
+    this.#database.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE file_operations_new (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK(kind IN ('move', 'copy', 'rename')),
+        status TEXT NOT NULL,
+        target_folder_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        completed_at INTEGER,
+        error_code TEXT
+      );
+      CREATE TABLE file_operation_items_new (
+        id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL REFERENCES file_operations_new(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL,
+        asset_id TEXT NOT NULL,
+        source_folder_id TEXT NOT NULL,
+        destination_folder_id TEXT NOT NULL,
+        source_path TEXT NOT NULL,
+        destination_path TEXT NOT NULL,
+        temporary_path TEXT NOT NULL,
+        original_file_name TEXT NOT NULL,
+        destination_file_name TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        result_asset_id TEXT,
+        status TEXT NOT NULL,
+        error_code TEXT,
+        UNIQUE(operation_id, ordinal)
+      );
+      INSERT INTO file_operations_new SELECT * FROM file_operations;
+      INSERT INTO file_operation_items_new (
+        id, operation_id, ordinal, asset_id, source_folder_id, destination_folder_id,
+        source_path, destination_path, temporary_path, original_file_name,
+        destination_file_name, size_bytes, status, error_code
+      ) SELECT id, operation_id, ordinal, asset_id, source_folder_id, destination_folder_id,
+        source_path, destination_path, temporary_path, original_file_name,
+        destination_file_name, size_bytes, status, error_code FROM file_operation_items;
+      DROP TABLE file_operation_items;
+      DROP TABLE file_operations;
+      ALTER TABLE file_operations_new RENAME TO file_operations;
+      ALTER TABLE file_operation_items_new RENAME TO file_operation_items;
+      CREATE INDEX file_operation_items_operation_idx ON file_operation_items(operation_id, ordinal);
+      COMMIT;
     `);
   }
 
@@ -179,6 +262,176 @@ export class FileOperationService {
     }
   }
 
+  async #executeCopy(input: CopyCatalogAssetsInput): Promise<CopyCatalogAssetsReport> {
+    const operationId = randomUUID();
+    let items: PlannedItem[] = [];
+    const completed: PlannedItem[] = [];
+    try {
+      items = await this.#planCopy(operationId, input);
+      this.#database.prepare('UPDATE file_operations SET status = ? WHERE id = ?').run('executing', operationId);
+      for (const item of items) {
+        this.#setItemStatus(item.id, 'copying', null);
+        await this.#copyVerified(item.sourcePath, item.destinationPath, item.temporaryPath);
+        const copiedStats = await this.#fileSystem.stat(item.destinationPath);
+        item.sizeBytes = copiedStats.size;
+        item.modifiedAt = Math.trunc(copiedStats.mtimeMs);
+        completed.push(item);
+        this.#setItemStatus(item.id, 'copied', null);
+      }
+      this.#commitCopies(operationId, completed);
+      return this.#copyReport(operationId, items, 'completed', false, null);
+    } catch (error) {
+      const code = errorCode(error);
+      let rolledBack = true;
+      if (items.length > 0) {
+        this.#database.prepare('UPDATE file_operations SET status = ?, error_code = ? WHERE id = ?')
+          .run('compensating', code, operationId);
+      }
+      for (const item of completed.reverse()) {
+        try {
+          await removeIfPresent(this.#fileSystem, item.destinationPath);
+          this.#setItemStatus(item.id, 'rolled_back', null);
+        } catch (compensationError) {
+          rolledBack = false;
+          this.#setItemStatus(item.id, 'compensation_failed', errorCode(compensationError));
+        }
+      }
+      if (items.length === 0) throw error;
+      this.#database.prepare(`
+        UPDATE file_operations SET status = ?, completed_at = ?, error_code = ? WHERE id = ?
+      `).run(rolledBack ? 'failed' : 'compensation_failed', Date.now(), code, operationId);
+      return this.#copyReport(operationId, items, 'failed', rolledBack, code);
+    }
+  }
+
+  async #executeRename(input: RenameCatalogAssetInput): Promise<RenameCatalogAssetReport> {
+    const operationId = randomUUID();
+    let item: PlannedItem | null = null;
+    let completed = false;
+    try {
+      item = await this.#planRename(operationId, input);
+      this.#database.prepare('UPDATE file_operations SET status = ? WHERE id = ?').run('executing', operationId);
+      this.#setItemStatus(item.id, 'moving', null);
+      await this.#moveRenameItem(item, false);
+      completed = true;
+      this.#setItemStatus(item.id, 'moved', null);
+      this.#commitCatalog(operationId, [item]);
+      return renameCatalogAssetReportSchema.parse({
+        operationId, status: 'completed', assetId: item.assetId,
+        previousFileName: item.previousFileName, fileName: item.fileName,
+        rolledBack: false, errorCode: null
+      });
+    } catch (error) {
+      const code = errorCode(error);
+      let rolledBack = true;
+      if (item) {
+        this.#database.prepare('UPDATE file_operations SET status = ?, error_code = ? WHERE id = ?')
+          .run('compensating', code, operationId);
+        if (completed) {
+          try {
+            await this.#moveRenameItem(item, true);
+            this.#setItemStatus(item.id, 'rolled_back', null);
+          } catch (compensationError) {
+            rolledBack = false;
+            this.#setItemStatus(item.id, 'compensation_failed', errorCode(compensationError));
+          }
+        }
+        this.#database.prepare(`
+          UPDATE file_operations SET status = ?, completed_at = ?, error_code = ? WHERE id = ?
+        `).run(rolledBack ? 'failed' : 'compensation_failed', Date.now(), code, operationId);
+      }
+      if (!item) throw error;
+      return renameCatalogAssetReportSchema.parse({
+        operationId, status: 'failed', assetId: item.assetId,
+        previousFileName: item.previousFileName, fileName: item.fileName,
+        rolledBack, errorCode: code
+      });
+    }
+  }
+
+  async #planCopy(operationId: string, input: CopyCatalogAssetsInput): Promise<PlannedItem[]> {
+    const assetIds = [...new Set(input.assetIds)];
+    if (assetIds.length !== input.assetIds.length) throw new Error('DUPLICATE_ASSET_ID');
+    const target = this.#database.prepare('SELECT id, path FROM folders WHERE id = ?')
+      .get(input.targetFolderId) as { id: string; path: string } | undefined;
+    if (!target) throw new Error('TARGET_FOLDER_NOT_FOUND');
+    const targetPath = await this.#fileSystem.realpath(target.path);
+    if (!(await this.#fileSystem.stat(targetPath)).isDirectory()) throw new Error('TARGET_NOT_DIRECTORY');
+    const placeholders = assetIds.map(() => '?').join(', ');
+    const rows = this.#database.prepare(`
+      SELECT id, folder_id, path, file_name, size_bytes FROM assets WHERE id IN (${placeholders})
+    `).all(...assetIds) as AssetLocationRow[];
+    if (rows.length !== assetIds.length) throw new Error('CATALOG_ASSET_SET_MISMATCH');
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const reserved = new Set((await this.#fileSystem.readdir(targetPath)).map(normalizeFileName));
+    const items = assetIds.map((assetId): PlannedItem => {
+      const asset = byId.get(assetId)!;
+      const fileName = reserveFileName(asset.file_name, reserved);
+      const itemId = randomUUID();
+      return {
+        id: itemId, assetId, sourcePath: asset.path,
+        destinationPath: path.join(targetPath, fileName),
+        temporaryPath: path.join(targetPath, `.photoallisai-${operationId}-${itemId}.tmp`),
+        sourceFolderId: asset.folder_id, destinationFolderId: target.id,
+        previousFileName: asset.file_name, fileName, sizeBytes: asset.size_bytes,
+        skipped: false, status: 'planned', resultAssetId: randomUUID()
+      };
+    });
+    this.#persistPlan(operationId, 'copy', target.id, items);
+    return items;
+  }
+
+  async #planRename(operationId: string, input: RenameCatalogAssetInput): Promise<PlannedItem> {
+    const asset = this.#database.prepare(`
+      SELECT id, folder_id, path, file_name, size_bytes FROM assets WHERE id = ?
+    `).get(input.assetId) as AssetLocationRow | undefined;
+    if (!asset) throw new Error('CATALOG_ASSET_NOT_FOUND');
+    const fileName = validateRenamedFileName(input.fileName, asset.file_name);
+    if (fileName === asset.file_name) throw new Error('FILE_NAME_UNCHANGED');
+    const directory = await this.#fileSystem.realpath(path.dirname(asset.path));
+    const entries = await this.#fileSystem.readdir(directory);
+    if (entries.some((entry) => entry !== asset.file_name && normalizeFileName(entry) === normalizeFileName(fileName))) {
+      throw new Error('EEXIST');
+    }
+    const itemId = randomUUID();
+    const item: PlannedItem = {
+      id: itemId, assetId: asset.id, sourcePath: asset.path,
+      destinationPath: path.join(directory, fileName),
+      temporaryPath: path.join(directory, `.photoallisai-${operationId}-${itemId}.tmp`),
+      sourceFolderId: asset.folder_id, destinationFolderId: asset.folder_id,
+      previousFileName: asset.file_name, fileName, sizeBytes: asset.size_bytes,
+      skipped: false, status: 'planned', resultAssetId: null
+    };
+    this.#persistPlan(operationId, 'rename', asset.folder_id, [item]);
+    return item;
+  }
+
+  #persistPlan(operationId: string, kind: 'copy' | 'rename', targetFolderId: string, items: PlannedItem[]): void {
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      this.#database.prepare(`
+        INSERT INTO file_operations (id, kind, status, target_folder_id, created_at)
+        VALUES (?, ?, 'planned', ?, ?)
+      `).run(operationId, kind, targetFolderId, Date.now());
+      const insertItem = this.#database.prepare(`
+        INSERT INTO file_operation_items (
+          id, operation_id, ordinal, asset_id, source_folder_id, destination_folder_id,
+          source_path, destination_path, temporary_path, original_file_name,
+          destination_file_name, size_bytes, result_asset_id, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned')
+      `);
+      items.forEach((item, ordinal) => insertItem.run(
+        item.id, operationId, ordinal, item.assetId, item.sourceFolderId,
+        item.destinationFolderId, item.sourcePath, item.destinationPath, item.temporaryPath,
+        item.previousFileName, item.fileName, item.sizeBytes, item.resultAssetId
+      ));
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   async #plan(operationId: string, input: MoveCatalogAssetsInput): Promise<PlannedItem[]> {
     const assetIds = [...new Set(input.assetIds)];
     if (assetIds.length !== input.assetIds.length) throw new Error('DUPLICATE_ASSET_ID');
@@ -213,7 +466,8 @@ export class FileOperationService {
         fileName,
         sizeBytes: asset.size_bytes,
         skipped,
-        status: skipped ? 'skipped' : 'planned'
+        status: skipped ? 'skipped' : 'planned',
+        resultAssetId: null
       };
     });
 
@@ -227,13 +481,14 @@ export class FileOperationService {
         INSERT INTO file_operation_items (
           id, operation_id, ordinal, asset_id, source_folder_id, destination_folder_id,
           source_path, destination_path, temporary_path, original_file_name,
-          destination_file_name, size_bytes, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          destination_file_name, size_bytes, result_asset_id, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       items.forEach((item, ordinal) => insertItem.run(
         item.id, operationId, ordinal, item.assetId, item.sourceFolderId,
         item.destinationFolderId, item.sourcePath, item.destinationPath, item.temporaryPath,
-        item.previousFileName, item.fileName, item.sizeBytes, item.skipped ? 'skipped' : 'planned'
+        item.previousFileName, item.fileName, item.sizeBytes, item.resultAssetId,
+        item.skipped ? 'skipped' : 'planned'
       ));
       this.#database.exec('COMMIT');
     } catch (error) {
@@ -261,6 +516,16 @@ export class FileOperationService {
       return;
     }
 
+    await this.#copyVerified(source, destination, temporary);
+    try {
+      await this.#fileSystem.unlink(source);
+    } catch (error) {
+      await removeIfPresent(this.#fileSystem, destination);
+      throw error;
+    }
+  }
+
+  async #copyVerified(source: string, destination: string, temporary: string): Promise<void> {
     await removeIfPresent(this.#fileSystem, temporary);
     let destinationPublished = false;
     try {
@@ -292,18 +557,31 @@ export class FileOperationService {
           throw new Error('PUBLISHED_FILE_HASH_MISMATCH');
         }
       }
-      await this.#fileSystem.unlink(temporary);
-      try {
-        await this.#fileSystem.unlink(source);
-      } catch (error) {
-        await removeIfPresent(this.#fileSystem, destination);
-        throw error;
+      const finalSourceStats = await this.#fileSystem.stat(source);
+      if (
+        finalSourceStats.size !== sourceStats.size
+        || finalSourceStats.mtimeMs !== sourceStats.mtimeMs
+        || finalSourceStats.ctimeMs !== sourceStats.ctimeMs
+      ) {
+        throw new Error('FILE_CHANGED_DURING_COPY');
       }
+      await this.#fileSystem.unlink(temporary);
     } catch (error) {
       await removeIfPresent(this.#fileSystem, temporary);
       if (destinationPublished) await removeIfPresent(this.#fileSystem, destination);
       throw error;
     }
+  }
+
+  async #moveRenameItem(item: PlannedItem, reverse: boolean): Promise<void> {
+    const source = reverse ? item.destinationPath : item.sourcePath;
+    const destination = reverse ? item.sourcePath : item.destinationPath;
+    if (normalizeFileName(item.previousFileName) === normalizeFileName(item.fileName)) {
+      if (!this.#fileSystem.rename) throw new Error('CASE_ONLY_RENAME_UNSUPPORTED');
+      await this.#fileSystem.rename(source, destination);
+      return;
+    }
+    await this.#transfer(source, destination, item.temporaryPath);
   }
 
   #commitCatalog(operationId: string, items: PlannedItem[]): void {
@@ -317,6 +595,40 @@ export class FileOperationService {
           item.destinationFolderId, item.destinationPath, item.fileName, item.assetId, item.sourcePath
         );
         if (result.changes !== 1) throw new Error('CATALOG_CONCURRENT_CHANGE');
+      }
+      this.#database.prepare(`
+        UPDATE file_operations SET status = 'completed', completed_at = ?, error_code = NULL WHERE id = ?
+      `).run(Date.now(), operationId);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  #commitCopies(operationId: string, items: PlannedItem[]): void {
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const insertAsset = this.#database.prepare(`
+        INSERT INTO assets (
+          id, folder_id, path, file_name, extension, size_bytes, modified_at,
+          imported_at, rating, favorite
+        )
+        SELECT ?, ?, ?, ?, extension, ?, ?, ?, rating, favorite FROM assets WHERE id = ?
+      `);
+      const copyTags = this.#database.prepare(`
+        INSERT INTO asset_tags (asset_id, tag_id, created_at)
+        SELECT ?, tag_id, ? FROM asset_tags WHERE asset_id = ?
+      `);
+      for (const item of items) {
+        if (!item.resultAssetId || item.modifiedAt === undefined) throw new Error('COPY_RESULT_INCOMPLETE');
+        const now = Date.now();
+        const result = insertAsset.run(
+          item.resultAssetId, item.destinationFolderId, item.destinationPath, item.fileName,
+          item.sizeBytes, item.modifiedAt, now, item.assetId
+        );
+        if (result.changes !== 1) throw new Error('CATALOG_CONCURRENT_CHANGE');
+        copyTags.run(item.resultAssetId, now, item.assetId);
       }
       this.#database.prepare(`
         UPDATE file_operations SET status = 'completed', completed_at = ?, error_code = NULL WHERE id = ?
@@ -352,15 +664,39 @@ export class FileOperationService {
     });
   }
 
+  #copyReport(
+    operationId: string,
+    items: PlannedItem[],
+    status: 'completed' | 'failed',
+    rolledBack: boolean,
+    code: string | null
+  ): CopyCatalogAssetsReport {
+    const copied = status === 'completed' ? items : [];
+    return copyCatalogAssetsReportSchema.parse({
+      operationId,
+      status,
+      total: items.length,
+      copied: copied.length,
+      rolledBack,
+      files: copied.map((item) => ({
+        sourceAssetId: item.assetId,
+        assetId: item.resultAssetId,
+        fileName: item.fileName
+      })),
+      errorCode: code
+    });
+  }
+
   #readOperationItems(operationId: string): PlannedItem[] {
     const rows = this.#database.prepare(`
       SELECT id, asset_id, source_path, destination_path, temporary_path, source_folder_id,
-        destination_folder_id, original_file_name, destination_file_name, size_bytes, status
+        destination_folder_id, original_file_name, destination_file_name, size_bytes, result_asset_id, status
       FROM file_operation_items WHERE operation_id = ? ORDER BY ordinal ASC
     `).all(operationId) as Array<{
       id: string; asset_id: string; source_path: string; destination_path: string;
       temporary_path: string; source_folder_id: string; destination_folder_id: string;
-      original_file_name: string; destination_file_name: string; size_bytes: number; status: string;
+      original_file_name: string; destination_file_name: string; size_bytes: number;
+      result_asset_id: string | null; status: string;
     }>;
     return rows.map((row) => ({
       id: row.id,
@@ -374,7 +710,8 @@ export class FileOperationService {
       fileName: row.destination_file_name,
       sizeBytes: row.size_bytes,
       skipped: row.status === 'skipped',
-      status: row.status
+      status: row.status,
+      resultAssetId: row.result_asset_id
     }));
   }
 
@@ -402,6 +739,46 @@ export class FileOperationService {
     await removeIfPresent(this.#fileSystem, item.temporaryPath);
   }
 
+  async #recoverCopyItem(item: PlannedItem): Promise<void> {
+    const [sourceExists, destinationExists] = await Promise.all([
+      exists(this.#fileSystem, item.sourcePath), exists(this.#fileSystem, item.destinationPath)
+    ]);
+    if (!sourceExists) throw new Error('RECOVERY_SOURCE_MISSING');
+    if (destinationExists) {
+      const [sourceStats, destinationStats] = await Promise.all([
+        this.#fileSystem.stat(item.sourcePath), this.#fileSystem.stat(item.destinationPath)
+      ]);
+      if (sourceStats.size !== destinationStats.size) throw new Error('RECOVERY_DESTINATION_CONFLICT');
+      const [sourceHash, destinationHash] = await Promise.all([
+        hashFile(item.sourcePath), hashFile(item.destinationPath)
+      ]);
+      if (sourceHash !== destinationHash) throw new Error('RECOVERY_DESTINATION_CONFLICT');
+      await removeIfPresent(this.#fileSystem, item.destinationPath);
+    }
+    await removeIfPresent(this.#fileSystem, item.temporaryPath);
+  }
+
+  async #recoverRenameItem(item: PlannedItem): Promise<void> {
+    if (normalizeFileName(item.previousFileName) !== normalizeFileName(item.fileName)) {
+      await this.#recoverItem(item);
+      return;
+    }
+    const entries = await this.#fileSystem.readdir(path.dirname(item.sourcePath));
+    const hasSourceName = entries.includes(item.previousFileName);
+    const hasDestinationName = entries.includes(item.fileName);
+    if (hasSourceName && !hasDestinationName) {
+      await removeIfPresent(this.#fileSystem, item.temporaryPath);
+      return;
+    }
+    if (!hasSourceName && hasDestinationName) {
+      if (!this.#fileSystem.rename) throw new Error('CASE_ONLY_RENAME_UNSUPPORTED');
+      await this.#fileSystem.rename(item.destinationPath, item.sourcePath);
+      await removeIfPresent(this.#fileSystem, item.temporaryPath);
+      return;
+    }
+    throw new Error('RECOVERY_DESTINATION_CONFLICT');
+  }
+
   #setItemStatus(itemId: string, status: string, code: string | null): void {
     this.#database.prepare('UPDATE file_operation_items SET status = ?, error_code = ? WHERE id = ?')
       .run(status, code, itemId);
@@ -423,6 +800,24 @@ function reserveFileName(original: string, reserved: Set<string>): string {
 
 function normalizeFileName(value: string): string {
   return value.normalize('NFC').toLocaleLowerCase('en-US');
+}
+
+function validateRenamedFileName(requested: string, current: string): string {
+  const fileName = requested.normalize('NFC');
+  if (fileName !== fileName.trim() || fileName === '.' || fileName === '..') throw new Error('INVALID_FILE_NAME');
+  const hasControlCharacter = [...fileName].some((character) => character.charCodeAt(0) < 32);
+  if (path.basename(fileName) !== fileName || /[<>:"/\\|?*]/u.test(fileName) || hasControlCharacter) {
+    throw new Error('INVALID_FILE_NAME');
+  }
+  if (fileName.endsWith('.') || fileName.endsWith(' ') || Buffer.byteLength(fileName, 'utf8') > 255) {
+    throw new Error('INVALID_FILE_NAME');
+  }
+  const deviceStem = fileName.split('.')[0]!.toUpperCase();
+  if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/u.test(deviceStem)) throw new Error('INVALID_FILE_NAME');
+  if (path.extname(fileName).toLocaleLowerCase('en-US') !== path.extname(current).toLocaleLowerCase('en-US')) {
+    throw new Error('FILE_EXTENSION_CHANGE_NOT_ALLOWED');
+  }
+  return fileName;
 }
 
 async function hashFile(filePath: string): Promise<string> {
