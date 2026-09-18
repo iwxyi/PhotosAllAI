@@ -352,6 +352,21 @@ describe('catalog copies and renames', () => {
     expect(context.catalog.resolveAssetFile(asset.id)?.fileName).toBe('PHOTO.jpg');
   });
 
+  it('renames a batch serially and reports partial failures', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    const report = await service.renameMany({ items: [
+      { assetId: asset.id, fileName: 'batch-final.jpg' },
+      { assetId: asset.id, fileName: 'batch-again.jpg' }
+    ] });
+
+    expect(report).toMatchObject({ total: 2, succeeded: 2, failed: 0 });
+    expect(context.catalog.resolveAssetFile(asset.id)?.fileName).toBe('batch-again.jpg');
+  });
+
   it('recovers a case-only rename without deleting the shared filesystem entry', async () => {
     const context = await fixture();
     const asset = context.catalog.listAssets()[0]!;

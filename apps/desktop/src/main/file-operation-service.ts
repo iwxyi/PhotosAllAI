@@ -22,6 +22,8 @@ import {
   moveCatalogAssetsReportSchema,
   renameCatalogAssetInputSchema,
   renameCatalogAssetReportSchema,
+  renameCatalogAssetsInputSchema,
+  renameCatalogAssetsReportSchema,
   type CatalogAssetRemovalInput,
   type CatalogAssetRemovalReport,
   type CopyCatalogAssetsInput,
@@ -31,6 +33,7 @@ import {
   type MoveCatalogAssetsReport,
   type RenameCatalogAssetInput,
   type RenameCatalogAssetReport
+  , type RenameCatalogAssetsInput, type RenameCatalogAssetsReport
 } from '@photoallisai/contracts';
 
 type FileSystemPort = {
@@ -109,6 +112,20 @@ export class FileOperationService {
   async rename(rawInput: RenameCatalogAssetInput): Promise<RenameCatalogAssetReport> {
     const input = renameCatalogAssetInputSchema.parse(rawInput);
     return this.#serialize(() => this.#executeRename(input));
+  }
+
+  async renameMany(rawInput: RenameCatalogAssetsInput): Promise<RenameCatalogAssetsReport> {
+    const input = renameCatalogAssetsInputSchema.parse(rawInput);
+    return this.#serialize(async () => {
+      const reports: RenameCatalogAssetReport[] = [];
+      for (const item of input.items) reports.push(await this.#executeRename(item));
+      return renameCatalogAssetsReportSchema.parse({
+        total: reports.length,
+        succeeded: reports.filter((report) => report.status === 'completed').length,
+        failed: reports.filter((report) => report.status !== 'completed').length,
+        reports
+      });
+    });
   }
 
   async removeFromCatalog(rawInput: CatalogAssetRemovalInput): Promise<CatalogAssetRemovalReport> {

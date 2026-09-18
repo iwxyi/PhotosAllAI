@@ -781,6 +781,8 @@ function PopulatedLibraryWorkspace({
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameDraft, setRenameDraft] = useState('');
   const [renameBusy, setRenameBusy] = useState(false);
+  const [batchRenameDialogOpen, setBatchRenameDialogOpen] = useState(false);
+  const [batchRenamePrefix, setBatchRenamePrefix] = useState('照片');
   const [removalMode, setRemovalMode] = useState<'remove' | 'trash' | null>(null);
   const [removalBusy, setRemovalBusy] = useState(false);
   const [albumTargetId, setAlbumTargetId] = useState('');
@@ -1093,6 +1095,27 @@ function PopulatedLibraryWorkspace({
     }
   };
 
+  const renameBatch = async () => {
+    if (!batchRenamePrefix.trim() || renameBusy) return;
+    const items = [...selection.selectedIds].map((assetId, index) => {
+      const photo = availablePhotos.find((item) => item.id === assetId);
+      const extension = photo?.fileName.match(/\.[^.]+$/)?.[0] ?? '';
+      return { assetId, fileName: `${batchRenamePrefix.trim()}_${String(index + 1).padStart(3, '0')}${extension}` };
+    });
+    if (items.length < 2) return;
+    setRenameBusy(true);
+    try {
+      const report = await window.desktopApi.renameCatalogAssets({ items });
+      setOperationNotice(`批量重命名完成 ${report.succeeded} 张，失败 ${report.failed} 张。`);
+      setBatchRenameDialogOpen(false);
+      await onRefreshCatalog();
+    } catch {
+      setOperationNotice('批量重命名失败，请检查文件名和权限。');
+    } finally {
+      setRenameBusy(false);
+    }
+  };
+
   const executeRemoval = async () => {
     if (!removalMode || removalBusy) return;
     const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
@@ -1159,6 +1182,7 @@ function PopulatedLibraryWorkspace({
           <button type="button" onClick={() => void analyzeSelection()}><Sparkles size={14} />AI 分析</button>
           <button type="button" onClick={() => void generateSelection({ providerProfileId: generationProfiles[0]?.id ?? '', template: null, count: 1, instruction: '', disabledActionIds: new Set() })} disabled={generationProfiles.length === 0}><WandSparkles size={14} />批量生成</button>
           <button type="button" onClick={() => void exportLatestSelection()}><Download size={14} />导出</button>
+          {!isDemo && <button type="button" onClick={() => setBatchRenameDialogOpen(true)}><FilePenLine size={14} />批量重命名</button>}
           {!isDemo && catalogAlbums.length > 0 && <><select aria-label="目标相册" value={albumTargetId} onChange={(event) => setAlbumTargetId(event.target.value)}><option value="">相册</option>{catalogAlbums.map((album) => <option key={album.id} value={album.id}>{album.name}</option>)}</select><button type="button" disabled={!albumTargetId} onClick={() => void updateAlbumMembership('add')}><FolderHeart size={14} />加入</button>{selectedAlbumId && <button type="button" onClick={() => void updateAlbumMembership('remove')}><FolderHeart size={14} />移出</button>}</>}
           {!isDemo && <><button type="button" onClick={() => setRemovalMode('remove')}><LibraryBig size={14} />移除</button><button className="is-danger" type="button" onClick={() => setRemovalMode('trash')}><Trash2 size={14} />回收站</button></>}
           <IconButton label="清除选择" onClick={() => setSelection({ selectedIds: new Set(), anchorId: null, focusId: selected.id })}><X size={14} /></IconButton>
@@ -1190,6 +1214,7 @@ function PopulatedLibraryWorkspace({
           </form>
         </div>
       )}
+      {batchRenameDialogOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !renameBusy) setBatchRenameDialogOpen(false); }}><form className="rename-dialog" role="dialog" aria-modal="true" aria-labelledby="batch-rename-dialog-title" onSubmit={(event) => { event.preventDefault(); void renameBatch(); }}><header><div><span className="dialog-icon"><FilePenLine size={16} /></span><div><h2 id="batch-rename-dialog-title">批量重命名</h2><p>将按选择顺序生成序号，原扩展名保持不变。</p></div></div><IconButton label="关闭批量重命名窗口" disabled={renameBusy} onClick={() => setBatchRenameDialogOpen(false)}><X size={15} /></IconButton></header><label className="rename-field"><span>名称前缀</span><input autoFocus aria-label="批量重命名前缀" value={batchRenamePrefix} onChange={(event) => setBatchRenamePrefix(event.target.value)} /></label><footer><span>共 {selection.selectedIds.size} 张 · 示例：{batchRenamePrefix || '照片'}_001</span><div><button className="quiet-button" type="button" disabled={renameBusy} onClick={() => setBatchRenameDialogOpen(false)}>取消</button><button className="primary-action compact" type="submit" disabled={selection.selectedIds.size < 2 || !batchRenamePrefix.trim() || renameBusy}>{renameBusy ? '正在重命名…' : '开始重命名'}</button></div></footer></form></div>}
       {removalMode && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !removalBusy) setRemovalMode(null); }}>
           <section className={`removal-dialog${removalMode === 'trash' ? ' is-destructive' : ''}`} role="alertdialog" aria-modal="true" aria-labelledby="removal-dialog-title">

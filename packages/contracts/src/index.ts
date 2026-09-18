@@ -179,6 +179,17 @@ export const renameCatalogAssetReportSchema = z.object({
   errorCode: z.string().min(1).nullable()
 });
 export type RenameCatalogAssetReport = z.infer<typeof renameCatalogAssetReportSchema>;
+export const renameCatalogAssetsInputSchema = z.object({
+  items: z.array(renameCatalogAssetInputSchema).min(1).max(10_000)
+});
+export type RenameCatalogAssetsInput = z.infer<typeof renameCatalogAssetsInputSchema>;
+export const renameCatalogAssetsReportSchema = z.object({
+  total: z.number().int().nonnegative(),
+  succeeded: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  reports: z.array(renameCatalogAssetReportSchema)
+});
+export type RenameCatalogAssetsReport = z.infer<typeof renameCatalogAssetsReportSchema>;
 
 export const catalogAssetRemovalInputSchema = z.object({
   assetIds: z.array(z.string().min(1)).min(1).max(10_000)
@@ -503,6 +514,7 @@ export interface DesktopApi {
   moveCatalogAssets(input: MoveCatalogAssetsInput): Promise<MoveCatalogAssetsReport>;
   copyCatalogAssets(input: CopyCatalogAssetsInput): Promise<CopyCatalogAssetsReport>;
   renameCatalogAsset(input: RenameCatalogAssetInput): Promise<RenameCatalogAssetReport>;
+  renameCatalogAssets(input: RenameCatalogAssetsInput): Promise<RenameCatalogAssetsReport>;
   removeCatalogAssets(input: CatalogAssetRemovalInput): Promise<CatalogAssetRemovalReport>;
   trashCatalogAssets(input: CatalogAssetRemovalInput): Promise<CatalogAssetRemovalReport>;
   listFileOperationHistory(): Promise<FileOperationHistoryItem[]>;

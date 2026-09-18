@@ -23,6 +23,8 @@ import {
   moveCatalogAssetsInputSchema,
   moveCatalogAssetsReportSchema,
   renameCatalogAssetInputSchema,
+  renameCatalogAssetsInputSchema,
+  renameCatalogAssetsReportSchema,
   renameCatalogAssetReportSchema,
   reorderTaskIdsSchema,
   savePromptTemplateInputSchema,
@@ -124,6 +126,9 @@ function registerIpc(): void {
     renameCatalogAssetReportSchema.parse(
       await fileOperations.rename(renameCatalogAssetInputSchema.parse(input))
     )
+  );
+  ipcMain.handle('catalog.assets.rename.v1', async (_event, input: unknown) =>
+    renameCatalogAssetsReportSchema.parse(await fileOperations.renameMany(renameCatalogAssetsInputSchema.parse(input)))
   );
   ipcMain.handle('catalog.assets.remove.v1', async (_event, input: unknown) =>
     catalogAssetRemovalReportSchema.parse(
