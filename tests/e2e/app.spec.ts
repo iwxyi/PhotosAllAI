@@ -1,13 +1,18 @@
 import path from 'node:path';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test';
 
 let electronApp: ElectronApplication;
 let page: Page;
+let userDataDirectory: string;
 
 test.beforeAll(async () => {
+  userDataDirectory = await mkdtemp(path.join(tmpdir(), 'photoallisai-e2e-'));
   electronApp = await electron.launch({
-    args: [path.resolve('apps/desktop/out/main/index.js')]
+    args: [path.resolve('apps/desktop/out/main/index.js')],
+    env: { ...process.env, PHOTOALLISAI_USER_DATA: userDataDirectory }
   });
   page = await electronApp.firstWindow();
   await page.waitForLoadState('domcontentloaded');
@@ -15,6 +20,7 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   await electronApp.close();
+  await rm(userDataDirectory, { recursive: true, force: true });
 });
 
 test('starts with the secure library workspace', async () => {

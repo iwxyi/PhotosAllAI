@@ -3,11 +3,12 @@ import type { DesktopApi } from '@photoallisai/contracts';
 
 const api: DesktopApi = {
   getAppInfo: () => ipcRenderer.invoke('app.info.v1') as ReturnType<DesktopApi['getAppInfo']>,
-  chooseImportFolders: () =>
-    ipcRenderer.invoke('catalog.choose-import-folders.v1') as ReturnType<
-      DesktopApi['chooseImportFolders']
+  listCatalogAssets: () =>
+    ipcRenderer.invoke('catalog.assets.list.v1') as ReturnType<DesktopApi['listCatalogAssets']>,
+  importFolders: () =>
+    ipcRenderer.invoke('catalog.folders.import.v1') as ReturnType<
+      DesktopApi['importFolders']
     >
 };
 
 contextBridge.exposeInMainWorld('desktopApi', Object.freeze(api));
-

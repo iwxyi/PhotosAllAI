@@ -15,8 +15,26 @@ export const openPathResultSchema = z.object({
 
 export type OpenPathResult = z.infer<typeof openPathResultSchema>;
 
+export const catalogAssetSchema = z.object({
+  id: z.string(),
+  fileName: z.string(),
+  format: z.string(),
+  sizeBytes: z.number().nonnegative(),
+  modifiedAt: z.number().nonnegative(),
+  previewUrl: z.string()
+});
+
+export type CatalogAsset = z.infer<typeof catalogAssetSchema>;
+
+export const catalogSnapshotSchema = z.object({
+  assets: z.array(catalogAssetSchema),
+  importedCount: z.number().int().nonnegative()
+});
+
+export type CatalogSnapshot = z.infer<typeof catalogSnapshotSchema>;
+
 export interface DesktopApi {
   getAppInfo(): Promise<AppInfo>;
-  chooseImportFolders(): Promise<OpenPathResult>;
+  listCatalogAssets(): Promise<CatalogAsset[]>;
+  importFolders(): Promise<CatalogSnapshot | null>;
 }
-

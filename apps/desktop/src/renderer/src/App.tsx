@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import type { CatalogAsset } from '@photoallisai/contracts';
 import {
   Aperture,
   Bot,
@@ -53,6 +54,17 @@ const folders = [
   { name: '待交付', count: 37 }
 ];
 
+function mapCatalogAssets(assets: CatalogAsset[]): Photo[] {
+  return assets.map((asset) => ({
+    id: asset.id,
+    fileName: asset.fileName,
+    src: asset.previewUrl,
+    format: asset.format,
+    dimensions: `${(asset.sizeBytes / 1_048_576).toFixed(1)} MB`,
+    rating: 0
+  }));
+}
+
 function IconButton({
   label,
   children,
@@ -104,12 +116,7 @@ function AppTabs({ active, onChange }: { active: WorkspaceTab; onChange: (id: Wo
   );
 }
 
-function AppHeader({ active, onChange }: { active: WorkspaceTab; onChange: (id: WorkspaceTab) => void }) {
-  const importFolders = async () => {
-    const result = await window.desktopApi.chooseImportFolders();
-    if (!result.canceled) console.info('Selected folders', result.paths);
-  };
-
+function AppHeader({ active, onChange, onImport }: { active: WorkspaceTab; onChange: (id: WorkspaceTab) => void; onImport: () => void }) {
   return (
     <header className="app-header">
       <div className="titlebar-drag" />
@@ -124,7 +131,7 @@ function AppHeader({ active, onChange }: { active: WorkspaceTab; onChange: (id: 
           <span>搜索图库</span>
           <kbd>⌘ K</kbd>
         </button>
-        <IconButton label="导入文件夹" onClick={() => void importFolders()}>
+        <IconButton label="导入文件夹" onClick={onImport}>
           <FolderOpen size={16} />
         </IconButton>
         <div className="sync-indicator" title="所有更改已保存">
@@ -224,7 +231,7 @@ function Filmstrip({
             aria-selected={selected.id === photo.id}
             type="button"
           >
-            <img src={photo.src} alt="" />
+            {photo.src ? <img src={photo.src} alt="" /> : <span className="raw-placeholder"><Image size={22} /><small>{photo.format}</small></span>}
             <span className="thumb-index">{index + 1}</span>
             {photo.status && <i className={`status-dot status-${photo.status}`} />}
             <span className="thumb-name">{photo.fileName}</span>
@@ -272,8 +279,8 @@ function Viewer({ photo }: { photo: Photo }): React.JSX.Element {
       </div>
       <div className="canvas-wrap">
         <div className={`photo-canvas${compareMode === 'split' ? ' is-comparing' : ''}`}>
-          <img className="base-image" src={photo.src} alt={photo.fileName} />
-          {!showOriginal && (
+          {photo.src ? <img className="base-image" src={photo.src} alt={photo.fileName} /> : <div className="preview-unavailable"><Image size={36} /><strong>RAW 预览待生成</strong><span>图像服务将在后台提取内嵌预览</span></div>}
+          {photo.src && !showOriginal && (
             <div
               className="generated-layer"
               style={compareMode === 'split' ? { clipPath: `inset(0 ${100 - split}% 0 0)` } : undefined}
@@ -394,15 +401,16 @@ function TaskBar({ open, onToggle }: { open: boolean; onToggle: () => void }): R
   );
 }
 
-function LibraryWorkspace(): React.JSX.Element {
-  const [selected, setSelected] = useState(photos[0]!);
+function LibraryWorkspace({ availablePhotos }: { availablePhotos: Photo[] }): React.JSX.Element {
+  const [selectedId, setSelectedId] = useState(availablePhotos[0]!.id);
   const [tasksOpen, setTasksOpen] = useState(false);
+  const selected = availablePhotos.find((photo) => photo.id === selectedId) ?? availablePhotos[0]!;
 
   return (
     <div className="workspace">
       <Sidebar />
       <main className="library-main">
-        <Filmstrip selected={selected} onSelect={setSelected} />
+        <Filmstrip selected={selected} onSelect={(photo) => setSelectedId(photo.id)} />
         <Viewer photo={selected} />
       </main>
       <AiPanel />
@@ -435,11 +443,23 @@ function PlaceholderPage({ type }: { type: Exclude<WorkspaceTab, 'library'> }): 
 
 export function App(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('library');
+  const [catalogPhotos, setCatalogPhotos] = useState<Photo[]>([]);
+
+  useEffect(() => {
+    void window.desktopApi.listCatalogAssets().then((assets) => setCatalogPhotos(mapCatalogAssets(assets)));
+  }, []);
+
+  const importFolders = async () => {
+    const result = await window.desktopApi.importFolders();
+    if (result) setCatalogPhotos(mapCatalogAssets(result.assets));
+  };
+
+  const availablePhotos = catalogPhotos.length > 0 ? catalogPhotos : photos;
 
   return (
     <div className="app-shell">
-      <AppHeader active={activeTab} onChange={setActiveTab} />
-      {activeTab === 'library' ? <LibraryWorkspace /> : <PlaceholderPage type={activeTab} />}
+      <AppHeader active={activeTab} onChange={setActiveTab} onImport={() => void importFolders()} />
+      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} /> : <PlaceholderPage type={activeTab} />}
     </div>
   );
 }

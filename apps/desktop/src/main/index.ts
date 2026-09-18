@@ -1,9 +1,21 @@
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
-import { appInfoSchema, openPathResultSchema } from '@photoallisai/contracts';
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from 'electron';
+import { appInfoSchema, catalogSnapshotSchema } from '@photoallisai/contracts';
+
+import { CatalogService } from './catalog-service';
 
 const APP_ORIGIN = 'app://photoallisai';
+let catalog: CatalogService;
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'photoasset',
+    privileges: { standard: true, secure: true, supportFetchAPI: true }
+  }
+]);
 
 function registerIpc(): void {
   ipcMain.handle('app.info.v1', () =>
@@ -14,13 +26,17 @@ function registerIpc(): void {
     })
   );
 
-  ipcMain.handle('catalog.choose-import-folders.v1', async () => {
+  ipcMain.handle('catalog.assets.list.v1', () => catalog.listAssets());
+
+  ipcMain.handle('catalog.folders.import.v1', async () => {
     const result = await dialog.showOpenDialog({
       title: '添加照片文件夹',
       properties: ['openDirectory', 'multiSelections']
     });
+    if (result.canceled) return null;
 
-    return openPathResultSchema.parse({ canceled: result.canceled, paths: result.filePaths });
+    const importedCount = await catalog.importFolders(result.filePaths);
+    return catalogSnapshotSchema.parse({ assets: catalog.listAssets(), importedCount });
   });
 }
 
@@ -63,7 +79,23 @@ function createWindow(): BrowserWindow {
 const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) app.quit();
 
+const customUserData = process.env.PHOTOALLISAI_USER_DATA;
+if (customUserData) app.setPath('userData', customUserData);
+
 app.whenReady().then(() => {
+  const libraryDirectory = join(app.getPath('userData'), 'library');
+  mkdirSync(libraryDirectory, { recursive: true });
+  catalog = new CatalogService(join(libraryDirectory, 'catalog.sqlite'));
+
+  protocol.handle('photoasset', (request) => {
+    const url = new URL(request.url);
+    if (url.host !== 'asset') return new Response('Not found', { status: 404 });
+    const assetId = url.pathname.slice(1);
+    const previewPath = catalog.resolvePreviewPath(assetId);
+    if (!previewPath) return new Response('Preview unavailable', { status: 404 });
+    return net.fetch(pathToFileURL(previewPath).toString());
+  });
+
   registerIpc();
   let mainWindow = createWindow();
 
@@ -79,4 +111,8 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  catalog?.close();
 });
