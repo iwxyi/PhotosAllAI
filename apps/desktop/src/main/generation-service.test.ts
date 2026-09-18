@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -106,6 +106,21 @@ describe('managed generation results', () => {
     expect(await readFile(sourcePath)).toEqual(original);
     expect(await readdir(portableDirectory)).toEqual(expect.arrayContaining(['manifest.json', result.fileName]));
     expect(await readdir(directory)).not.toContain('managed');
+    service.close();
+  });
+
+  it('relocates portable results when the original moves or is renamed', async () => {
+    const { service, directory, sourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', { ...payload(), storageMode: 'portable' });
+    const nextDirectory = path.join(directory, 'moved');
+    const nextSourcePath = path.join(nextDirectory, 'RENAMED.CR3');
+    await mkdir(nextDirectory, { recursive: true });
+    await rename(sourcePath, nextSourcePath);
+    await service.relocatePortableResults('asset-1', sourcePath, nextSourcePath, 'IMG_1024.CR3', 'RENAMED.CR3');
+    const relocated = service.resolveResultFile(result.id);
+    expect(relocated).toContain(path.join('moved', '_PhotoAllIsAI', 'RENAMED__ASSET1'));
+    expect(relocated).toBeTruthy();
+    expect(await readFile(relocated!)).toEqual(png);
     service.close();
   });
 

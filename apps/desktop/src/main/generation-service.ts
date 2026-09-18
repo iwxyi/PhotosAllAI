@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -99,6 +99,44 @@ export class GenerationService {
   resolveResultFile(resultId: string): string | null {
     const row = this.#database.prepare('SELECT file_path FROM generation_results WHERE id = ?').get(resultId) as { file_path: string } | undefined;
     return row?.file_path ?? null;
+  }
+
+  async relocatePortableResults(
+    assetId: string,
+    previousSourcePath: string,
+    nextSourcePath: string,
+    previousFileName: string,
+    nextFileName: string
+  ): Promise<void> {
+    const rows = this.#database.prepare(`
+      SELECT id, batch_id, file_name, file_path FROM generation_results
+      WHERE asset_id = ? AND storage_mode = 'portable'
+    `).all(assetId) as Array<{ id: string; batch_id: string; file_name: string; file_path: string }>;
+    if (rows.length === 0) return;
+
+    const shortAssetId = assetId.replaceAll('-', '').slice(0, 8).toUpperCase();
+    const previousDirectory = path.join(
+      path.dirname(previousSourcePath), '_PhotoAllIsAI',
+      `${sanitizeFileStem(path.parse(previousFileName).name)}__${shortAssetId}`
+    );
+    const nextDirectory = path.join(
+      path.dirname(nextSourcePath), '_PhotoAllIsAI',
+      `${sanitizeFileStem(path.parse(nextFileName).name)}__${shortAssetId}`
+    );
+    if (previousDirectory !== nextDirectory) {
+      const previousExists = await pathExists(previousDirectory);
+      const nextExists = await pathExists(nextDirectory);
+      if (previousExists && !nextExists) {
+        await mkdir(path.dirname(nextDirectory), { recursive: true });
+        await rename(previousDirectory, nextDirectory);
+      }
+    }
+
+    const update = this.#database.prepare('UPDATE generation_results SET file_path = ? WHERE id = ?');
+    for (const row of rows) {
+      const candidate = path.join(nextDirectory, row.batch_id, row.file_name);
+      if (await pathExists(candidate)) update.run(candidate, row.id);
+    }
   }
 
   updateReview(rawInput: UpdateGenerationResultReviewInput): GenerationResult {
@@ -202,6 +240,15 @@ export class GenerationService {
       templateId: row.template_id, templateVersion: row.template_version, reviewState: row.review_state, createdAt: row.created_at
       , storageMode: row.storage_mode
     });
+  }
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
   }
 }
 

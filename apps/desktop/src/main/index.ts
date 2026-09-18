@@ -84,6 +84,16 @@ protocol.registerSchemesAsPrivileged([
   }
 ]);
 
+async function relocatePortableAfterFileOperation(
+  assetId: string,
+  previous: { path: string; fileName: string } | null
+): Promise<void> {
+  if (!previous) return;
+  const next = catalog.resolveAssetFile(assetId);
+  if (!next) return;
+  await generation.relocatePortableResults(assetId, previous.path, next.path, previous.fileName, next.fileName);
+}
+
 function registerIpc(): void {
   ipcMain.handle('app.info.v1', () =>
     appInfoSchema.parse({
@@ -143,24 +153,36 @@ function registerIpc(): void {
   ipcMain.handle('catalog.tags.update.v1', (_event, input: unknown) =>
     catalog.updateTags(updateCatalogTagsInputSchema.parse(input))
   );
-  ipcMain.handle('catalog.assets.move.v1', async (_event, input: unknown) =>
-    moveCatalogAssetsReportSchema.parse(
-      await fileOperations.move(moveCatalogAssetsInputSchema.parse(input))
-    )
-  );
+  ipcMain.handle('catalog.assets.move.v1', async (_event, input: unknown) => {
+    const parsed = moveCatalogAssetsInputSchema.parse(input);
+    const previous = new Map(parsed.assetIds.map((assetId) => [assetId, catalog.resolveAssetFile(assetId)]));
+    const report = moveCatalogAssetsReportSchema.parse(await fileOperations.move(parsed));
+    if (report.status === 'completed') {
+      await Promise.allSettled(report.files.map((file) => relocatePortableAfterFileOperation(file.assetId, previous.get(file.assetId) ?? null)));
+    }
+    return report;
+  });
   ipcMain.handle('catalog.assets.copy.v1', async (_event, input: unknown) =>
     copyCatalogAssetsReportSchema.parse(
       await fileOperations.copy(copyCatalogAssetsInputSchema.parse(input))
     )
   );
-  ipcMain.handle('catalog.asset.rename.v1', async (_event, input: unknown) =>
-    renameCatalogAssetReportSchema.parse(
-      await fileOperations.rename(renameCatalogAssetInputSchema.parse(input))
-    )
-  );
-  ipcMain.handle('catalog.assets.rename.v1', async (_event, input: unknown) =>
-    renameCatalogAssetsReportSchema.parse(await fileOperations.renameMany(renameCatalogAssetsInputSchema.parse(input)))
-  );
+  ipcMain.handle('catalog.asset.rename.v1', async (_event, input: unknown) => {
+    const parsed = renameCatalogAssetInputSchema.parse(input);
+    const previous = catalog.resolveAssetFile(parsed.assetId);
+    const report = renameCatalogAssetReportSchema.parse(await fileOperations.rename(parsed));
+    if (report.status === 'completed') await Promise.allSettled([relocatePortableAfterFileOperation(parsed.assetId, previous)]);
+    return report;
+  });
+  ipcMain.handle('catalog.assets.rename.v1', async (_event, input: unknown) => {
+    const parsed = renameCatalogAssetsInputSchema.parse(input);
+    const previous = new Map(parsed.items.map((item) => [item.assetId, catalog.resolveAssetFile(item.assetId)]));
+    const report = renameCatalogAssetsReportSchema.parse(await fileOperations.renameMany(parsed));
+    if (report.reports.length > 0) {
+      await Promise.allSettled(report.reports.filter((item) => item.status === 'completed').map((item) => relocatePortableAfterFileOperation(item.assetId, previous.get(item.assetId) ?? null)));
+    }
+    return report;
+  });
   ipcMain.handle('catalog.assets.remove.v1', async (_event, input: unknown) =>
     catalogAssetRemovalReportSchema.parse(
       await fileOperations.removeFromCatalog(catalogAssetRemovalInputSchema.parse(input))
