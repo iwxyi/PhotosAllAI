@@ -143,7 +143,10 @@ export class ProviderService {
   async #read(): Promise<StoredProviderProfile[]> {
     try {
       const value: unknown = JSON.parse(await readFile(this.#settingsPath, 'utf8'));
-      if (!Array.isArray(value)) return [];
+      if (!Array.isArray(value)) {
+        await this.#quarantineCorruptFile();
+        return [];
+      }
       return value.flatMap((item) => {
         const parsed = providerProfileSchema.omit({ hasCredential: true }).safeParse(item);
         if (!parsed.success || typeof item !== 'object' || item === null) return [];
@@ -154,8 +157,16 @@ export class ProviderService {
       });
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return [];
+      if (error instanceof SyntaxError) {
+        await this.#quarantineCorruptFile();
+        return [];
+      }
       throw error;
     }
+  }
+
+  async #quarantineCorruptFile(): Promise<void> {
+    await rename(this.#settingsPath, `${this.#settingsPath}.corrupt-${Date.now()}`).catch(() => undefined);
   }
 
   async #write(profiles: readonly StoredProviderProfile[]): Promise<void> {

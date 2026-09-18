@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -19,6 +19,13 @@ async function service(): Promise<ProviderService> {
   const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-provider-'));
   temporaryDirectories.push(directory);
   return new ProviderService(path.join(directory, 'providers.json'), cipher);
+}
+
+async function serviceWithPath(): Promise<{ providers: ProviderService; settingsPath: string; directory: string }> {
+  const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-provider-corrupt-'));
+  temporaryDirectories.push(directory);
+  const settingsPath = path.join(directory, 'providers.json');
+  return { providers: new ProviderService(settingsPath, cipher), settingsPath, directory };
 }
 
 afterEach(async () => {
@@ -70,5 +77,15 @@ describe('provider service', () => {
     expect(result.ok).toBe(true);
     expect(receivedAuthorization).toBe('Bearer test-key');
   });
-});
 
+  it('quarantines malformed provider settings and keeps the app usable', async () => {
+    const { providers, settingsPath, directory } = await serviceWithPath();
+    await writeFile(settingsPath, '{not-json');
+    await expect(providers.list()).resolves.toEqual([]);
+    expect((await readdir(directory)).some((name) => name.startsWith('providers.json.corrupt-'))).toBe(true);
+    await expect(providers.save({
+      name: 'Recovered', kind: 'openai-compatible', purpose: 'vision',
+      baseUrl: 'https://example.com/v1', modelId: 'model', enabled: true
+    })).resolves.toMatchObject({ name: 'Recovered' });
+  });
+});
