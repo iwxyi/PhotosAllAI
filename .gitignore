@@ -9,6 +9,7 @@ release/
 coverage/
 playwright-report/
 test-results/
+*.tsbuildinfo
 
 # Runtime data
 *.log
@@ -35,4 +36,3 @@ Thumbs.db
 
 # Rust
 target/
-
