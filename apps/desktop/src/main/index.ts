@@ -2,15 +2,17 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from 'electron';
-import { appInfoSchema, catalogSnapshotSchema } from '@photoallisai/contracts';
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, safeStorage, shell } from 'electron';
+import { appInfoSchema, catalogSnapshotSchema, saveProviderProfileInputSchema } from '@photoallisai/contracts';
 
 import { CatalogService } from './catalog-service';
 import { ImageCacheService, type ImageVariant } from './image-cache-service';
+import { ProviderService } from './provider-service';
 
 const APP_ORIGIN = 'app://photoallisai';
 let catalog: CatalogService;
 let imageCache: ImageCacheService;
+let providers: ProviderService;
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -40,6 +42,14 @@ function registerIpc(): void {
     const importedCount = await catalog.importFolders(result.filePaths);
     return catalogSnapshotSchema.parse({ assets: catalog.listAssets(), importedCount });
   });
+
+  ipcMain.handle('providers.list.v1', () => providers.list());
+  ipcMain.handle('providers.save.v1', (_event, input: unknown) =>
+    providers.save(saveProviderProfileInputSchema.parse(input))
+  );
+  ipcMain.handle('providers.test.v1', (_event, input: unknown) =>
+    providers.test(saveProviderProfileInputSchema.parse(input))
+  );
 }
 
 function createWindow(): BrowserWindow {
@@ -89,6 +99,11 @@ app.whenReady().then(() => {
   mkdirSync(libraryDirectory, { recursive: true });
   catalog = new CatalogService(join(libraryDirectory, 'catalog.sqlite'));
   imageCache = new ImageCacheService(join(app.getPath('userData'), 'cache', 'images'), catalog);
+  providers = new ProviderService(join(app.getPath('userData'), 'settings', 'providers.json'), {
+    available: () => safeStorage.isEncryptionAvailable(),
+    encrypt: (value) => safeStorage.encryptString(value).toString('base64'),
+    decrypt: (value) => safeStorage.decryptString(Buffer.from(value, 'base64'))
+  });
 
   protocol.handle('photoasset', async (request) => {
     const url = new URL(request.url);

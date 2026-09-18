@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { CatalogAsset } from '@photoallisai/contracts';
+import type { CatalogAsset, ProviderProfile, SaveProviderProfileInput } from '@photoallisai/contracts';
 import { selectAll, updateSelection, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
 import {
   Aperture,
@@ -10,6 +10,7 @@ import {
   CircleAlert,
   Clock3,
   Columns2,
+  Command,
   Download,
   Folder,
   FolderHeart,
@@ -18,6 +19,7 @@ import {
   Grid2X2,
   Image,
   Info,
+  KeyRound,
   Layers3,
   ListFilter,
   Maximize2,
@@ -26,10 +28,12 @@ import {
   Play,
   Plus,
   Search,
+  Server,
   Settings,
   SlidersHorizontal,
   Sparkles,
   Star,
+  ShieldCheck,
   Tags,
   WandSparkles,
   X,
@@ -490,6 +494,115 @@ function PlaceholderPage({ type }: { type: Exclude<WorkspaceTab, 'library'> }): 
   );
 }
 
+const emptyProviderForm: SaveProviderProfileInput = {
+  name: '',
+  kind: 'openai-compatible',
+  purpose: 'vision',
+  baseUrl: '',
+  modelId: '',
+  apiKey: '',
+  enabled: true
+};
+
+function SettingsPage(): React.JSX.Element {
+  const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
+  const [form, setForm] = useState<SaveProviderProfileInput>(emptyProviderForm);
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState<'save' | 'test' | null>(null);
+
+  useEffect(() => {
+    void window.desktopApi.listProviderProfiles().then(setProfiles);
+  }, []);
+
+  const patchForm = <Key extends keyof SaveProviderProfileInput>(key: Key, value: SaveProviderProfileInput[Key]) => {
+    setForm((current) => ({ ...current, [key]: value }));
+    setMessage('');
+  };
+
+  const save = async () => {
+    setBusy('save');
+    try {
+      const saved = await window.desktopApi.saveProviderProfile(form);
+      setProfiles((current) => [...current.filter((profile) => profile.id !== saved.id), saved]);
+      setForm(emptyProviderForm);
+      setMessage('配置已安全保存');
+    } catch {
+      setMessage('保存失败，请检查必填项和服务地址');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const testConnection = async () => {
+    setBusy('test');
+    try {
+      const result = await window.desktopApi.testProviderConnection(form);
+      setMessage(`${result.message}${result.latencyMs > 0 ? ` · ${result.latencyMs} ms` : ''}`);
+    } catch {
+      setMessage('连接测试失败，请检查配置');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="settings-page">
+      <aside className="settings-nav">
+        <strong>设置</strong>
+        <button className="is-active" type="button"><Bot size={14} />AI 模型</button>
+        <button type="button"><Folder size={14} />图库与存储</button>
+        <button type="button"><Clock3 size={14} />任务与重试</button>
+        <button type="button"><Command size={14} />快捷键</button>
+        <button type="button"><ShieldCheck size={14} />隐私与安全</button>
+      </aside>
+      <main className="settings-content">
+        <div className="settings-heading">
+          <div><h1>AI 模型</h1><p>配置用于视觉分析与图片生成的兼容服务。应用不会提供默认密钥。</p></div>
+          <span><ShieldCheck size={14} />凭据由系统安全存储保护</span>
+        </div>
+
+        <section className="provider-layout">
+          <div className="provider-list">
+            <div className="provider-list-head"><strong>已配置服务</strong><span>{profiles.length}</span></div>
+            {profiles.length === 0 ? (
+              <div className="provider-empty"><Server size={25} /><strong>尚未配置模型</strong><span>填写右侧表单开始使用 AI 功能</span></div>
+            ) : profiles.map((profile) => (
+              <button className="provider-item" key={profile.id} type="button" onClick={() => setForm({
+                id: profile.id,
+                name: profile.name,
+                kind: profile.kind,
+                purpose: profile.purpose,
+                baseUrl: profile.baseUrl,
+                modelId: profile.modelId,
+                enabled: profile.enabled
+              })}>
+                <span className="provider-icon">{profile.purpose === 'vision' ? <Bot size={16} /> : <WandSparkles size={16} />}</span>
+                <span><strong>{profile.name}</strong><small>{profile.modelId}</small></span>
+                <i className={profile.enabled ? 'is-online' : ''} />
+              </button>
+            ))}
+          </div>
+
+          <form className="provider-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
+            <div className="form-title"><span className="provider-icon"><Plus size={16} /></span><div><strong>{form.id ? '编辑模型配置' : '添加模型配置'}</strong><small>所有字段均保存在本机</small></div></div>
+            <div className="form-grid two-columns">
+              <label><span>用途</span><select value={form.purpose} onChange={(event) => patchForm('purpose', event.target.value as SaveProviderProfileInput['purpose'])}><option value="vision">视觉分析模型</option><option value="generation">图片生成模型</option></select></label>
+              <label><span>接口类型</span><select value={form.kind} onChange={(event) => patchForm('kind', event.target.value as SaveProviderProfileInput['kind'])}><option value="openai-compatible">OpenAI Compatible</option><option value="nanobanana-compatible">NanoBanana Compatible</option></select></label>
+            </div>
+            <label><span>配置名称</span><input required maxLength={80} placeholder="例如：视觉分析 · 主服务" value={form.name} onChange={(event) => patchForm('name', event.target.value)} /></label>
+            <label><span>Base URL</span><input required type="url" placeholder="https://api.example.com/v1" value={form.baseUrl} onChange={(event) => patchForm('baseUrl', event.target.value)} /><small>远程地址必须使用 HTTPS；本地开发服务可使用 localhost HTTP。</small></label>
+            <label><span>Model ID</span><input required placeholder="模型标识" value={form.modelId} onChange={(event) => patchForm('modelId', event.target.value)} /></label>
+            <label><span>API Key</span><div className="secret-input"><KeyRound size={14} /><input type="password" autoComplete="off" placeholder={form.id ? '留空以保留已保存凭据' : '输入服务密钥'} value={form.apiKey ?? ''} onChange={(event) => patchForm('apiKey', event.target.value)} /></div><small>密钥不会写入图库数据库、日志或导出清单。</small></label>
+            <label className="enabled-row"><input type="checkbox" checked={form.enabled} onChange={(event) => patchForm('enabled', event.target.checked)} /><span>启用此配置</span></label>
+            <div className="form-feedback" role="status">{message}</div>
+            <div className="form-actions"><button className="secondary-action" type="button" disabled={busy !== null} onClick={() => void testConnection()}>{busy === 'test' ? '测试中…' : '测试连接'}</button><button className="primary-action compact" type="submit" disabled={busy !== null}>{busy === 'save' ? '保存中…' : '保存配置'}</button></div>
+          </form>
+        </section>
+      </main>
+    </div>
+  );
+}
+
 export function App(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('library');
   const [catalogPhotos, setCatalogPhotos] = useState<Photo[]>([]);
@@ -508,7 +621,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} onChange={setActiveTab} onImport={() => void importFolders()} />
-      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} /> : <PlaceholderPage type={activeTab} />}
+      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} /> : activeTab === 'settings' ? <SettingsPage /> : <PlaceholderPage type={activeTab} />}
     </div>
   );
 }

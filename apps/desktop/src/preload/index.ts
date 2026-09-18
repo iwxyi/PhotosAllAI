@@ -8,7 +8,13 @@ const api: DesktopApi = {
   importFolders: () =>
     ipcRenderer.invoke('catalog.folders.import.v1') as ReturnType<
       DesktopApi['importFolders']
-    >
+    >,
+  listProviderProfiles: () =>
+    ipcRenderer.invoke('providers.list.v1') as ReturnType<DesktopApi['listProviderProfiles']>,
+  saveProviderProfile: (input) =>
+    ipcRenderer.invoke('providers.save.v1', input) as ReturnType<DesktopApi['saveProviderProfile']>,
+  testProviderConnection: (input) =>
+    ipcRenderer.invoke('providers.test.v1', input) as ReturnType<DesktopApi['testProviderConnection']>
 };
 
 contextBridge.exposeInMainWorld('desktopApi', Object.freeze(api));

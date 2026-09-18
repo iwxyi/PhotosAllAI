@@ -72,7 +72,11 @@ test('opens the task drawer and application tabs', async () => {
   await expect(page.getByText('正在生成 · 64%')).toBeVisible();
 
   await page.getByRole('tab', { name: /设置/ }).click();
-  await expect(page.getByRole('heading', { name: '设置', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'AI 模型' })).toBeVisible();
+  await expect(page.getByLabel('Base URL')).toBeVisible();
+  await expect(page.getByLabel('API Key')).toHaveAttribute('type', 'password');
+  await expect(page.getByText('尚未配置模型')).toBeVisible();
+  await page.screenshot({ path: 'test-results/settings-models.png', animations: 'disabled' });
   await page.getByRole('tab', { name: /图库/ }).click();
 });
 
