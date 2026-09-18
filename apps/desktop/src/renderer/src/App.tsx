@@ -567,6 +567,8 @@ function Viewer({
 }
 
 function AiPanel({
+  photo,
+  results,
   revision,
   isDemo,
   notice,
@@ -576,6 +578,8 @@ function AiPanel({
   onOpenTemplates,
   onGenerate
 }: {
+  photo: Photo;
+  results: GenerationResult[];
   revision: AnalysisRevision | undefined;
   isDemo: boolean;
   notice: string;
@@ -592,6 +596,7 @@ function AiPanel({
   const [instruction, setInstruction] = useState('保持自然皮肤纹理，不要过度磨皮。');
   const [generationNotice, setGenerationNotice] = useState('');
   const [generating, setGenerating] = useState(false);
+  const [inspectorTab, setInspectorTab] = useState<'ai' | 'info' | 'versions'>('ai');
 
   const toggle = (key: keyof typeof actions) => setActions((current) => ({ ...current, [key]: !current[key] }));
   const result = revision?.result;
@@ -626,8 +631,8 @@ function AiPanel({
 
   return (
     <aside className="inspector">
-      <div className="inspector-tabs"><button className="is-active" type="button"><Bot size={14} />AI</button><button type="button"><Info size={14} />信息</button><button type="button"><Layers3 size={14} />版本</button></div>
-      <div className="inspector-scroll">
+      <div className="inspector-tabs"><button className={inspectorTab === 'ai' ? 'is-active' : ''} type="button" aria-selected={inspectorTab === 'ai'} onClick={() => setInspectorTab('ai')}><Bot size={14} />AI</button><button className={inspectorTab === 'info' ? 'is-active' : ''} type="button" aria-selected={inspectorTab === 'info'} onClick={() => setInspectorTab('info')}><Info size={14} />信息</button><button className={inspectorTab === 'versions' ? 'is-active' : ''} type="button" aria-selected={inspectorTab === 'versions'} onClick={() => setInspectorTab('versions')}><Layers3 size={14} />版本</button></div>
+      <div className="inspector-scroll">{inspectorTab === 'ai' ? <>
         <div className="analysis-head">
           <div className="analysis-score"><span>AI</span><strong>{score}</strong></div>
           <div><strong>{summary}</strong><p>{description}</p></div>
@@ -660,7 +665,7 @@ function AiPanel({
           </label>
           {!isDemo && generationNotice && <p className="generation-notice">{generationNotice}</p>}
         </div>
-      </div>
+      </> : inspectorTab === 'info' ? <InspectorInfo photo={photo} revision={revision} /> : <InspectorVersions results={results} />}</div>
       <div className="generate-footer">
         <div className="generation-count"><span>生成数量</span><div><button type="button" aria-label="减少生成数量" onClick={() => setGenerationCount((value) => Math.max(1, value - 1))}>−</button><strong>{generationCount}</strong><button type="button" aria-label="增加生成数量" onClick={() => setGenerationCount((value) => Math.min(8, value + 1))}>+</button></div></div>
         <button className="primary-action" type="button" onClick={() => void queueGeneration()} disabled={!isDemo && (!result || generating)}><Sparkles size={16} />{generating ? '正在加入…' : '加入生成队列'}</button>
@@ -677,6 +682,21 @@ function ActionToggle({ title, detail, risk, checked, onChange }: { title: strin
       <span className="risk-chip">{risk}</span>
     </button>
   );
+}
+
+function InspectorInfo({ photo, revision }: { photo: Photo; revision: AnalysisRevision | undefined }): React.JSX.Element {
+  const fields = [
+    ['文件名', photo.fileName],
+    ['格式', photo.format],
+    ['尺寸', photo.dimensions],
+    ['评分', `${photo.rating} / 5`],
+    ['AI 状态', revision ? '已分析' : '未分析']
+  ];
+  return <div className="inspector-info"><section className="inspector-section"><div className="inspector-heading"><span>文件信息</span></div><div className="metadata-list">{fields.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div></section><section className="inspector-section"><div className="inspector-heading"><span>用户标签</span><span className="section-count">{photo.tags?.length ?? 0} 个</span></div>{photo.tags?.length ? <div className="metadata-tags">{photo.tags.map((tag) => <span key={tag.id}>{tag.name}</span>)}</div> : <div className="inline-empty">尚未添加标签</div>}</section>{revision && <section className="inspector-section"><div className="inspector-heading"><span>AI 编目</span></div><p className="analysis-copy">{revision.result.catalog.shortDescription}</p></section>}</div>;
+}
+
+function InspectorVersions({ results }: { results: GenerationResult[] }): React.JSX.Element {
+  return <div className="inspector-versions"><section className="inspector-section"><div className="inspector-heading"><span>生成版本</span><span className="section-count">{results.length} 个</span></div>{results.length === 0 ? <div className="inline-empty">尚未生成版本</div> : <div className="version-list">{[...results].sort((a, b) => b.version - a.version).map((result) => <div className="version-list-row" key={result.id}><span><strong>V{result.version}</strong><small>{result.reviewState === 'preferred' ? '首选' : result.reviewState === 'accepted' ? '已接受' : result.reviewState === 'rejected' ? '已拒绝' : '未审阅'}</small></span><em>{new Date(result.createdAt).toLocaleDateString()}</em></div>)}</div>}</section></div>;
 }
 
 function TaskBar({ open, onToggle, onOpenTaskCenter, tasks }: { open: boolean; onToggle: () => void; onOpenTaskCenter: () => void; tasks: PersistedTask[] | null }): React.JSX.Element {
@@ -1212,7 +1232,7 @@ function PopulatedLibraryWorkspace({
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
         <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} onReview={reviewResult} />
       </main>
-      <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onOpenTemplates={onOpenTemplates} onGenerate={generateSelection} />
+      <AiPanel photo={selected} results={generationResults} revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onOpenTemplates={onOpenTemplates} onGenerate={generateSelection} />
       {selection.selectedIds.size > 1 && (
         <div className="batch-actionbar">
           <strong>已选择 {selection.selectedIds.size} 张</strong>

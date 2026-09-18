@@ -32,6 +32,11 @@ test('starts with the secure library workspace', async () => {
   await page.getByRole('button', { name: '浏览模板' }).click();
   await expect(page.getByRole('heading', { name: '提示词模板' })).toBeVisible();
   await page.getByRole('tab', { name: /图库/ }).click();
+  await page.getByRole('button', { name: '信息', exact: true }).click();
+  await expect(page.getByText('文件信息')).toBeVisible();
+  await page.getByRole('button', { name: '版本', exact: true }).click();
+  await expect(page.getByText('生成版本', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'AI', exact: true }).click();
   await page.getByRole('button', { name: /筛选/ }).click();
   await expect(page.getByRole('dialog', { name: '图库筛选' })).toBeVisible();
   await page.getByLabel('仅显示首选照片').check();
