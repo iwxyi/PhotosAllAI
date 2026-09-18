@@ -29,6 +29,9 @@ test('starts with the secure library workspace', async () => {
   await expect(page.getByText('2026 人像作品', { exact: true }).first()).toBeVisible();
   await expect(page.getByLabel('添加文件夹')).toBeVisible();
   await expect(page.getByRole('button', { name: /加入生成队列/ })).toBeVisible();
+  await page.getByRole('button', { name: '浏览模板' }).click();
+  await expect(page.getByRole('heading', { name: '提示词模板' })).toBeVisible();
+  await page.getByRole('tab', { name: /图库/ }).click();
   await page.getByRole('button', { name: /筛选/ }).click();
   await expect(page.getByRole('dialog', { name: '图库筛选' })).toBeVisible();
   await page.getByLabel('仅显示首选照片').check();

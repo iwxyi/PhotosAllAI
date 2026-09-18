@@ -263,6 +263,7 @@ function Sidebar({
   const visibleFolders = isDemo
     ? demoFolders.map((folder, index) => ({ id: `demo-${index}`, name: folder.name, assetCount: folder.count }))
     : folders;
+  const favoriteCount = isDemo ? 86 : smartCollections.find((collection) => collection.id === 'favorites')?.assetCount ?? 0;
   return (
     <aside className="sidebar">
       <div className="sidebar-scroll">
@@ -277,11 +278,11 @@ function Sidebar({
             <span>最近导入</span>
             <span className="row-count">248</span>
           </div>
-          <div className="nav-row">
+          <button className={`nav-row${selectedSmartCollection === 'favorites' ? ' is-active' : ''}`} type="button" onClick={() => onSelectSmartCollection(selectedSmartCollection === 'favorites' ? null : 'favorites')}>
             <Star size={15} />
             <span>首选</span>
-            <span className="row-count">86</span>
-          </div>
+            <span className="row-count">{favoriteCount}</span>
+          </button>
         </nav>
 
         <div className="sidebar-section">
@@ -572,6 +573,7 @@ function AiPanel({
   onAnalyze,
   generationProfiles,
   templates,
+  onOpenTemplates,
   onGenerate
 }: {
   revision: AnalysisRevision | undefined;
@@ -580,6 +582,7 @@ function AiPanel({
   onAnalyze: () => void;
   generationProfiles: ProviderProfile[];
   templates: PromptTemplate[];
+  onOpenTemplates: () => void;
   onGenerate: (input: { providerProfileId: string; template: PromptTemplate | null; count: number; instruction: string; disabledActionIds: Set<string> }) => Promise<string>;
 }): React.JSX.Element {
   const [actions, setActions] = useState({ people: true, light: true, texture: false });
@@ -644,8 +647,8 @@ function AiPanel({
         </div>
 
         <div className="inspector-section">
-          <div className="inspector-heading"><span>提示词模板</span><button type="button">浏览模板</button></div>
-          {isDemo ? <button className="template-choice" type="button"><span className="template-preview"><img src="./demo/portrait.jpg" alt="" /></span><span><strong>自然人像 · 清洁背景</strong><small>保留身份、服装与真实光线</small></span><ChevronRight size={15} /></button> : (
+          <div className="inspector-heading"><span>提示词模板</span><button type="button" onClick={onOpenTemplates}>浏览模板</button></div>
+          {isDemo ? <button className="template-choice" type="button" onClick={onOpenTemplates}><span className="template-preview"><img src="./demo/portrait.jpg" alt="" /></span><span><strong>自然人像 · 清洁背景</strong><small>保留身份、服装与真实光线</small></span><ChevronRight size={15} /></button> : (
             <select className="template-select" aria-label="生成提示词模板" value={templateId} onChange={(event) => setTemplateId(event.target.value)}>
               <option value="">通用 AI 修图</option>
               {templates.map((template) => <option value={template.id} key={template.id}>{template.name} · V{template.version}</option>)}
@@ -729,6 +732,7 @@ type LibraryWorkspaceProps = {
   onSelectedAssetChange: (assetId: string | null) => void;
   onRefreshCatalog: () => Promise<void>;
   onOpenTaskCenter: () => void;
+  onOpenTemplates: () => void;
 };
 
 function LibraryWorkspace(props: LibraryWorkspaceProps): React.JSX.Element {
@@ -787,6 +791,7 @@ function PopulatedLibraryWorkspace({
   onSelectedAssetChange,
   onRefreshCatalog,
   onOpenTaskCenter,
+  onOpenTemplates,
   operationNotice,
   setOperationNotice
 }: PopulatedLibraryWorkspaceProps): React.JSX.Element {
@@ -1207,7 +1212,7 @@ function PopulatedLibraryWorkspace({
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
         <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} onReview={reviewResult} />
       </main>
-      <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onGenerate={generateSelection} />
+      <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onOpenTemplates={onOpenTemplates} onGenerate={generateSelection} />
       {selection.selectedIds.size > 1 && (
         <div className="batch-actionbar">
           <strong>已选择 {selection.selectedIds.size} 张</strong>
@@ -1790,7 +1795,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
-      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} exportPresets={exportPresets} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={setFavoriteOnly} sortBy={sortBy} onSortByChange={setSortBy} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onOpenTaskCenter={() => openWorkspaceTab('tasks')} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
+      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} exportPresets={exportPresets} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={setFavoriteOnly} sortBy={sortBy} onSortByChange={setSortBy} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onOpenTaskCenter={() => openWorkspaceTab('tasks')} onOpenTemplates={() => openWorkspaceTab('templates')} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
     </div>
   );
 }
