@@ -1509,6 +1509,8 @@ function TemplatePage(): React.JSX.Element {
   const [templateItems, setTemplateItems] = useState<PromptTemplate[]>([]);
   const [form, setForm] = useState<SavePromptTemplateInput>(emptyTemplateForm);
   const [previewTemplate, setPreviewTemplate] = useState<PromptTemplate | null>(null);
+  const [templateSearch, setTemplateSearch] = useState('');
+  const [templateCategory, setTemplateCategory] = useState('全部分类');
   const [message, setMessage] = useState('');
 
   useEffect(() => { void window.desktopApi.listPromptTemplates().then(setTemplateItems); }, []);
@@ -1538,6 +1540,15 @@ function TemplatePage(): React.JSX.Element {
     }
   };
 
+  const visibleTemplates = useMemo(() => {
+    const query = templateSearch.trim().toLocaleLowerCase();
+    return templateItems.filter((template) => {
+      const matchesCategory = templateCategory === '全部分类' || template.category === templateCategory;
+      const matchesQuery = !query || [template.name, template.description, template.body].some((value) => value.toLocaleLowerCase().includes(query));
+      return matchesCategory && matchesQuery;
+    });
+  }, [templateCategory, templateItems, templateSearch]);
+
   return (
     <div className="template-page">
       <div className="template-page-heading">
@@ -1546,12 +1557,14 @@ function TemplatePage(): React.JSX.Element {
       </div>
       <div className="template-workspace">
         <section className="template-browser">
-          <div className="template-browser-tools"><div className="inline-search"><Search size={14} /><input placeholder="搜索模板" /></div><button type="button"><ListFilter size={14} />全部分类</button></div>
+          <div className="template-browser-tools"><div className="inline-search"><Search size={14} /><input aria-label="搜索模板" value={templateSearch} placeholder="搜索模板" onChange={(event) => setTemplateSearch(event.target.value)} /></div><label className="template-category-filter"><ListFilter size={14} /><select aria-label="模板分类" value={templateCategory} onChange={(event) => setTemplateCategory(event.target.value)}><option>全部分类</option><option>人像</option><option>风光</option><option>商品</option><option>建筑</option><option>其他</option></select></label></div>
           {templateItems.length === 0 ? (
             <div className="template-empty"><WandSparkles size={30} /><h2>尚未创建模板</h2><p>创建第一个模板，把常用修图要求和保护规则保存下来。</p></div>
+          ) : visibleTemplates.length === 0 ? (
+            <div className="template-empty"><Search size={30} /><h2>没有匹配模板</h2><p>尝试更换搜索词或分类筛选。</p></div>
           ) : (
             <div className="template-grid">
-              {templateItems.map((template, index) => (
+              {visibleTemplates.map((template, index) => (
                 <button className={`template-card${form.id === template.id ? ' is-selected' : ''}`} key={template.id} type="button" onClick={() => setForm({
                   id: template.id,
                   name: template.name,

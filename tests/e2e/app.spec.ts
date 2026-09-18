@@ -83,6 +83,12 @@ test('opens the task drawer and application tabs', async () => {
   await page.getByLabel('简短描述').fill('移除背景干扰并保持主体自然。');
   await page.getByRole('button', { name: '创建模板' }).click();
   await expect(page.getByText('E2E 人像清洁', { exact: true })).toBeVisible();
+  await page.getByLabel('搜索模板').fill('清洁');
+  await expect(page.getByRole('button', { name: /E2E 人像清洁/ })).toBeVisible();
+  await page.getByLabel('模板分类').selectOption('风光');
+  await expect(page.getByText('没有匹配模板')).toBeVisible();
+  await page.getByLabel('模板分类').selectOption('全部分类');
+  await page.getByLabel('搜索模板').fill('');
   await page.getByRole('button', { name: '预览模板' }).click();
   await expect(page.getByRole('dialog', { name: 'E2E 人像清洁' })).toBeVisible();
   await expect(page.getByRole('dialog').getByText('移除背景干扰并保持主体自然。')).toBeVisible();
