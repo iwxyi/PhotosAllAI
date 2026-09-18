@@ -15,6 +15,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke('catalog.metadata.update.v1', input) as ReturnType<DesktopApi['updateCatalogMetadata']>,
   updateCatalogTags: (input) =>
     ipcRenderer.invoke('catalog.tags.update.v1', input) as ReturnType<DesktopApi['updateCatalogTags']>,
+  moveCatalogAssets: (input) =>
+    ipcRenderer.invoke('catalog.assets.move.v1', input) as ReturnType<DesktopApi['moveCatalogAssets']>,
   importFolders: () =>
     ipcRenderer.invoke('catalog.folders.import.v1') as ReturnType<
       DesktopApi['importFolders']

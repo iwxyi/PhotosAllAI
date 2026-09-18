@@ -245,7 +245,6 @@ export class CatalogService {
       FROM folders
       LEFT JOIN assets ON assets.folder_id = folders.id
       GROUP BY folders.id, folders.name
-      HAVING COUNT(assets.id) > 0
       ORDER BY folders.name COLLATE NOCASE ASC, folders.id ASC
     `).all() as { id: string; name: string; asset_count: number }[];
     return rows.map((row) => catalogFolderSchema.parse({

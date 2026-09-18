@@ -12,6 +12,8 @@ import {
   listAnalysisInputSchema,
   listCatalogAssetsInputSchema,
   listGenerationResultsInputSchema,
+  moveCatalogAssetsInputSchema,
+  moveCatalogAssetsReportSchema,
   reorderTaskIdsSchema,
   savePromptTemplateInputSchema,
   saveProviderProfileInputSchema,
@@ -25,6 +27,7 @@ import { AnalysisService } from './analysis-service';
 import { ImageCacheService, type ImageVariant } from './image-cache-service';
 import { GenerationService } from './generation-service';
 import { ExportService } from './export-service';
+import { FileOperationService } from './file-operation-service';
 import { ProviderService } from './provider-service';
 import { TaskService } from './task-service';
 import { TaskRunner } from './task-runner';
@@ -39,6 +42,7 @@ let templates: TemplateService;
 let analysis: AnalysisService;
 let generation: GenerationService;
 let exportService: ExportService;
+let fileOperations: FileOperationService;
 let taskRunner: TaskRunner;
 
 protocol.registerSchemesAsPrivileged([
@@ -72,6 +76,11 @@ function registerIpc(): void {
   );
   ipcMain.handle('catalog.tags.update.v1', (_event, input: unknown) =>
     catalog.updateTags(updateCatalogTagsInputSchema.parse(input))
+  );
+  ipcMain.handle('catalog.assets.move.v1', async (_event, input: unknown) =>
+    moveCatalogAssetsReportSchema.parse(
+      await fileOperations.move(moveCatalogAssetsInputSchema.parse(input))
+    )
   );
 
   ipcMain.handle('catalog.folders.import.v1', async () => {
@@ -182,11 +191,13 @@ if (!hasLock) app.quit();
 const customUserData = process.env.PHOTOALLISAI_USER_DATA;
 if (customUserData) app.setPath('userData', customUserData);
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   const libraryDirectory = join(app.getPath('userData'), 'library');
   mkdirSync(libraryDirectory, { recursive: true });
   const databasePath = join(libraryDirectory, 'catalog.sqlite');
   catalog = new CatalogService(databasePath);
+  fileOperations = new FileOperationService(databasePath);
+  await fileOperations.recoverInterruptedOperations();
   tasks = new TaskService(databasePath);
   templates = new TemplateService(databasePath);
   imageCache = new ImageCacheService(join(app.getPath('userData'), 'cache', 'images'), catalog);
@@ -258,5 +269,6 @@ app.on('before-quit', () => {
   analysis?.close();
   templates?.close();
   tasks?.close();
+  fileOperations?.close();
   catalog?.close();
 });

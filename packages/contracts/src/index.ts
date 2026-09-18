@@ -71,6 +71,30 @@ export const catalogFolderSchema = z.object({
 
 export type CatalogFolder = z.infer<typeof catalogFolderSchema>;
 
+export const moveCatalogAssetsInputSchema = z.object({
+  assetIds: z.array(z.string().min(1)).min(1).max(10_000),
+  targetFolderId: z.string().min(1)
+});
+
+export type MoveCatalogAssetsInput = z.infer<typeof moveCatalogAssetsInputSchema>;
+
+export const moveCatalogAssetsReportSchema = z.object({
+  operationId: z.string().uuid(),
+  status: z.enum(['completed', 'failed']),
+  total: z.number().int().nonnegative(),
+  moved: z.number().int().nonnegative(),
+  skipped: z.number().int().nonnegative(),
+  rolledBack: z.boolean(),
+  files: z.array(z.object({
+    assetId: z.string().min(1),
+    fileName: z.string().min(1),
+    previousFileName: z.string().min(1)
+  })),
+  errorCode: z.string().min(1).nullable()
+});
+
+export type MoveCatalogAssetsReport = z.infer<typeof moveCatalogAssetsReportSchema>;
+
 export const updateCatalogMetadataInputSchema = z.object({
   assetIds: z.array(z.string().min(1)).min(1).max(10_000),
   rating: z.number().int().min(0).max(5).optional(),
@@ -331,6 +355,7 @@ export interface DesktopApi {
   listCatalogTags(): Promise<CatalogTag[]>;
   updateCatalogMetadata(input: UpdateCatalogMetadataInput): Promise<CatalogAsset[]>;
   updateCatalogTags(input: UpdateCatalogTagsInput): Promise<CatalogTag[]>;
+  moveCatalogAssets(input: MoveCatalogAssetsInput): Promise<MoveCatalogAssetsReport>;
   importFolders(): Promise<CatalogSnapshot | null>;
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;
