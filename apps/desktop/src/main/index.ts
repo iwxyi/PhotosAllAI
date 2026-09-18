@@ -8,6 +8,7 @@ import {
   catalogAssetRemovalInputSchema,
   catalogAssetRemovalReportSchema,
   catalogSnapshotSchema,
+  catalogAlbumSchema,
   copyCatalogAssetsInputSchema,
   copyCatalogAssetsReportSchema,
   enqueueTaskInputSchema,
@@ -26,6 +27,8 @@ import {
   taskIdSchema,
   updateCatalogMetadataInputSchema,
   updateCatalogTagsInputSchema,
+  saveCatalogAlbumInputSchema,
+  updateCatalogAlbumAssetsInputSchema,
   workspaceSessionSchema
 } from '@photoallisai/contracts';
 
@@ -84,6 +87,18 @@ function registerIpc(): void {
   );
   ipcMain.handle('catalog.folders.list.v1', () => catalog.listFolders());
   ipcMain.handle('catalog.tags.list.v1', () => catalog.listTags());
+  ipcMain.handle('catalog.albums.list.v1', () => catalog.listAlbums());
+  ipcMain.handle('catalog.smart-collections.list.v1', () => catalog.listSmartCollections());
+  ipcMain.handle('catalog.album.save.v1', (_event, input: unknown) =>
+    catalogAlbumSchema.parse(catalog.saveAlbum(saveCatalogAlbumInputSchema.parse(input)))
+  );
+  ipcMain.handle('catalog.album.delete.v1', (_event, input: unknown) => {
+    const albumId = String(input);
+    catalog.deleteAlbum(albumId);
+  });
+  ipcMain.handle('catalog.album.assets.update.v1', (_event, input: unknown) =>
+    catalogAlbumSchema.parse(catalog.updateAlbumAssets(updateCatalogAlbumAssetsInputSchema.parse(input)))
+  );
   ipcMain.handle('catalog.metadata.update.v1', (_event, input: unknown) =>
     catalog.updateMetadata(updateCatalogMetadataInputSchema.parse(input))
   );

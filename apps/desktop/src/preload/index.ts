@@ -15,6 +15,16 @@ const api: DesktopApi = {
     ipcRenderer.invoke('catalog.folders.list.v1') as ReturnType<DesktopApi['listCatalogFolders']>,
   listCatalogTags: () =>
     ipcRenderer.invoke('catalog.tags.list.v1') as ReturnType<DesktopApi['listCatalogTags']>,
+  listCatalogAlbums: () =>
+    ipcRenderer.invoke('catalog.albums.list.v1') as ReturnType<DesktopApi['listCatalogAlbums']>,
+  listCatalogSmartCollections: () =>
+    ipcRenderer.invoke('catalog.smart-collections.list.v1') as ReturnType<DesktopApi['listCatalogSmartCollections']>,
+  saveCatalogAlbum: (input) =>
+    ipcRenderer.invoke('catalog.album.save.v1', input) as ReturnType<DesktopApi['saveCatalogAlbum']>,
+  deleteCatalogAlbum: (albumId) =>
+    ipcRenderer.invoke('catalog.album.delete.v1', albumId) as ReturnType<DesktopApi['deleteCatalogAlbum']>,
+  updateCatalogAlbumAssets: (input) =>
+    ipcRenderer.invoke('catalog.album.assets.update.v1', input) as ReturnType<DesktopApi['updateCatalogAlbumAssets']>,
   updateCatalogMetadata: (input) =>
     ipcRenderer.invoke('catalog.metadata.update.v1', input) as ReturnType<DesktopApi['updateCatalogMetadata']>,
   updateCatalogTags: (input) =>

@@ -4,16 +4,24 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  catalogAlbumSchema,
   catalogAssetSchema,
   catalogAssetPageSchema,
   catalogFolderSchema,
+  catalogSmartCollectionSchema,
   catalogTagSchema,
   listCatalogAssetsInputSchema,
+  saveCatalogAlbumInputSchema,
+  updateCatalogAlbumAssetsInputSchema,
+  type CatalogAlbum,
   type CatalogAsset,
   type CatalogAssetPage,
   type CatalogFolder,
+  type CatalogSmartCollection,
   type CatalogTag,
   type ListCatalogAssetsInput,
+  type SaveCatalogAlbumInput,
+  type UpdateCatalogAlbumAssetsInput,
   type UpdateCatalogMetadataInput,
   type UpdateCatalogTagsInput,
   updateCatalogTagsInputSchema,
@@ -170,6 +178,28 @@ export class CatalogService {
         COMMIT;
       `);
     }
+    const albumVersion = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (albumVersion.user_version < 6) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE albums (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          normalized_name TEXT NOT NULL UNIQUE,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE album_assets (
+          album_id TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE,
+          asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          added_at INTEGER NOT NULL,
+          PRIMARY KEY (album_id, asset_id)
+        );
+        CREATE INDEX album_assets_asset_idx ON album_assets(asset_id, album_id);
+        PRAGMA user_version = 6;
+        COMMIT;
+      `);
+    }
   }
 
   close(): void {
@@ -201,6 +231,20 @@ export class CatalogService {
     if (input.tagId) {
       baseConditions.push('id IN (SELECT asset_id FROM asset_tags WHERE tag_id = ?)');
       baseValues.push(input.tagId);
+    }
+    if (input.albumId) {
+      baseConditions.push('id IN (SELECT asset_id FROM album_assets WHERE album_id = ?)');
+      baseValues.push(input.albumId);
+    }
+    if (input.smartCollection === 'favorites') baseConditions.push('favorite = 1');
+    if (input.smartCollection === 'unrated') baseConditions.push('rating = 0');
+    if (input.smartCollection === 'unanalyzed' && this.#tableExists('analysis_revisions')) {
+      baseConditions.push('id NOT IN (SELECT asset_id FROM analysis_revisions)');
+    }
+    if (input.smartCollection === 'generated') {
+      baseConditions.push(this.#tableExists('generation_results')
+        ? 'id IN (SELECT asset_id FROM generation_results)'
+        : '0');
     }
     if (input.favoriteOnly) baseConditions.push('favorite = 1');
     const query = input.query.trim();
@@ -263,6 +307,110 @@ export class CatalogService {
       name: row.name,
       assetCount: row.asset_count
     }));
+  }
+
+  listAlbums(): CatalogAlbum[] {
+    const rows = this.#database.prepare(`
+      SELECT albums.id, albums.name, albums.created_at, albums.updated_at,
+        COUNT(assets.id) AS asset_count
+      FROM albums
+      LEFT JOIN album_assets ON album_assets.album_id = albums.id
+      LEFT JOIN assets ON assets.id = album_assets.asset_id AND assets.removed_at IS NULL
+      GROUP BY albums.id
+      ORDER BY albums.name COLLATE NOCASE ASC, albums.id ASC
+    `).all() as Array<{
+      id: string; name: string; created_at: number; updated_at: number; asset_count: number;
+    }>;
+    return rows.map((row) => catalogAlbumSchema.parse({
+      id: row.id,
+      name: row.name,
+      assetCount: row.asset_count,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }));
+  }
+
+  listSmartCollections(): CatalogSmartCollection[] {
+    const count = (condition: string): number => {
+      const row = this.#database.prepare(`
+        SELECT COUNT(*) AS value FROM assets WHERE removed_at IS NULL AND (${condition})
+      `).get() as { value: number };
+      return row.value;
+    };
+    const hasAnalysis = this.#tableExists('analysis_revisions');
+    const hasGeneration = this.#tableExists('generation_results');
+    return [
+      catalogSmartCollectionSchema.parse({ id: 'favorites', assetCount: count('favorite = 1') }),
+      catalogSmartCollectionSchema.parse({ id: 'unrated', assetCount: count('rating = 0') }),
+      catalogSmartCollectionSchema.parse({
+        id: 'unanalyzed',
+        assetCount: hasAnalysis ? count('id NOT IN (SELECT asset_id FROM analysis_revisions)') : count('1')
+      }),
+      catalogSmartCollectionSchema.parse({
+        id: 'generated',
+        assetCount: hasGeneration ? count('id IN (SELECT asset_id FROM generation_results)') : 0
+      })
+    ];
+  }
+
+  saveAlbum(rawInput: SaveCatalogAlbumInput): CatalogAlbum {
+    const input = saveCatalogAlbumInputSchema.parse(rawInput);
+    const normalizedName = normalizeSearchText(input.name);
+    const duplicate = this.#database.prepare(`
+      SELECT id FROM albums WHERE normalized_name = ? AND id != ?
+    `).get(normalizedName, input.id ?? '') as { id: string } | undefined;
+    if (duplicate) throw new Error('ALBUM_NAME_EXISTS');
+    const now = Date.now();
+    const id = input.id ?? randomUUID();
+    if (input.id) {
+      const result = this.#database.prepare(`
+        UPDATE albums SET name = ?, normalized_name = ?, updated_at = ? WHERE id = ?
+      `).run(input.name, normalizedName, now, id);
+      if (result.changes !== 1) throw new Error('ALBUM_NOT_FOUND');
+    } else {
+      this.#database.prepare(`
+        INSERT INTO albums (id, name, normalized_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
+      `).run(id, input.name, normalizedName, now, now);
+    }
+    return this.#findAlbum(id);
+  }
+
+  deleteAlbum(albumId: string): void {
+    if (this.#database.prepare('DELETE FROM albums WHERE id = ?').run(albumId).changes !== 1) {
+      throw new Error('ALBUM_NOT_FOUND');
+    }
+  }
+
+  updateAlbumAssets(rawInput: UpdateCatalogAlbumAssetsInput): CatalogAlbum {
+    const input = updateCatalogAlbumAssetsInputSchema.parse(rawInput);
+    const album = this.#database.prepare('SELECT id FROM albums WHERE id = ?').get(input.albumId);
+    if (!album) throw new Error('ALBUM_NOT_FOUND');
+    const assetIds = [...new Set(input.assetIds)];
+    if (assetIds.length !== input.assetIds.length) throw new Error('DUPLICATE_ASSET_ID');
+    const placeholders = assetIds.map(() => '?').join(', ');
+    const active = this.#database.prepare(`
+      SELECT COUNT(*) AS value FROM assets WHERE removed_at IS NULL AND id IN (${placeholders})
+    `).get(...assetIds) as { value: number };
+    if (active.value !== assetIds.length) throw new Error('CATALOG_ASSET_SET_MISMATCH');
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      if (input.mode === 'add') {
+        const insert = this.#database.prepare(`
+          INSERT OR IGNORE INTO album_assets (album_id, asset_id, added_at) VALUES (?, ?, ?)
+        `);
+        const now = Date.now();
+        for (const assetId of assetIds) insert.run(input.albumId, assetId, now);
+      } else {
+        const remove = this.#database.prepare('DELETE FROM album_assets WHERE album_id = ? AND asset_id = ?');
+        for (const assetId of assetIds) remove.run(input.albumId, assetId);
+      }
+      this.#database.prepare('UPDATE albums SET updated_at = ? WHERE id = ?').run(Date.now(), input.albumId);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    return this.#findAlbum(input.albumId);
   }
 
   listTags(): CatalogTag[] {
@@ -421,6 +569,34 @@ export class CatalogService {
       .get(assetId) as Pick<AssetRow, 'path' | 'file_name' | 'modified_at'> | undefined;
     if (!row) return null;
     return { path: row.path, fileName: row.file_name, modifiedAt: row.modified_at };
+  }
+
+  #tableExists(tableName: string): boolean {
+    return Boolean(this.#database.prepare(`
+      SELECT 1 AS value FROM sqlite_master WHERE type = 'table' AND name = ?
+    `).get(tableName));
+  }
+
+  #findAlbum(albumId: string): CatalogAlbum {
+    const row = this.#database.prepare(`
+      SELECT albums.id, albums.name, albums.created_at, albums.updated_at,
+        COUNT(assets.id) AS asset_count
+      FROM albums
+      LEFT JOIN album_assets ON album_assets.album_id = albums.id
+      LEFT JOIN assets ON assets.id = album_assets.asset_id AND assets.removed_at IS NULL
+      WHERE albums.id = ?
+      GROUP BY albums.id
+    `).get(albumId) as {
+      id: string; name: string; created_at: number; updated_at: number; asset_count: number;
+    } | undefined;
+    if (!row) throw new Error('ALBUM_NOT_FOUND');
+    return catalogAlbumSchema.parse({
+      id: row.id,
+      name: row.name,
+      assetCount: row.asset_count,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    });
   }
 
   #toAssets(rows: AssetRow[]): CatalogAsset[] {

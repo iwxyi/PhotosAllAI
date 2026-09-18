@@ -67,6 +67,8 @@ export type CatalogAssetCursor = z.infer<typeof catalogAssetCursorSchema>;
 export const listCatalogAssetsInputSchema = z.object({
   folderId: z.string().min(1).nullable().default(null),
   tagId: z.string().uuid().nullable().default(null),
+  albumId: z.string().uuid().nullable().default(null),
+  smartCollection: z.enum(['favorites', 'unrated', 'unanalyzed', 'generated']).nullable().default(null),
   favoriteOnly: z.boolean().default(false),
   query: z.string().max(500).default(''),
   cursor: catalogAssetCursorSchema.nullable().default(null),
@@ -90,6 +92,34 @@ export const catalogFolderSchema = z.object({
 });
 
 export type CatalogFolder = z.infer<typeof catalogFolderSchema>;
+
+export const catalogAlbumSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(1).max(120),
+  assetCount: z.number().int().nonnegative(),
+  createdAt: z.number().nonnegative(),
+  updatedAt: z.number().nonnegative()
+});
+export type CatalogAlbum = z.infer<typeof catalogAlbumSchema>;
+
+export const saveCatalogAlbumInputSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().trim().min(1).max(120)
+});
+export type SaveCatalogAlbumInput = z.infer<typeof saveCatalogAlbumInputSchema>;
+
+export const updateCatalogAlbumAssetsInputSchema = z.object({
+  albumId: z.string().uuid(),
+  assetIds: z.array(z.string().min(1)).min(1).max(10_000),
+  mode: z.enum(['add', 'remove'])
+});
+export type UpdateCatalogAlbumAssetsInput = z.infer<typeof updateCatalogAlbumAssetsInputSchema>;
+
+export const catalogSmartCollectionSchema = z.object({
+  id: z.enum(['favorites', 'unrated', 'unanalyzed', 'generated']),
+  assetCount: z.number().int().nonnegative()
+});
+export type CatalogSmartCollection = z.infer<typeof catalogSmartCollectionSchema>;
 
 export const moveCatalogAssetsInputSchema = z.object({
   assetIds: z.array(z.string().min(1)).min(1).max(10_000),
@@ -440,6 +470,11 @@ export interface DesktopApi {
   listCatalogAssetPage(input: ListCatalogAssetsInput): Promise<CatalogAssetPage>;
   listCatalogFolders(): Promise<CatalogFolder[]>;
   listCatalogTags(): Promise<CatalogTag[]>;
+  listCatalogAlbums(): Promise<CatalogAlbum[]>;
+  listCatalogSmartCollections(): Promise<CatalogSmartCollection[]>;
+  saveCatalogAlbum(input: SaveCatalogAlbumInput): Promise<CatalogAlbum>;
+  deleteCatalogAlbum(albumId: string): Promise<void>;
+  updateCatalogAlbumAssets(input: UpdateCatalogAlbumAssetsInput): Promise<CatalogAlbum>;
   updateCatalogMetadata(input: UpdateCatalogMetadataInput): Promise<CatalogAsset[]>;
   updateCatalogTags(input: UpdateCatalogTagsInput): Promise<CatalogTag[]>;
   moveCatalogAssets(input: MoveCatalogAssetsInput): Promise<MoveCatalogAssetsReport>;

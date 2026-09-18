@@ -87,4 +87,23 @@ describe('catalog image discovery', () => {
     expect(assets.find((asset) => asset.fileName === 'raw.NEF')?.previewUrl).toMatch(/^photoasset:\/\/preview/);
     catalog.close();
   });
+
+  it('manages virtual albums and dynamic smart collections without moving files', async () => {
+    const root = await createTemporaryDirectory();
+    const photosDirectory = path.join(root, 'photos');
+    await mkdir(photosDirectory, { recursive: true });
+    await writeFile(path.join(photosDirectory, 'one.jpg'), 'one');
+    await writeFile(path.join(photosDirectory, 'two.jpg'), 'two');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([photosDirectory]);
+    const assets = catalog.listAssets();
+    catalog.updateMetadata({ assetIds: [assets[0]!.id], favorite: true });
+    const album = catalog.saveAlbum({ name: '交付候选' });
+    expect(catalog.updateAlbumAssets({ albumId: album.id, assetIds: [assets[0]!.id], mode: 'add' })).toMatchObject({ assetCount: 1 });
+    expect(catalog.listAssetPage({ albumId: album.id, cursor: null, limit: 20 }).items).toHaveLength(1);
+    expect(catalog.listSmartCollections().find((item) => item.id === 'favorites')?.assetCount).toBe(1);
+    expect(catalog.updateAlbumAssets({ albumId: album.id, assetIds: [assets[0]!.id], mode: 'remove' })).toMatchObject({ assetCount: 0 });
+    catalog.deleteAlbum(album.id);
+    catalog.close();
+  });
 });
