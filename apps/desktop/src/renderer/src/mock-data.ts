@@ -1,5 +1,6 @@
 export type Photo = {
   id: string;
+  folderId?: string;
   fileName: string;
   src: string;
   thumbnailSrc?: string;

@@ -3,7 +3,12 @@ import { opendir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { catalogAssetSchema, type CatalogAsset } from '@photoallisai/contracts';
+import {
+  catalogAssetSchema,
+  catalogFolderSchema,
+  type CatalogAsset,
+  type CatalogFolder
+} from '@photoallisai/contracts';
 
 const SUPPORTED_EXTENSIONS = new Set([
   '.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif',
@@ -14,6 +19,7 @@ const IGNORED_DIRECTORIES = new Set(['_PhotoAllIsAI', '.git', 'node_modules']);
 
 type AssetRow = {
   id: string;
+  folder_id: string;
   path: string;
   file_name: string;
   extension: string;
@@ -101,7 +107,7 @@ export class CatalogService {
     const safeLimit = Math.max(1, Math.min(limit, 1_000));
     const rows = this.#database
       .prepare(`
-        SELECT id, path, file_name, extension, size_bytes, modified_at
+        SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at
         FROM assets
         ORDER BY modified_at DESC, id ASC
         LIMIT ?
@@ -109,6 +115,21 @@ export class CatalogService {
       .all(safeLimit) as AssetRow[];
 
     return rows.map((row) => this.#toAsset(row));
+  }
+
+  listFolders(): CatalogFolder[] {
+    const rows = this.#database.prepare(`
+      SELECT folders.id, folders.name, COUNT(assets.id) AS asset_count
+      FROM folders
+      LEFT JOIN assets ON assets.folder_id = folders.id
+      GROUP BY folders.id, folders.name
+      ORDER BY folders.name COLLATE NOCASE ASC, folders.id ASC
+    `).all() as { id: string; name: string; asset_count: number }[];
+    return rows.map((row) => catalogFolderSchema.parse({
+      id: row.id,
+      name: row.name,
+      assetCount: row.asset_count
+    }));
   }
 
   async importFolders(folderPaths: readonly string[]): Promise<number> {
@@ -182,6 +203,7 @@ export class CatalogService {
   #toAsset(row: AssetRow): CatalogAsset {
     return catalogAssetSchema.parse({
       id: row.id,
+      folderId: row.folder_id,
       fileName: row.file_name,
       format: row.extension.slice(1).toUpperCase(),
       sizeBytes: row.size_bytes,

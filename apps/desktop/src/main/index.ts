@@ -59,6 +59,7 @@ function registerIpc(): void {
   );
 
   ipcMain.handle('catalog.assets.list.v1', () => catalog.listAssets());
+  ipcMain.handle('catalog.folders.list.v1', () => catalog.listFolders());
 
   ipcMain.handle('catalog.folders.import.v1', async () => {
     const result = await dialog.showOpenDialog({

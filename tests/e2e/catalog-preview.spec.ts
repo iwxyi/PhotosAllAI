@@ -55,6 +55,10 @@ test('serves bounded cached images without exposing file paths', async () => {
   expect(await preview.evaluate((image) => image.naturalWidth)).toBeLessThanOrEqual(2560);
   await expect(page.getByText('等待视觉分析')).toBeVisible();
   await expect(page.getByText('处理中 0')).toBeVisible();
+  await expect(page.getByRole('button', { name: /source 1/ })).toBeVisible();
+  await page.getByRole('button', { name: /source 1/ }).click();
+  await expect(page.getByText('source', { exact: true }).last()).toBeVisible();
+  await expect(page.getByText('1 张照片')).toBeVisible();
   await page.getByRole('button', { name: '开始分析' }).click();
   await expect(page.getByText('请先在设置中添加并启用视觉分析模型。')).toBeVisible();
 });

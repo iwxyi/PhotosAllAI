@@ -17,6 +17,7 @@ export type OpenPathResult = z.infer<typeof openPathResultSchema>;
 
 export const catalogAssetSchema = z.object({
   id: z.string(),
+  folderId: z.string(),
   fileName: z.string(),
   format: z.string(),
   sizeBytes: z.number().nonnegative(),
@@ -26,6 +27,14 @@ export const catalogAssetSchema = z.object({
 });
 
 export type CatalogAsset = z.infer<typeof catalogAssetSchema>;
+
+export const catalogFolderSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1),
+  assetCount: z.number().int().nonnegative()
+});
+
+export type CatalogFolder = z.infer<typeof catalogFolderSchema>;
 
 export const catalogSnapshotSchema = z.object({
   assets: z.array(catalogAssetSchema),
@@ -263,6 +272,7 @@ export type ExportReport = z.infer<typeof exportReportSchema>;
 export interface DesktopApi {
   getAppInfo(): Promise<AppInfo>;
   listCatalogAssets(): Promise<CatalogAsset[]>;
+  listCatalogFolders(): Promise<CatalogFolder[]>;
   importFolders(): Promise<CatalogSnapshot | null>;
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;

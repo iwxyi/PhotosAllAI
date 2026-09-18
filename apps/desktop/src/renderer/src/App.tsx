@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type {
   CatalogAsset,
+  CatalogFolder,
   AnalysisRevision,
   GenerationResult,
   PersistedTask,
@@ -64,7 +65,7 @@ const tabs: { id: WorkspaceTab; label: string; icon: typeof Image }[] = [
   { id: 'settings', label: '设置', icon: Settings }
 ];
 
-const folders = [
+const demoFolders = [
   { name: '2026 人像作品', count: 128, selected: true },
   { name: '城市漫步', count: 84 },
   { name: '海岸与山野', count: 216 },
@@ -74,6 +75,7 @@ const folders = [
 function mapCatalogAssets(assets: CatalogAsset[]): Photo[] {
   return assets.map((asset) => ({
     id: asset.id,
+    folderId: asset.folderId,
     fileName: asset.fileName,
     src: asset.previewUrl,
     thumbnailSrc: asset.thumbnailUrl,
@@ -163,16 +165,31 @@ function AppHeader({ active, onChange, onImport }: { active: WorkspaceTab; onCha
   );
 }
 
-function Sidebar(): React.JSX.Element {
+function Sidebar({
+  folders,
+  totalCount,
+  selectedFolderId,
+  onSelectFolder,
+  isDemo
+}: {
+  folders: CatalogFolder[];
+  totalCount: number;
+  selectedFolderId: string | null;
+  onSelectFolder: (folderId: string | null) => void;
+  isDemo: boolean;
+}): React.JSX.Element {
+  const visibleFolders = isDemo
+    ? demoFolders.map((folder, index) => ({ id: `demo-${index}`, name: folder.name, assetCount: folder.count }))
+    : folders;
   return (
     <aside className="sidebar">
       <div className="sidebar-scroll">
         <nav aria-label="图库导航">
-          <div className="nav-row is-active">
+          <button className={`nav-row${selectedFolderId === null ? ' is-active' : ''}`} type="button" onClick={() => onSelectFolder(null)}>
             <GalleryHorizontalEnd size={15} />
             <span>所有照片</span>
-            <span className="row-count">12,408</span>
-          </div>
+            <span className="row-count">{isDemo ? '12,408' : totalCount}</span>
+          </button>
           <div className="nav-row">
             <Clock3 size={15} />
             <span>最近导入</span>
@@ -190,13 +207,13 @@ function Sidebar(): React.JSX.Element {
             <span>文件夹</span>
             <button type="button" aria-label="添加文件夹"><Plus size={13} /></button>
           </div>
-          {folders.map((folder) => (
-            <div className={`nav-row folder-row${folder.selected ? ' is-selected' : ''}`} key={folder.name}>
+          {visibleFolders.map((folder) => (
+            <button className={`nav-row folder-row${selectedFolderId === folder.id ? ' is-selected' : ''}`} type="button" key={folder.id} onClick={() => onSelectFolder(folder.id)}>
               <ChevronRight className="disclosure" size={12} />
               <Folder size={15} />
               <span>{folder.name}</span>
-              <span className="row-count">{folder.count}</span>
-            </div>
+              <span className="row-count">{folder.assetCount}</span>
+            </button>
           ))}
         </div>
 
@@ -226,17 +243,19 @@ function Filmstrip({
   items,
   selected,
   selection,
-  onSelect
+  onSelect,
+  collectionName
 }: {
   items: Photo[];
   selected: Photo;
   selection: SelectionState;
   onSelect: (photo: Photo, intent: SelectionIntent) => void;
+  collectionName: string;
 }): React.JSX.Element {
   return (
     <section className="filmstrip-region">
       <div className="filmstrip-toolbar">
-        <div className="result-summary"><strong>2026 人像作品</strong><span>128 张照片</span></div>
+        <div className="result-summary"><strong>{collectionName}</strong><span>{items.length} 张照片</span></div>
         <div className="filmstrip-tools">
           <button className="quiet-button" type="button"><ListFilter size={14} /> 筛选</button>
           <button className="quiet-button" type="button">拍摄时间 <ChevronDown size={12} /></button>
@@ -526,12 +545,14 @@ function TaskBar({ open, onToggle, tasks }: { open: boolean; onToggle: () => voi
   );
 }
 
-function LibraryWorkspace({ availablePhotos, isDemo }: { availablePhotos: Photo[]; isDemo: boolean }): React.JSX.Element {
-  const [selectedId, setSelectedId] = useState(availablePhotos[0]!.id);
+function LibraryWorkspace({ availablePhotos, catalogFolders, isDemo }: { availablePhotos: Photo[]; catalogFolders: CatalogFolder[]; isDemo: boolean }): React.JSX.Element {
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  const visiblePhotos = selectedFolderId ? availablePhotos.filter((photo) => photo.folderId === selectedFolderId) : availablePhotos;
+  const [selectedId, setSelectedId] = useState(visiblePhotos[0]!.id);
   const [selection, setSelection] = useState<SelectionState>({
-    selectedIds: new Set([availablePhotos[0]!.id]),
-    anchorId: availablePhotos[0]!.id,
-    focusId: availablePhotos[0]!.id
+    selectedIds: new Set([visiblePhotos[0]!.id]),
+    anchorId: visiblePhotos[0]!.id,
+    focusId: visiblePhotos[0]!.id
   });
   const [tasksOpen, setTasksOpen] = useState(false);
   const [visionProfiles, setVisionProfiles] = useState<ProviderProfile[]>([]);
@@ -542,8 +563,20 @@ function LibraryWorkspace({ availablePhotos, isDemo }: { availablePhotos: Photo[
   const [analysisNotice, setAnalysisNotice] = useState('');
   const [operationNotice, setOperationNotice] = useState('');
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
-  const selected = availablePhotos.find((photo) => photo.id === selectedId) ?? availablePhotos[0]!;
-  const orderedIds = useMemo(() => availablePhotos.map((photo) => photo.id), [availablePhotos]);
+  const selected = visiblePhotos.find((photo) => photo.id === selectedId) ?? visiblePhotos[0]!;
+  const orderedIds = useMemo(() => visiblePhotos.map((photo) => photo.id), [visiblePhotos]);
+  const collectionName = selectedFolderId
+    ? catalogFolders.find((folder) => folder.id === selectedFolderId)?.name ?? '文件夹'
+    : isDemo ? '2026 人像作品' : '所有照片';
+
+  const selectFolder = (folderId: string | null) => {
+    const nextPhotos = folderId ? availablePhotos.filter((photo) => photo.folderId === folderId) : availablePhotos;
+    const first = nextPhotos[0];
+    if (!first) return;
+    setSelectedFolderId(folderId);
+    setSelectedId(first.id);
+    setSelection({ selectedIds: new Set([first.id]), anchorId: first.id, focusId: first.id });
+  };
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -717,9 +750,9 @@ function LibraryWorkspace({ availablePhotos, isDemo }: { availablePhotos: Photo[
 
   return (
     <div className="workspace">
-      <Sidebar />
+      <Sidebar folders={catalogFolders} totalCount={availablePhotos.length} selectedFolderId={selectedFolderId} onSelectFolder={selectFolder} isDemo={isDemo} />
       <main className="library-main">
-        <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} />
+        <Filmstrip items={visiblePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} />
         <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} />
       </main>
       <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onGenerate={generateSelection} />
@@ -1018,14 +1051,21 @@ function TemplatePage(): React.JSX.Element {
 export function App(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('library');
   const [catalogPhotos, setCatalogPhotos] = useState<Photo[]>([]);
+  const [catalogFolders, setCatalogFolders] = useState<CatalogFolder[]>([]);
 
   useEffect(() => {
-    void window.desktopApi.listCatalogAssets().then((assets) => setCatalogPhotos(mapCatalogAssets(assets)));
+    void Promise.all([window.desktopApi.listCatalogAssets(), window.desktopApi.listCatalogFolders()]).then(([assets, folders]) => {
+      setCatalogPhotos(mapCatalogAssets(assets));
+      setCatalogFolders(folders);
+    });
   }, []);
 
   const importFolders = async () => {
     const result = await window.desktopApi.importFolders();
-    if (result) setCatalogPhotos(mapCatalogAssets(result.assets));
+    if (result) {
+      setCatalogPhotos(mapCatalogAssets(result.assets));
+      setCatalogFolders(await window.desktopApi.listCatalogFolders());
+    }
   };
 
   const availablePhotos = catalogPhotos.length > 0 ? catalogPhotos : photos;
@@ -1033,7 +1073,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} onChange={setActiveTab} onImport={() => void importFolders()} />
-      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} isDemo={catalogPhotos.length === 0} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
+      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} isDemo={catalogPhotos.length === 0} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
     </div>
   );
 }
