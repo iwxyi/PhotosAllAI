@@ -90,6 +90,27 @@ test('opens the task drawer and application tabs', async () => {
   await page.getByRole('tab', { name: /图库/ }).click();
 });
 
+test('restores open tabs, active workspace, and selected photo', async () => {
+  await page.getByRole('option', { name: '' }).nth(2).click();
+  await page.getByRole('button', { name: '关闭设置标签页' }).click();
+  await expect(page.getByRole('tab', { name: '设置' })).toHaveCount(0);
+  await page.getByRole('tab', { name: /任务中心/ }).click();
+  await page.waitForTimeout(500);
+
+  await page.reload();
+  await expect(page.getByRole('tab', { name: /任务中心/ })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: '设置' })).toHaveCount(0);
+  await page.getByRole('tab', { name: /图库/ }).click();
+  await expect(page.getByText('A7R_0912.ARW', { exact: true }).last()).toBeVisible();
+  await expect(page.locator('.generated-layer img')).toHaveCSS('object-fit', 'cover');
+
+  await page.getByRole('button', { name: '打开工作区' }).click();
+  await page.screenshot({ path: 'test-results/workspace-tab-menu.png', animations: 'disabled' });
+  await page.getByRole('menuitem', { name: '设置' }).click();
+  await expect(page.getByRole('heading', { name: 'AI 模型' })).toBeVisible();
+  await page.getByRole('tab', { name: /图库/ }).click();
+});
+
 test('captures the primary workspace for visual inspection', async () => {
   await page.screenshot({
     path: 'test-results/library-workspace.png',

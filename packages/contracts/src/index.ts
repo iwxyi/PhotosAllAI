@@ -8,6 +8,26 @@ export const appInfoSchema = z.object({
 
 export type AppInfo = z.infer<typeof appInfoSchema>;
 
+export const workspaceTabSchema = z.enum(['library', 'templates', 'tasks', 'settings']);
+export type WorkspaceTab = z.infer<typeof workspaceTabSchema>;
+
+export const workspaceSessionSchema = z.object({
+  version: z.literal(1),
+  openTabs: z.array(workspaceTabSchema).min(1).max(4)
+    .refine((items) => new Set(items).size === items.length, 'Workspace tabs must be unique')
+    .refine((items) => items.includes('library'), 'Library tab must remain open'),
+  activeTab: workspaceTabSchema,
+  library: z.object({
+    selectedFolderId: z.string().min(1).nullable(),
+    selectedTagId: z.string().uuid().nullable(),
+    selectedAssetId: z.string().min(1).nullable(),
+    searchQuery: z.string().max(500)
+  })
+}).refine((session) => session.openTabs.includes(session.activeTab), {
+  message: 'Active workspace tab must be open'
+});
+export type WorkspaceSession = z.infer<typeof workspaceSessionSchema>;
+
 export const openPathResultSchema = z.object({
   canceled: z.boolean(),
   paths: z.array(z.string())
@@ -414,6 +434,8 @@ export type ExportReport = z.infer<typeof exportReportSchema>;
 
 export interface DesktopApi {
   getAppInfo(): Promise<AppInfo>;
+  getWorkspaceSession(): Promise<WorkspaceSession>;
+  saveWorkspaceSession(session: WorkspaceSession): Promise<WorkspaceSession>;
   listCatalogAssets(): Promise<CatalogAsset[]>;
   listCatalogAssetPage(input: ListCatalogAssetsInput): Promise<CatalogAssetPage>;
   listCatalogFolders(): Promise<CatalogFolder[]>;

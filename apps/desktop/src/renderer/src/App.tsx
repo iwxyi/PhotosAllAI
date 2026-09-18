@@ -11,7 +11,9 @@ import type {
   PromptTemplate,
   ProviderProfile,
   SavePromptTemplateInput,
-  SaveProviderProfileInput
+  SaveProviderProfileInput,
+  WorkspaceSession,
+  WorkspaceTab
 } from '@photoallisai/contracts';
 import { computeHorizontalWindow, composeGenerationPrompt, selectAll, updateSelection, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
 import {
@@ -64,7 +66,6 @@ import {
 
 import { photos, type Photo } from './mock-data';
 
-type WorkspaceTab = 'library' | 'templates' | 'tasks' | 'settings';
 type CompareMode = 'single' | 'split';
 
 const tabs: { id: WorkspaceTab; label: string; icon: typeof Image }[] = [
@@ -122,34 +123,58 @@ function IconButton({
   );
 }
 
-function AppTabs({ active, onChange }: { active: WorkspaceTab; onChange: (id: WorkspaceTab) => void }) {
+function AppTabs({
+  active,
+  openTabs,
+  onChange,
+  onClose,
+  onOpen
+}: {
+  active: WorkspaceTab;
+  openTabs: WorkspaceTab[];
+  onChange: (id: WorkspaceTab) => void;
+  onClose: (id: WorkspaceTab) => void;
+  onOpen: (id: WorkspaceTab) => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const closedTabs = tabs.filter((tab) => !openTabs.includes(tab.id));
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') setMenuOpen(false); };
+    const closeOutside = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest('.new-tab-control')) setMenuOpen(false);
+    };
+    window.addEventListener('keydown', close);
+    window.addEventListener('pointerdown', closeOutside);
+    return () => {
+      window.removeEventListener('keydown', close);
+      window.removeEventListener('pointerdown', closeOutside);
+    };
+  }, [menuOpen]);
   return (
     <div className="tab-strip" role="tablist" aria-label="工作区">
-      {tabs.map((tab) => {
+      {openTabs.map((tabId) => {
+        const tab = tabs.find((item) => item.id === tabId)!;
         const Icon = tab.icon;
         return (
-          <button
+          <div
             key={tab.id}
             className={`workspace-tab${active === tab.id ? ' is-active' : ''}`}
-            role="tab"
-            aria-selected={active === tab.id}
-            type="button"
-            onClick={() => onChange(tab.id)}
           >
-            <Icon size={14} />
-            <span>{tab.label}</span>
-            {tab.id !== 'library' && <X className="tab-close" size={12} />}
-          </button>
+            <button className="tab-main" role="tab" aria-selected={active === tab.id} type="button" tabIndex={active === tab.id ? 0 : -1} onClick={() => onChange(tab.id)}><Icon size={14} /><span>{tab.label}</span></button>
+            {tab.id !== 'library' && <button className="tab-close" type="button" aria-label={`关闭${tab.label}标签页`} onClick={(event) => { event.stopPropagation(); onClose(tab.id); }}><X size={12} /></button>}
+          </div>
         );
       })}
-      <IconButton label="新建工作区">
-        <Plus size={15} />
-      </IconButton>
+      <div className="new-tab-control">
+        <IconButton label="打开工作区" disabled={closedTabs.length === 0} onClick={() => setMenuOpen((value) => !value)}><Plus size={15} /></IconButton>
+        {menuOpen && <div className="new-tab-menu" role="menu">{closedTabs.map((tab) => { const Icon = tab.icon; return <button key={tab.id} type="button" role="menuitem" onClick={() => { onOpen(tab.id); setMenuOpen(false); }}><Icon size={14} /><span>{tab.label}</span></button>; })}</div>}
+      </div>
     </div>
   );
 }
 
-function AppHeader({ active, onChange, onImport, search, onSearchChange }: { active: WorkspaceTab; onChange: (id: WorkspaceTab) => void; onImport: () => void; search: string; onSearchChange: (value: string) => void }) {
+function AppHeader({ active, openTabs, onChange, onClose, onOpen, onImport, search, onSearchChange }: { active: WorkspaceTab; openTabs: WorkspaceTab[]; onChange: (id: WorkspaceTab) => void; onClose: (id: WorkspaceTab) => void; onOpen: (id: WorkspaceTab) => void; onImport: () => void; search: string; onSearchChange: (value: string) => void }) {
   const searchRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent) => {
@@ -168,7 +193,7 @@ function AppHeader({ active, onChange, onImport, search, onSearchChange }: { act
         <Aperture size={18} strokeWidth={1.7} />
         <span>PhotoAllIsAI</span>
       </div>
-      <AppTabs active={active} onChange={onChange} />
+      <AppTabs active={active} openTabs={openTabs} onChange={onChange} onClose={onClose} onOpen={onOpen} />
       <div className="header-actions">
         <label className="search-trigger">
           <Search size={14} />
@@ -641,6 +666,8 @@ type LibraryWorkspaceProps = {
   onSelectTag: (tagId: string | null) => void;
   onLoadMore: () => void;
   searchQuery: string;
+  selectedAssetId: string | null;
+  onSelectedAssetChange: (assetId: string | null) => void;
   onRefreshCatalog: () => Promise<void>;
 };
 
@@ -683,15 +710,20 @@ function PopulatedLibraryWorkspace({
   onSelectTag,
   onLoadMore,
   searchQuery,
+  selectedAssetId,
+  onSelectedAssetChange,
   onRefreshCatalog,
   operationNotice,
   setOperationNotice
 }: PopulatedLibraryWorkspaceProps): React.JSX.Element {
-  const [selectedId, setSelectedId] = useState(availablePhotos[0]!.id);
+  const initialSelectedId = availablePhotos.some((photo) => photo.id === selectedAssetId)
+    ? selectedAssetId!
+    : availablePhotos[0]!.id;
+  const [selectedId, setSelectedId] = useState(initialSelectedId);
   const [selection, setSelection] = useState<SelectionState>({
-    selectedIds: new Set([availablePhotos[0]!.id]),
-    anchorId: availablePhotos[0]!.id,
-    focusId: availablePhotos[0]!.id
+    selectedIds: new Set([initialSelectedId]),
+    anchorId: initialSelectedId,
+    focusId: initialSelectedId
   });
   const [tasksOpen, setTasksOpen] = useState(false);
   const [visionProfiles, setVisionProfiles] = useState<ProviderProfile[]>([]);
@@ -719,12 +751,17 @@ function PopulatedLibraryWorkspace({
     : isDemo ? '2026 人像作品' : searchQuery ? `搜索：${searchQuery}` : '所有照片';
 
   useEffect(() => {
+    if (selectedAssetId !== selectedId) onSelectedAssetChange(selectedId);
+  }, [onSelectedAssetChange, selectedAssetId, selectedId]);
+
+  useEffect(() => {
     if (availablePhotos.some((photo) => photo.id === selectedId)) return;
     const first = availablePhotos[0];
     if (!first) return;
     setSelectedId(first.id);
+    onSelectedAssetChange(first.id);
     setSelection({ selectedIds: new Set([first.id]), anchorId: first.id, focusId: first.id });
-  }, [availablePhotos, selectedId]);
+  }, [availablePhotos, onSelectedAssetChange, selectedId]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -793,6 +830,7 @@ function PopulatedLibraryWorkspace({
 
   const selectPhoto = (photo: Photo, intent: SelectionIntent) => {
     setSelectedId(photo.id);
+    onSelectedAssetChange(photo.id);
     setSelection((current) => updateSelection(current, orderedIds, photo.id, intent));
   };
 
@@ -1406,11 +1444,14 @@ function TemplatePage(): React.JSX.Element {
 
 export function App(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('library');
+  const [openTabs, setOpenTabs] = useState<WorkspaceTab[]>(['library', 'templates', 'tasks', 'settings']);
+  const [sessionReady, setSessionReady] = useState(false);
   const [catalogPhotos, setCatalogPhotos] = useState<Photo[]>([]);
   const [catalogFolders, setCatalogFolders] = useState<CatalogFolder[]>([]);
   const [catalogTags, setCatalogTags] = useState<CatalogTag[]>([]);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
+  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [catalogTotal, setCatalogTotal] = useState(0);
   const [nextCursor, setNextCursor] = useState<CatalogAssetCursor | null>(null);
   const [catalogReady, setCatalogReady] = useState(false);
@@ -1418,6 +1459,36 @@ export function App(): React.JSX.Element {
   const [searchDraft, setSearchDraft] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const catalogRequest = useRef(0);
+
+  useEffect(() => {
+    let active = true;
+    void window.desktopApi.getWorkspaceSession().then((session) => {
+      if (!active) return;
+      setOpenTabs(session.openTabs);
+      setActiveTab(session.activeTab);
+      setSelectedFolderId(session.library.selectedFolderId);
+      setSelectedTagId(session.library.selectedTagId);
+      setSelectedAssetId(session.library.selectedAssetId);
+      setSearchDraft(session.library.searchQuery);
+      setSearchQuery(session.library.searchQuery);
+      setSessionReady(true);
+    }).catch(() => setSessionReady(true));
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!sessionReady) return;
+    const session: WorkspaceSession = {
+      version: 1,
+      openTabs,
+      activeTab,
+      library: { selectedFolderId, selectedTagId, selectedAssetId, searchQuery: searchDraft.trim() }
+    };
+    const timeout = window.setTimeout(() => {
+      void window.desktopApi.saveWorkspaceSession(session).catch(() => undefined);
+    }, 400);
+    return () => window.clearTimeout(timeout);
+  }, [activeTab, openTabs, searchDraft, selectedAssetId, selectedFolderId, selectedTagId, sessionReady]);
 
   const refreshCatalog = useCallback(async () => {
     const request = ++catalogRequest.current;
@@ -1432,6 +1503,8 @@ export function App(): React.JSX.Element {
       setCatalogPhotos(mapCatalogAssets(page.items));
       setCatalogFolders(folders);
       setCatalogTags(tags);
+      if (selectedFolderId && !folders.some((folder) => folder.id === selectedFolderId)) setSelectedFolderId(null);
+      if (selectedTagId && !tags.some((tag) => tag.id === selectedTagId)) setSelectedTagId(null);
       setCatalogTotal(page.totalCount);
       setNextCursor(page.nextCursor);
       setCatalogReady(true);
@@ -1441,8 +1514,9 @@ export function App(): React.JSX.Element {
   }, [searchQuery, selectedFolderId, selectedTagId]);
 
   useEffect(() => {
+    if (!sessionReady) return;
     void refreshCatalog();
-  }, [refreshCatalog]);
+  }, [refreshCatalog, sessionReady]);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setSearchQuery(searchDraft.trim()), 250);
@@ -1453,6 +1527,35 @@ export function App(): React.JSX.Element {
     const result = await window.desktopApi.importFolders();
     if (result) await refreshCatalog();
   };
+
+  const openWorkspaceTab = useCallback((tab: WorkspaceTab) => {
+    setOpenTabs((current) => current.includes(tab) ? current : [...current, tab]);
+    setActiveTab(tab);
+  }, []);
+
+  const closeWorkspaceTab = useCallback((tab: WorkspaceTab) => {
+    if (tab === 'library') return;
+    setOpenTabs((current) => current.filter((item) => item !== tab));
+    setActiveTab((current) => current === tab ? 'library' : current);
+  }, []);
+
+  useEffect(() => {
+    const handleWorkspaceShortcut = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey)) return;
+      if (event.key.toLowerCase() === 'w' && activeTab !== 'library') {
+        event.preventDefault();
+        closeWorkspaceTab(activeTab);
+      } else if (event.key === 'Tab') {
+        event.preventDefault();
+        const currentIndex = openTabs.indexOf(activeTab);
+        const direction = event.shiftKey ? -1 : 1;
+        const nextIndex = (currentIndex + direction + openTabs.length) % openTabs.length;
+        setActiveTab(openTabs[nextIndex]!);
+      }
+    };
+    window.addEventListener('keydown', handleWorkspaceShortcut);
+    return () => window.removeEventListener('keydown', handleWorkspaceShortcut);
+  }, [activeTab, closeWorkspaceTab, openTabs]);
 
   const loadMoreCatalog = async () => {
     if (!nextCursor || loadingMore) return;
@@ -1484,8 +1587,8 @@ export function App(): React.JSX.Element {
 
   return (
     <div className="app-shell">
-      <AppHeader active={activeTab} onChange={setActiveTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
-      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogTags={catalogTags} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedTagId={selectedTagId} totalCount={displayTotal} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={setSelectedFolderId} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
+      <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
+      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogTags={catalogTags} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={setSelectedFolderId} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
     </div>
   );
 }

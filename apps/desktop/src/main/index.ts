@@ -25,7 +25,8 @@ import {
   saveProviderProfileInputSchema,
   taskIdSchema,
   updateCatalogMetadataInputSchema,
-  updateCatalogTagsInputSchema
+  updateCatalogTagsInputSchema,
+  workspaceSessionSchema
 } from '@photoallisai/contracts';
 
 import { CatalogService } from './catalog-service';
@@ -38,6 +39,7 @@ import { ProviderService } from './provider-service';
 import { TaskService } from './task-service';
 import { TaskRunner } from './task-runner';
 import { TemplateService } from './template-service';
+import { WorkspaceService } from './workspace-service';
 
 const APP_ORIGIN = 'app://photoallisai';
 let catalog: CatalogService;
@@ -50,6 +52,7 @@ let generation: GenerationService;
 let exportService: ExportService;
 let fileOperations: FileOperationService;
 let taskRunner: TaskRunner;
+let workspace: WorkspaceService;
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -69,6 +72,10 @@ function registerIpc(): void {
       version: app.getVersion(),
       platform: process.platform
     })
+  );
+  ipcMain.handle('workspace.session.get.v1', () => workspace.get());
+  ipcMain.handle('workspace.session.save.v1', (_event, input: unknown) =>
+    workspace.save(workspaceSessionSchema.parse(input))
   );
 
   ipcMain.handle('catalog.assets.list.v1', () => catalog.listAssets());
@@ -222,6 +229,7 @@ app.whenReady().then(async () => {
   const libraryDirectory = join(app.getPath('userData'), 'library');
   mkdirSync(libraryDirectory, { recursive: true });
   const databasePath = join(libraryDirectory, 'catalog.sqlite');
+  workspace = new WorkspaceService(databasePath);
   catalog = new CatalogService(databasePath);
   fileOperations = new FileOperationService(databasePath, undefined, {
     trashItem: (filePath) => shell.trashItem(filePath)
@@ -293,6 +301,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   taskRunner?.stop();
+  workspace?.close();
   generation?.close();
   exportService?.close();
   analysis?.close();
