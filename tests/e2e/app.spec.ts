@@ -29,6 +29,11 @@ test('starts with the secure library workspace', async () => {
   await expect(page.getByText('2026 人像作品', { exact: true }).first()).toBeVisible();
   await expect(page.getByLabel('添加文件夹')).toBeVisible();
   await expect(page.getByRole('button', { name: /加入生成队列/ })).toBeVisible();
+  await page.getByRole('button', { name: /筛选/ }).click();
+  await expect(page.getByRole('dialog', { name: '图库筛选' })).toBeVisible();
+  await page.getByLabel('仅显示首选照片').check();
+  await expect(page.getByRole('button', { name: /筛选 · 首选/ })).toBeVisible();
+  await page.getByRole('dialog', { name: '图库筛选' }).getByRole('button', { name: '清除筛选' }).click();
 
   const security = await page.evaluate(() => ({
     hasDesktopApi: typeof window.desktopApi === 'object',
