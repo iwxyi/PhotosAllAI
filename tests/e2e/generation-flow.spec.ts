@@ -80,7 +80,7 @@ test.afterAll(async () => {
   await rm(testRoot, { recursive: true, force: true });
 });
 
-test('analyzes, generates, persists, and displays a managed result', async () => {
+test('analyzes, generates, compares, and persists managed and portable results', async () => {
   const address = mockServer.address();
   if (!address || typeof address === 'string') throw new Error('Mock server unavailable');
   const baseUrl = `http://127.0.0.1:${address.port}/v1`;
@@ -127,7 +127,12 @@ test('analyzes, generates, persists, and displays a managed result', async () =>
   await expect(page.getByRole('button', { name: '标记为首选' })).toBeVisible();
   await expect(page.locator('.version-button.is-preferred')).toBeVisible();
 
-  await page.getByRole('button', { name: '按当前方案再次生成' }).click();
+  await page.getByRole('tab', { name: /设置/ }).click();
+  const storageSection = page.locator('.storage-section');
+  await storageSection.getByRole('radio', { name: /原图旁便携目录/ }).check();
+  await expect(storageSection.getByRole('status')).toContainText('存储策略已保存');
+  await page.getByRole('tab', { name: '图库' }).click();
+  await page.getByRole('button', { name: /加入生成队列/ }).click();
   await expect(page.getByText('V2', { exact: true })).toBeVisible({ timeout: 10_000 });
 
   const exportDirectory = path.join(testRoot, 'exported');
@@ -144,4 +149,8 @@ test('analyzes, generates, persists, and displays a managed result', async () =>
   const generatedRoot = path.join(testRoot, 'user-data', 'library', 'generated');
   const firstLevel = await readdir(generatedRoot);
   expect(firstLevel).toHaveLength(1);
+  const portableRoot = path.join(path.dirname(sourcePath), '_PhotoAllIsAI');
+  const portableFiles = await readdir(portableRoot, { recursive: true });
+  expect(portableFiles.some((file) => file.endsWith('.jpg'))).toBe(true);
+  expect(portableFiles.some((file) => file.endsWith('manifest.json'))).toBe(true);
 });
