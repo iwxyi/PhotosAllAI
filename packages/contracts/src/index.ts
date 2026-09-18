@@ -14,7 +14,16 @@ export const diagnosticSnapshotSchema = z.object({
   catalog: z.object({ assets: z.number().int().nonnegative(), offline: z.number().int().nonnegative() }),
   providers: z.object({ total: z.number().int().nonnegative(), enabled: z.number().int().nonnegative() }),
   tasks: z.record(z.string(), z.number().int().nonnegative()),
-  cache: z.object({ files: z.number().int().nonnegative(), bytes: z.number().int().nonnegative() })
+  cache: z.object({
+    files: z.number().int().nonnegative(),
+    bytes: z.number().int().nonnegative(),
+    performance: z.object({
+      hits: z.number().int().nonnegative(),
+      misses: z.number().int().nonnegative(),
+      decodes: z.number().int().nonnegative(),
+      decodeMsTotal: z.number().nonnegative()
+    })
+  })
 });
 export type DiagnosticSnapshot = z.infer<typeof diagnosticSnapshotSchema>;
 

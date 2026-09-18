@@ -19,6 +19,10 @@ export class ImageCacheService {
   readonly #inFlight = new Map<string, Promise<string>>();
   readonly #cacheDirectory: string;
   readonly #catalog: CatalogService;
+  #hits = 0;
+  #misses = 0;
+  #decodes = 0;
+  #decodeMsTotal = 0;
 
   constructor(cacheDirectory: string, catalog: CatalogService) {
     this.#cacheDirectory = cacheDirectory;
@@ -30,6 +34,15 @@ export class ImageCacheService {
     let bytes = 0;
     for (const file of files) bytes += file.size;
     return { files: files.length, bytes };
+  }
+
+  getPerformanceStats(): { hits: number; misses: number; decodes: number; decodeMsTotal: number } {
+    return {
+      hits: this.#hits,
+      misses: this.#misses,
+      decodes: this.#decodes,
+      decodeMsTotal: Math.round(this.#decodeMsTotal * 100) / 100
+    };
   }
 
   async prune(maxBytes: number): Promise<{ removedFiles: number; removedBytes: number }> {
@@ -78,17 +91,24 @@ export class ImageCacheService {
 
     try {
       await access(destination);
+      this.#hits += 1;
       return destination;
     } catch {
       // Cache miss.
+      this.#misses += 1;
     }
 
     const existing = this.#inFlight.get(cacheKey);
     if (existing) return existing;
 
-    const operation = this.#create(source.path, destination, specification).finally(() => {
-      this.#inFlight.delete(cacheKey);
-    });
+    const startedAt = performance.now();
+    const operation = this.#create(source.path, destination, specification)
+      .then((result) => result)
+      .finally(() => {
+        this.#decodes += 1;
+        this.#decodeMsTotal += performance.now() - startedAt;
+        this.#inFlight.delete(cacheKey);
+      });
     this.#inFlight.set(cacheKey, operation);
     return operation;
   }
