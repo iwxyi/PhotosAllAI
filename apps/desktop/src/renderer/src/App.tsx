@@ -1307,6 +1307,8 @@ const emptyProviderForm: SaveProviderProfileInput = {
 };
 
 function SettingsPage(): React.JSX.Element {
+  type SettingsSection = 'models' | 'storage' | 'tasks' | 'shortcuts' | 'privacy';
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('models');
   const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
   const [form, setForm] = useState<SaveProviderProfileInput>(emptyProviderForm);
   const [message, setMessage] = useState('');
@@ -1380,18 +1382,19 @@ function SettingsPage(): React.JSX.Element {
     <div className="settings-page">
       <aside className="settings-nav">
         <strong>设置</strong>
-        <button className="is-active" type="button"><Bot size={14} />AI 模型</button>
-        <button type="button"><Folder size={14} />图库与存储</button>
-        <button type="button"><Clock3 size={14} />任务与重试</button>
-        <button type="button"><Command size={14} />快捷键</button>
-        <button type="button"><ShieldCheck size={14} />隐私与安全</button>
+        <button className={settingsSection === 'models' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('models')} aria-current={settingsSection === 'models' ? 'page' : undefined}><Bot size={14} />AI 模型</button>
+        <button className={settingsSection === 'storage' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('storage')} aria-current={settingsSection === 'storage' ? 'page' : undefined}><Folder size={14} />图库与存储</button>
+        <button className={settingsSection === 'tasks' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('tasks')} aria-current={settingsSection === 'tasks' ? 'page' : undefined}><Clock3 size={14} />任务与重试</button>
+        <button className={settingsSection === 'shortcuts' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('shortcuts')} aria-current={settingsSection === 'shortcuts' ? 'page' : undefined}><Command size={14} />快捷键</button>
+        <button className={settingsSection === 'privacy' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('privacy')} aria-current={settingsSection === 'privacy' ? 'page' : undefined}><ShieldCheck size={14} />隐私与安全</button>
       </aside>
       <main className="settings-content">
         <div className="settings-heading">
-          <div><h1>AI 模型</h1><p>配置用于视觉分析与图片生成的兼容服务。应用不会提供默认密钥。</p></div>
-          <span><ShieldCheck size={14} />凭据由系统安全存储保护</span>
+          <div><h1>{settingsSection === 'models' ? 'AI 模型' : settingsSection === 'storage' ? '图库与存储' : settingsSection === 'tasks' ? '任务与重试' : settingsSection === 'shortcuts' ? '快捷键' : '隐私与安全'}</h1><p>{settingsSection === 'models' ? '配置用于视觉分析与图片生成的兼容服务。应用不会提供默认密钥。' : settingsSection === 'storage' ? '管理预览缓存与生成结果的保存位置。' : settingsSection === 'tasks' ? '控制后台队列的执行节奏和失败恢复行为。' : settingsSection === 'shortcuts' ? '查看常用图库和任务操作的键盘入口。' : '了解图片上传、凭据和诊断数据的处理边界。'}</p></div>
+          <span><ShieldCheck size={14} />本地优先</span>
         </div>
 
+        {settingsSection === 'models' && <>
         <section className="provider-layout">
           <div className="provider-list">
             <div className="provider-list-head"><strong>已配置服务</strong><span>{profiles.length}</span></div>
@@ -1435,6 +1438,8 @@ function SettingsPage(): React.JSX.Element {
           <div className="preset-list">{presets.length === 0 ? <small>暂无导出预设</small> : presets.map((preset) => <div className="preset-item" key={preset.id}><span><strong>{preset.name}</strong><small>{preset.namingPattern} · {preset.conflictPolicy === 'skip' ? '跳过同名' : '自动编号'}</small></span><button type="button" aria-label={`删除导出预设 ${preset.name}`} onClick={async () => { await window.desktopApi.deleteExportPreset(preset.id); setPresets((current) => current.filter((item) => item.id !== preset.id)); }}>删除</button></div>)}</div>
           {presetMessage && <div className="form-feedback" role="status">{presetMessage}</div>}
         </section>
+        </>}
+        {settingsSection === 'storage' && <>
         <section className="settings-section storage-section">
           <div className="settings-heading"><div><h2>生成结果存储</h2><p>原图始终保持不变。策略会写入每个任务，重试和导出时可追溯。</p></div><span><Folder size={14} />不会覆盖原图</span></div>
           <div className="storage-options" aria-label="生成结果存储策略">
@@ -1447,6 +1452,19 @@ function SettingsPage(): React.JSX.Element {
           <div className="settings-heading"><div><h2>预览缓存</h2><p>缓存可安全重建，不会删除原图、生成结果或分析数据。</p></div><span>{cacheStats ? `${cacheStats.files} 个文件 · ${(cacheStats.bytes / 1_073_741_824).toFixed(2)} GiB` : '正在读取'}</span></div>
           <div className="cache-actions"><button className="secondary-action" type="button" disabled={cacheBusy || !cacheStats || cacheStats.bytes === 0} onClick={async () => { setCacheBusy(true); try { const result = await window.desktopApi.pruneImageCache({ maxBytes: 0 }); setCacheMessage(`已清理 ${result.removedFiles} 个缓存文件。`); setCacheStats(await window.desktopApi.getImageCacheStats()); } catch { setCacheMessage('缓存清理失败，请稍后重试。'); } finally { setCacheBusy(false); } }}>{cacheBusy ? '清理中…' : '清理全部可重建缓存'}</button><span role="status">{cacheMessage}</span></div>
         </section>
+        </>}
+        {settingsSection === 'tasks' && <section className="settings-section settings-info-section">
+          <div className="settings-heading"><div><h2>队列执行</h2><p>生成任务默认串行执行，保证显存和网络占用可预测。</p></div><span><Clock3 size={14} />持久化队列</span></div>
+          <div className="settings-info-grid"><article><strong>并发策略</strong><span>图片分析与生成按队列顺序执行，等待中的任务可在任务中心调整。</span></article><article><strong>失败恢复</strong><span>失败任务保留错误状态和重试次数，不会覆盖已完成版本。</span></article><article><strong>取消边界</strong><span>取消只作用于尚未提交结果的任务，已落盘版本继续保留。</span></article></div>
+        </section>}
+        {settingsSection === 'shortcuts' && <section className="settings-section settings-info-section">
+          <div className="settings-heading"><div><h2>工作流快捷键</h2><p>快捷键仅在图库焦点区域生效，输入框和对话框不会抢夺按键。</p></div><span><Command size={14} />键盘友好</span></div>
+          <div className="shortcut-list"><span><kbd>⌘ / Ctrl</kbd><strong>+</strong><kbd>A</kbd><em>选择当前列表全部照片</em></span><span><kbd>0–5</kbd><em>设置选中照片评分</em></span><span><kbd>Shift</kbd><strong>+</strong><em>范围选择</em></span><span><kbd>⌘ / Ctrl</kbd><strong>+</strong><em>点击追加选择</em></span></div>
+        </section>}
+        {settingsSection === 'privacy' && <section className="settings-section settings-info-section">
+          <div className="settings-heading"><div><h2>数据边界</h2><p>应用默认在本机管理图库和派生数据，只有执行 AI 任务时才向用户配置的服务发送图片。</p></div><span><ShieldCheck size={14} />不提供默认服务</span></div>
+          <div className="settings-info-grid"><article><strong>凭据</strong><span>API Key 仅通过系统安全存储保存，不写入 SQLite、manifest 或诊断摘要。</span></article><article><strong>图片上传</strong><span>分析和生成使用缓存预览图发送，任务完成后服务端响应不会写入日志。</span></article><article><strong>诊断</strong><span>诊断摘要只包含版本、数量和缓存统计，不包含路径、密钥或图片内容。</span></article></div>
+        </section>}
         <section className="settings-section diagnostics-section">
           <div className="settings-heading"><div><h2>诊断摘要</h2><p>仅包含运行统计，不包含路径、密钥、图片内容或模型响应。</p></div><span><ShieldCheck size={14} />可安全提交给支持团队</span></div>
           {diagnostics ? <div className="diagnostic-grid"><span>版本<strong>{diagnostics.appVersion}</strong></span><span>图库<strong>{diagnostics.catalog.assets} 张 · 离线 {diagnostics.catalog.offline}</strong></span><span>模型<strong>{diagnostics.providers.enabled}/{diagnostics.providers.total} 已启用</strong></span><span>缓存<strong>{(diagnostics.cache.bytes / 1_073_741_824).toFixed(2)} GiB</strong></span></div> : <small>正在读取诊断摘要…</small>}

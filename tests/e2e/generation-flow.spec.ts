@@ -128,6 +128,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await expect(page.locator('.version-button.is-preferred')).toBeVisible();
 
   await page.getByRole('tab', { name: /设置/ }).click();
+  await page.getByRole('button', { name: '图库与存储' }).click();
   const storageSection = page.locator('.storage-section');
   await storageSection.getByRole('radio', { name: /原图旁便携目录/ }).check();
   await expect(storageSection.getByRole('status')).toContainText('存储策略已保存');
