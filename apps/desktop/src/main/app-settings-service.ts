@@ -12,9 +12,17 @@ export class AppSettingsService {
 
   async get(): Promise<AppSettings> {
     try {
-      return appSettingsSchema.parse(JSON.parse(await readFile(this.#settingsPath, 'utf8')));
+      const parsed: unknown = JSON.parse(await readFile(this.#settingsPath, 'utf8'));
+      const result = appSettingsSchema.safeParse(parsed);
+      if (result.success) return result.data;
+      await this.#quarantineCorruptFile();
+      return appSettingsSchema.parse({});
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return appSettingsSchema.parse({});
+      if (error instanceof SyntaxError) {
+        await this.#quarantineCorruptFile();
+        return appSettingsSchema.parse({});
+      }
       throw error;
     }
   }
@@ -26,5 +34,10 @@ export class AppSettingsService {
     await writeFile(temporaryPath, JSON.stringify(settings, null, 2), { mode: 0o600 });
     await rename(temporaryPath, this.#settingsPath);
     return settings;
+  }
+
+  async #quarantineCorruptFile(): Promise<void> {
+    const quarantinePath = `${this.#settingsPath}.corrupt-${Date.now()}`;
+    await rename(this.#settingsPath, quarantinePath).catch(() => undefined);
   }
 }

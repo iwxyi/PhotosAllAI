@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -21,5 +21,15 @@ describe('app settings service', () => {
     await expect(service.save({ generationStorageMode: 'portable' })).resolves.toEqual({ generationStorageMode: 'portable' });
     await expect(service.get()).resolves.toEqual({ generationStorageMode: 'portable' });
     expect(JSON.parse(await readFile(path.join(directory, 'nested', 'app.json'), 'utf8'))).toEqual({ generationStorageMode: 'portable' });
+  });
+
+  it('quarantines malformed settings and restores defaults', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-settings-corrupt-'));
+    temporaryDirectories.push(directory);
+    const settingsPath = path.join(directory, 'app.json');
+    await writeFile(settingsPath, '{not-json');
+    const service = new AppSettingsService(settingsPath);
+    await expect(service.get()).resolves.toEqual({ generationStorageMode: 'managed' });
+    expect((await readdir(directory)).some((name) => name.startsWith('app.json.corrupt-'))).toBe(true);
   });
 });
