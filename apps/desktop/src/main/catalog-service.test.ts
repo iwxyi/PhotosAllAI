@@ -66,6 +66,23 @@ describe('catalog image discovery', () => {
       .toBe('visible.jpg');
     expect(catalog.listAssetPage({ folderId: null, query: 'missing', cursor: null, limit: 20 }).totalCount)
       .toBe(0);
+    const tags = catalog.updateTags({
+      assetIds: assets.map((asset) => asset.id),
+      addTags: ['人像', ' 人像 ', '夜景'],
+      removeTagIds: []
+    });
+    expect(tags).toHaveLength(2);
+    expect(tags.every((tag) => tag.assetCount === 2)).toBe(true);
+    const portraitTag = tags.find((tag) => tag.name === '人像')!;
+    const taggedPage = catalog.listAssetPage({ tagId: portraitTag.id, cursor: null, limit: 20 });
+    expect(taggedPage.totalCount).toBe(2);
+    expect(taggedPage.items.every((asset) => asset.tags.some((tag) => tag.id === portraitTag.id))).toBe(true);
+    const remaining = catalog.updateTags({
+      assetIds: [assets[0]!.id],
+      addTags: [],
+      removeTagIds: [portraitTag.id]
+    });
+    expect(remaining.find((tag) => tag.id === portraitTag.id)?.assetCount).toBe(1);
     expect(assets.find((asset) => asset.fileName === 'visible.jpg')?.thumbnailUrl).toMatch(/^photoasset:\/\/thumbnail/);
     expect(assets.find((asset) => asset.fileName === 'raw.NEF')?.previewUrl).toMatch(/^photoasset:\/\/preview/);
     catalog.close();

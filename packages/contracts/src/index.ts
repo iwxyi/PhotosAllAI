@@ -15,6 +15,13 @@ export const openPathResultSchema = z.object({
 
 export type OpenPathResult = z.infer<typeof openPathResultSchema>;
 
+export const catalogTagSchema = z.object({
+  id: z.string().uuid(),
+  name: z.string().min(1).max(100),
+  assetCount: z.number().int().nonnegative()
+});
+export type CatalogTag = z.infer<typeof catalogTagSchema>;
+
 export const catalogAssetSchema = z.object({
   id: z.string(),
   folderId: z.string(),
@@ -24,6 +31,7 @@ export const catalogAssetSchema = z.object({
   modifiedAt: z.number().nonnegative(),
   rating: z.number().int().min(0).max(5),
   favorite: z.boolean(),
+  tags: z.array(catalogTagSchema.omit({ assetCount: true })),
   thumbnailUrl: z.string(),
   previewUrl: z.string()
 });
@@ -38,6 +46,8 @@ export type CatalogAssetCursor = z.infer<typeof catalogAssetCursorSchema>;
 
 export const listCatalogAssetsInputSchema = z.object({
   folderId: z.string().min(1).nullable().default(null),
+  tagId: z.string().uuid().nullable().default(null),
+  favoriteOnly: z.boolean().default(false),
   query: z.string().max(500).default(''),
   cursor: catalogAssetCursorSchema.nullable().default(null),
   limit: z.number().int().min(1).max(500).default(200)
@@ -70,6 +80,15 @@ export const updateCatalogMetadataInputSchema = z.object({
 });
 
 export type UpdateCatalogMetadataInput = z.infer<typeof updateCatalogMetadataInputSchema>;
+
+export const updateCatalogTagsInputSchema = z.object({
+  assetIds: z.array(z.string().min(1)).min(1).max(10_000),
+  addTags: z.array(z.string().min(1).max(100)).max(50).default([]),
+  removeTagIds: z.array(z.string().uuid()).max(50).default([])
+}).refine((input) => input.addTags.length > 0 || input.removeTagIds.length > 0, {
+  message: 'At least one tag operation is required'
+});
+export type UpdateCatalogTagsInput = z.input<typeof updateCatalogTagsInputSchema>;
 
 export const catalogSnapshotSchema = z.object({
   assets: z.array(catalogAssetSchema),
@@ -309,7 +328,9 @@ export interface DesktopApi {
   listCatalogAssets(): Promise<CatalogAsset[]>;
   listCatalogAssetPage(input: ListCatalogAssetsInput): Promise<CatalogAssetPage>;
   listCatalogFolders(): Promise<CatalogFolder[]>;
+  listCatalogTags(): Promise<CatalogTag[]>;
   updateCatalogMetadata(input: UpdateCatalogMetadataInput): Promise<CatalogAsset[]>;
+  updateCatalogTags(input: UpdateCatalogTagsInput): Promise<CatalogTag[]>;
   importFolders(): Promise<CatalogSnapshot | null>;
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;

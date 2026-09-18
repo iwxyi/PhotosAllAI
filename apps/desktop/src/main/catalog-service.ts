@@ -7,16 +7,20 @@ import {
   catalogAssetSchema,
   catalogAssetPageSchema,
   catalogFolderSchema,
+  catalogTagSchema,
   listCatalogAssetsInputSchema,
   type CatalogAsset,
   type CatalogAssetPage,
   type CatalogFolder,
+  type CatalogTag,
   type ListCatalogAssetsInput,
   type UpdateCatalogMetadataInput,
+  type UpdateCatalogTagsInput,
+  updateCatalogTagsInputSchema,
   updateCatalogMetadataInputSchema
 } from '@photoallisai/contracts';
 
-import { tokenizeSearchText } from './search-index';
+import { normalizeSearchText, tokenizeSearchText } from './search-index';
 
 const SUPPORTED_EXTENSIONS = new Set([
   '.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif',
@@ -135,6 +139,26 @@ export class CatalogService {
         COMMIT;
       `);
     }
+    const searchVersion = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (searchVersion.user_version < 4) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS tags (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          normalized_name TEXT NOT NULL UNIQUE
+        );
+        CREATE TABLE IF NOT EXISTS asset_tags (
+          asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+          created_at INTEGER NOT NULL,
+          PRIMARY KEY (asset_id, tag_id)
+        );
+        CREATE INDEX IF NOT EXISTS asset_tags_tag_idx ON asset_tags(tag_id, asset_id);
+        PRAGMA user_version = 4;
+        COMMIT;
+      `);
+    }
   }
 
   close(): void {
@@ -152,7 +176,7 @@ export class CatalogService {
       `)
       .all(safeLimit) as AssetRow[];
 
-    return rows.map((row) => this.#toAsset(row));
+    return this.#toAssets(rows);
   }
 
   listAssetPage(rawInput: ListCatalogAssetsInput): CatalogAssetPage {
@@ -163,6 +187,11 @@ export class CatalogService {
       baseConditions.push('folder_id = ?');
       baseValues.push(input.folderId);
     }
+    if (input.tagId) {
+      baseConditions.push('id IN (SELECT asset_id FROM asset_tags WHERE tag_id = ?)');
+      baseValues.push(input.tagId);
+    }
+    if (input.favoriteOnly) baseConditions.push('favorite = 1');
     const query = input.query.trim();
     if (query) {
       const tokens = tokenizeSearchText(query);
@@ -204,7 +233,7 @@ export class CatalogService {
     `).get(...baseValues) as { value: number };
     const last = pageRows.at(-1);
     return catalogAssetPageSchema.parse({
-      items: pageRows.map((row) => this.#toAsset(row)),
+      items: this.#toAssets(pageRows),
       totalCount: count.value,
       nextCursor: hasMore && last ? { modifiedAt: last.modified_at, id: last.id } : null
     });
@@ -224,6 +253,18 @@ export class CatalogService {
       name: row.name,
       assetCount: row.asset_count
     }));
+  }
+
+  listTags(): CatalogTag[] {
+    const rows = this.#database.prepare(`
+      SELECT tags.id, tags.name, COUNT(asset_tags.asset_id) AS asset_count
+      FROM tags
+      LEFT JOIN asset_tags ON asset_tags.tag_id = tags.id
+      GROUP BY tags.id, tags.name
+      HAVING COUNT(asset_tags.asset_id) > 0
+      ORDER BY tags.name COLLATE NOCASE ASC, tags.id ASC
+    `).all() as { id: string; name: string; asset_count: number }[];
+    return rows.map((row) => catalogTagSchema.parse({ id: row.id, name: row.name, assetCount: row.asset_count }));
   }
 
   updateMetadata(rawInput: UpdateCatalogMetadataInput): CatalogAsset[] {
@@ -255,7 +296,50 @@ export class CatalogService {
       SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, favorite
       FROM assets WHERE id IN (${placeholders}) ORDER BY modified_at DESC, id ASC
     `).all(...uniqueIds) as AssetRow[];
-    return rows.map((row) => this.#toAsset(row));
+    return this.#toAssets(rows);
+  }
+
+  updateTags(rawInput: UpdateCatalogTagsInput): CatalogTag[] {
+    const input = updateCatalogTagsInputSchema.parse(rawInput);
+    const assetIds = [...new Set(input.assetIds)];
+    const assetPlaceholders = assetIds.map(() => '?').join(', ');
+    const existing = this.#database.prepare(`
+      SELECT COUNT(*) AS value FROM assets WHERE id IN (${assetPlaceholders})
+    `).get(...assetIds) as { value: number };
+    if (existing.value !== assetIds.length) throw new Error('CATALOG_ASSET_SET_MISMATCH');
+
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const insertTag = this.#database.prepare(`
+        INSERT INTO tags (id, name, normalized_name) VALUES (?, ?, ?)
+        ON CONFLICT(normalized_name) DO NOTHING
+      `);
+      const findTag = this.#database.prepare('SELECT id FROM tags WHERE normalized_name = ?');
+      const linkTag = this.#database.prepare(`
+        INSERT OR IGNORE INTO asset_tags (asset_id, tag_id, created_at) VALUES (?, ?, ?)
+      `);
+      for (const rawName of input.addTags) {
+        const name = rawName.trim();
+        const normalizedName = normalizeSearchText(name);
+        if (!normalizedName) continue;
+        insertTag.run(randomUUID(), name, normalizedName);
+        const tag = findTag.get(normalizedName) as { id: string };
+        for (const assetId of assetIds) linkTag.run(assetId, tag.id, Date.now());
+      }
+      if (input.removeTagIds.length > 0) {
+        const tagPlaceholders = input.removeTagIds.map(() => '?').join(', ');
+        this.#database.prepare(`
+          DELETE FROM asset_tags
+          WHERE asset_id IN (${assetPlaceholders}) AND tag_id IN (${tagPlaceholders})
+        `).run(...assetIds, ...input.removeTagIds);
+        this.#database.prepare('DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM asset_tags)').run();
+      }
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    return this.listTags();
   }
 
   async importFolders(folderPaths: readonly string[]): Promise<number> {
@@ -326,7 +410,25 @@ export class CatalogService {
     return { path: row.path, fileName: row.file_name, modifiedAt: row.modified_at };
   }
 
-  #toAsset(row: AssetRow): CatalogAsset {
+  #toAssets(rows: AssetRow[]): CatalogAsset[] {
+    if (rows.length === 0) return [];
+    const placeholders = rows.map(() => '?').join(', ');
+    const tagRows = this.#database.prepare(`
+      SELECT asset_tags.asset_id, tags.id, tags.name
+      FROM asset_tags JOIN tags ON tags.id = asset_tags.tag_id
+      WHERE asset_tags.asset_id IN (${placeholders})
+      ORDER BY tags.name COLLATE NOCASE ASC
+    `).all(...rows.map((row) => row.id)) as { asset_id: string; id: string; name: string }[];
+    const tagsByAsset = new Map<string, { id: string; name: string }[]>();
+    for (const tag of tagRows) {
+      const tags = tagsByAsset.get(tag.asset_id) ?? [];
+      tags.push({ id: tag.id, name: tag.name });
+      tagsByAsset.set(tag.asset_id, tags);
+    }
+    return rows.map((row) => this.#toAsset(row, tagsByAsset.get(row.id) ?? []));
+  }
+
+  #toAsset(row: AssetRow, tags: { id: string; name: string }[]): CatalogAsset {
     return catalogAssetSchema.parse({
       id: row.id,
       folderId: row.folder_id,
@@ -336,6 +438,7 @@ export class CatalogService {
       modifiedAt: row.modified_at,
       rating: row.rating,
       favorite: row.favorite === 1,
+      tags,
       thumbnailUrl: `photoasset://thumbnail/${row.id}`,
       previewUrl: `photoasset://preview/${row.id}`
     });

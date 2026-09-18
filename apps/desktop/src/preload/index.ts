@@ -9,8 +9,12 @@ const api: DesktopApi = {
     ipcRenderer.invoke('catalog.assets.page.v1', input) as ReturnType<DesktopApi['listCatalogAssetPage']>,
   listCatalogFolders: () =>
     ipcRenderer.invoke('catalog.folders.list.v1') as ReturnType<DesktopApi['listCatalogFolders']>,
+  listCatalogTags: () =>
+    ipcRenderer.invoke('catalog.tags.list.v1') as ReturnType<DesktopApi['listCatalogTags']>,
   updateCatalogMetadata: (input) =>
     ipcRenderer.invoke('catalog.metadata.update.v1', input) as ReturnType<DesktopApi['updateCatalogMetadata']>,
+  updateCatalogTags: (input) =>
+    ipcRenderer.invoke('catalog.tags.update.v1', input) as ReturnType<DesktopApi['updateCatalogTags']>,
   importFolders: () =>
     ipcRenderer.invoke('catalog.folders.import.v1') as ReturnType<
       DesktopApi['importFolders']

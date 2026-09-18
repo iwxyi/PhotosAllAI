@@ -3,6 +3,7 @@ import type {
   CatalogAsset,
   CatalogAssetCursor,
   CatalogFolder,
+  CatalogTag,
   AnalysisRevision,
   GenerationResult,
   PersistedTask,
@@ -82,7 +83,8 @@ function mapCatalogAssets(assets: CatalogAsset[]): Photo[] {
     thumbnailSrc: asset.thumbnailUrl,
     format: asset.format,
     dimensions: `${(asset.sizeBytes / 1_048_576).toFixed(1)} MB`,
-    rating: asset.rating
+    rating: asset.rating,
+    tags: asset.tags
   }));
 }
 
@@ -181,13 +183,19 @@ function Sidebar({
   folders,
   totalCount,
   selectedFolderId,
+  tags,
+  selectedTagId,
   onSelectFolder,
+  onSelectTag,
   isDemo
 }: {
   folders: CatalogFolder[];
   totalCount: number;
   selectedFolderId: string | null;
+  tags: CatalogTag[];
+  selectedTagId: string | null;
   onSelectFolder: (folderId: string | null) => void;
+  onSelectTag: (tagId: string | null) => void;
   isDemo: boolean;
 }): React.JSX.Element {
   const visibleFolders = isDemo
@@ -239,7 +247,7 @@ function Sidebar({
         <div className="sidebar-section">
           <div className="section-heading"><span>标签</span><button type="button" aria-label="管理标签"><Tags size={13} /></button></div>
           <div className="tag-cloud">
-            <span>人像</span><span>夜景</span><span>街拍</span><span>自然光</span>
+            {isDemo ? <><span>人像</span><span>夜景</span><span>街拍</span><span>自然光</span></> : tags.length === 0 ? <small>暂无标签</small> : tags.map((tag) => <button className={selectedTagId === tag.id ? 'is-active' : ''} type="button" key={tag.id} onClick={() => onSelectTag(selectedTagId === tag.id ? null : tag.id)}>{tag.name}<em>{tag.assetCount}</em></button>)}
           </div>
         </div>
       </div>
@@ -344,7 +352,8 @@ function Viewer({
   isDemo,
   onExport,
   onRate,
-  onRegenerate
+  onRegenerate,
+  onEditTags
 }: {
   photo: Photo;
   results: GenerationResult[];
@@ -352,6 +361,7 @@ function Viewer({
   onExport: (resultIds: string[]) => Promise<string>;
   onRate: (rating: number) => void;
   onRegenerate: (result: GenerationResult) => Promise<string>;
+  onEditTags: () => void;
 }): React.JSX.Element {
   const [compareMode, setCompareMode] = useState<CompareMode>('single');
   const [split, setSplit] = useState(52);
@@ -441,7 +451,7 @@ function Viewer({
         </div>
       </div>
       <div className="viewer-footer">
-        <div className="rating">{[1, 2, 3, 4, 5].map((value) => <button type="button" aria-label={`设置评分 ${value}`} key={value} onClick={() => onRate(photo.rating === value ? 0 : value)}><Star size={13} fill={value <= photo.rating ? 'currentColor' : 'none'} /></button>)}</div>
+        <div className="viewer-meta-actions"><div className="rating">{[1, 2, 3, 4, 5].map((value) => <button type="button" aria-label={`设置评分 ${value}`} key={value} onClick={() => onRate(photo.rating === value ? 0 : value)}><Star size={13} fill={value <= photo.rating ? 'currentColor' : 'none'} /></button>)}</div><IconButton label="添加标签" onClick={onEditTags}><Tags size={13} /></IconButton></div>
         <div className="version-switcher">
           <button type="button" onMouseDown={() => setShowOriginal(true)} onMouseUp={() => setShowOriginal(false)} onMouseLeave={() => setShowOriginal(false)}>
             按住查看原图 <kbd>O</kbd>
@@ -603,12 +613,15 @@ function TaskBar({ open, onToggle, tasks }: { open: boolean; onToggle: () => voi
 type LibraryWorkspaceProps = {
   availablePhotos: Photo[];
   catalogFolders: CatalogFolder[];
+  catalogTags: CatalogTag[];
   isDemo: boolean;
   selectedFolderId: string | null;
+  selectedTagId: string | null;
   totalCount: number;
   hasMore: boolean;
   loadingMore: boolean;
   onSelectFolder: (folderId: string | null) => void;
+  onSelectTag: (tagId: string | null) => void;
   onLoadMore: () => void;
   searchQuery: string;
   onRefreshCatalog: () => Promise<void>;
@@ -618,7 +631,7 @@ function LibraryWorkspace(props: LibraryWorkspaceProps): React.JSX.Element {
   if (props.availablePhotos.length > 0) return <PopulatedLibraryWorkspace {...props} />;
   return (
     <div className="workspace">
-      <Sidebar folders={props.catalogFolders} totalCount={props.totalCount} selectedFolderId={props.selectedFolderId} onSelectFolder={props.onSelectFolder} isDemo={props.isDemo} />
+      <Sidebar folders={props.catalogFolders} totalCount={props.totalCount} selectedFolderId={props.selectedFolderId} tags={props.catalogTags} selectedTagId={props.selectedTagId} onSelectFolder={props.onSelectFolder} onSelectTag={props.onSelectTag} isDemo={props.isDemo} />
       <main className="empty-library-main">
         <Search size={30} />
         <h2>{props.searchQuery ? '没有匹配的照片' : '此集合为空'}</h2>
@@ -633,12 +646,15 @@ function LibraryWorkspace(props: LibraryWorkspaceProps): React.JSX.Element {
 function PopulatedLibraryWorkspace({
   availablePhotos,
   catalogFolders,
+  catalogTags,
   isDemo,
   selectedFolderId,
+  selectedTagId,
   totalCount,
   hasMore,
   loadingMore,
   onSelectFolder,
+  onSelectTag,
   onLoadMore,
   searchQuery,
   onRefreshCatalog
@@ -658,6 +674,8 @@ function PopulatedLibraryWorkspace({
   const [analysisNotice, setAnalysisNotice] = useState('');
   const [operationNotice, setOperationNotice] = useState('');
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
+  const [tagEditorOpen, setTagEditorOpen] = useState(false);
+  const [tagDraft, setTagDraft] = useState('');
   const selected = availablePhotos.find((photo) => photo.id === selectedId) ?? availablePhotos[0]!;
   const orderedIds = useMemo(() => availablePhotos.map((photo) => photo.id), [availablePhotos]);
   const collectionName = selectedFolderId
@@ -872,12 +890,23 @@ function PopulatedLibraryWorkspace({
     return '已按当前方案加入 1 个生成任务。';
   };
 
+  const addTags = async () => {
+    const names = tagDraft.split(',').map((name) => name.trim()).filter(Boolean);
+    if (names.length === 0) return;
+    const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+    await window.desktopApi.updateCatalogTags({ assetIds, addTags: names, removeTagIds: [] });
+    setTagDraft('');
+    setTagEditorOpen(false);
+    setOperationNotice(`已为 ${assetIds.length} 张照片添加标签。`);
+    await onRefreshCatalog();
+  };
+
   return (
     <div className="workspace">
-      <Sidebar folders={catalogFolders} totalCount={totalCount} selectedFolderId={selectedFolderId} onSelectFolder={onSelectFolder} isDemo={isDemo} />
+      <Sidebar folders={catalogFolders} totalCount={totalCount} selectedFolderId={selectedFolderId} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={onSelectFolder} onSelectTag={onSelectTag} isDemo={isDemo} />
       <main className="library-main">
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
-        <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} />
+        <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} />
       </main>
       <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onGenerate={generateSelection} />
       {selection.selectedIds.size > 1 && (
@@ -885,13 +914,14 @@ function PopulatedLibraryWorkspace({
           <strong>已选择 {selection.selectedIds.size} 张</strong>
           <span />
           <button type="button" onClick={() => void rateSelection(5)}><Star size={14} />5 星</button>
-          <button type="button"><Tags size={14} />标签</button>
+          <button type="button" onClick={() => setTagEditorOpen(true)}><Tags size={14} />标签</button>
           <button type="button" onClick={() => void analyzeSelection()}><Sparkles size={14} />AI 分析</button>
           <button type="button" onClick={() => void generateSelection({ providerProfileId: generationProfiles[0]?.id ?? '', template: null, count: 1, instruction: '', disabledActionIds: new Set() })} disabled={generationProfiles.length === 0}><WandSparkles size={14} />批量生成</button>
           <button type="button" onClick={() => void exportLatestSelection()}><Download size={14} />导出</button>
           <IconButton label="清除选择" onClick={() => setSelection({ selectedIds: new Set(), anchorId: null, focusId: selected.id })}><X size={14} /></IconButton>
         </div>
       )}
+      {tagEditorOpen && <form className="tag-editor-popover" onSubmit={(event) => { event.preventDefault(); void addTags(); }}><label><span>添加标签</span><input autoFocus value={tagDraft} onChange={(event) => setTagDraft(event.target.value)} placeholder="人像, 夜景" /></label><button className="primary-action compact" type="submit">应用</button><IconButton label="关闭标签编辑器" onClick={() => setTagEditorOpen(false)}><X size={13} /></IconButton></form>}
       {operationNotice && <div className="operation-toast" role="status">{operationNotice}<button type="button" aria-label="关闭提示" onClick={() => setOperationNotice('')}><X size={13} /></button></div>}
       <TaskBar open={tasksOpen} onToggle={() => setTasksOpen((value) => !value)} tasks={isDemo ? null : taskItems} />
     </div>
@@ -1176,7 +1206,9 @@ export function App(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('library');
   const [catalogPhotos, setCatalogPhotos] = useState<Photo[]>([]);
   const [catalogFolders, setCatalogFolders] = useState<CatalogFolder[]>([]);
+  const [catalogTags, setCatalogTags] = useState<CatalogTag[]>([]);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
+  const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
   const [catalogTotal, setCatalogTotal] = useState(0);
   const [nextCursor, setNextCursor] = useState<CatalogAssetCursor | null>(null);
   const [catalogReady, setCatalogReady] = useState(false);
@@ -1189,20 +1221,22 @@ export function App(): React.JSX.Element {
     const request = ++catalogRequest.current;
     setLoadingMore(true);
     try {
-      const [page, folders] = await Promise.all([
-        window.desktopApi.listCatalogAssetPage({ folderId: selectedFolderId, query: searchQuery, cursor: null, limit: 200 }),
-        window.desktopApi.listCatalogFolders()
+      const [page, folders, tags] = await Promise.all([
+        window.desktopApi.listCatalogAssetPage({ folderId: selectedFolderId, tagId: selectedTagId, query: searchQuery, cursor: null, limit: 200 }),
+        window.desktopApi.listCatalogFolders(),
+        window.desktopApi.listCatalogTags()
       ]);
       if (request !== catalogRequest.current) return;
       setCatalogPhotos(mapCatalogAssets(page.items));
       setCatalogFolders(folders);
+      setCatalogTags(tags);
       setCatalogTotal(page.totalCount);
       setNextCursor(page.nextCursor);
       setCatalogReady(true);
     } finally {
       if (request === catalogRequest.current) setLoadingMore(false);
     }
-  }, [searchQuery, selectedFolderId]);
+  }, [searchQuery, selectedFolderId, selectedTagId]);
 
   useEffect(() => {
     void refreshCatalog();
@@ -1225,6 +1259,7 @@ export function App(): React.JSX.Element {
     try {
       const page = await window.desktopApi.listCatalogAssetPage({
         folderId: selectedFolderId,
+        tagId: selectedTagId,
         query: searchQuery,
         cursor: nextCursor,
         limit: 200
@@ -1248,7 +1283,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} onChange={setActiveTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
-      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} totalCount={displayTotal} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={setSelectedFolderId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
+      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogTags={catalogTags} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedTagId={selectedTagId} totalCount={displayTotal} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={setSelectedFolderId} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
     </div>
   );
 }

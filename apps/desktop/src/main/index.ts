@@ -16,7 +16,8 @@ import {
   savePromptTemplateInputSchema,
   saveProviderProfileInputSchema,
   taskIdSchema,
-  updateCatalogMetadataInputSchema
+  updateCatalogMetadataInputSchema,
+  updateCatalogTagsInputSchema
 } from '@photoallisai/contracts';
 
 import { CatalogService } from './catalog-service';
@@ -65,8 +66,12 @@ function registerIpc(): void {
     catalog.listAssetPage(listCatalogAssetsInputSchema.parse(input))
   );
   ipcMain.handle('catalog.folders.list.v1', () => catalog.listFolders());
+  ipcMain.handle('catalog.tags.list.v1', () => catalog.listTags());
   ipcMain.handle('catalog.metadata.update.v1', (_event, input: unknown) =>
     catalog.updateMetadata(updateCatalogMetadataInputSchema.parse(input))
+  );
+  ipcMain.handle('catalog.tags.update.v1', (_event, input: unknown) =>
+    catalog.updateTags(updateCatalogTagsInputSchema.parse(input))
   );
 
   ipcMain.handle('catalog.folders.import.v1', async () => {
