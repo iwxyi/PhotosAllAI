@@ -26,6 +26,10 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+      - name: Package unsigned directory smoke test
+        run: |
+          pnpm package:dir
+          test -d release/linux-unpacked
 
   e2e:
     runs-on: ubuntu-latest
