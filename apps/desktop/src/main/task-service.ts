@@ -135,6 +135,58 @@ export class TaskService {
     return this.#get(id);
   }
 
+  claimNext(kinds: readonly PersistedTask['kind'][]): PersistedTask | null {
+    if (kinds.length === 0) return null;
+    const placeholders = kinds.map(() => '?').join(', ');
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.#database.prepare(`
+        SELECT * FROM tasks WHERE status = 'queued' AND kind IN (${placeholders})
+        ORDER BY position ASC, created_at ASC LIMIT 1
+      `).get(...kinds) as TaskRow | undefined;
+      if (!row) {
+        this.#database.exec('COMMIT');
+        return null;
+      }
+      const now = Date.now();
+      this.#database.prepare(`
+        UPDATE tasks SET status = 'preparing', progress = 0, updated_at = ?
+        WHERE id = ? AND status = 'queued'
+      `).run(now, row.id);
+      this.#database.prepare(`
+        INSERT INTO task_events (task_id, from_status, to_status, occurred_at)
+        VALUES (?, 'queued', 'preparing', ?)
+      `).run(row.id, now);
+      this.#database.exec('COMMIT');
+      return this.#get(row.id);
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  advance(taskId: string, status: TaskStatus, progress: number, errorCode: string | null = null): PersistedTask {
+    const task = this.#get(taskId);
+    assertTaskTransition(task.status, status);
+    const now = Date.now();
+    const boundedProgress = Math.max(0, Math.min(progress, 1));
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      this.#database.prepare(`
+        UPDATE tasks SET status = ?, progress = ?, error_code = ?, updated_at = ? WHERE id = ?
+      `).run(status, boundedProgress, errorCode, now, taskId);
+      this.#database.prepare(`
+        INSERT INTO task_events (task_id, from_status, to_status, occurred_at, details_json)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(taskId, task.status, status, now, JSON.stringify(errorCode ? { errorCode } : {}));
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    return this.#get(taskId);
+  }
+
   cancel(taskId: string): PersistedTask {
     const task = this.#get(taskId);
     if (task.status === 'canceled') return task;

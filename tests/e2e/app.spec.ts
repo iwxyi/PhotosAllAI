@@ -67,7 +67,7 @@ test('supports additive, range, and select-all interactions', async () => {
 });
 
 test('opens the task drawer and application tabs', async () => {
-  await page.getByRole('button', { name: /生成中 1/ }).click();
+  await page.getByRole('button', { name: /处理中 1/ }).click();
   await expect(page.getByText('当前任务')).toBeVisible();
   await expect(page.getByText('正在生成 · 64%')).toBeVisible();
 

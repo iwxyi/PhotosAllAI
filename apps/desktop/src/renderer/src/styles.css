@@ -153,6 +153,7 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 .action-toggle + .action-toggle { border-top: 1px solid #232723; }
 .action-toggle > span:nth-child(2) { display: grid; gap: 3px; }
 .action-toggle small { color: var(--dim); font-size: 9px; }
+.inline-empty { padding: 18px 8px; color: var(--dim); text-align: center; font-size: 9px; line-height: 1.5; }
 .check-box { width: 16px; height: 16px; display: grid; place-items: center; color: var(--accent-ink); border: 1px solid var(--line-strong); border-radius: 3px; }
 .check-box.is-checked { background: var(--accent); border-color: var(--accent); }
 .risk-chip { padding: 3px 5px; color: var(--dim); background: var(--surface-3); border-radius: 3px; font-size: 8px; }
@@ -175,9 +176,11 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 .batch-actionbar button:hover { color: var(--text); background: var(--surface-4); }
 .task-statusbar strong { color: var(--text); }.failed-count { color: var(--danger); }.status-spacer { flex: 1; }.task-statusbar svg { transition: transform 180ms ease; }.task-statusbar svg.is-open { transform: rotate(180deg); }
 .working-pulse { width: 7px; height: 7px; background: var(--accent); border-radius: 50%; box-shadow: 0 0 0 3px rgb(200 243 93 / 10%); animation: pulse 1.8s ease-in-out infinite; }
+.working-pulse.is-idle { background: var(--dim); box-shadow: none; animation: none; }
 .task-drawer { position: absolute; z-index: 10; right: 0; bottom: 29px; left: 0; height: 203px; background: #181b18; border-top: 1px solid var(--line-strong); box-shadow: 0 -16px 40px rgb(0 0 0 / 35%); animation: drawer-in 180ms ease-out; }
 .drawer-head { height: 45px; padding: 0 10px 0 14px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }.drawer-head > div { display: flex; align-items: center; gap: 10px; }.drawer-head span { color: var(--dim); font-size: 9px; }
 .task-row { height: 69px; margin: 0 9px; padding: 8px 3px; display: grid; grid-template-columns: 18px 60px minmax(160px, 1fr) minmax(180px, 1.2fr) 80px 34px; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }.task-row img { width: 60px; height: 45px; object-fit: cover; border-radius: 3px; }.drag-handle { color: var(--dim); font-size: 17px; cursor: grab; }.task-title { display: grid; gap: 4px; }.task-title small { color: var(--dim); }.task-progress { position: relative; height: 25px; padding-top: 15px; }.task-progress::before, .task-progress i { content: ""; position: absolute; top: 6px; left: 0; height: 3px; border-radius: 2px; }.task-progress::before { width: 100%; background: var(--surface-4); }.task-progress i { background: var(--accent); }.task-progress em { color: var(--muted); font-style: normal; font-size: 9px; }.task-time { color: var(--dim); font-size: 9px; }.queued-label { color: var(--muted); }
+.task-placeholder-image { width: 60px; height: 45px; display: grid; place-items: center; color: var(--accent); background: var(--surface-3); border-radius: 3px; }.drawer-empty { height: 110px; display: grid; place-items: center; color: var(--dim); }
 
 .placeholder-page { min-height: 0; display: grid; grid-template-columns: 224px minmax(0, 1fr); background: var(--bg); }
 .placeholder-rail { padding: 21px 10px; display: flex; flex-direction: column; gap: 3px; background: var(--surface-1); border-right: 1px solid var(--line); }.placeholder-rail strong { padding: 0 9px 14px; font-size: 14px; }.placeholder-rail button { height: 31px; padding: 0 9px; text-align: left; color: var(--muted); background: transparent; border: 0; border-radius: var(--radius-sm); }.placeholder-rail button.is-active { color: var(--text); background: var(--surface-3); }

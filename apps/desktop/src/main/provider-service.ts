@@ -21,6 +21,11 @@ export interface CredentialCipher {
   decrypt(value: string): string;
 }
 
+export type ResolvedProvider = {
+  profile: ProviderProfile;
+  apiKey: string;
+};
+
 function normalizeBaseUrl(value: string): string {
   const url = new URL(value);
   const isLocal = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1';
@@ -45,6 +50,18 @@ export class ProviderService {
     return (await this.#read()).map(({ encryptedCredential, ...profile }) =>
       providerProfileSchema.parse({ ...profile, hasCredential: Boolean(encryptedCredential) })
     );
+  }
+
+  async resolve(profileId: string): Promise<ResolvedProvider> {
+    const stored = (await this.#read()).find((profile) => profile.id === profileId);
+    if (!stored) throw new Error('PROVIDER_NOT_FOUND');
+    if (!stored.enabled) throw new Error('PROVIDER_DISABLED');
+    if (!stored.encryptedCredential) throw new Error('PROVIDER_CREDENTIAL_MISSING');
+    const { encryptedCredential, ...profile } = stored;
+    return {
+      profile: providerProfileSchema.parse({ ...profile, hasCredential: true }),
+      apiKey: this.#cipher.decrypt(encryptedCredential)
+    };
   }
 
   async save(rawInput: SaveProviderProfileInput): Promise<ProviderProfile> {

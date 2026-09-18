@@ -200,6 +200,22 @@ export const savePromptTemplateInputSchema = promptTemplateSchema.omit({
 
 export type SavePromptTemplateInput = z.infer<typeof savePromptTemplateInputSchema>;
 
+export const analysisRevisionSchema = z.object({
+  id: z.string().uuid(),
+  assetId: z.string(),
+  providerProfileId: z.string().uuid(),
+  result: analysisResultSchema,
+  createdAt: z.number().nonnegative()
+});
+
+export type AnalysisRevision = z.infer<typeof analysisRevisionSchema>;
+
+export const listAnalysisInputSchema = z.object({ assetId: z.string().min(1) });
+export const analysisTaskPayloadSchema = z.object({
+  providerProfileId: z.string().uuid(),
+  mode: z.enum(['catalog', 'full']).default('full')
+});
+
 export interface DesktopApi {
   getAppInfo(): Promise<AppInfo>;
   listCatalogAssets(): Promise<CatalogAsset[]>;
@@ -214,4 +230,5 @@ export interface DesktopApi {
   reorderTasks(taskIds: string[]): Promise<PersistedTask[]>;
   listPromptTemplates(): Promise<PromptTemplate[]>;
   savePromptTemplate(input: SavePromptTemplateInput): Promise<PromptTemplate>;
+  listAnalysisRevisions(assetId: string): Promise<AnalysisRevision[]>;
 }

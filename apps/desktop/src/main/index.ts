@@ -7,6 +7,7 @@ import {
   appInfoSchema,
   catalogSnapshotSchema,
   enqueueTaskInputSchema,
+  listAnalysisInputSchema,
   reorderTaskIdsSchema,
   savePromptTemplateInputSchema,
   saveProviderProfileInputSchema,
@@ -14,9 +15,11 @@ import {
 } from '@photoallisai/contracts';
 
 import { CatalogService } from './catalog-service';
+import { AnalysisService } from './analysis-service';
 import { ImageCacheService, type ImageVariant } from './image-cache-service';
 import { ProviderService } from './provider-service';
 import { TaskService } from './task-service';
+import { TaskRunner } from './task-runner';
 import { TemplateService } from './template-service';
 
 const APP_ORIGIN = 'app://photoallisai';
@@ -25,6 +28,8 @@ let imageCache: ImageCacheService;
 let providers: ProviderService;
 let tasks: TaskService;
 let templates: TemplateService;
+let analysis: AnalysisService;
+let taskRunner: TaskRunner;
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -63,9 +68,11 @@ function registerIpc(): void {
     providers.test(saveProviderProfileInputSchema.parse(input))
   );
   ipcMain.handle('tasks.list.v1', () => tasks.list());
-  ipcMain.handle('tasks.enqueue.v1', (_event, input: unknown) =>
-    tasks.enqueue(enqueueTaskInputSchema.parse(input))
-  );
+  ipcMain.handle('tasks.enqueue.v1', (_event, input: unknown) => {
+    const task = tasks.enqueue(enqueueTaskInputSchema.parse(input));
+    taskRunner.wake();
+    return task;
+  });
   ipcMain.handle('tasks.cancel.v1', (_event, taskId: unknown) => tasks.cancel(taskIdSchema.parse(taskId)));
   ipcMain.handle('tasks.retry.v1', (_event, taskId: unknown) => tasks.retry(taskIdSchema.parse(taskId)));
   ipcMain.handle('tasks.reorder.v1', (_event, taskIds: unknown) =>
@@ -75,6 +82,10 @@ function registerIpc(): void {
   ipcMain.handle('templates.save.v1', (_event, input: unknown) =>
     templates.save(savePromptTemplateInputSchema.parse(input))
   );
+  ipcMain.handle('analysis.list.v1', (_event, input: unknown) => {
+    const { assetId } = listAnalysisInputSchema.parse(input);
+    return analysis.list(assetId);
+  });
 }
 
 function createWindow(): BrowserWindow {
@@ -132,6 +143,8 @@ app.whenReady().then(() => {
     encrypt: (value) => safeStorage.encryptString(value).toString('base64'),
     decrypt: (value) => safeStorage.decryptString(Buffer.from(value, 'base64'))
   });
+  analysis = new AnalysisService(databasePath, providers, imageCache);
+  taskRunner = new TaskRunner(tasks, analysis);
 
   protocol.handle('photoasset', async (request) => {
     const url = new URL(request.url);
@@ -151,6 +164,7 @@ app.whenReady().then(() => {
   });
 
   registerIpc();
+  taskRunner.start();
   let mainWindow = createWindow();
 
   app.on('second-instance', () => {
@@ -168,6 +182,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  taskRunner?.stop();
+  analysis?.close();
   templates?.close();
   tasks?.close();
   catalog?.close();

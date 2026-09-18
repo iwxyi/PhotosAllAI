@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type {
   CatalogAsset,
+  AnalysisRevision,
   PersistedTask,
   PromptTemplate,
   ProviderProfile,
@@ -347,33 +348,49 @@ function Viewer({ photo }: { photo: Photo }): React.JSX.Element {
   );
 }
 
-function AiPanel(): React.JSX.Element {
+function AiPanel({
+  revision,
+  isDemo,
+  notice,
+  onAnalyze
+}: {
+  revision: AnalysisRevision | undefined;
+  isDemo: boolean;
+  notice: string;
+  onAnalyze: () => void;
+}): React.JSX.Element {
   const [actions, setActions] = useState({ people: true, light: true, texture: false });
+  const [disabledActions, setDisabledActions] = useState<Set<string>>(new Set());
 
   const toggle = (key: keyof typeof actions) => setActions((current) => ({ ...current, [key]: !current[key] }));
+  const result = revision?.result;
+  const score = isDemo ? 86 : result ? Math.round(result.quality.overallScore) : '--';
+  const summary = isDemo ? '自然光人像' : result?.summary ?? '等待视觉分析';
+  const description = isDemo ? '主体清晰，背景存在干扰元素' : result ? result.catalog.shortDescription : '尚未生成分析与编目数据';
+  const enabledActionCount = isDemo
+    ? Object.values(actions).filter(Boolean).length
+    : result?.generativeActions.filter((action) => action.enabled && !disabledActions.has(action.id)).length ?? 0;
 
   return (
     <aside className="inspector">
       <div className="inspector-tabs"><button className="is-active" type="button"><Bot size={14} />AI</button><button type="button"><Info size={14} />信息</button><button type="button"><Layers3 size={14} />版本</button></div>
       <div className="inspector-scroll">
         <div className="analysis-head">
-          <div className="analysis-score"><span>AI</span><strong>86</strong></div>
-          <div><strong>自然光人像</strong><p>主体清晰，背景存在干扰元素</p></div>
-          <span className="confidence">高置信度</span>
+          <div className="analysis-score"><span>AI</span><strong>{score}</strong></div>
+          <div><strong>{summary}</strong><p>{description}</p></div>
+          <span className="confidence">{result || isDemo ? '分析完成' : '未分析'}</span>
         </div>
 
         <div className="inspector-section">
-          <div className="inspector-heading"><span>视觉分析</span><button type="button">查看完整报告</button></div>
-          <p className="analysis-copy">柔和侧光塑造了自然肤色。建议保留浅景深和发丝细节，同时清理右后方路人并轻微提亮面部。</p>
-          <div className="issue-row"><i className="severity high" /><span>背景路人分散注意力</span><em>严重</em></div>
-          <div className="issue-row"><i className="severity medium" /><span>面部中间调略暗</span><em>中等</em></div>
+          <div className="inspector-heading"><span>视觉分析</span>{!isDemo && <button type="button" onClick={onAnalyze}>{result ? '重新分析' : '开始分析'}</button>}</div>
+          <p className="analysis-copy">{isDemo ? '柔和侧光塑造了自然肤色。建议保留浅景深和发丝细节，同时清理右后方路人并轻微提亮面部。' : result?.report ?? (notice || '选择已配置的视觉模型后开始分析。')}</p>
+          {isDemo ? <><div className="issue-row"><i className="severity high" /><span>背景路人分散注意力</span><em>严重</em></div><div className="issue-row"><i className="severity medium" /><span>面部中间调略暗</span><em>中等</em></div></> : result?.quality.issues.map((issue) => <div className="issue-row" key={`${issue.type}-${issue.description}`}><i className={`severity ${issue.severity >= 0.7 ? 'high' : 'medium'}`} /><span>{issue.description}</span><em>{Math.round(issue.confidence * 100)}%</em></div>)}
         </div>
 
         <div className="inspector-section">
-          <div className="inspector-heading"><span>AI 编辑动作</span><span className="section-count">2 项已启用</span></div>
-          <ActionToggle title="清除背景路人" detail="自然补全街道与光影" checked={actions.people} onChange={() => toggle('people')} />
-          <ActionToggle title="优化人物光线" detail="保持身份和肤色不变" checked={actions.light} onChange={() => toggle('light')} />
-          <ActionToggle title="增强衣物纹理" detail="避免改变服装结构" checked={actions.texture} onChange={() => toggle('texture')} />
+          <div className="inspector-heading"><span>AI 编辑动作</span><span className="section-count">{enabledActionCount} 项已启用</span></div>
+          {isDemo ? <><ActionToggle title="清除背景路人" detail="自然补全街道与光影" risk="低风险" checked={actions.people} onChange={() => toggle('people')} /><ActionToggle title="优化人物光线" detail="保持身份和肤色不变" risk="低风险" checked={actions.light} onChange={() => toggle('light')} /><ActionToggle title="增强衣物纹理" detail="避免改变服装结构" risk="低风险" checked={actions.texture} onChange={() => toggle('texture')} /></> : result?.generativeActions.map((action) => <ActionToggle key={action.id} title={action.target} detail={action.instruction} risk={`${action.risk === 'high' ? '高' : action.risk === 'medium' ? '中' : '低'}风险`} checked={action.enabled && !disabledActions.has(action.id)} onChange={() => setDisabledActions((current) => { const next = new Set(current); if (next.has(action.id)) next.delete(action.id); else next.add(action.id); return next; })} />)}
+          {!isDemo && !result && <div className="inline-empty">分析后将显示清除路人、移除障碍物等建议</div>}
         </div>
 
         <div className="inspector-section">
@@ -391,40 +408,45 @@ function AiPanel(): React.JSX.Element {
       </div>
       <div className="generate-footer">
         <div className="generation-count"><span>生成数量</span><div><button type="button">−</button><strong>3</strong><button type="button">+</button></div></div>
-        <button className="primary-action" type="button"><Sparkles size={16} />加入生成队列</button>
+        <button className="primary-action" type="button" disabled={!isDemo && !result}><Sparkles size={16} />加入生成队列</button>
       </div>
     </aside>
   );
 }
 
-function ActionToggle({ title, detail, checked, onChange }: { title: string; detail: string; checked: boolean; onChange: () => void }): React.JSX.Element {
+function ActionToggle({ title, detail, risk, checked, onChange }: { title: string; detail: string; risk: string; checked: boolean; onChange: () => void }): React.JSX.Element {
   return (
     <button className="action-toggle" type="button" aria-pressed={checked} onClick={onChange}>
       <span className={`check-box${checked ? ' is-checked' : ''}`}>{checked && <Check size={12} />}</span>
       <span><strong>{title}</strong><small>{detail}</small></span>
-      <span className="risk-chip">低风险</span>
+      <span className="risk-chip">{risk}</span>
     </button>
   );
 }
 
-function TaskBar({ open, onToggle }: { open: boolean; onToggle: () => void }): React.JSX.Element {
+function TaskBar({ open, onToggle, tasks }: { open: boolean; onToggle: () => void; tasks: PersistedTask[] | null }): React.JSX.Element {
+  const isDemo = tasks === null;
+  const visibleTasks = tasks ?? [];
+  const runningCount = isDemo ? 1 : visibleTasks.filter((task) => ['preparing', 'uploading', 'processing', 'downloading', 'saving'].includes(task.status)).length;
+  const waitingCount = isDemo ? 4 : visibleTasks.filter((task) => task.status === 'queued').length;
+  const failedCount = isDemo ? 1 : visibleTasks.filter((task) => task.status === 'failed').length;
+
   return (
     <>
       {open && (
         <div className="task-drawer">
           <div className="drawer-head"><div><strong>当前任务</strong><span>生成任务将按顺序执行</span></div><div><button className="quiet-button" type="button"><Pause size={13} />暂停全部</button><IconButton label="关闭任务抽屉" onClick={onToggle}><X size={15} /></IconButton></div></div>
-          <div className="task-row is-running"><span className="drag-handle">⠿</span><img src="./demo/portrait.jpg" alt="" /><span className="task-title"><strong>DSC_4821.NEF</strong><small>自然人像 · 清洁背景</small></span><span className="task-progress"><i style={{ width: '64%' }} /><em>正在生成 · 64%</em></span><span className="task-time">约 18 秒</span><IconButton label="暂停"><Pause size={14} /></IconButton></div>
-          <div className="task-row"><span className="drag-handle">⠿</span><img src="./demo/coast.jpg" alt="" /><span className="task-title"><strong>A7R_0938.ARW</strong><small>自然风光 · 清除游客</small></span><span className="queued-label">队列第 1 位</span><span className="task-time">生成 2 次</span><IconButton label="开始"><Play size={14} /></IconButton></div>
+          {isDemo ? <><div className="task-row is-running"><span className="drag-handle">⠿</span><img src="./demo/portrait.jpg" alt="" /><span className="task-title"><strong>DSC_4821.NEF</strong><small>自然人像 · 清洁背景</small></span><span className="task-progress"><i style={{ width: '64%' }} /><em>正在生成 · 64%</em></span><span className="task-time">约 18 秒</span><IconButton label="暂停"><Pause size={14} /></IconButton></div><div className="task-row"><span className="drag-handle">⠿</span><img src="./demo/coast.jpg" alt="" /><span className="task-title"><strong>A7R_0938.ARW</strong><small>自然风光 · 清除游客</small></span><span className="queued-label">队列第 1 位</span><span className="task-time">生成 2 次</span><IconButton label="开始"><Play size={14} /></IconButton></div></> : visibleTasks.length === 0 ? <div className="drawer-empty">暂无任务</div> : visibleTasks.slice(0, 2).map((task) => <div className="task-row" key={task.id}><span className="drag-handle">⠿</span><span className="task-placeholder-image"><TaskKindIcon kind={task.kind} /></span><span className="task-title"><strong>{taskLabels[task.kind]}</strong><small>{task.assetId ?? '批量任务'}</small></span><span className="task-progress"><i style={{ width: `${task.progress * 100}%` }} /><em>{statusLabels[task.status]} · {Math.round(task.progress * 100)}%</em></span><span className="task-time">第 {task.attempt + 1} 次</span><span /></div>)}
         </div>
       )}
       <button className="task-statusbar" type="button" onClick={onToggle} aria-expanded={open}>
-        <span className="working-pulse" /><strong>生成中 1</strong><span>等待 4</span><span className="failed-count">失败 1</span><span className="status-spacer" /><span>串行生成</span><PanelBottomOpen size={15} className={open ? 'is-open' : ''} />
+        <span className={`working-pulse${runningCount === 0 ? ' is-idle' : ''}`} /><strong>处理中 {runningCount}</strong><span>等待 {waitingCount}</span><span className="failed-count">失败 {failedCount}</span><span className="status-spacer" /><span>串行任务</span><PanelBottomOpen size={15} className={open ? 'is-open' : ''} />
       </button>
     </>
   );
 }
 
-function LibraryWorkspace({ availablePhotos }: { availablePhotos: Photo[] }): React.JSX.Element {
+function LibraryWorkspace({ availablePhotos, isDemo }: { availablePhotos: Photo[]; isDemo: boolean }): React.JSX.Element {
   const [selectedId, setSelectedId] = useState(availablePhotos[0]!.id);
   const [selection, setSelection] = useState<SelectionState>({
     selectedIds: new Set([availablePhotos[0]!.id]),
@@ -432,6 +454,10 @@ function LibraryWorkspace({ availablePhotos }: { availablePhotos: Photo[] }): Re
     focusId: availablePhotos[0]!.id
   });
   const [tasksOpen, setTasksOpen] = useState(false);
+  const [visionProfiles, setVisionProfiles] = useState<ProviderProfile[]>([]);
+  const [analysisRevision, setAnalysisRevision] = useState<AnalysisRevision>();
+  const [analysisNotice, setAnalysisNotice] = useState('');
+  const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
   const selected = availablePhotos.find((photo) => photo.id === selectedId) ?? availablePhotos[0]!;
   const orderedIds = useMemo(() => availablePhotos.map((photo) => photo.id), [availablePhotos]);
 
@@ -448,9 +474,54 @@ function LibraryWorkspace({ availablePhotos }: { availablePhotos: Photo[] }): Re
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [orderedIds]);
 
+  useEffect(() => {
+    if (isDemo) return;
+    void window.desktopApi.listProviderProfiles().then((items) =>
+      setVisionProfiles(items.filter((profile) => profile.purpose === 'vision' && profile.enabled))
+    );
+  }, [isDemo]);
+
+  useEffect(() => {
+    if (isDemo) return;
+    let active = true;
+    const refresh = () => {
+      void window.desktopApi.listAnalysisRevisions(selected.id).then((items) => {
+        if (active) setAnalysisRevision(items[0]);
+      });
+    };
+    setAnalysisRevision(undefined);
+    refresh();
+    const interval = window.setInterval(refresh, 2_000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [isDemo, selected.id]);
+
+  useEffect(() => {
+    if (isDemo) return;
+    let active = true;
+    const refresh = () => { void window.desktopApi.listTasks().then((items) => { if (active) setTaskItems(items); }); };
+    refresh();
+    const interval = window.setInterval(refresh, 1_000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [isDemo]);
+
   const selectPhoto = (photo: Photo, intent: SelectionIntent) => {
     setSelectedId(photo.id);
     setSelection((current) => updateSelection(current, orderedIds, photo.id, intent));
+  };
+
+  const analyzeSelection = async () => {
+    const profile = visionProfiles[0];
+    if (!profile) {
+      setAnalysisNotice('请先在设置中添加并启用视觉分析模型。');
+      return;
+    }
+    const targetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+    await Promise.all(targetIds.map((assetId) => window.desktopApi.enqueueTask({
+      kind: 'analysis',
+      assetId,
+      payload: { providerProfileId: profile.id, mode: 'full' }
+    })));
+    setAnalysisNotice(`已将 ${targetIds.length} 张照片加入分析队列。`);
   };
 
   return (
@@ -460,20 +531,20 @@ function LibraryWorkspace({ availablePhotos }: { availablePhotos: Photo[] }): Re
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} />
         <Viewer photo={selected} />
       </main>
-      <AiPanel />
+      <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} />
       {selection.selectedIds.size > 1 && (
         <div className="batch-actionbar">
           <strong>已选择 {selection.selectedIds.size} 张</strong>
           <span />
           <button type="button"><Star size={14} />评分</button>
           <button type="button"><Tags size={14} />标签</button>
-          <button type="button"><Sparkles size={14} />AI 分析</button>
+          <button type="button" onClick={() => void analyzeSelection()}><Sparkles size={14} />AI 分析</button>
           <button type="button"><WandSparkles size={14} />批量生成</button>
           <button type="button"><Download size={14} />导出</button>
           <IconButton label="清除选择" onClick={() => setSelection({ selectedIds: new Set(), anchorId: null, focusId: selected.id })}><X size={14} /></IconButton>
         </div>
       )}
-      <TaskBar open={tasksOpen} onToggle={() => setTasksOpen((value) => !value)} />
+      <TaskBar open={tasksOpen} onToggle={() => setTasksOpen((value) => !value)} tasks={isDemo ? null : taskItems} />
     </div>
   );
 }
@@ -740,7 +811,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} onChange={setActiveTab} onImport={() => void importFolders()} />
-      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
+      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} isDemo={catalogPhotos.length === 0} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
     </div>
   );
 }
