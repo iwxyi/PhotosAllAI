@@ -47,6 +47,7 @@ type AssetRow = {
   modified_at: number;
   rating: number;
   favorite: number;
+  offline_at: number | null;
 };
 
 export function isSupportedImage(filePath: string): boolean {
@@ -200,6 +201,16 @@ export class CatalogService {
         COMMIT;
       `);
     }
+    const offlineVersion = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (offlineVersion.user_version < 7) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE assets ADD COLUMN offline_at INTEGER;
+        CREATE INDEX assets_offline_idx ON assets(offline_at, folder_id);
+        PRAGMA user_version = 7;
+        COMMIT;
+      `);
+    }
   }
 
   close(): void {
@@ -210,7 +221,7 @@ export class CatalogService {
     const safeLimit = Math.max(1, Math.min(limit, 1_000));
     const rows = this.#database
       .prepare(`
-        SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, favorite
+        SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, favorite, offline_at
         FROM assets WHERE removed_at IS NULL
         ORDER BY modified_at DESC, id ASC
         LIMIT ?
@@ -280,7 +291,7 @@ export class CatalogService {
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const rows = this.#database.prepare(`
-      SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, favorite
+      SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, favorite, offline_at
       FROM assets ${where}
       ORDER BY modified_at DESC, id ASC
       LIMIT ?
@@ -312,6 +323,10 @@ export class CatalogService {
       name: row.name,
       assetCount: row.asset_count
     }));
+  }
+
+  listFolderPaths(): string[] {
+    return (this.#database.prepare('SELECT path FROM folders ORDER BY path').all() as { path: string }[]).map((row) => row.path);
   }
 
   listAlbums(): CatalogAlbum[] {
@@ -461,7 +476,7 @@ export class CatalogService {
       throw error;
     }
     const rows = this.#database.prepare(`
-      SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, favorite
+      SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, favorite, offline_at
       FROM assets WHERE id IN (${placeholders}) ORDER BY modified_at DESC, id ASC
     `).all(...uniqueIds) as AssetRow[];
     return this.#toAssets(rows);
@@ -532,8 +547,8 @@ export class CatalogService {
       try {
         const upsert = this.#database.prepare(`
           INSERT INTO assets (
-            id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at, offline_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
           ON CONFLICT(path) DO UPDATE SET
             folder_id = excluded.folder_id,
             file_name = excluded.file_name,
@@ -541,7 +556,8 @@ export class CatalogService {
             size_bytes = excluded.size_bytes,
             modified_at = excluded.modified_at,
             removed_at = NULL,
-            trashed_at = NULL
+            trashed_at = NULL,
+            offline_at = NULL
         `);
 
         for await (const filePath of walkImages(folderPath)) {
@@ -570,6 +586,19 @@ export class CatalogService {
     }
 
     return importedCount;
+  }
+
+  async reconcileImportedFolders(): Promise<{ discovered: number; offline: number }> {
+    const folders = this.#database.prepare('SELECT id, path FROM folders').all() as { id: string; path: string }[];
+    const before = new Set<string>();
+    for (const folder of folders) {
+      const rows = this.#database.prepare('SELECT path FROM assets WHERE folder_id = ? AND removed_at IS NULL').all(folder.id) as { path: string }[];
+      rows.forEach((row) => before.add(row.path));
+      this.#database.prepare('UPDATE assets SET offline_at = ? WHERE folder_id = ? AND removed_at IS NULL').run(Date.now(), folder.id);
+    }
+    const discovered = await this.importFolders(folders.map((folder) => folder.path));
+    const row = this.#database.prepare('SELECT COUNT(*) AS value FROM assets WHERE offline_at IS NOT NULL AND removed_at IS NULL').get() as { value: number };
+    return { discovered: Math.max(0, discovered - before.size), offline: row.value };
   }
 
   resolveAssetFile(assetId: string): { path: string; fileName: string; modifiedAt: number } | null {
@@ -636,6 +665,7 @@ export class CatalogService {
       modifiedAt: row.modified_at,
       rating: row.rating,
       favorite: row.favorite === 1,
+      offline: row.offline_at !== null,
       tags,
       thumbnailUrl: `photoasset://thumbnail/${row.id}`,
       previewUrl: `photoasset://preview/${row.id}`

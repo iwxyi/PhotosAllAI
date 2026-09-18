@@ -95,7 +95,8 @@ function mapCatalogAssets(assets: CatalogAsset[]): Photo[] {
     format: asset.format,
     dimensions: `${(asset.sizeBytes / 1_048_576).toFixed(1)} MB`,
     rating: asset.rating,
-    tags: asset.tags
+    tags: asset.tags,
+    offline: asset.offline
   }));
 }
 
@@ -373,7 +374,7 @@ function Filmstrip({
           const index = virtual.start + visibleIndex;
           return (
           <button
-            className={`thumb${selected.id === photo.id ? ' is-selected' : ''}`}
+            className={`thumb${selected.id === photo.id ? ' is-selected' : ''}${photo.offline ? ' is-offline' : ''}`}
             key={photo.id}
             style={{ left: index * itemSize }}
             onClick={(event) => onSelect(
@@ -388,6 +389,7 @@ function Filmstrip({
             {photo.thumbnailSrc || photo.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" onError={(event) => { event.currentTarget.style.display = 'none'; }} /> : null}
             <span className="thumb-index">{index + 1}</span>
             {photo.status && <i className={`status-dot status-${photo.status}`} />}
+            {photo.offline && <i className="offline-badge">离线</i>}
             {selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={11} /></span>}
             <span className="thumb-name">{photo.fileName}</span>
           </button>

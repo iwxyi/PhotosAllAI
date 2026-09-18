@@ -8,6 +8,7 @@ export type Photo = {
   dimensions: string;
   rating: number;
   tags?: { id: string; name: string }[];
+  offline?: boolean;
   status?: 'analyzed' | 'queued' | 'generated';
 };
 

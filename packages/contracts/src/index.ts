@@ -51,6 +51,7 @@ export const catalogAssetSchema = z.object({
   modifiedAt: z.number().nonnegative(),
   rating: z.number().int().min(0).max(5),
   favorite: z.boolean(),
+  offline: z.boolean(),
   tags: z.array(catalogTagSchema.omit({ assetCount: true })),
   thumbnailUrl: z.string(),
   previewUrl: z.string()

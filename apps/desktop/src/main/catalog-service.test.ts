@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -110,6 +110,23 @@ describe('catalog image discovery', () => {
     expect(catalog.listAssetPage({ smartCollection: 'to-review', cursor: null, limit: 20 }).items).toHaveLength(1);
     expect(catalog.updateAlbumAssets({ albumId: album.id, assetIds: [assets[0]!.id], mode: 'remove' })).toMatchObject({ assetCount: 0 });
     catalog.deleteAlbum(album.id);
+    catalog.close();
+  });
+
+  it('marks externally removed files offline and restores them after reappearance', async () => {
+    const root = await createTemporaryDirectory();
+    const photosDirectory = path.join(root, 'photos');
+    await mkdir(photosDirectory, { recursive: true });
+    const photoPath = path.join(photosDirectory, 'tracked.jpg');
+    await writeFile(photoPath, 'photo');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([photosDirectory]);
+    await unlink(photoPath);
+    await catalog.reconcileImportedFolders();
+    expect(catalog.listAssets()[0]?.offline).toBe(true);
+    await writeFile(photoPath, 'photo-restored');
+    await catalog.reconcileImportedFolders();
+    expect(catalog.listAssets()[0]?.offline).toBe(false);
     catalog.close();
   });
 });

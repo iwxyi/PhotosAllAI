@@ -38,6 +38,7 @@ import {
 } from '@photoallisai/contracts';
 
 import { CatalogService } from './catalog-service';
+import { CatalogWatcher } from './catalog-watcher';
 import { AnalysisService } from './analysis-service';
 import { ImageCacheService, type ImageVariant } from './image-cache-service';
 import { GenerationService } from './generation-service';
@@ -52,6 +53,7 @@ import { WorkspaceService } from './workspace-service';
 
 const APP_ORIGIN = 'app://photoallisai';
 let catalog: CatalogService;
+let catalogWatcher: CatalogWatcher;
 let imageCache: ImageCacheService;
 let providers: ProviderService;
 let tasks: TaskService;
@@ -150,6 +152,7 @@ function registerIpc(): void {
     if (result.canceled) return null;
 
     const importedCount = await catalog.importFolders(result.filePaths);
+    catalogWatcher.watchFolders(catalog.listFolderPaths());
     return catalogSnapshotSchema.parse({ assets: catalog.listAssets(), importedCount });
   });
 
@@ -266,6 +269,8 @@ app.whenReady().then(async () => {
   const databasePath = join(libraryDirectory, 'catalog.sqlite');
   workspace = new WorkspaceService(databasePath);
   catalog = new CatalogService(databasePath);
+  catalogWatcher = new CatalogWatcher(catalog);
+  catalogWatcher.watchFolders(catalog.listFolderPaths());
   fileOperations = new FileOperationService(databasePath, undefined, {
     trashItem: (filePath) => shell.trashItem(filePath)
   });
@@ -336,6 +341,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  catalogWatcher?.stop();
   taskRunner?.stop();
   workspace?.close();
   generation?.close();
