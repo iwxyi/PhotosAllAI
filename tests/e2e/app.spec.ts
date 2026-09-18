@@ -80,6 +80,8 @@ test('opens the task drawer and application tabs', async () => {
   await page.getByRole('button', { name: /处理中 1/ }).click();
   await expect(page.getByText('当前任务')).toBeVisible();
   await expect(page.getByText('正在生成 · 64%')).toBeVisible();
+  await page.getByRole('button', { name: '任务中心', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '任务中心' })).toBeVisible();
 
   await page.getByRole('tab', { name: /任务中心/ }).click();
   await expect(page.getByRole('heading', { name: '任务中心' })).toBeVisible();

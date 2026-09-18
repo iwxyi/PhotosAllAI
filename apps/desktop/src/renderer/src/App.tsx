@@ -667,7 +667,7 @@ function ActionToggle({ title, detail, risk, checked, onChange }: { title: strin
   );
 }
 
-function TaskBar({ open, onToggle, tasks }: { open: boolean; onToggle: () => void; tasks: PersistedTask[] | null }): React.JSX.Element {
+function TaskBar({ open, onToggle, onOpenTaskCenter, tasks }: { open: boolean; onToggle: () => void; onOpenTaskCenter: () => void; tasks: PersistedTask[] | null }): React.JSX.Element {
   const isDemo = tasks === null;
   const visibleTasks = tasks ?? [];
   const runningCount = isDemo ? 1 : visibleTasks.filter((task) => ['preparing', 'uploading', 'processing', 'downloading', 'saving'].includes(task.status)).length;
@@ -678,7 +678,7 @@ function TaskBar({ open, onToggle, tasks }: { open: boolean; onToggle: () => voi
     <>
       {open && (
         <div className="task-drawer">
-          <div className="drawer-head"><div><strong>当前任务</strong><span>生成任务将按顺序执行</span></div><div><button className="quiet-button" type="button"><Pause size={13} />暂停全部</button><IconButton label="关闭任务抽屉" onClick={onToggle}><X size={15} /></IconButton></div></div>
+          <div className="drawer-head"><div><strong>当前任务</strong><span>生成任务将按顺序执行</span></div><div><button className="quiet-button" type="button" onClick={onOpenTaskCenter}><ListFilter size={13} />任务中心</button><IconButton label="关闭任务抽屉" onClick={onToggle}><X size={15} /></IconButton></div></div>
           {isDemo ? <><div className="task-row is-running"><span className="drag-handle">⠿</span><img src="./demo/portrait.jpg" alt="" /><span className="task-title"><strong>DSC_4821.NEF</strong><small>自然人像 · 清洁背景</small></span><span className="task-progress"><i style={{ width: '64%' }} /><em>正在生成 · 64%</em></span><span className="task-time">约 18 秒</span><IconButton label="暂停"><Pause size={14} /></IconButton></div><div className="task-row"><span className="drag-handle">⠿</span><img src="./demo/coast.jpg" alt="" /><span className="task-title"><strong>A7R_0938.ARW</strong><small>自然风光 · 清除游客</small></span><span className="queued-label">队列第 1 位</span><span className="task-time">生成 2 次</span><IconButton label="开始"><Play size={14} /></IconButton></div></> : visibleTasks.length === 0 ? <div className="drawer-empty">暂无任务</div> : visibleTasks.slice(0, 2).map((task) => <div className="task-row" key={task.id}><span className="drag-handle">⠿</span><span className="task-placeholder-image"><TaskKindIcon kind={task.kind} /></span><span className="task-title"><strong>{taskLabels[task.kind]}</strong><small>{task.assetId ?? '批量任务'}</small></span><span className="task-progress"><i style={{ width: `${task.progress * 100}%` }} /><em>{statusLabels[task.status]} · {Math.round(task.progress * 100)}%</em></span><span className="task-time">第 {task.attempt + 1} 次</span><span /></div>)}
         </div>
       )}
@@ -717,6 +717,7 @@ type LibraryWorkspaceProps = {
   selectedAssetId: string | null;
   onSelectedAssetChange: (assetId: string | null) => void;
   onRefreshCatalog: () => Promise<void>;
+  onOpenTaskCenter: () => void;
 };
 
 function LibraryWorkspace(props: LibraryWorkspaceProps): React.JSX.Element {
@@ -734,7 +735,7 @@ function LibraryWorkspace(props: LibraryWorkspaceProps): React.JSX.Element {
       </main>
       <aside className="empty-library-inspector"><Info size={18} /><span>选择照片后显示分析和版本信息</span></aside>
       {operationNotice && <div className="operation-toast" role="status">{operationNotice}<button type="button" aria-label="关闭提示" onClick={() => setOperationNotice('')}><X size={13} /></button></div>}
-      <TaskBar open={false} onToggle={() => undefined} tasks={[]} />
+      <TaskBar open={false} onToggle={() => undefined} onOpenTaskCenter={props.onOpenTaskCenter} tasks={[]} />
     </div>
   );
 }
@@ -772,6 +773,7 @@ function PopulatedLibraryWorkspace({
   selectedAssetId,
   onSelectedAssetChange,
   onRefreshCatalog,
+  onOpenTaskCenter,
   operationNotice,
   setOperationNotice
 }: PopulatedLibraryWorkspaceProps): React.JSX.Element {
@@ -1246,7 +1248,7 @@ function PopulatedLibraryWorkspace({
         </div>
       )}
       {operationNotice && <div className="operation-toast" role="status">{operationNotice}<button type="button" aria-label="关闭提示" onClick={() => setOperationNotice('')}><X size={13} /></button></div>}
-      <TaskBar open={tasksOpen} onToggle={() => setTasksOpen((value) => !value)} tasks={isDemo ? null : taskItems} />
+      <TaskBar open={tasksOpen} onToggle={() => setTasksOpen((value) => !value)} onOpenTaskCenter={onOpenTaskCenter} tasks={isDemo ? null : taskItems} />
     </div>
   );
 }
@@ -1773,7 +1775,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
-      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} exportPresets={exportPresets} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={setFavoriteOnly} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
+      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} exportPresets={exportPresets} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={setFavoriteOnly} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onOpenTaskCenter={() => openWorkspaceTab('tasks')} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
     </div>
   );
 }
