@@ -16,6 +16,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke('catalog.folders.list.v1') as ReturnType<DesktopApi['listCatalogFolders']>,
   listCatalogTags: () =>
     ipcRenderer.invoke('catalog.tags.list.v1') as ReturnType<DesktopApi['listCatalogTags']>,
+  deleteCatalogTag: (tagId) =>
+    ipcRenderer.invoke('catalog.tags.delete.v1', tagId) as ReturnType<DesktopApi['deleteCatalogTag']>,
   listCatalogAlbums: () =>
     ipcRenderer.invoke('catalog.albums.list.v1') as ReturnType<DesktopApi['listCatalogAlbums']>,
   listCatalogSmartCollections: () =>

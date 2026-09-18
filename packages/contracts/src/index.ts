@@ -51,6 +51,8 @@ export const catalogTagSchema = z.object({
   assetCount: z.number().int().nonnegative()
 });
 export type CatalogTag = z.infer<typeof catalogTagSchema>;
+export const deleteCatalogTagInputSchema = z.string().uuid();
+export type DeleteCatalogTagInput = z.input<typeof deleteCatalogTagInputSchema>;
 
 export const catalogAssetSchema = z.object({
   id: z.string(),
@@ -529,6 +531,7 @@ export interface DesktopApi {
   listCatalogAssetPage(input: ListCatalogAssetsInput): Promise<CatalogAssetPage>;
   listCatalogFolders(): Promise<CatalogFolder[]>;
   listCatalogTags(): Promise<CatalogTag[]>;
+  deleteCatalogTag(tagId: DeleteCatalogTagInput): Promise<void>;
   listCatalogAlbums(): Promise<CatalogAlbum[]>;
   listCatalogSmartCollections(): Promise<CatalogSmartCollection[]>;
   saveCatalogAlbum(input: SaveCatalogAlbumInput): Promise<CatalogAlbum>;

@@ -10,6 +10,7 @@ import {
   catalogFolderSchema,
   catalogSmartCollectionSchema,
   catalogTagSchema,
+  deleteCatalogTagInputSchema,
   listCatalogAssetsInputSchema,
   saveCatalogAlbumInputSchema,
   updateCatalogAlbumAssetsInputSchema,
@@ -477,6 +478,19 @@ export class CatalogService {
       ORDER BY tags.name COLLATE NOCASE ASC, tags.id ASC
     `).all() as { id: string; name: string; asset_count: number }[];
     return rows.map((row) => catalogTagSchema.parse({ id: row.id, name: row.name, assetCount: row.asset_count }));
+  }
+
+  deleteTag(rawTagId: string): void {
+    const tagId = deleteCatalogTagInputSchema.parse(rawTagId);
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const result = this.#database.prepare('DELETE FROM tags WHERE id = ?').run(tagId);
+      if (result.changes !== 1) throw new Error('TAG_NOT_FOUND');
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   updateMetadata(rawInput: UpdateCatalogMetadataInput): CatalogAsset[] {

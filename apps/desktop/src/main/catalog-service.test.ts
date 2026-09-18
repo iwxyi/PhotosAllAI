@@ -93,6 +93,8 @@ describe('catalog image discovery', () => {
       removeTagIds: [portraitTag.id]
     });
     expect(remaining.find((tag) => tag.id === portraitTag.id)?.assetCount).toBe(1);
+    catalog.deleteTag(portraitTag.id);
+    expect(catalog.listTags().some((tag) => tag.id === portraitTag.id)).toBe(false);
     expect(assets.find((asset) => asset.fileName === 'visible.jpg')?.thumbnailUrl).toMatch(/^photoasset:\/\/thumbnail/);
     expect(assets.find((asset) => asset.fileName === 'raw.NEF')?.previewUrl).toMatch(/^photoasset:\/\/preview/);
     catalog.close();

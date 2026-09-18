@@ -10,6 +10,7 @@ import {
   catalogAssetRemovalReportSchema,
   catalogSnapshotSchema,
   catalogAlbumSchema,
+  deleteCatalogTagInputSchema,
   copyCatalogAssetsInputSchema,
   copyCatalogAssetsReportSchema,
   enqueueTaskInputSchema,
@@ -114,6 +115,9 @@ function registerIpc(): void {
   );
   ipcMain.handle('catalog.folders.list.v1', () => catalog.listFolders());
   ipcMain.handle('catalog.tags.list.v1', () => catalog.listTags());
+  ipcMain.handle('catalog.tags.delete.v1', (_event, input: unknown) => {
+    catalog.deleteTag(deleteCatalogTagInputSchema.parse(input));
+  });
   ipcMain.handle('catalog.albums.list.v1', () => catalog.listAlbums());
   ipcMain.handle('catalog.smart-collections.list.v1', () => catalog.listSmartCollections());
   ipcMain.handle('catalog.album.save.v1', (_event, input: unknown) =>
