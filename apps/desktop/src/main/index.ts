@@ -17,6 +17,7 @@ import {
   listAnalysisInputSchema,
   listCatalogAssetsInputSchema,
   listGenerationResultsInputSchema,
+  updateGenerationResultReviewInputSchema,
   moveCatalogAssetsInputSchema,
   moveCatalogAssetsReportSchema,
   renameCatalogAssetInputSchema,
@@ -181,6 +182,9 @@ function registerIpc(): void {
     const { assetId } = listGenerationResultsInputSchema.parse(input);
     return generation.list(assetId);
   });
+  ipcMain.handle('generation.result.review.update.v1', (_event, input: unknown) =>
+    generation.updateReview(updateGenerationResultReviewInputSchema.parse(input))
+  );
   ipcMain.handle('generation.results.export.v1', async (_event, input: unknown) => {
     const { resultIds } = exportGenerationResultsInputSchema.parse(input);
     const selection = await dialog.showOpenDialog({

@@ -7,6 +7,8 @@ import {
   generationResultSchema,
   generationTaskPayloadSchema,
   type GenerationResult,
+  type UpdateGenerationResultReviewInput,
+  updateGenerationResultReviewInputSchema,
   type ProviderProfile
 } from '@photoallisai/contracts';
 
@@ -29,6 +31,7 @@ type ResultRow = {
   provider_profile_id: string;
   template_id: string | null;
   template_version: number | null;
+  review_state: GenerationResult['reviewState'];
   created_at: number;
 };
 
@@ -72,6 +75,10 @@ export class GenerationService {
       CREATE INDEX IF NOT EXISTS generation_asset_idx
         ON generation_results(asset_id, version DESC);
     `);
+    const columns = this.#database.prepare('PRAGMA table_info(generation_results)').all() as { name: string }[];
+    if (!columns.some((column) => column.name === 'review_state')) {
+      this.#database.exec("ALTER TABLE generation_results ADD COLUMN review_state TEXT NOT NULL DEFAULT 'undecided' CHECK(review_state IN ('undecided', 'accepted', 'rejected', 'preferred'))");
+    }
   }
 
   close(): void {
@@ -87,6 +94,25 @@ export class GenerationService {
   resolveResultFile(resultId: string): string | null {
     const row = this.#database.prepare('SELECT file_path FROM generation_results WHERE id = ?').get(resultId) as { file_path: string } | undefined;
     return row?.file_path ?? null;
+  }
+
+  updateReview(rawInput: UpdateGenerationResultReviewInput): GenerationResult {
+    const input = updateGenerationResultReviewInputSchema.parse(rawInput);
+    const row = this.#database.prepare('SELECT asset_id FROM generation_results WHERE id = ?').get(input.resultId) as { asset_id: string } | undefined;
+    if (!row) throw new Error('GENERATION_RESULT_NOT_FOUND');
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      if (input.reviewState === 'preferred') {
+        this.#database.prepare(`UPDATE generation_results SET review_state = 'accepted' WHERE asset_id = ? AND review_state = 'preferred'`).run(row.asset_id);
+      }
+      this.#database.prepare('UPDATE generation_results SET review_state = ? WHERE id = ?').run(input.reviewState, input.resultId);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    const updated = this.#database.prepare('SELECT * FROM generation_results WHERE id = ?').get(input.resultId) as ResultRow;
+    return this.#toResult(updated);
   }
 
   async generate(assetId: string, rawPayload: unknown, signal?: AbortSignal): Promise<GenerationResult> {
@@ -140,7 +166,7 @@ export class GenerationService {
       id, assetId, batchId: payload.batchId, version, fileName,
       resultUrl: `photoresult://result/${id}`, prompt: payload.prompt,
       providerProfileId: payload.providerProfileId, templateId: payload.templateId,
-      templateVersion: payload.templateVersion, createdAt
+      templateVersion: payload.templateVersion, reviewState: 'undecided', createdAt
     });
   }
 
@@ -165,7 +191,7 @@ export class GenerationService {
       id: row.id, assetId: row.asset_id, batchId: row.batch_id, version: row.version,
       fileName: row.file_name, resultUrl: `photoresult://result/${row.id}`,
       prompt: row.prompt, providerProfileId: row.provider_profile_id,
-      templateId: row.template_id, templateVersion: row.template_version, createdAt: row.created_at
+      templateId: row.template_id, templateVersion: row.template_version, reviewState: row.review_state, createdAt: row.created_at
     });
   }
 }

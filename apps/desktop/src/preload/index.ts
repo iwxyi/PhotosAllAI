@@ -68,6 +68,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke('analysis.list.v1', { assetId }) as ReturnType<DesktopApi['listAnalysisRevisions']>,
   listGenerationResults: (assetId) =>
     ipcRenderer.invoke('generation.results.list.v1', { assetId }) as ReturnType<DesktopApi['listGenerationResults']>,
+  updateGenerationResultReview: (input) =>
+    ipcRenderer.invoke('generation.result.review.update.v1', input) as ReturnType<DesktopApi['updateGenerationResultReview']>,
   exportGenerationResults: (input) =>
     ipcRenderer.invoke('generation.results.export.v1', input) as ReturnType<DesktopApi['exportGenerationResults']>
 };

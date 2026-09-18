@@ -121,6 +121,12 @@ test('analyzes, generates, persists, and displays a managed result', async () =>
   await expect.poll(() => generated.evaluate((image) => image.naturalWidth)).toBeGreaterThan(0);
 
   await page.getByRole('button', { name: '关闭任务抽屉' }).click();
+  await page.getByRole('button', { name: '标记为首选' }).click();
+  await expect(page.getByRole('status')).toContainText('已标记为首选版本');
+  await page.reload();
+  await expect(page.getByRole('button', { name: '标记为首选' })).toBeVisible();
+  await expect(page.locator('.version-button.is-preferred')).toBeVisible();
+
   await page.getByRole('button', { name: '按当前方案再次生成' }).click();
   await expect(page.getByText('V2', { exact: true })).toBeVisible({ timeout: 10_000 });
 

@@ -96,6 +96,17 @@ describe('managed generation results', () => {
     service.close();
   });
 
+  it('persists review state and keeps a single preferred result per asset', async () => {
+    const { service } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const first = await service.generate('asset-1', payload());
+    const second = await service.generate('asset-1', payload(2));
+    expect(service.updateReview({ resultId: first.id, reviewState: 'preferred' }).reviewState).toBe('preferred');
+    expect(service.updateReview({ resultId: second.id, reviewState: 'preferred' }).reviewState).toBe('preferred');
+    expect(service.list('asset-1').find((result) => result.id === first.id)?.reviewState).toBe('accepted');
+    expect(service.updateReview({ resultId: second.id, reviewState: 'rejected' }).reviewState).toBe('rejected');
+    service.close();
+  });
+
   it('rejects unsafe result URLs', async () => {
     const { service } = await fixture(() => ({ data: [{ url: 'http://example.com/result.png' }] }));
     await expect(service.generate('asset-1', payload())).rejects.toThrow('GENERATED_IMAGE_URL_UNSAFE');

@@ -439,10 +439,17 @@ export const generationResultSchema = z.object({
   providerProfileId: z.string().uuid(),
   templateId: z.string().uuid().nullable(),
   templateVersion: z.number().int().positive().nullable(),
+  reviewState: z.enum(['undecided', 'accepted', 'rejected', 'preferred']),
   createdAt: z.number().nonnegative()
 });
 
 export type GenerationResult = z.infer<typeof generationResultSchema>;
+
+export const updateGenerationResultReviewInputSchema = z.object({
+  resultId: z.string().uuid(),
+  reviewState: z.enum(['undecided', 'accepted', 'rejected', 'preferred'])
+});
+export type UpdateGenerationResultReviewInput = z.infer<typeof updateGenerationResultReviewInputSchema>;
 
 export const exportGenerationResultsInputSchema = z.object({
   resultIds: z.array(z.string().uuid()).min(1).max(10_000)
@@ -496,5 +503,6 @@ export interface DesktopApi {
   savePromptTemplate(input: SavePromptTemplateInput): Promise<PromptTemplate>;
   listAnalysisRevisions(assetId: string): Promise<AnalysisRevision[]>;
   listGenerationResults(assetId: string): Promise<GenerationResult[]>;
+  updateGenerationResultReview(input: UpdateGenerationResultReviewInput): Promise<GenerationResult>;
   exportGenerationResults(input: ExportGenerationResultsInput): Promise<ExportReport>;
 }

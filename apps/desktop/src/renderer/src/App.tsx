@@ -411,7 +411,8 @@ function Viewer({
   onCopy,
   onRename,
   onRemove,
-  onTrash
+  onTrash,
+  onReview
 }: {
   photo: Photo;
   results: GenerationResult[];
@@ -425,6 +426,7 @@ function Viewer({
   onRename: () => void;
   onRemove: () => void;
   onTrash: () => void;
+  onReview: (resultId: string, reviewState: GenerationResult['reviewState']) => Promise<void>;
 }): React.JSX.Element {
   const [compareMode, setCompareMode] = useState<CompareMode>('single');
   const [split, setSplit] = useState(52);
@@ -481,6 +483,7 @@ function Viewer({
           <span className="zoom-value">38%</span>
           <IconButton label="放大"><ZoomIn size={15} /></IconButton>
           <IconButton label="适应窗口"><Maximize2 size={15} /></IconButton>
+          {selectedResult && !isDemo && <span className="review-actions"><button type="button" aria-label="接受当前版本" className={selectedResult.reviewState === 'accepted' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'accepted')}>接受</button><button type="button" aria-label="标记为首选" className={selectedResult.reviewState === 'preferred' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'preferred')}><Star size={12} />首选</button><button type="button" aria-label="拒绝当前版本" className={selectedResult.reviewState === 'rejected' ? 'is-review-rejected' : ''} onClick={() => void onReview(selectedResult.id, 'rejected')}>拒绝</button></span>}
         </div>
       </div>
       <div className="canvas-wrap">
@@ -522,7 +525,7 @@ function Viewer({
           <span />
           <button className={!selectedResult && !isDemo ? 'is-current' : ''} type="button" onClick={() => setSelectedResultId(null)}>原图</button>
           {isDemo ? <><button type="button">V1</button><button className="is-current" type="button">V2</button></> : [...results].reverse().map((result) => (
-            <button className={selectedResult?.id === result.id ? 'is-current' : ''} type="button" key={result.id} onClick={() => setSelectedResultId(result.id)}>V{result.version}</button>
+            <button className={`version-button${selectedResult?.id === result.id ? ' is-current' : ''}${result.reviewState === 'preferred' ? ' is-preferred' : result.reviewState === 'rejected' ? ' is-rejected' : ''}`} type="button" key={result.id} onClick={() => setSelectedResultId(result.id)} title={result.reviewState === 'preferred' ? '首选' : result.reviewState === 'accepted' ? '已接受' : result.reviewState === 'rejected' ? '已拒绝' : '未审阅'}>V{result.version}</button>
           ))}
           <button type="button" title="按当前方案再次生成" aria-label="按当前方案再次生成" disabled={!selectedResult || isDemo} onClick={() => {
             if (!selectedResult) return;
@@ -1002,6 +1005,20 @@ function PopulatedLibraryWorkspace({
     return '已按当前方案加入 1 个生成任务。';
   };
 
+  const reviewResult = async (resultId: string, reviewState: GenerationResult['reviewState']): Promise<void> => {
+    try {
+      const updated = await window.desktopApi.updateGenerationResultReview({ resultId, reviewState });
+      setGenerationResults((current) => current.map((result) => {
+        if (result.id === updated.id) return updated;
+        if (reviewState === 'preferred' && result.reviewState === 'preferred') return { ...result, reviewState: 'accepted' };
+        return result;
+      }));
+      setOperationNotice(reviewState === 'preferred' ? '已标记为首选版本。' : reviewState === 'accepted' ? '已接受当前版本。' : '已拒绝当前版本。');
+    } catch {
+      setOperationNotice('版本状态更新失败，请稍后重试。');
+    }
+  };
+
   const addTags = async () => {
     const names = tagDraft.split(',').map((name) => name.trim()).filter(Boolean);
     if (names.length === 0) return;
@@ -1128,7 +1145,7 @@ function PopulatedLibraryWorkspace({
       <Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={totalCount} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={onSelectFolder} onSelectAlbum={onSelectAlbum} onSelectSmartCollection={onSelectSmartCollection} onRefreshAlbums={onRefreshAlbums} onSelectTag={onSelectTag} isDemo={isDemo} />
       <main className="library-main">
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
-        <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} />
+        <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} onReview={reviewResult} />
       </main>
       <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onGenerate={generateSelection} />
       {selection.selectedIds.size > 1 && (
