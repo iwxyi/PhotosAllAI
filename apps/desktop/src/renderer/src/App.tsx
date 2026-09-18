@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   CatalogAsset,
   CatalogFolder,
@@ -10,7 +10,7 @@ import type {
   SavePromptTemplateInput,
   SaveProviderProfileInput
 } from '@photoallisai/contracts';
-import { composeGenerationPrompt, selectAll, updateSelection, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
+import { computeHorizontalWindow, composeGenerationPrompt, selectAll, updateSelection, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
 import {
   Aperture,
   ArrowDown,
@@ -252,6 +252,22 @@ function Filmstrip({
   onSelect: (photo: Photo, intent: SelectionIntent) => void;
   collectionName: string;
 }): React.JSX.Element {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const [viewport, setViewport] = useState({ width: 0, scrollLeft: 0 });
+  const itemSize = 137;
+  const virtual = computeHorizontalWindow(items.length, itemSize, viewport.width, viewport.scrollLeft, 4);
+  const visibleItems = items.slice(virtual.start, virtual.end);
+
+  useEffect(() => {
+    const element = viewportRef.current;
+    if (!element) return;
+    const updateWidth = () => setViewport((current) => ({ ...current, width: element.clientWidth }));
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <section className="filmstrip-region">
       <div className="filmstrip-toolbar">
@@ -265,11 +281,15 @@ function Filmstrip({
           </div>
         </div>
       </div>
-      <div className="filmstrip" role="listbox" aria-label="照片">
-        {items.map((photo, index) => (
+      <div className="filmstrip" role="listbox" aria-label="照片" ref={viewportRef} onScroll={(event) => setViewport((current) => ({ ...current, scrollLeft: event.currentTarget.scrollLeft }))}>
+        <div className="filmstrip-track" style={{ width: virtual.totalSize }}>
+        {visibleItems.map((photo, visibleIndex) => {
+          const index = virtual.start + visibleIndex;
+          return (
           <button
             className={`thumb${selected.id === photo.id ? ' is-selected' : ''}`}
             key={photo.id}
+            style={{ left: index * itemSize }}
             onClick={(event) => onSelect(
               photo,
               event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace'
@@ -285,7 +305,9 @@ function Filmstrip({
             {selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={11} /></span>}
             <span className="thumb-name">{photo.fileName}</span>
           </button>
-        ))}
+          );
+        })}
+        </div>
       </div>
     </section>
   );

@@ -81,4 +81,29 @@ export function selectAll(orderedIds: readonly string[]): SelectionState {
   };
 }
 
+export type VirtualWindow = {
+  start: number;
+  end: number;
+  totalSize: number;
+};
+
+export function computeHorizontalWindow(
+  itemCount: number,
+  itemSize: number,
+  viewportSize: number,
+  scrollOffset: number,
+  overscan = 3
+): VirtualWindow {
+  if (itemCount <= 0 || itemSize <= 0) return { start: 0, end: 0, totalSize: 0 };
+  const safeViewport = Math.max(0, viewportSize);
+  const safeOffset = Math.max(0, Math.min(scrollOffset, itemCount * itemSize));
+  const visibleStart = Math.floor(safeOffset / itemSize);
+  const visibleCount = Math.max(1, Math.ceil(safeViewport / itemSize));
+  return {
+    start: Math.max(0, visibleStart - overscan),
+    end: Math.min(itemCount, visibleStart + visibleCount + overscan),
+    totalSize: itemCount * itemSize
+  };
+}
+
 export { composeGenerationPrompt, type ComposePromptInput } from './prompt-composer';
