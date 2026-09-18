@@ -14,7 +14,8 @@ import {
   reorderTaskIdsSchema,
   savePromptTemplateInputSchema,
   saveProviderProfileInputSchema,
-  taskIdSchema
+  taskIdSchema,
+  updateCatalogMetadataInputSchema
 } from '@photoallisai/contracts';
 
 import { CatalogService } from './catalog-service';
@@ -60,6 +61,9 @@ function registerIpc(): void {
 
   ipcMain.handle('catalog.assets.list.v1', () => catalog.listAssets());
   ipcMain.handle('catalog.folders.list.v1', () => catalog.listFolders());
+  ipcMain.handle('catalog.metadata.update.v1', (_event, input: unknown) =>
+    catalog.updateMetadata(updateCatalogMetadataInputSchema.parse(input))
+  );
 
   ipcMain.handle('catalog.folders.import.v1', async () => {
     const result = await dialog.showOpenDialog({

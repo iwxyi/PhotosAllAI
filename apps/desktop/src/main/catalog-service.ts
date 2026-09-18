@@ -7,7 +7,9 @@ import {
   catalogAssetSchema,
   catalogFolderSchema,
   type CatalogAsset,
-  type CatalogFolder
+  type CatalogFolder,
+  type UpdateCatalogMetadataInput,
+  updateCatalogMetadataInputSchema
 } from '@photoallisai/contracts';
 
 const SUPPORTED_EXTENSIONS = new Set([
@@ -25,6 +27,8 @@ type AssetRow = {
   extension: string;
   size_bytes: number;
   modified_at: number;
+  rating: number;
+  favorite: number;
 };
 
 export function isSupportedImage(filePath: string): boolean {
@@ -72,31 +76,41 @@ export class CatalogService {
 
   #migrate(): void {
     const version = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
-    if (version.user_version >= 1) return;
-
-    this.#database.exec(`
-      BEGIN IMMEDIATE;
-      CREATE TABLE IF NOT EXISTS folders (
-        id TEXT PRIMARY KEY,
-        path TEXT NOT NULL UNIQUE,
-        name TEXT NOT NULL,
-        imported_at INTEGER NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS assets (
-        id TEXT PRIMARY KEY,
-        folder_id TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
-        path TEXT NOT NULL UNIQUE,
-        file_name TEXT NOT NULL,
-        extension TEXT NOT NULL,
-        size_bytes INTEGER NOT NULL,
-        modified_at INTEGER NOT NULL,
-        imported_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS assets_folder_id_idx ON assets(folder_id);
-      CREATE INDEX IF NOT EXISTS assets_modified_at_idx ON assets(modified_at DESC);
-      PRAGMA user_version = 1;
-      COMMIT;
-    `);
+    if (version.user_version < 1) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS folders (
+          id TEXT PRIMARY KEY,
+          path TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          imported_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS assets (
+          id TEXT PRIMARY KEY,
+          folder_id TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+          path TEXT NOT NULL UNIQUE,
+          file_name TEXT NOT NULL,
+          extension TEXT NOT NULL,
+          size_bytes INTEGER NOT NULL,
+          modified_at INTEGER NOT NULL,
+          imported_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS assets_folder_id_idx ON assets(folder_id);
+        CREATE INDEX IF NOT EXISTS assets_modified_at_idx ON assets(modified_at DESC);
+        PRAGMA user_version = 1;
+        COMMIT;
+      `);
+    }
+    const current = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (current.user_version < 2) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE assets ADD COLUMN rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5);
+        ALTER TABLE assets ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0, 1));
+        PRAGMA user_version = 2;
+        COMMIT;
+      `);
+    }
   }
 
   close(): void {
@@ -107,7 +121,7 @@ export class CatalogService {
     const safeLimit = Math.max(1, Math.min(limit, 1_000));
     const rows = this.#database
       .prepare(`
-        SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at
+        SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, favorite
         FROM assets
         ORDER BY modified_at DESC, id ASC
         LIMIT ?
@@ -130,6 +144,38 @@ export class CatalogService {
       name: row.name,
       assetCount: row.asset_count
     }));
+  }
+
+  updateMetadata(rawInput: UpdateCatalogMetadataInput): CatalogAsset[] {
+    const input = updateCatalogMetadataInputSchema.parse(rawInput);
+    const uniqueIds = [...new Set(input.assetIds)];
+    const assignments: string[] = [];
+    const values: (number | string)[] = [];
+    if (input.rating !== undefined) {
+      assignments.push('rating = ?');
+      values.push(input.rating);
+    }
+    if (input.favorite !== undefined) {
+      assignments.push('favorite = ?');
+      values.push(input.favorite ? 1 : 0);
+    }
+    const placeholders = uniqueIds.map(() => '?').join(', ');
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const result = this.#database.prepare(`
+        UPDATE assets SET ${assignments.join(', ')} WHERE id IN (${placeholders})
+      `).run(...values, ...uniqueIds);
+      if (result.changes !== uniqueIds.length) throw new Error('CATALOG_ASSET_SET_MISMATCH');
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    const rows = this.#database.prepare(`
+      SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, favorite
+      FROM assets WHERE id IN (${placeholders}) ORDER BY modified_at DESC, id ASC
+    `).all(...uniqueIds) as AssetRow[];
+    return rows.map((row) => this.#toAsset(row));
   }
 
   async importFolders(folderPaths: readonly string[]): Promise<number> {
@@ -208,6 +254,8 @@ export class CatalogService {
       format: row.extension.slice(1).toUpperCase(),
       sizeBytes: row.size_bytes,
       modifiedAt: row.modified_at,
+      rating: row.rating,
+      favorite: row.favorite === 1,
       thumbnailUrl: `photoasset://thumbnail/${row.id}`,
       previewUrl: `photoasset://preview/${row.id}`
     });

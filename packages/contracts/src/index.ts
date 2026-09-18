@@ -22,6 +22,8 @@ export const catalogAssetSchema = z.object({
   format: z.string(),
   sizeBytes: z.number().nonnegative(),
   modifiedAt: z.number().nonnegative(),
+  rating: z.number().int().min(0).max(5),
+  favorite: z.boolean(),
   thumbnailUrl: z.string(),
   previewUrl: z.string()
 });
@@ -35,6 +37,16 @@ export const catalogFolderSchema = z.object({
 });
 
 export type CatalogFolder = z.infer<typeof catalogFolderSchema>;
+
+export const updateCatalogMetadataInputSchema = z.object({
+  assetIds: z.array(z.string().min(1)).min(1).max(10_000),
+  rating: z.number().int().min(0).max(5).optional(),
+  favorite: z.boolean().optional()
+}).refine((input) => input.rating !== undefined || input.favorite !== undefined, {
+  message: 'At least one metadata field is required'
+});
+
+export type UpdateCatalogMetadataInput = z.infer<typeof updateCatalogMetadataInputSchema>;
 
 export const catalogSnapshotSchema = z.object({
   assets: z.array(catalogAssetSchema),
@@ -273,6 +285,7 @@ export interface DesktopApi {
   getAppInfo(): Promise<AppInfo>;
   listCatalogAssets(): Promise<CatalogAsset[]>;
   listCatalogFolders(): Promise<CatalogFolder[]>;
+  updateCatalogMetadata(input: UpdateCatalogMetadataInput): Promise<CatalogAsset[]>;
   importFolders(): Promise<CatalogSnapshot | null>;
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;

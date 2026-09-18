@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   CatalogAsset,
   CatalogFolder,
@@ -81,7 +81,7 @@ function mapCatalogAssets(assets: CatalogAsset[]): Photo[] {
     thumbnailSrc: asset.thumbnailUrl,
     format: asset.format,
     dimensions: `${(asset.sizeBytes / 1_048_576).toFixed(1)} MB`,
-    rating: 0
+    rating: asset.rating
   }));
 }
 
@@ -295,12 +295,14 @@ function Viewer({
   photo,
   results,
   isDemo,
-  onExport
+  onExport,
+  onRate
 }: {
   photo: Photo;
   results: GenerationResult[];
   isDemo: boolean;
   onExport: (resultIds: string[]) => Promise<string>;
+  onRate: (rating: number) => void;
 }): React.JSX.Element {
   const [compareMode, setCompareMode] = useState<CompareMode>('single');
   const [split, setSplit] = useState(52);
@@ -390,7 +392,7 @@ function Viewer({
         </div>
       </div>
       <div className="viewer-footer">
-        <div className="rating">{[1, 2, 3, 4, 5].map((value) => <Star key={value} size={13} fill={value <= photo.rating ? 'currentColor' : 'none'} />)}</div>
+        <div className="rating">{[1, 2, 3, 4, 5].map((value) => <button type="button" aria-label={`设置评分 ${value}`} key={value} onClick={() => onRate(photo.rating === value ? 0 : value)}><Star size={13} fill={value <= photo.rating ? 'currentColor' : 'none'} /></button>)}</div>
         <div className="version-switcher">
           <button type="button" onMouseDown={() => setShowOriginal(true)} onMouseUp={() => setShowOriginal(false)} onMouseLeave={() => setShowOriginal(false)}>
             按住查看原图 <kbd>O</kbd>
@@ -545,7 +547,7 @@ function TaskBar({ open, onToggle, tasks }: { open: boolean; onToggle: () => voi
   );
 }
 
-function LibraryWorkspace({ availablePhotos, catalogFolders, isDemo }: { availablePhotos: Photo[]; catalogFolders: CatalogFolder[]; isDemo: boolean }): React.JSX.Element {
+function LibraryWorkspace({ availablePhotos, catalogFolders, isDemo, onRefreshCatalog }: { availablePhotos: Photo[]; catalogFolders: CatalogFolder[]; isDemo: boolean; onRefreshCatalog: () => Promise<void> }): React.JSX.Element {
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const visiblePhotos = selectedFolderId ? availablePhotos.filter((photo) => photo.folderId === selectedFolderId) : availablePhotos;
   const [selectedId, setSelectedId] = useState(visiblePhotos[0]!.id);
@@ -585,11 +587,17 @@ function LibraryWorkspace({ availablePhotos, catalogFolders, isDemo }: { availab
         if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
         event.preventDefault();
         setSelection(selectAll(orderedIds));
+      } else if (!isDemo && /^[0-5]$/.test(event.key)) {
+        const target = event.target;
+        if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+        event.preventDefault();
+        const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+        void window.desktopApi.updateCatalogMetadata({ assetIds, rating: Number(event.key) }).then(onRefreshCatalog);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [orderedIds]);
+  }, [isDemo, onRefreshCatalog, orderedIds, selected.id, selection.selectedIds]);
 
   useEffect(() => {
     if (isDemo) return;
@@ -655,6 +663,13 @@ function LibraryWorkspace({ availablePhotos, catalogFolders, isDemo }: { availab
       payload: { providerProfileId: profile.id, mode: 'full' }
     })));
     setAnalysisNotice(`已将 ${targetIds.length} 张照片加入分析队列。`);
+  };
+
+  const rateSelection = async (rating: number) => {
+    if (isDemo) return;
+    const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+    await window.desktopApi.updateCatalogMetadata({ assetIds, rating });
+    await onRefreshCatalog();
   };
 
   const generateSelection = async ({
@@ -753,14 +768,14 @@ function LibraryWorkspace({ availablePhotos, catalogFolders, isDemo }: { availab
       <Sidebar folders={catalogFolders} totalCount={availablePhotos.length} selectedFolderId={selectedFolderId} onSelectFolder={selectFolder} isDemo={isDemo} />
       <main className="library-main">
         <Filmstrip items={visiblePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} />
-        <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} />
+        <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} />
       </main>
       <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onGenerate={generateSelection} />
       {selection.selectedIds.size > 1 && (
         <div className="batch-actionbar">
           <strong>已选择 {selection.selectedIds.size} 张</strong>
           <span />
-          <button type="button"><Star size={14} />评分</button>
+          <button type="button" onClick={() => void rateSelection(5)}><Star size={14} />5 星</button>
           <button type="button"><Tags size={14} />标签</button>
           <button type="button" onClick={() => void analyzeSelection()}><Sparkles size={14} />AI 分析</button>
           <button type="button" onClick={() => void generateSelection({ providerProfileId: generationProfiles[0]?.id ?? '', template: null, count: 1, instruction: '', disabledActionIds: new Set() })} disabled={generationProfiles.length === 0}><WandSparkles size={14} />批量生成</button>
@@ -1053,12 +1068,15 @@ export function App(): React.JSX.Element {
   const [catalogPhotos, setCatalogPhotos] = useState<Photo[]>([]);
   const [catalogFolders, setCatalogFolders] = useState<CatalogFolder[]>([]);
 
-  useEffect(() => {
-    void Promise.all([window.desktopApi.listCatalogAssets(), window.desktopApi.listCatalogFolders()]).then(([assets, folders]) => {
-      setCatalogPhotos(mapCatalogAssets(assets));
-      setCatalogFolders(folders);
-    });
+  const refreshCatalog = useCallback(async () => {
+    const [assets, folders] = await Promise.all([window.desktopApi.listCatalogAssets(), window.desktopApi.listCatalogFolders()]);
+    setCatalogPhotos(mapCatalogAssets(assets));
+    setCatalogFolders(folders);
   }, []);
+
+  useEffect(() => {
+    void refreshCatalog();
+  }, [refreshCatalog]);
 
   const importFolders = async () => {
     const result = await window.desktopApi.importFolders();
@@ -1073,7 +1091,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} onChange={setActiveTab} onImport={() => void importFolders()} />
-      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} isDemo={catalogPhotos.length === 0} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
+      {activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} isDemo={catalogPhotos.length === 0} onRefreshCatalog={refreshCatalog} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
     </div>
   );
 }

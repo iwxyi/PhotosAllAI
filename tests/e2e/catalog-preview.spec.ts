@@ -59,6 +59,11 @@ test('serves bounded cached images without exposing file paths', async () => {
   await page.getByRole('button', { name: /source 1/ }).click();
   await expect(page.getByText('source', { exact: true }).last()).toBeVisible();
   await expect(page.getByText('1 张照片')).toBeVisible();
+  await page.getByRole('button', { name: '设置评分 4' }).click();
+  await expect(page.getByRole('button', { name: '设置评分 4' }).locator('svg')).toHaveAttribute('fill', 'currentColor');
+  await page.reload();
+  await expect(page.getByText('IMPORTED_PORTRAIT.jpg', { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('button', { name: '设置评分 4' }).locator('svg')).toHaveAttribute('fill', 'currentColor');
   await page.getByRole('button', { name: '开始分析' }).click();
   await expect(page.getByText('请先在设置中添加并启用视觉分析模型。')).toBeVisible();
 });

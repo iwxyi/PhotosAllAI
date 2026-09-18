@@ -123,7 +123,7 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 .image-label { position: absolute; z-index: 2; top: 9px; padding: 4px 6px; color: white; background: rgb(0 0 0 / 50%); border-radius: 3px; font-size: 9px; }
 .original-label { left: 9px; }.result-label { right: 9px; }
 .viewer-footer { border-top: 1px solid #20231f; }
-.rating { display: flex; gap: 2px; color: var(--warning); }
+.rating { display: flex; gap: 1px; color: var(--warning); }.rating button { width: 18px; height: 22px; padding: 0; display: grid; place-items: center; color: inherit; background: transparent; border: 0; border-radius: 3px; }.rating button:hover { background: var(--surface-3); }
 .version-switcher { display: flex; align-items: center; gap: 3px; }
 .version-switcher > span { width: 1px; height: 15px; margin: 0 3px; background: var(--line); }
 .version-switcher button { height: 23px; padding: 0 7px; display: inline-flex; align-items: center; gap: 5px; color: var(--muted); background: transparent; border: 0; border-radius: 3px; }

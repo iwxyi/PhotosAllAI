@@ -42,6 +42,8 @@ describe('catalog image discovery', () => {
     expect(imported).toBe(2);
     expect(assets.map((asset) => asset.fileName).sort()).toEqual(['raw.NEF', 'visible.jpg']);
     expect(catalog.listFolders()).toEqual([{ id: assets[0]?.folderId, name: 'photos', assetCount: 2 }]);
+    const updated = catalog.updateMetadata({ assetIds: assets.map((asset) => asset.id), rating: 4 });
+    expect(updated.every((asset) => asset.rating === 4)).toBe(true);
     expect(assets.find((asset) => asset.fileName === 'visible.jpg')?.thumbnailUrl).toMatch(/^photoasset:\/\/thumbnail/);
     expect(assets.find((asset) => asset.fileName === 'raw.NEF')?.previewUrl).toMatch(/^photoasset:\/\/preview/);
     catalog.close();
