@@ -71,7 +71,8 @@ export type CatalogAsset = z.infer<typeof catalogAssetSchema>;
 
 export const catalogAssetCursorSchema = z.object({
   modifiedAt: z.number().nonnegative(),
-  id: z.string().min(1)
+  id: z.string().min(1),
+  sortValue: z.union([z.string(), z.number()]).optional()
 });
 export type CatalogAssetCursor = z.infer<typeof catalogAssetCursorSchema>;
 
@@ -81,6 +82,7 @@ export const listCatalogAssetsInputSchema = z.object({
   albumId: z.string().uuid().nullable().default(null),
   smartCollection: z.enum(['favorites', 'unrated', 'unanalyzed', 'generated', 'to-review']).nullable().default(null),
   favoriteOnly: z.boolean().default(false),
+  sortBy: z.enum(['modifiedAt', 'fileName', 'rating']).default('modifiedAt'),
   query: z.string().max(500).default(''),
   cursor: catalogAssetCursorSchema.nullable().default(null),
   limit: z.number().int().min(1).max(500).default(200)

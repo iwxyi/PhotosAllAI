@@ -38,6 +38,9 @@ test('starts with the secure library workspace', async () => {
   await expect(page.locator('.filmstrip')).toHaveClass(/is-grid/);
   await page.getByRole('button', { name: '胶片视图' }).click();
   await expect(page.locator('.filmstrip')).not.toHaveClass(/is-grid/);
+  await page.getByLabel('图库排序').selectOption('fileName');
+  await expect(page.getByLabel('图库排序')).toHaveValue('fileName');
+  await page.getByLabel('图库排序').selectOption('modifiedAt');
 
   const security = await page.evaluate(() => ({
     hasDesktopApi: typeof window.desktopApi === 'object',
@@ -54,7 +57,7 @@ test('starts with the secure library workspace', async () => {
 });
 
 test('switches photos and comparison modes', async () => {
-  await page.getByRole('option', { name: '' }).nth(1).click();
+  await page.locator('.filmstrip [role="option"]').nth(1).click();
   await expect(page.getByText('DSC_4837.NEF', { exact: true }).last()).toBeVisible();
 
   await page.getByRole('button', { name: /对比/ }).click();
@@ -62,7 +65,7 @@ test('switches photos and comparison modes', async () => {
 });
 
 test('supports additive, range, and select-all interactions', async () => {
-  const options = page.getByRole('option');
+  const options = page.locator('.filmstrip [role="option"]');
   await options.nth(0).click();
   await options.nth(2).click({ modifiers: ['Meta'] });
   await expect(page.getByText('已选择 2 张')).toBeVisible();
@@ -127,7 +130,7 @@ test('opens the task drawer and application tabs', async () => {
 });
 
 test('restores open tabs, active workspace, and selected photo', async () => {
-  await page.getByRole('option', { name: '' }).nth(2).click();
+  await page.locator('.filmstrip [role="option"]').nth(2).click();
   await page.getByRole('button', { name: '关闭设置标签页' }).click();
   await expect(page.getByRole('tab', { name: '设置' })).toHaveCount(0);
   await page.getByRole('tab', { name: /任务中心/ }).click();

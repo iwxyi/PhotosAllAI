@@ -294,14 +294,28 @@ export class CatalogService {
     const conditions = [...baseConditions];
     const values = [...baseValues];
     if (input.cursor) {
-      conditions.push('(modified_at < ? OR (modified_at = ? AND id > ?))');
-      values.push(input.cursor.modifiedAt, input.cursor.modifiedAt, input.cursor.id);
+      if (input.sortBy === 'fileName') {
+        conditions.push('(file_name > ? OR (file_name = ? AND id > ?))');
+        values.push(typeof input.cursor.sortValue === 'string' ? input.cursor.sortValue : '', typeof input.cursor.sortValue === 'string' ? input.cursor.sortValue : '', input.cursor.id);
+      } else if (input.sortBy === 'rating') {
+        conditions.push('(rating < ? OR (rating = ? AND id > ?))');
+        const rating = typeof input.cursor.sortValue === 'number' ? input.cursor.sortValue : 0;
+        values.push(rating, rating, input.cursor.id);
+      } else {
+        conditions.push('(modified_at < ? OR (modified_at = ? AND id > ?))');
+        values.push(input.cursor.modifiedAt, input.cursor.modifiedAt, input.cursor.id);
+      }
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const orderBy = input.sortBy === 'fileName'
+      ? 'file_name COLLATE NOCASE ASC, id ASC'
+      : input.sortBy === 'rating'
+        ? 'rating DESC, id ASC'
+        : 'modified_at DESC, id ASC';
     const rows = this.#database.prepare(`
       SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, favorite, offline_at
       FROM assets ${where}
-      ORDER BY modified_at DESC, id ASC
+      ORDER BY ${orderBy}
       LIMIT ?
     `).all(...values, input.limit + 1) as AssetRow[];
     const hasMore = rows.length > input.limit;
@@ -311,10 +325,17 @@ export class CatalogService {
       SELECT COUNT(*) AS value FROM assets ${countWhere}
     `).get(...baseValues) as { value: number };
     const last = pageRows.at(-1);
+    const sortValue = last
+      ? input.sortBy === 'fileName'
+        ? last.file_name
+        : input.sortBy === 'rating'
+          ? last.rating
+          : undefined
+      : undefined;
     return catalogAssetPageSchema.parse({
       items: this.#toAssets(pageRows),
       totalCount: count.value,
-      nextCursor: hasMore && last ? { modifiedAt: last.modified_at, id: last.id } : null
+      nextCursor: hasMore && last ? { modifiedAt: last.modified_at, id: last.id, ...(sortValue === undefined ? {} : { sortValue }) } : null
     });
   }
 

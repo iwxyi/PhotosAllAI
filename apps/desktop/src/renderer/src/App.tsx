@@ -72,6 +72,7 @@ import {
 import { photos, type Photo } from './mock-data';
 
 type CompareMode = 'single' | 'split';
+type CatalogSort = 'modifiedAt' | 'fileName' | 'rating';
 
 const tabs: { id: WorkspaceTab; label: string; icon: typeof Image }[] = [
   { id: 'library', label: '图库', icon: Image },
@@ -327,6 +328,8 @@ function Filmstrip({
   totalCount,
   favoriteOnly,
   onFavoriteOnlyChange,
+  sortBy,
+  onSortByChange,
   hasMore,
   loading,
   onLoadMore
@@ -339,6 +342,8 @@ function Filmstrip({
   totalCount: number;
   favoriteOnly: boolean;
   onFavoriteOnlyChange: (value: boolean) => void;
+  sortBy: CatalogSort;
+  onSortByChange: (value: CatalogSort) => void;
   hasMore: boolean;
   loading: boolean;
   onLoadMore: () => void;
@@ -367,7 +372,7 @@ function Filmstrip({
         <div className="result-summary"><strong>{collectionName}</strong><span>{totalCount} 张照片</span></div>
         <div className="filmstrip-tools">
           <div className="filter-control"><button className={`quiet-button${favoriteOnly ? ' is-active' : ''}`} type="button" aria-expanded={filterOpen} onClick={() => setFilterOpen((value) => !value)}><ListFilter size={14} /> 筛选{favoriteOnly ? ' · 首选' : ''}</button>{filterOpen && <div className="filter-popover" role="dialog" aria-label="图库筛选"><label><input type="checkbox" checked={favoriteOnly} onChange={(event) => onFavoriteOnlyChange(event.target.checked)} />仅显示首选照片</label><button className="quiet-button" type="button" onClick={() => { onFavoriteOnlyChange(false); setFilterOpen(false); }}>清除筛选</button></div>}</div>
-          <button className="quiet-button" type="button">拍摄时间 <ChevronDown size={12} /></button>
+          <label className="sort-control"><select aria-label="图库排序" value={sortBy} onChange={(event) => onSortByChange(event.target.value as CatalogSort)}><option value="modifiedAt">拍摄时间</option><option value="fileName">文件名</option><option value="rating">评分</option></select><ChevronDown size={12} /></label>
           <div className="segmented-control">
             <button className={viewMode === 'filmstrip' ? 'is-active' : ''} type="button" aria-label="胶片视图" aria-pressed={viewMode === 'filmstrip'} onClick={() => setViewMode('filmstrip')}><GalleryHorizontalEnd size={14} /></button>
             <button className={viewMode === 'grid' ? 'is-active' : ''} type="button" aria-label="网格视图" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}><Grid2X2 size={14} /></button>
@@ -704,6 +709,8 @@ type LibraryWorkspaceProps = {
   totalCount: number;
   favoriteOnly: boolean;
   onFavoriteOnlyChange: (value: boolean) => void;
+  sortBy: CatalogSort;
+  onSortByChange: (value: CatalogSort) => void;
   hasMore: boolean;
   loadingMore: boolean;
   onSelectFolder: (folderId: string | null) => void;
@@ -760,6 +767,8 @@ function PopulatedLibraryWorkspace({
   totalCount,
   favoriteOnly,
   onFavoriteOnlyChange,
+  sortBy,
+  onSortByChange,
   hasMore,
   loadingMore,
   onSelectFolder,
@@ -1191,7 +1200,7 @@ function PopulatedLibraryWorkspace({
     <div className="workspace">
       <Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={totalCount} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={onSelectFolder} onSelectAlbum={onSelectAlbum} onSelectSmartCollection={onSelectSmartCollection} onRefreshAlbums={onRefreshAlbums} onImportFolders={onImportFolders} onSelectTag={onSelectTag} isDemo={isDemo} />
       <main className="library-main">
-        <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
+        <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
         <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} onReview={reviewResult} />
       </main>
       <AiPanel revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onGenerate={generateSelection} />
@@ -1633,6 +1642,7 @@ export function App(): React.JSX.Element {
   const [searchDraft, setSearchDraft] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [favoriteOnly, setFavoriteOnly] = useState(false);
+  const [sortBy, setSortBy] = useState<CatalogSort>('modifiedAt');
   const catalogRequest = useRef(0);
 
   useEffect(() => {
@@ -1674,7 +1684,7 @@ export function App(): React.JSX.Element {
     setLoadingMore(true);
     try {
       const [page, folders, tags, albums, smartCollections] = await Promise.all([
-        window.desktopApi.listCatalogAssetPage({ folderId: selectedFolderId, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: selectedSmartCollection, favoriteOnly, query: searchQuery, cursor: null, limit: 200 }),
+        window.desktopApi.listCatalogAssetPage({ folderId: selectedFolderId, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: selectedSmartCollection, favoriteOnly, sortBy, query: searchQuery, cursor: null, limit: 200 }),
         window.desktopApi.listCatalogFolders(),
         window.desktopApi.listCatalogTags(),
         window.desktopApi.listCatalogAlbums(),
@@ -1695,7 +1705,7 @@ export function App(): React.JSX.Element {
     } finally {
       if (request === catalogRequest.current) setLoadingMore(false);
     }
-  }, [favoriteOnly, searchQuery, selectedAlbumId, selectedFolderId, selectedSmartCollection, selectedTagId]);
+  }, [favoriteOnly, searchQuery, selectedAlbumId, selectedFolderId, selectedSmartCollection, selectedTagId, sortBy]);
 
   useEffect(() => {
     if (!sessionReady) return;
@@ -1752,6 +1762,7 @@ export function App(): React.JSX.Element {
         albumId: selectedAlbumId,
         smartCollection: selectedSmartCollection,
         favoriteOnly,
+        sortBy,
         query: searchQuery,
         cursor: nextCursor,
         limit: 200
@@ -1775,7 +1786,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
-      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} exportPresets={exportPresets} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={setFavoriteOnly} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onOpenTaskCenter={() => openWorkspaceTab('tasks')} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
+      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} exportPresets={exportPresets} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={setFavoriteOnly} sortBy={sortBy} onSortByChange={setSortBy} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onOpenTaskCenter={() => openWorkspaceTab('tasks')} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
     </div>
   );
 }

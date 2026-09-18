@@ -53,6 +53,16 @@ describe('catalog image discovery', () => {
     expect(secondPage.items).toHaveLength(1);
     expect(secondPage.items[0]?.id).not.toBe(firstPage.items[0]?.id);
     expect(secondPage.nextCursor).toBeNull();
+    const namePage = catalog.listAssetPage({ folderId: null, sortBy: 'fileName', cursor: null, limit: 1 });
+    expect(namePage.items[0]?.fileName).toBe('raw.NEF');
+    const nameSecondPage = catalog.listAssetPage({ folderId: null, sortBy: 'fileName', cursor: namePage.nextCursor, limit: 1 });
+    expect(nameSecondPage.items[0]?.fileName).toBe('visible.jpg');
+    catalog.updateMetadata({ assetIds: [assets[0]!.id], rating: 1 });
+    catalog.updateMetadata({ assetIds: [assets[1]!.id], rating: 5 });
+    const ratingPage = catalog.listAssetPage({ folderId: null, sortBy: 'rating', cursor: null, limit: 1 });
+    expect(ratingPage.items[0]?.rating).toBe(5);
+    const ratingSecondPage = catalog.listAssetPage({ folderId: null, sortBy: 'rating', cursor: ratingPage.nextCursor, limit: 1 });
+    expect(ratingSecondPage.items[0]?.rating).toBe(1);
     const database = new DatabaseSync(databasePath);
     const searchableId = assets.find((asset) => asset.fileName === 'visible.jpg')!.id;
     database.prepare('INSERT INTO asset_search (asset_id, normalized_content) VALUES (?, ?)')
