@@ -6,7 +6,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ProviderProfile } from '@photoallisai/contracts';
 
-import { GenerationService } from './generation-service';
+import { GenerationService, isPrivateAddress } from './generation-service';
 
 const temporaryDirectories: string[] = [];
 const servers: Server[] = [];
@@ -152,5 +152,15 @@ describe('managed generation results', () => {
     await expect(service.generate('asset-1', payload())).rejects.toThrow('GENERATED_IMAGE_FORMAT_UNSUPPORTED');
     expect(service.list('asset-1')).toEqual([]);
     service.close();
+  });
+});
+
+describe('generated image URL network policy', () => {
+  it('rejects private, mapped, shared, and reserved address ranges', () => {
+    for (const address of ['10.0.0.2', '100.64.0.1', '192.168.1.2', '198.18.0.1', '224.0.0.1', '::1', 'fe80::1', 'fd12::1', '::ffff:192.168.1.2']) {
+      expect(isPrivateAddress(address), address).toBe(true);
+    }
+    expect(isPrivateAddress('8.8.8.8')).toBe(false);
+    expect(isPrivateAddress('2001:4860:4860::8888')).toBe(false);
   });
 });
