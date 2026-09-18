@@ -107,3 +107,4 @@ export function computeHorizontalWindow(
 }
 
 export { composeGenerationPrompt, type ComposePromptInput } from './prompt-composer';
+export { pickExportResult } from './export-selection';

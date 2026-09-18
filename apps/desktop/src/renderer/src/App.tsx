@@ -20,7 +20,7 @@ import type {
   WorkspaceSession,
   WorkspaceTab
 } from '@photoallisai/contracts';
-import { computeHorizontalWindow, composeGenerationPrompt, selectAll, updateSelection, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
+import { computeHorizontalWindow, composeGenerationPrompt, pickExportResult, selectAll, updateSelection, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
 import {
   Aperture,
   ArrowDown,
@@ -1044,7 +1044,7 @@ function PopulatedLibraryWorkspace({
     const lists = await Promise.all(targetIds.map((assetId) =>
       assetId === selected.id ? Promise.resolve(generationResults) : window.desktopApi.listGenerationResults(assetId)
     ));
-    const resultIds = lists.flatMap((items) => items[0] ? [items[0].id] : []);
+    const resultIds = lists.flatMap((items) => { const result = pickExportResult(items); return result ? [result.id] : []; });
     if (resultIds.length === 0) {
       setOperationNotice('所选照片还没有可导出的生成版本。');
       return;
