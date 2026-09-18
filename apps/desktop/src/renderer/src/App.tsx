@@ -346,6 +346,7 @@ function Filmstrip({
   const viewportRef = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState({ width: 0, scrollLeft: 0 });
   const [filterOpen, setFilterOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<'filmstrip' | 'grid'>('filmstrip');
   const itemSize = 137;
   const virtual = computeHorizontalWindow(items.length, itemSize, viewport.width, viewport.scrollLeft, 4);
   const visibleItems = items.slice(virtual.start, virtual.end);
@@ -368,24 +369,24 @@ function Filmstrip({
           <div className="filter-control"><button className={`quiet-button${favoriteOnly ? ' is-active' : ''}`} type="button" aria-expanded={filterOpen} onClick={() => setFilterOpen((value) => !value)}><ListFilter size={14} /> 筛选{favoriteOnly ? ' · 首选' : ''}</button>{filterOpen && <div className="filter-popover" role="dialog" aria-label="图库筛选"><label><input type="checkbox" checked={favoriteOnly} onChange={(event) => onFavoriteOnlyChange(event.target.checked)} />仅显示首选照片</label><button className="quiet-button" type="button" onClick={() => { onFavoriteOnlyChange(false); setFilterOpen(false); }}>清除筛选</button></div>}</div>
           <button className="quiet-button" type="button">拍摄时间 <ChevronDown size={12} /></button>
           <div className="segmented-control">
-            <button className="is-active" type="button" aria-label="胶片视图"><GalleryHorizontalEnd size={14} /></button>
-            <button type="button" aria-label="网格视图"><Grid2X2 size={14} /></button>
+            <button className={viewMode === 'filmstrip' ? 'is-active' : ''} type="button" aria-label="胶片视图" aria-pressed={viewMode === 'filmstrip'} onClick={() => setViewMode('filmstrip')}><GalleryHorizontalEnd size={14} /></button>
+            <button className={viewMode === 'grid' ? 'is-active' : ''} type="button" aria-label="网格视图" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}><Grid2X2 size={14} /></button>
           </div>
         </div>
       </div>
-      <div className="filmstrip" role="listbox" aria-label="照片" ref={viewportRef} onScroll={(event) => {
+      <div className={`filmstrip${viewMode === 'grid' ? ' is-grid' : ''}`} role="listbox" aria-label="照片" ref={viewportRef} onScroll={(event) => {
         const element = event.currentTarget;
         setViewport((current) => ({ ...current, scrollLeft: element.scrollLeft }));
-        if (hasMore && !loading && element.scrollLeft + element.clientWidth >= element.scrollWidth - itemSize * 3) onLoadMore();
+        if (hasMore && !loading && (viewMode === 'grid' ? element.scrollTop + element.clientHeight >= element.scrollHeight - 220 : element.scrollLeft + element.clientWidth >= element.scrollWidth - itemSize * 3)) onLoadMore();
       }}>
-        <div className="filmstrip-track" style={{ width: virtual.totalSize + (hasMore ? itemSize : 0) }}>
-        {visibleItems.map((photo, visibleIndex) => {
-          const index = virtual.start + visibleIndex;
+        <div className="filmstrip-track" style={viewMode === 'grid' ? undefined : { width: virtual.totalSize + (hasMore ? itemSize : 0) }}>
+        {(viewMode === 'grid' ? items : visibleItems).map((photo, visibleIndex) => {
+          const index = viewMode === 'grid' ? visibleIndex : virtual.start + visibleIndex;
           return (
           <button
             className={`thumb${selected.id === photo.id ? ' is-selected' : ''}${photo.offline ? ' is-offline' : ''}`}
             key={photo.id}
-            style={{ left: index * itemSize }}
+            style={viewMode === 'grid' ? undefined : { left: index * itemSize }}
             onClick={(event) => onSelect(
               photo,
               event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace'
@@ -404,7 +405,7 @@ function Filmstrip({
           </button>
           );
         })}
-        {hasMore && <button className="filmstrip-more" type="button" style={{ left: items.length * itemSize }} onClick={onLoadMore} disabled={loading}>{loading ? '加载中' : '更多'}</button>}
+        {hasMore && <button className="filmstrip-more" type="button" style={viewMode === 'grid' ? undefined : { left: items.length * itemSize }} onClick={onLoadMore} disabled={loading}>{loading ? '加载中' : '更多'}</button>}
         </div>
       </div>
     </section>

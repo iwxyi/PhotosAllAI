@@ -97,6 +97,7 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 .segmented-control button.is-active { color: var(--text); background: var(--surface-4); box-shadow: 0 1px 2px rgb(0 0 0 / 40%); }
 .filmstrip { height: 123px; padding: 8px 10px 10px; overflow-x: auto; overflow-y: hidden; }
 .filmstrip-track { position: relative; height: 102px; }
+.filmstrip.is-grid { height: 160px; padding: 10px; overflow-x: hidden; overflow-y: auto; }.filmstrip.is-grid .filmstrip-track { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); align-content: start; gap: 8px; height: auto; }.filmstrip.is-grid .thumb, .filmstrip.is-grid .filmstrip-more { position: relative; inset: auto; width: auto; height: 88px; }.filmstrip.is-grid .thumb-name { height: 23px; padding-top: 8px; }.filmstrip.is-grid .thumb-index { top: 4px; left: 4px; }
 .thumb { position: absolute; top: 0; width: 130px; height: 102px; padding: 0; overflow: hidden; color: white; background: #0b0d0b; border: 1px solid transparent; border-radius: var(--radius-sm); }
 .filmstrip-more { position: absolute; top: 0; width: 130px; height: 102px; color: var(--muted); background: var(--surface-1); border: 1px dashed var(--line-strong); border-radius: var(--radius-sm); }
 .filmstrip-more:hover { color: var(--text); background: var(--surface-3); }.filmstrip-more:disabled { opacity: .6; }

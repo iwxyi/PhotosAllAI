@@ -34,6 +34,10 @@ test('starts with the secure library workspace', async () => {
   await page.getByLabel('仅显示首选照片').check();
   await expect(page.getByRole('button', { name: /筛选 · 首选/ })).toBeVisible();
   await page.getByRole('dialog', { name: '图库筛选' }).getByRole('button', { name: '清除筛选' }).click();
+  await page.getByRole('button', { name: '网格视图' }).click();
+  await expect(page.locator('.filmstrip')).toHaveClass(/is-grid/);
+  await page.getByRole('button', { name: '胶片视图' }).click();
+  await expect(page.locator('.filmstrip')).not.toHaveClass(/is-grid/);
 
   const security = await page.evaluate(() => ({
     hasDesktopApi: typeof window.desktopApi === 'object',
