@@ -411,6 +411,7 @@ export const promptTemplateSchema = z.object({
   description: z.string().max(2_000),
   category: z.string().min(1).max(100),
   body: z.string().min(1).max(20_000),
+  exampleId: z.enum(['portrait', 'street', 'coast', 'none']),
   version: z.number().int().positive(),
   createdAt: z.number().nonnegative(),
   updatedAt: z.number().nonnegative()
@@ -420,9 +421,11 @@ export type PromptTemplate = z.infer<typeof promptTemplateSchema>;
 
 export const savePromptTemplateInputSchema = promptTemplateSchema.omit({
   id: true, version: true, createdAt: true, updatedAt: true
-}).extend({ id: z.string().uuid().optional() });
+}).extend({ id: z.string().uuid().optional(), exampleId: z.enum(['portrait', 'street', 'coast', 'none']).optional().default('none') });
 
-export type SavePromptTemplateInput = z.infer<typeof savePromptTemplateInputSchema>;
+export type SavePromptTemplateInput = Omit<z.infer<typeof savePromptTemplateInputSchema>, 'exampleId'> & {
+  exampleId?: PromptTemplate['exampleId'];
+};
 
 export const analysisRevisionSchema = z.object({
   id: z.string().uuid(),

@@ -1501,6 +1501,7 @@ const emptyTemplateForm: SavePromptTemplateInput = {
   name: '',
   description: '',
   category: '人像',
+  exampleId: 'portrait',
   body: '{{analysis.summary}}\n\n需要执行：\n{{analysis.generative_actions}}\n\n用户补充：\n{{user_instruction}}\n\n必须保留：\n{{preservation_rules}}'
 };
 
@@ -1546,9 +1547,10 @@ function TemplatePage(): React.JSX.Element {
                   name: template.name,
                   description: template.description,
                   category: template.category,
-                  body: template.body
+                  body: template.body,
+                  exampleId: template.exampleId
                 })}>
-                  <span className="template-card-image"><img src={`./demo/${['portrait', 'street', 'coast'][index % 3]}.jpg`} alt="" /><i>{template.category}</i></span>
+                  <span className="template-card-image"><img src={`./demo/${template.exampleId === 'none' ? ['portrait', 'street', 'coast'][index % 3] : template.exampleId}.jpg`} alt={`${template.name} 示例`} /><i>{template.category}</i></span>
                   <span className="template-card-copy"><strong>{template.name}</strong><small>{template.description || '暂无描述'}</small><em>版本 {template.version}</em></span>
                 </button>
               ))}
@@ -1558,7 +1560,8 @@ function TemplatePage(): React.JSX.Element {
         <form className="template-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
           <div className="template-editor-head"><div><strong>{form.id ? '编辑模板' : '创建模板'}</strong><small>保存修改会创建新版本</small></div>{form.id && <span>不可变版本</span>}</div>
           <label><span>模板名称</span><input required maxLength={120} value={form.name} placeholder="例如：自然人像 · 清洁背景" onChange={(event) => patchTemplate('name', event.target.value)} /></label>
-          <div className="form-grid two-columns"><label><span>分类</span><select value={form.category} onChange={(event) => patchTemplate('category', event.target.value)}><option>人像</option><option>风光</option><option>商品</option><option>建筑</option><option>其他</option></select></label><label><span>简短描述</span><input maxLength={2_000} value={form.description} placeholder="说明适用场景和效果" onChange={(event) => patchTemplate('description', event.target.value)} /></label></div>
+          <div className="form-grid two-columns"><label><span>分类</span><select value={form.category} onChange={(event) => patchTemplate('category', event.target.value)}><option>人像</option><option>风光</option><option>商品</option><option>建筑</option><option>其他</option></select></label><label><span>示例图片</span><select value={form.exampleId} onChange={(event) => patchTemplate('exampleId', event.target.value as SavePromptTemplateInput['exampleId'])}><option value="portrait">人像示例</option><option value="street">街拍示例</option><option value="coast">海岸示例</option><option value="none">不使用示例</option></select></label></div>
+          <label><span>简短描述</span><input maxLength={2_000} value={form.description} placeholder="说明适用场景和效果" onChange={(event) => patchTemplate('description', event.target.value)} /></label>
           <label className="template-body-field"><span>模板正文</span><textarea required value={form.body} onChange={(event) => patchTemplate('body', event.target.value)} /></label>
           <div className="template-variables"><span>可用变量</span>{['analysis.summary', 'analysis.generative_actions', 'catalog.subjects', 'user_instruction', 'preservation_rules'].map((variable) => <code key={variable}>{`{{${variable}}}`}</code>)}</div>
           <div className="template-editor-footer"><span role="status">{message}</span><button className="primary-action compact" type="submit">{form.id ? '保存新版本' : '创建模板'}</button></div>
