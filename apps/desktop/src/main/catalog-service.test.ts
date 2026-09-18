@@ -141,4 +141,21 @@ describe('catalog image discovery', () => {
     expect(catalog.listAssets()[0]?.offline).toBe(false);
     catalog.close();
   });
+
+  it('keeps inaccessible imported roots offline without blocking other roots', async () => {
+    const root = await createTemporaryDirectory();
+    const first = path.join(root, 'first');
+    const second = path.join(root, 'second');
+    await mkdir(first, { recursive: true });
+    await mkdir(second, { recursive: true });
+    await writeFile(path.join(first, 'first.jpg'), 'first');
+    await writeFile(path.join(second, 'second.jpg'), 'second');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([first, second]);
+    await rm(first, { recursive: true, force: true });
+    await expect(catalog.reconcileImportedFolders()).resolves.toMatchObject({ discovered: 0, offline: 1 });
+    expect(catalog.listAssets().find((asset) => asset.fileName === 'first.jpg')?.offline).toBe(true);
+    expect(catalog.listAssets().find((asset) => asset.fileName === 'second.jpg')?.offline).toBe(false);
+    catalog.close();
+  });
 });

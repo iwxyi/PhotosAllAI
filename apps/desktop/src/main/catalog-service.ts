@@ -639,7 +639,14 @@ export class CatalogService {
       rows.forEach((row) => before.add(row.path));
       this.#database.prepare('UPDATE assets SET offline_at = ? WHERE folder_id = ? AND removed_at IS NULL').run(Date.now(), folder.id);
     }
-    const discovered = await this.importFolders(folders.map((folder) => folder.path));
+    let discovered = 0;
+    for (const folder of folders) {
+      try {
+        discovered += await this.importFolders([folder.path]);
+      } catch {
+        // Missing or inaccessible roots remain offline; other roots still reconcile.
+      }
+    }
     const row = this.#database.prepare('SELECT COUNT(*) AS value FROM assets WHERE offline_at IS NOT NULL AND removed_at IS NULL').get() as { value: number };
     return { discovered: Math.max(0, discovered - before.size), offline: row.value };
   }

@@ -328,6 +328,7 @@ app.whenReady().then(async () => {
   workspace = new WorkspaceService(databasePath);
   appSettings = new AppSettingsService(join(app.getPath('userData'), 'settings', 'app.json'));
   catalog = new CatalogService(databasePath);
+  await catalog.reconcileImportedFolders();
   catalogWatcher = new CatalogWatcher(catalog);
   catalogWatcher.watchFolders(catalog.listFolderPaths());
   fileOperations = new FileOperationService(databasePath, undefined, {
