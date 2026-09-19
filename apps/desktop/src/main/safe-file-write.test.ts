@@ -5,7 +5,7 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { replaceRegularFileSafely } from './safe-file-write';
+import { publishTemporaryFileSafely, replaceRegularFileSafely } from './safe-file-write';
 
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
@@ -47,6 +47,35 @@ describe('safe user-selected file replacement', () => {
     expect(await readFile(destination, 'utf8')).toBe('previous');
     expect(await readdir(root)).toEqual(['diagnostics.json']);
     expect(rename).toHaveBeenCalledTimes(3);
+  });
+
+  it('publishes an existing temporary file over a regular destination', async () => {
+    const { root, destination } = await fixture();
+    const temporary = `${destination}.producer.tmp`;
+    await writeFile(destination, 'previous');
+    await writeFile(temporary, 'next');
+
+    await publishTemporaryFileSafely(destination, temporary);
+
+    expect(await readFile(destination, 'utf8')).toBe('next');
+    expect(await readdir(root)).toEqual(['diagnostics.json']);
+  });
+
+  it('removes a partially written temporary file when staging fails', async () => {
+    const { root, destination } = await fixture();
+    const writeFileWithFailure = vi.fn(async (...[target]: Parameters<typeof fileSystem.writeFile>) => {
+      await fileSystem.writeFile(target, 'partial');
+      throw Object.assign(new Error('simulated disk failure'), { code: 'ENOSPC' });
+    }) as typeof fileSystem.writeFile;
+
+    await expect(replaceRegularFileSafely(destination, Buffer.from('next'), {
+      lstat: fileSystem.lstat,
+      rename: fileSystem.rename,
+      unlink: fileSystem.unlink,
+      writeFile: writeFileWithFailure
+    })).rejects.toThrow('simulated disk failure');
+
+    expect(await readdir(root)).toEqual([]);
   });
 
   it('does not follow a symbolic-link destination', async () => {

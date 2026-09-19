@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readdir, rename, stat, unlink } from 'node:fs/promises';
+import { mkdir, readdir, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+
+import { publishTemporaryFileSafely } from './safe-file-write';
 
 export type DatabaseBackupResult = {
   destinationPath: string;
@@ -28,10 +30,13 @@ export class DatabaseBackupService {
     database.exec('PRAGMA busy_timeout = 10000;');
     try {
       database.prepare('VACUUM INTO ?').run(temporary);
+    } catch (error) {
+      await unlink(temporary).catch(() => undefined);
+      throw error;
     } finally {
       database.close();
     }
-    await rename(temporary, destination);
+    await publishTemporaryFileSafely(destination, temporary);
     const file = await stat(destination);
     const hash = createHash('sha256');
     const { createReadStream } = await import('node:fs');

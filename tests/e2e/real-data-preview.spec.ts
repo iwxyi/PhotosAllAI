@@ -96,7 +96,8 @@ suite('real photo preview pipeline', () => {
 });
 
 async function waitForVisibleImages(target: Page): Promise<void> {
-  await expect(target.getByText('8 张照片', { exact: true })).toBeVisible();
+  await expect(target.locator('.result-summary').getByText('8 张照片', { exact: true }))
+    .toBeVisible({ timeout: 60_000 });
   await expect.poll(async () => target.locator('img').evaluateAll((images) =>
     images.length > 1 && images.every((image) => image.complete && image.naturalWidth > 0)
   ), { timeout: 60_000 }).toBe(true);

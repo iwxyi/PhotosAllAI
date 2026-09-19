@@ -22,6 +22,9 @@ describe('app settings service', () => {
     await expect(service.save(settings)).resolves.toEqual(settings);
     await expect(service.get()).resolves.toEqual(settings);
     expect(JSON.parse(await readFile(path.join(directory, 'nested', 'app.json'), 'utf8'))).toEqual(settings);
+    const updated = { ...settings, theme: 'dark' as const };
+    await expect(service.save(updated)).resolves.toEqual(updated);
+    expect(await readdir(path.join(directory, 'nested'))).toEqual(['app.json']);
   });
 
   it('quarantines malformed settings and restores defaults', async () => {

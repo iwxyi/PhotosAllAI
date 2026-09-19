@@ -23,10 +23,12 @@ import type { CatalogService } from './catalog-service';
 import type { ImageCacheService } from './image-cache-service';
 import { downloadPinned, fetchBounded, isPrivateNetworkAddress } from './network-safety';
 import type { ProviderService, ResolvedProvider } from './provider-service';
+import { publishTemporaryFileSafely } from './safe-file-write';
 
 type ProviderResolver = Pick<ProviderService, 'resolve'>;
 type GenerationImageSource = Pick<ImageCacheService, 'getOrCreate'>;
 type CatalogSource = Pick<CatalogService, 'resolveAssetFile'>;
+type TemporaryFilePublisher = typeof publishTemporaryFileSafely;
 
 type ResultRow = {
   id: string;
@@ -82,19 +84,22 @@ export class GenerationService {
   readonly #providers: ProviderResolver;
   readonly #images: GenerationImageSource;
   readonly #catalog: CatalogSource;
+  readonly #publishTemporaryFile: TemporaryFilePublisher;
 
   constructor(
     databasePath: string,
     generatedDirectory: string,
     providers: ProviderResolver,
     images: GenerationImageSource,
-    catalog: CatalogSource
+    catalog: CatalogSource,
+    publishTemporaryFile: TemporaryFilePublisher = publishTemporaryFileSafely
   ) {
     this.#generatedDirectory = generatedDirectory;
     this.#trashDirectory = path.resolve(path.dirname(generatedDirectory), 'trash', 'generation');
     this.#providers = providers;
     this.#images = images;
     this.#catalog = catalog;
+    this.#publishTemporaryFile = publishTemporaryFile;
     this.#database = new DatabaseSync(databasePath);
     this.#database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.#database.exec(`
@@ -571,9 +576,14 @@ export class GenerationService {
       results
     };
     const destination = path.join(directory, 'manifest.json');
-    const temporary = `${destination}.${process.pid}.tmp`;
-    await writeFile(temporary, JSON.stringify(manifest, null, 2), { mode: 0o600 });
-    await rename(temporary, destination);
+    const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, JSON.stringify(manifest, null, 2), { mode: 0o600, flag: 'wx' });
+      await this.#publishTemporaryFile(destination, temporary);
+    } catch (error) {
+      await unlink(temporary).catch(() => undefined);
+      throw error;
+    }
   }
 
   async #refreshManifest(directory: string, assetId: string, batchId: string): Promise<void> {
@@ -598,7 +608,7 @@ export class GenerationService {
     const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
     try {
       await writeFile(temporary, JSON.stringify({ ...existing, results }, null, 2), { mode: 0o600, flag: 'wx' });
-      await rename(temporary, destination);
+      await this.#publishTemporaryFile(destination, temporary);
     } catch (error) {
       await unlink(temporary).catch(() => undefined);
       throw error;

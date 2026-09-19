@@ -1,7 +1,9 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 
 import { appSettingsSchema, type AppSettings } from '@photoallisai/contracts';
+
+import { replaceRegularFileSafely } from './safe-file-write';
 
 export class AppSettingsService {
   readonly #settingsPath: string;
@@ -30,9 +32,7 @@ export class AppSettingsService {
   async save(input: AppSettings): Promise<AppSettings> {
     const settings = appSettingsSchema.parse(input);
     await mkdir(path.dirname(this.#settingsPath), { recursive: true });
-    const temporaryPath = `${this.#settingsPath}.${process.pid}.tmp`;
-    await writeFile(temporaryPath, JSON.stringify(settings, null, 2), { mode: 0o600 });
-    await rename(temporaryPath, this.#settingsPath);
+    await replaceRegularFileSafely(this.#settingsPath, Buffer.from(JSON.stringify(settings, null, 2)));
     return settings;
   }
 

@@ -17,19 +17,30 @@ export async function replaceRegularFileSafely(
 ): Promise<void> {
   const suffix = `${process.pid}.${randomUUID()}`;
   const temporary = `${destination}.${suffix}.tmp`;
-  const previous = `${destination}.${suffix}.previous`;
-  let existed = false;
-
   try {
-    const metadata = await fileSystem.lstat(destination);
-    if (!metadata.isFile()) throw new Error('DESTINATION_NOT_REGULAR_FILE');
-    existed = true;
+    await fileSystem.writeFile(temporary, content, { flag: 'wx', mode: 0o600 });
   } catch (error) {
-    if (!isNodeError(error, 'ENOENT')) throw error;
+    await fileSystem.unlink(temporary).catch(() => undefined);
+    throw error;
   }
+  await publishTemporaryFileSafely(destination, temporary, fileSystem);
+}
 
-  await fileSystem.writeFile(temporary, content, { flag: 'wx', mode: 0o600 });
+export async function publishTemporaryFileSafely(
+  destination: string,
+  temporary: string,
+  fileSystem: Pick<SafeWriteFileSystem, 'lstat' | 'rename' | 'unlink'> = nodeFileSystem
+): Promise<void> {
+  const previous = `${destination}.${process.pid}.${randomUUID()}.previous`;
+  let existed = false;
   try {
+    try {
+      const metadata = await fileSystem.lstat(destination);
+      if (!metadata.isFile()) throw new Error('DESTINATION_NOT_REGULAR_FILE');
+      existed = true;
+    } catch (error) {
+      if (!isNodeError(error, 'ENOENT')) throw error;
+    }
     if (existed) await fileSystem.rename(destination, previous);
     try {
       await fileSystem.rename(temporary, destination);

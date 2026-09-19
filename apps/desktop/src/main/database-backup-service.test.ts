@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -35,6 +35,23 @@ describe('database backup service', () => {
     database.exec('CREATE TABLE records (id INTEGER PRIMARY KEY);');
     database.close();
     await expect(new DatabaseBackupService(databasePath).create(databasePath)).rejects.toThrow('BACKUP_DESTINATION_IS_SOURCE');
+  });
+
+  it('safely replaces an existing backup file', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'photoallisai-backup-replace-'));
+    const databasePath = path.join(root, 'catalog.sqlite');
+    const backupPath = path.join(root, 'backup.sqlite');
+    const database = new DatabaseSync(databasePath);
+    database.exec('CREATE TABLE records (value TEXT NOT NULL); INSERT INTO records VALUES (\'current\');');
+    await writeFile(backupPath, 'previous-backup');
+
+    await new DatabaseBackupService(databasePath).create(backupPath);
+
+    const restored = new DatabaseSync(backupPath, { readOnly: true });
+    expect(restored.prepare('SELECT value FROM records').get()).toEqual({ value: 'current' });
+    restored.close();
+    expect((await readdir(root)).filter((name) => name.includes('.previous') || name.endsWith('.tmp'))).toEqual([]);
+    database.close();
   });
 
   it('skips fresh automatic backups and removes snapshots beyond retention', async () => {

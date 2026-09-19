@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
@@ -10,6 +10,8 @@ import {
   type ProviderProfile,
   type SaveProviderProfileInput
 } from '@photoallisai/contracts';
+
+import { replaceRegularFileSafely } from './safe-file-write';
 
 type StoredProviderProfile = Omit<ProviderProfile, 'hasCredential'> & {
   encryptedCredential?: string;
@@ -180,8 +182,6 @@ export class ProviderService {
 
   async #write(profiles: readonly StoredProviderProfile[]): Promise<void> {
     await mkdir(path.dirname(this.#settingsPath), { recursive: true });
-    const temporaryPath = `${this.#settingsPath}.${process.pid}.tmp`;
-    await writeFile(temporaryPath, JSON.stringify(profiles, null, 2), { mode: 0o600 });
-    await rename(temporaryPath, this.#settingsPath);
+    await replaceRegularFileSafely(this.#settingsPath, Buffer.from(JSON.stringify(profiles, null, 2)));
   }
 }

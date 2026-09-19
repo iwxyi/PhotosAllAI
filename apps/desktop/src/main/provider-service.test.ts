@@ -48,6 +48,24 @@ describe('provider service', () => {
     await expect(providers.resolve(saved.id)).rejects.toThrow('PROVIDER_NOT_FOUND');
   });
 
+  it('replaces provider settings repeatedly without transaction artifacts', async () => {
+    const { providers, directory } = await serviceWithPath();
+    const saved = await providers.save({
+      name: 'Vision', kind: 'openai-compatible', purpose: 'vision',
+      baseUrl: 'https://example.com/v1', modelId: 'vision-model', apiKey: 'secret-key', enabled: true
+    });
+
+    await providers.save({
+      id: saved.id, name: 'Vision updated', kind: 'openai-compatible', purpose: 'vision',
+      baseUrl: 'https://example.com/v1', modelId: 'vision-model-2', enabled: true
+    });
+
+    expect(await readdir(directory)).toEqual(['providers.json']);
+    await expect(providers.list()).resolves.toEqual([
+      expect.objectContaining({ id: saved.id, name: 'Vision updated', modelId: 'vision-model-2' })
+    ]);
+  });
+
   it('rejects insecure remote URLs but permits localhost development', async () => {
     const providers = await service();
     await expect(providers.save({

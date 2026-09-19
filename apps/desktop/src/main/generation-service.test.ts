@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { ProviderProfile } from '@photoallisai/contracts';
 
 import { GenerationService, isPrivateAddress, validateGeneratedImageUrl } from './generation-service';
+import { publishTemporaryFileSafely } from './safe-file-write';
 
 const temporaryDirectories: string[] = [];
 const servers: Server[] = [];
@@ -22,7 +23,8 @@ afterEach(async () => {
 
 async function fixture(
   responseBody: (origin: string) => unknown,
-  imageDownload?: Buffer
+  imageDownload?: Buffer,
+  publishTemporaryFile?: ConstructorParameters<typeof GenerationService>[5]
 ): Promise<{ service: GenerationService; directory: string; sourcePath: string; setSourcePath: (value: string) => void }> {
   const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-generation-'));
   temporaryDirectories.push(directory);
@@ -70,7 +72,8 @@ async function fixture(
       fileName: path.basename(currentSourcePath),
       modifiedAt: 1,
       sizeBytes: 18
-    }) }
+    }) },
+    publishTemporaryFile
   );
   return { service, directory, sourcePath, setSourcePath: (value) => { currentSourcePath = value; } };
 }
@@ -96,6 +99,31 @@ describe('managed generation results', () => {
     expect(manifest.results).toHaveLength(2);
     expect(manifest.results[0]).toMatchObject({ byteSize: png.byteLength, format: 'png', sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
     expect((await readdir(batchDirectory)).filter((name) => name.endsWith('.png'))).toHaveLength(2);
+    service.close();
+  });
+
+  it('preserves the previous manifest and removes staging files when an update fails', async () => {
+    let publishCalls = 0;
+    const publisher: ConstructorParameters<typeof GenerationService>[5] = async (destination, temporary) => {
+      publishCalls += 1;
+      if (publishCalls > 1) throw new Error('simulated manifest publish failure');
+      await publishTemporaryFileSafely(destination, temporary);
+    };
+    const { service, directory } = await fixture(
+      () => ({ data: [{ b64_json: png.toString('base64') }] }),
+      undefined,
+      publisher
+    );
+    await service.generate('asset-1', payload());
+    const batchDirectory = path.join(directory, 'managed', 'generated', 'as', 'asset-1', batchId);
+    const manifestPath = path.join(batchDirectory, 'manifest.json');
+    const previousManifest = await readFile(manifestPath, 'utf8');
+
+    await expect(service.generate('asset-1', payload(2))).rejects.toThrow('simulated manifest publish failure');
+
+    expect(service.list('asset-1')).toHaveLength(1);
+    expect(await readFile(manifestPath, 'utf8')).toBe(previousManifest);
+    expect((await readdir(batchDirectory)).filter((name) => name.endsWith('.tmp') || name.includes('.previous'))).toEqual([]);
     service.close();
   });
 
