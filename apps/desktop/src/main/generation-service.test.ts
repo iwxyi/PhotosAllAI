@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http';
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -108,7 +108,7 @@ describe('managed generation results', () => {
     let publishCalls = 0;
     const publisher: ConstructorParameters<typeof GenerationService>[5] = async (destination, temporary) => {
       publishCalls += 1;
-      if (publishCalls > 1) throw new Error('simulated manifest publish failure');
+      if (publishCalls > 2) throw new Error('simulated manifest publish failure');
       await publishTemporaryFileSafely(destination, temporary);
     };
     const { service, directory } = await fixture(
@@ -129,11 +129,50 @@ describe('managed generation results', () => {
     service.close();
   });
 
+  it('does not remove a competing destination when result publication fails', async () => {
+    let destination = '';
+    const publisher: ConstructorParameters<typeof GenerationService>[5] = async (target) => {
+      destination = target;
+      await writeFile(target, 'competing-result');
+      throw new Error('simulated result publish failure');
+    };
+    const { service } = await fixture(
+      () => ({ data: [{ b64_json: png.toString('base64') }] }),
+      undefined,
+      publisher
+    );
+
+    await expect(service.generate('asset-1', payload())).rejects.toThrow('simulated result publish failure');
+    expect(await readFile(destination, 'utf8')).toBe('competing-result');
+    service.close();
+  });
+
+  it('rejects a symbolic-link result destination without touching its target', async () => {
+    let destination = '';
+    const publisher: ConstructorParameters<typeof GenerationService>[5] = async (target, temporary) => {
+      destination = target;
+      const external = `${target}.external`;
+      await writeFile(external, 'external-result');
+      await symlink(external, target);
+      await publishTemporaryFileSafely(target, temporary);
+    };
+    const { service } = await fixture(
+      () => ({ data: [{ b64_json: png.toString('base64') }] }),
+      undefined,
+      publisher
+    );
+
+    await expect(service.generate('asset-1', payload())).rejects.toThrow('DESTINATION_NOT_REGULAR_FILE');
+    expect(await readFile(`${destination}.external`, 'utf8')).toBe('external-result');
+    expect((await lstat(destination)).isSymbolicLink()).toBe(true);
+    service.close();
+  });
+
   it('surfaces a trash rollback failure instead of hiding the file/database mismatch', async () => {
     let publishCalls = 0;
     const publisher: ConstructorParameters<typeof GenerationService>[5] = async (destination, temporary) => {
       publishCalls += 1;
-      if (publishCalls > 1) throw new Error('simulated trash manifest failure');
+      if (publishCalls > 2) throw new Error('simulated trash manifest failure');
       await publishTemporaryFileSafely(destination, temporary);
     };
     let moveCalls = 0;

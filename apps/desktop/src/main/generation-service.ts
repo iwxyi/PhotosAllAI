@@ -521,10 +521,12 @@ export class GenerationService {
         result_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, assetId, payload.batchId, fileName, filePath, temporaryPath, payload.storageMode, createdAt);
+    let published = false;
     try {
       await mkdir(batchDirectory, { recursive: true });
       await writeFile(temporaryPath, bytes, { flag: 'wx' });
-      await rename(temporaryPath, filePath);
+      await this.#publishTemporaryFile(filePath, temporaryPath);
+      published = true;
       signal?.throwIfAborted();
       this.#database.prepare(`
         INSERT INTO generation_results (
@@ -542,7 +544,8 @@ export class GenerationService {
     } catch (error) {
       this.#database.prepare('DELETE FROM generation_results WHERE id = ?').run(id);
       let cleanupFailed = false;
-      for (const candidate of [temporaryPath, filePath]) {
+      const cleanupCandidates = published ? [temporaryPath, filePath] : [temporaryPath];
+      for (const candidate of cleanupCandidates) {
         await unlink(candidate).catch((cleanupError: NodeJS.ErrnoException) => {
           if (cleanupError.code !== 'ENOENT') cleanupFailed = true;
         });
