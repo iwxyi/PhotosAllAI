@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { pickExportResult } from './export-selection';
+import { pickExportResult, pickExportResults } from './export-selection';
 
 const result = (id: string, reviewState: 'undecided' | 'accepted' | 'rejected' | 'preferred', version: number) => ({
   id,
@@ -28,5 +28,19 @@ describe('export result selection', () => {
     const latest = result('latest', 'accepted', 2);
     expect(pickExportResult([latest])?.id).toBe('latest');
     expect(pickExportResult([])).toBeNull();
+  });
+
+  it('selects accepted and preferred versions without undecided or rejected results', () => {
+    const accepted = result('accepted', 'accepted', 4);
+    const preferred = result('preferred', 'preferred', 3);
+    expect(pickExportResults([
+      result('undecided', 'undecided', 5), accepted, preferred, result('rejected', 'rejected', 2)
+    ], 'accepted').map((item) => item.id)).toEqual(['accepted', 'preferred']);
+  });
+
+  it('selects every version when explicitly requested', () => {
+    const results = [result('latest', 'undecided', 2), result('rejected', 'rejected', 1)];
+    expect(pickExportResults(results, 'all')).toEqual(results);
+    expect(pickExportResults([], 'all')).toEqual([]);
   });
 });

@@ -27,7 +27,7 @@ import type {
   WorkspaceTab,
   AppSettings
 } from '@photoallisai/contracts';
-import { computeHorizontalWindow, composeGenerationPrompt, pickExportResult, selectAll, updateSelection, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
+import { computeHorizontalWindow, composeGenerationPrompt, pickExportResults, selectAll, updateSelection, type ExportSelectionMode, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
 import {
   Aperture,
   ArrowDown,
@@ -1005,6 +1005,7 @@ function PopulatedLibraryWorkspace({
   const [removalBusy, setRemovalBusy] = useState(false);
   const [albumTargetId, setAlbumTargetId] = useState('');
   const [selectedExportPresetId, setSelectedExportPresetId] = useState<string | null>(exportPresets[0]?.id ?? null);
+  const [exportSelectionMode, setExportSelectionMode] = useState<ExportSelectionMode>('preferred-or-latest');
   const [trackedExport, setTrackedExport] = useState<{ taskId: string; notice: string; surface: 'viewer' | 'operation' } | null>(null);
   const trackedExportTaskId = trackedExport?.taskId ?? null;
   const trackedExportSurface = trackedExport?.surface ?? null;
@@ -1280,7 +1281,7 @@ function PopulatedLibraryWorkspace({
     const lists = await Promise.all(targetIds.map((assetId) =>
       assetId === selected.id ? Promise.resolve(generationResults) : window.desktopApi.listGenerationResults(assetId)
     ));
-    const resultIds = lists.flatMap((items) => { const result = pickExportResult(items); return result ? [result.id] : []; });
+    const resultIds = lists.flatMap((items) => pickExportResults(items, exportSelectionMode).map((result) => result.id));
     if (resultIds.length === 0) {
       setOperationNotice('所选照片还没有可导出的生成版本。');
       return;
@@ -1520,7 +1521,7 @@ function PopulatedLibraryWorkspace({
             {!isDemo && <><button type="button" onClick={() => openFolderDialog('copy')}><Copy size={14} />复制</button><button type="button" onClick={() => openFolderDialog('move')}><FolderInput size={14} />移动</button></>}
             <button type="button" onClick={() => void analyzeSelection()}><Sparkles size={14} />AI 分析</button>
             <button type="button" onClick={() => void generateSelection({ providerProfileId: generationProfiles[0]?.id ?? '', template: null, count: 1, instruction: '', disabledActionIds: new Set() })} disabled={generationProfiles.length === 0}><WandSparkles size={14} />批量生成</button>
-            <select aria-label="导出预设" value={selectedExportPresetId ?? ''} onChange={(event) => setSelectedExportPresetId(event.target.value || null)}><option value="">默认命名</option>{exportPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select><button type="button" onClick={() => void exportLatestSelection()}><Download size={14} />导出</button>
+            <select aria-label="批量导出版本" value={exportSelectionMode} onChange={(event) => setExportSelectionMode(event.target.value as ExportSelectionMode)}><option value="preferred-or-latest">每张首选 / 最新</option><option value="accepted">所有已接受</option><option value="all">所有版本</option></select><select aria-label="导出预设" value={selectedExportPresetId ?? ''} onChange={(event) => setSelectedExportPresetId(event.target.value || null)}><option value="">默认命名</option>{exportPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select><button type="button" onClick={() => void exportLatestSelection()}><Download size={14} />导出</button>
             {!isDemo && <button type="button" onClick={() => setBatchRenameDialogOpen(true)}><FilePenLine size={14} />批量重命名</button>}
             {!isDemo && catalogAlbums.length > 0 && <><select aria-label="目标相册" value={albumTargetId} onChange={(event) => setAlbumTargetId(event.target.value)}><option value="">相册</option>{catalogAlbums.map((album) => <option key={album.id} value={album.id}>{album.name}</option>)}</select><button type="button" disabled={!albumTargetId} onClick={() => void updateAlbumMembership('add')}><FolderHeart size={14} />加入</button>{selectedAlbumId && <button type="button" onClick={() => void updateAlbumMembership('remove')}><FolderHeart size={14} />移出</button>}</>}
             {!isDemo && <><button type="button" onClick={() => setRemovalMode('remove')}><LibraryBig size={14} />移除</button><button className="is-danger" type="button" onClick={() => setRemovalMode('trash')}><Trash2 size={14} />回收站</button></>}

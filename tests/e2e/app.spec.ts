@@ -104,6 +104,9 @@ test('supports additive, range, and select-all interactions', async () => {
   await page.keyboard.press('Meta+A');
   await expect(page.getByText('已选择 6 张')).toBeVisible();
   await expect(page.getByRole('button', { name: /批量生成/ })).toBeVisible();
+  await expect(page.getByLabel('批量导出版本')).toHaveValue('preferred-or-latest');
+  await page.getByLabel('批量导出版本').selectOption('all');
+  await expect(page.getByLabel('批量导出版本')).toHaveValue('all');
   await page.getByRole('button', { name: '清除选择' }).click();
 });
 
