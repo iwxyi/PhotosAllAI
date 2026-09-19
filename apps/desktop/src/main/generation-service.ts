@@ -29,6 +29,7 @@ type ProviderResolver = Pick<ProviderService, 'resolve'>;
 type GenerationImageSource = Pick<ImageCacheService, 'getOrCreate'>;
 type CatalogSource = Pick<CatalogService, 'resolveAssetFile'>;
 type TemporaryFilePublisher = typeof publishTemporaryFileSafely;
+type VerifiedFileMover = typeof moveFileVerified;
 
 type ResultRow = {
   id: string;
@@ -85,6 +86,7 @@ export class GenerationService {
   readonly #images: GenerationImageSource;
   readonly #catalog: CatalogSource;
   readonly #publishTemporaryFile: TemporaryFilePublisher;
+  readonly #moveFile: VerifiedFileMover;
 
   constructor(
     databasePath: string,
@@ -92,7 +94,8 @@ export class GenerationService {
     providers: ProviderResolver,
     images: GenerationImageSource,
     catalog: CatalogSource,
-    publishTemporaryFile: TemporaryFilePublisher = publishTemporaryFileSafely
+    publishTemporaryFile: TemporaryFilePublisher = publishTemporaryFileSafely,
+    moveFile: VerifiedFileMover = moveFileVerified
   ) {
     this.#generatedDirectory = generatedDirectory;
     this.#trashDirectory = path.resolve(path.dirname(generatedDirectory), 'trash', 'generation');
@@ -100,6 +103,7 @@ export class GenerationService {
     this.#images = images;
     this.#catalog = catalog;
     this.#publishTemporaryFile = publishTemporaryFile;
+    this.#moveFile = moveFile;
     this.#database = new DatabaseSync(databasePath);
     this.#database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.#database.exec(`
@@ -179,7 +183,7 @@ export class GenerationService {
     const trashPath = path.join(path.dirname(this.#generatedDirectory), 'trash', 'generation', row.id, row.file_name);
     if (await pathExists(trashPath)) throw new Error('GENERATION_RESULT_TRASH_CONFLICT');
     await mkdir(path.dirname(trashPath), { recursive: true });
-    await moveFileVerified(row.file_path, trashPath);
+    await this.#moveFile(row.file_path, trashPath);
     const trashedAt = Date.now();
     try {
       const result = this.#database.prepare(`
@@ -192,7 +196,11 @@ export class GenerationService {
         UPDATE generation_results SET trashed_at = NULL, trash_path = NULL
         WHERE id = ? AND trash_path = ?
       `).run(resultId, trashPath);
-      await moveFileVerified(trashPath, row.file_path).catch(() => undefined);
+      try {
+        await this.#moveFile(trashPath, row.file_path);
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], 'GENERATION_TRASH_ROLLBACK_FAILED');
+      }
       throw error;
     }
     return trashedGenerationResultSchema.parse({ ...this.#toResult(row), trashedAt });
@@ -209,7 +217,7 @@ export class GenerationService {
     if (trashFile === false) throw new Error('GENERATION_RESULT_TRASH_PATH_UNSAFE');
     if (await pathExists(row.file_path)) throw new Error('GENERATION_RESULT_RESTORE_CONFLICT');
     await mkdir(path.dirname(row.file_path), { recursive: true });
-    await moveFileVerified(row.trash_path, row.file_path);
+    await this.#moveFile(row.trash_path, row.file_path);
     try {
       const result = this.#database.prepare(`
         UPDATE generation_results SET trashed_at = NULL, trash_path = NULL WHERE id = ? AND trashed_at IS NOT NULL
@@ -221,7 +229,11 @@ export class GenerationService {
         UPDATE generation_results SET trashed_at = ?, trash_path = ?
         WHERE id = ? AND trashed_at IS NULL
       `).run(row.trashed_at, row.trash_path, resultId);
-      await moveFileVerified(row.file_path, row.trash_path).catch(() => undefined);
+      try {
+        await this.#moveFile(row.file_path, row.trash_path);
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], 'GENERATION_RESTORE_ROLLBACK_FAILED');
+      }
       throw error;
     }
     await rmdir(path.dirname(row.trash_path)).catch(() => undefined);

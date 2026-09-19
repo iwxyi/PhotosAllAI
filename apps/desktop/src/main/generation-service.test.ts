@@ -24,7 +24,8 @@ afterEach(async () => {
 async function fixture(
   responseBody: (origin: string) => unknown,
   imageDownload?: Buffer,
-  publishTemporaryFile?: ConstructorParameters<typeof GenerationService>[5]
+  publishTemporaryFile?: ConstructorParameters<typeof GenerationService>[5],
+  moveFile?: ConstructorParameters<typeof GenerationService>[6]
 ): Promise<{ service: GenerationService; directory: string; sourcePath: string; setSourcePath: (value: string) => void }> {
   const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-generation-'));
   temporaryDirectories.push(directory);
@@ -73,7 +74,8 @@ async function fixture(
       modifiedAt: 1,
       sizeBytes: 18
     }) },
-    publishTemporaryFile
+    publishTemporaryFile,
+    moveFile
   );
   return { service, directory, sourcePath, setSourcePath: (value) => { currentSourcePath = value; } };
 }
@@ -124,6 +126,36 @@ describe('managed generation results', () => {
     expect(service.list('asset-1')).toHaveLength(1);
     expect(await readFile(manifestPath, 'utf8')).toBe(previousManifest);
     expect((await readdir(batchDirectory)).filter((name) => name.endsWith('.tmp') || name.includes('.previous'))).toEqual([]);
+    service.close();
+  });
+
+  it('surfaces a trash rollback failure instead of hiding the file/database mismatch', async () => {
+    let publishCalls = 0;
+    const publisher: ConstructorParameters<typeof GenerationService>[5] = async (destination, temporary) => {
+      publishCalls += 1;
+      if (publishCalls > 1) throw new Error('simulated trash manifest failure');
+      await publishTemporaryFileSafely(destination, temporary);
+    };
+    let moveCalls = 0;
+    const mover: ConstructorParameters<typeof GenerationService>[6] = async (source, destination) => {
+      moveCalls += 1;
+      if (moveCalls === 2) throw new Error('simulated trash rollback failure');
+      await rename(source, destination);
+    };
+    const { service, directory } = await fixture(
+      () => ({ data: [{ b64_json: png.toString('base64') }] }),
+      undefined,
+      publisher,
+      mover
+    );
+    const result = await service.generate('asset-1', payload());
+
+    await expect(service.trash(result.id)).rejects.toMatchObject({
+      message: 'GENERATION_TRASH_ROLLBACK_FAILED',
+      errors: [expect.objectContaining({ message: 'simulated trash manifest failure' }), expect.objectContaining({ message: 'simulated trash rollback failure' })]
+    });
+    expect(service.list('asset-1')).toHaveLength(1);
+    expect(await stat(path.join(directory, 'managed', 'trash', 'generation', result.id, result.fileName))).toBeTruthy();
     service.close();
   });
 
