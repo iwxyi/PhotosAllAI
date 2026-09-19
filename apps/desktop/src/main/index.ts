@@ -85,6 +85,7 @@ import { LibraryIntegrityService } from './library-integrity-service';
 import { classifyAutomaticBackupFailure, classifyAutomaticBackupResult, type AutomaticBackupStatus } from './automatic-backup-status';
 import { settleBeforeShutdown } from './shutdown-coordinator';
 import { createStartupFailureDialog } from './startup-failure';
+import { getWindowChromeOptions } from './window-chrome';
 
 const APP_ORIGIN = 'app://photoallisai';
 const APPLICATION_SCHEMA_VERSION = 4;
@@ -562,8 +563,7 @@ function createWindow(): BrowserWindow {
     minWidth: 1080,
     minHeight: 700,
     backgroundColor: '#111311',
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
-    trafficLightPosition: { x: 16, y: 18 },
+    ...getWindowChromeOptions(process.platform),
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
       contextIsolation: true,

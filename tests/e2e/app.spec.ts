@@ -75,6 +75,13 @@ test('starts with the secure library workspace', async () => {
   expect(Math.abs((canvas!.width / canvas!.height) - sourceRatio)).toBeLessThan(0.02);
 });
 
+test('honors the reduced motion preference', async () => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await expect.poll(() => page.locator('.working-pulse').first().evaluate((element) =>
+    getComputedStyle(element).animationDuration)).toBe('0.001s');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+});
+
 test('switches photos and comparison modes', async () => {
   await page.locator('.filmstrip [role="option"]').nth(1).click();
   await expect(page.getByText('DSC_4837.NEF', { exact: true }).last()).toBeVisible();

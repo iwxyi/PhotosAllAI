@@ -80,7 +80,7 @@
 html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 button, textarea { font: inherit; }
 button { color: inherit; letter-spacing: 0; }
-button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .app-shell { height: 100%; background: var(--bg); color: var(--text); font-size: 12px; display: grid; grid-template-rows: 48px minmax(0, 1fr); }
 .app-header { position: relative; display: grid; grid-template-columns: 220px minmax(400px, 1fr) 330px; align-items: end; height: 48px; background: #131613; border-bottom: 1px solid var(--line); -webkit-app-region: drag; }
@@ -394,6 +394,15 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 @keyframes batch-in { from { opacity: 0; transform: translate(-50%, 7px); } }
 @keyframes modal-fade-in { from { opacity: 0; } }
 @keyframes modal-rise-in { from { opacity: 0; transform: translateY(7px) scale(.99); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
 
 @media (max-width: 1220px) {
   .app-header { grid-template-columns: 190px minmax(350px, 1fr) 260px; }
