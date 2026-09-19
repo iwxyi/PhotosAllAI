@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { copyFile, mkdir, readFile, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, realpath, rename, rm, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 
 import { DatabaseBackupService } from './database-backup-service';
+import { replaceRegularFileSafely } from './safe-file-write';
 
 const stateSchema = z.object({ schemaVersion: z.number().int().nonnegative() }).strict();
 const checkpointSchema = z.object({
@@ -127,20 +128,7 @@ export class DatabaseMigrationService {
 }
 
 async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
-  const temporary = `${filePath}.${process.pid}.tmp`;
-  const previous = `${filePath}.${process.pid}.previous`;
-  await writeFile(temporary, JSON.stringify(value, null, 2), { mode: 0o600 });
-  await rm(previous, { force: true });
-  const existed = await isRegularFile(filePath);
-  if (existed) await rename(filePath, previous);
-  try {
-    await rename(temporary, filePath);
-    await rm(previous, { force: true });
-  } catch (error) {
-    await rm(temporary, { force: true });
-    if (existed) await rename(previous, filePath).catch(() => undefined);
-    throw error;
-  }
+  await replaceRegularFileSafely(filePath, Buffer.from(JSON.stringify(value, null, 2)));
 }
 
 async function isRegularFile(filePath: string): Promise<boolean> {

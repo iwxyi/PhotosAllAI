@@ -1,14 +1,21 @@
-import { mkdtemp, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { DatabaseMigrationService } from './database-migration-service';
 
+const roots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), 'photoallisai-migration-'));
+  roots.push(root);
   const databasePath = path.join(root, 'catalog.sqlite');
   const database = new DatabaseSync(databasePath);
   database.exec('CREATE TABLE records (value TEXT NOT NULL); INSERT INTO records VALUES (\'before\');');
@@ -35,6 +42,7 @@ describe('database migration checkpoints', () => {
     expect(secondCheckpoint).toMatchObject({ sourceVersion: 1, targetVersion: 2 });
     await service.complete(2, secondCheckpoint);
     expect(JSON.parse(await readFile(path.join(context.root, 'schema-state.json'), 'utf8'))).toEqual({ schemaVersion: 2 });
+    expect((await readdir(context.root)).filter((name) => name.endsWith('.tmp') || name.includes('.previous'))).toEqual([]);
     const database = new DatabaseSync(context.databasePath, { readOnly: true });
     expect(database.prepare('SELECT migrated FROM records').get()).toEqual({ migrated: 1 });
     database.close();
@@ -64,5 +72,19 @@ describe('database migration checkpoints', () => {
     const service = new DatabaseMigrationService(context.databasePath);
     await service.complete(2, null);
     await expect(service.prepare(1)).rejects.toThrow('MIGRATION_DATABASE_NEWER_THAN_APP');
+  });
+
+  it('does not follow a symbolic link when committing schema state', async () => {
+    const context = await fixture();
+    const outside = path.join(context.root, 'outside-state.json');
+    const statePath = path.join(context.root, 'schema-state.json');
+    await writeFile(outside, JSON.stringify({ schemaVersion: 99 }));
+    await symlink(outside, statePath);
+
+    await expect(new DatabaseMigrationService(context.databasePath).complete(1, null))
+      .rejects.toThrow('DESTINATION_NOT_REGULAR_FILE');
+
+    expect(JSON.parse(await readFile(outside, 'utf8'))).toEqual({ schemaVersion: 99 });
+    expect((await readdir(context.root)).filter((name) => name.endsWith('.tmp') || name.includes('.previous'))).toEqual([]);
   });
 });
