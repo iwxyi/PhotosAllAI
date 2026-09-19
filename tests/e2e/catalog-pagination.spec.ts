@@ -50,7 +50,7 @@ test.afterAll(async () => {
 test('loads cursor pages at the virtualized filmstrip boundary', async () => {
   await expect(page.getByText('205 张照片')).toBeVisible();
   const options = page.getByRole('option');
-  expect(await options.count()).toBeLessThan(20);
+  expect(await options.count()).toBeLessThan(30);
 
   const filmstrip = page.locator('.filmstrip');
   await filmstrip.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
@@ -58,5 +58,5 @@ test('loads cursor pages at the virtualized filmstrip boundary', async () => {
 
   await filmstrip.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
   await expect(page.getByRole('option').filter({ hasText: 'PAGE_204.jpg' })).toBeVisible();
-  expect(await options.count()).toBeLessThan(20);
+  expect(await options.count()).toBeLessThan(30);
 });

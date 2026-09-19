@@ -537,7 +537,9 @@ export type ExportGenerationResultsInput = z.infer<typeof exportGenerationResult
 export const exportPresetSchema = z.object({
   id: z.string().uuid(),
   name: z.string().min(1).max(80),
-  format: z.literal('original'),
+  format: z.enum(['original', 'jpeg', 'png']),
+  quality: z.number().int().min(1).max(100),
+  maxDimension: z.number().int().min(256).max(20_000).nullable(),
   conflictPolicy: z.enum(['auto-rename', 'skip']),
   namingPattern: z.string().min(1).max(160),
   createdAt: z.number().int().nonnegative(),
@@ -546,7 +548,9 @@ export const exportPresetSchema = z.object({
 export type ExportPreset = z.infer<typeof exportPresetSchema>;
 
 export const saveExportPresetInputSchema = exportPresetSchema.omit({ id: true, createdAt: true, updatedAt: true }).extend({
-  id: z.string().uuid().optional()
+  id: z.string().uuid().optional(),
+  quality: z.number().int().min(1).max(100).optional().default(90),
+  maxDimension: z.number().int().min(256).max(20_000).nullable().optional().default(null)
 });
 export type SaveExportPresetInput = z.input<typeof saveExportPresetInputSchema>;
 

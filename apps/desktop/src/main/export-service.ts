@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { copyFile, link, realpath, stat, unlink } from 'node:fs/promises';
+import { copyFile, link, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { nativeImage } from 'electron';
 
 import { exportReportSchema, type ExportPreset, type ExportReport } from '@photoallisai/contracts';
 
@@ -10,12 +11,37 @@ interface ResultResolver {
   resolveResultFile(resultId: string): string | null;
 }
 
+export interface ImageEncoder {
+  encode(sourcePath: string, options: { format: 'jpeg' | 'png'; quality: number; maxDimension: number | null }): Promise<Buffer>;
+}
+
+const electronImageEncoder: ImageEncoder = {
+  async encode(sourcePath, options) {
+    let image = nativeImage.createFromPath(sourcePath);
+    if (image.isEmpty()) throw new Error('EXPORT_DECODE_FAILED');
+    const size = image.getSize();
+    if (options.maxDimension && Math.max(size.width, size.height) > options.maxDimension) {
+      const scale = options.maxDimension / Math.max(size.width, size.height);
+      image = image.resize({
+        width: Math.max(1, Math.round(size.width * scale)),
+        height: Math.max(1, Math.round(size.height * scale)),
+        quality: 'best'
+      });
+    }
+    const encoded = options.format === 'jpeg' ? image.toJPEG(options.quality) : image.toPNG();
+    if (encoded.length === 0) throw new Error('EXPORT_ENCODE_FAILED');
+    return encoded;
+  }
+};
+
 export class ExportService {
   readonly #database: DatabaseSync;
   readonly #results: ResultResolver;
+  readonly #imageEncoder: ImageEncoder;
 
-  constructor(databasePath: string, results: ResultResolver) {
+  constructor(databasePath: string, results: ResultResolver, imageEncoder: ImageEncoder = electronImageEncoder) {
     this.#results = results;
+    this.#imageEncoder = imageEncoder;
     this.#database = new DatabaseSync(databasePath);
     this.#database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.#database.exec(`
@@ -54,7 +80,7 @@ export class ExportService {
         continue;
       }
       try {
-        const fileName = await copyWithPreset(sourcePath, destinationDirectory, preset);
+        const fileName = await copyWithPreset(sourcePath, destinationDirectory, this.#imageEncoder, preset);
         files.push({ resultId, fileName });
       } catch (error) {
         failures.push({
@@ -80,22 +106,34 @@ export class ExportService {
   }
 }
 
-async function copyWithPreset(sourcePath: string, destinationDirectory: string, preset?: ExportPreset): Promise<string> {
+async function copyWithPreset(sourcePath: string, destinationDirectory: string, imageEncoder: ImageEncoder, preset?: ExportPreset): Promise<string> {
   const source = await stat(sourcePath);
   if (!source.isFile()) throw new Error('EXPORT_SOURCE_NOT_FILE');
   const parsed = path.parse(sourcePath);
   const temporaryPath = path.join(destinationDirectory, `.photoallisai-export-${randomUUID()}.tmp`);
-  await copyFile(sourcePath, temporaryPath, constants.COPYFILE_EXCL);
   try {
+    if (!preset || preset.format === 'original') {
+      await copyFile(sourcePath, temporaryPath, constants.COPYFILE_EXCL);
+    } else {
+      const encoded = await imageEncoder.encode(sourcePath, {
+        format: preset.format,
+        quality: preset.quality,
+        maxDimension: preset.maxDimension
+      });
+      if (encoded.length === 0) throw new Error('EXPORT_ENCODE_FAILED');
+      await writeFile(temporaryPath, encoded, { flag: 'wx' });
+    }
     const copied = await stat(temporaryPath);
-    if (copied.size !== source.size) throw new Error('EXPORT_SIZE_MISMATCH');
+    if ((!preset || preset.format === 'original') && copied.size !== source.size) throw new Error('EXPORT_SIZE_MISMATCH');
+    if (copied.size === 0) throw new Error('EXPORT_EMPTY_FILE');
     const version = parsed.name.match(/(?:^|[-_])(v\d+)$/i)?.[1] ?? 'original';
+    const extension = preset?.format === 'jpeg' ? '.jpg' : preset?.format === 'png' ? '.png' : parsed.ext;
     const requestedName = preset
-      ? preset.namingPattern.replaceAll('{name}', parsed.name).replaceAll('{version}', version) + parsed.ext
+      ? preset.namingPattern.replaceAll('{name}', parsed.name).replaceAll('{version}', version) + extension
       : parsed.base;
     for (let index = 0; index < 10_000; index += 1) {
       if (index > 0 && preset?.conflictPolicy === 'skip') throw new Error('EXPORT_NAME_EXISTS');
-      const fileName = index === 0 ? requestedName : `${path.parse(requestedName).name} (${index})${parsed.ext}`;
+      const fileName = index === 0 ? requestedName : `${path.parse(requestedName).name} (${index})${extension}`;
       try {
         await link(temporaryPath, path.join(destinationDirectory, fileName));
         return fileName;

@@ -440,6 +440,9 @@ function Viewer({
   photo,
   results,
   isDemo,
+  exportPresets,
+  selectedExportPresetId,
+  onExportPresetChange,
   onExport,
   onRate,
   onRegenerate,
@@ -456,7 +459,10 @@ function Viewer({
   photo: Photo;
   results: GenerationResult[];
   isDemo: boolean;
-  onExport: (resultIds: string[]) => Promise<string>;
+  exportPresets: ExportPreset[];
+  selectedExportPresetId: string | null;
+  onExportPresetChange: (presetId: string | null) => void;
+  onExport: (resultIds: string[], presetId?: string | null) => Promise<string>;
   onRate: (rating: number) => void;
   onRegenerate: (result: GenerationResult) => Promise<string>;
   onEditTags: () => void;
@@ -572,9 +578,13 @@ function Viewer({
             if (!selectedResult) return;
             void onRegenerate(selectedResult).then(setExportNotice);
           }}><RotateCcw size={13} /></button>
+          <select aria-label="导出预设" value={selectedExportPresetId ?? ''} onChange={(event) => onExportPresetChange(event.target.value || null)}>
+            <option value="">默认命名</option>
+            {exportPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
+          </select>
           <button type="button" title="导出当前版本" aria-label="导出当前版本" disabled={!selectedResult || isDemo} onClick={() => {
             if (!selectedResult) return;
-            void onExport([selectedResult.id]).then(setExportNotice);
+            void onExport([selectedResult.id], selectedExportPresetId).then(setExportNotice);
           }}><Download size={13} /></button>
           <button type="button" title="在文件管理器中显示生成版本" aria-label="在文件管理器中显示生成版本" disabled={!selectedResult || isDemo} onClick={() => { if (selectedResult) onRevealResult(selectedResult.id); }}><FolderOpen size={13} /></button>
           {exportNotice && <em className="viewer-notice" role="status">{exportNotice}</em>}
@@ -889,6 +899,11 @@ function PopulatedLibraryWorkspace({
     onSelectedAssetChange(first.id);
     setSelection({ selectedIds: new Set([first.id]), anchorId: first.id, focusId: first.id });
   }, [availablePhotos, onSelectedAssetChange, selectedId]);
+
+  useEffect(() => {
+    if (selectedExportPresetId && exportPresets.some((preset) => preset.id === selectedExportPresetId)) return;
+    setSelectedExportPresetId(exportPresets[0]?.id ?? null);
+  }, [exportPresets, selectedExportPresetId]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -1255,7 +1270,7 @@ function PopulatedLibraryWorkspace({
       <Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={totalCount} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={onSelectFolder} onSelectAlbum={onSelectAlbum} onSelectSmartCollection={onSelectSmartCollection} onRefreshAlbums={onRefreshAlbums} onImportFolders={onImportFolders} onRelinkFolder={onRelinkFolder} onSelectTag={onSelectTag} isDemo={isDemo} />
       <main className="library-main">
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
-        <Viewer photo={selected} results={generationResults} isDemo={isDemo} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} onReview={reviewResult} onRevealOriginal={() => void window.desktopApi.revealCatalogAsset(selected.id)} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} />
+        <Viewer photo={selected} results={generationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} onReview={reviewResult} onRevealOriginal={() => void window.desktopApi.revealCatalogAsset(selected.id)} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} />
       </main>
       <AiPanel photo={selected} results={generationResults} revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onOpenTemplates={onOpenTemplates} onGenerate={generateSelection} />
       {selection.selectedIds.size > 1 && (
@@ -1326,7 +1341,7 @@ const emptyProviderForm: SaveProviderProfileInput = {
   enabled: true
 };
 
-function SettingsPage(): React.JSX.Element {
+function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (presets: ExportPreset[]) => void }): React.JSX.Element {
   type SettingsSection = 'appearance' | 'models' | 'storage' | 'tasks' | 'shortcuts' | 'privacy';
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('models');
   const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
@@ -1336,6 +1351,9 @@ function SettingsPage(): React.JSX.Element {
   const [providerDeleteCandidate, setProviderDeleteCandidate] = useState<string | null>(null);
   const [presets, setPresets] = useState<ExportPreset[]>([]);
   const [presetName, setPresetName] = useState('');
+  const [presetFormat, setPresetFormat] = useState<ExportPreset['format']>('jpeg');
+  const [presetQuality, setPresetQuality] = useState(90);
+  const [presetMaxDimension, setPresetMaxDimension] = useState<number | null>(null);
   const [presetMessage, setPresetMessage] = useState('');
   const [cacheStats, setCacheStats] = useState<ImageCacheStats | null>(null);
   const [cacheMessage, setCacheMessage] = useState('');
@@ -1352,14 +1370,17 @@ function SettingsPage(): React.JSX.Element {
 
   useEffect(() => {
     void window.desktopApi.listProviderProfiles().then(setProfiles);
-    void window.desktopApi.listExportPresets().then(setPresets);
+    void window.desktopApi.listExportPresets().then((items) => {
+      setPresets(items);
+      onExportPresetsChange(items);
+    });
     void window.desktopApi.getImageCacheStats().then(setCacheStats);
     void window.desktopApi.getDiagnosticSnapshot().then(setDiagnostics);
     void window.desktopApi.getAppSettings().then((settings) => {
       setGenerationStorageMode(settings.generationStorageMode);
       setTheme(settings.theme);
     });
-  }, []);
+  }, [onExportPresetsChange]);
 
   const saveStorageMode = async (value: AppSettings['generationStorageMode']) => {
     setGenerationStorageMode(value);
@@ -1532,9 +1553,9 @@ function SettingsPage(): React.JSX.Element {
           </form>
         </section>
         <section className="settings-section export-presets-section">
-          <div className="settings-heading"><div><h2>导出预设</h2><p>保存常用的命名和冲突策略，导出时可复用。当前版本保留原始生成格式。</p></div><span><Download size={14} />受管结果可随时导出</span></div>
-          <div className="preset-row"><input aria-label="导出预设名称" placeholder="例如：客户交付" value={presetName} onChange={(event) => { setPresetName(event.target.value); setPresetMessage(''); }} /><button className="primary-action compact" type="button" disabled={!presetName.trim()} onClick={async () => { try { const saved = await window.desktopApi.saveExportPreset({ name: presetName.trim(), format: 'original', conflictPolicy: 'auto-rename', namingPattern: '{name}_{version}' }); setPresets((current) => [...current.filter((item) => item.id !== saved.id), saved]); setPresetName(''); setPresetMessage('预设已保存'); } catch { setPresetMessage('名称已存在或保存失败'); } }}>保存预设</button></div>
-          <div className="preset-list">{presets.length === 0 ? <small>暂无导出预设</small> : presets.map((preset) => <div className="preset-item" key={preset.id}><span><strong>{preset.name}</strong><small>{preset.namingPattern} · {preset.conflictPolicy === 'skip' ? '跳过同名' : '自动编号'}</small></span><button type="button" aria-label={`删除导出预设 ${preset.name}`} onClick={async () => { await window.desktopApi.deleteExportPreset(preset.id); setPresets((current) => current.filter((item) => item.id !== preset.id)); }}>删除</button></div>)}</div>
+          <div className="settings-heading"><div><h2>导出预设</h2><p>保存格式、尺寸、JPEG 质量和命名策略；原格式导出不会重新编码。</p></div><span><Download size={14} />受管结果可随时导出</span></div>
+          <div className="preset-row"><input aria-label="导出预设名称" placeholder="例如：客户交付" value={presetName} onChange={(event) => { setPresetName(event.target.value); setPresetMessage(''); }} /><select aria-label="导出格式" value={presetFormat} onChange={(event) => setPresetFormat(event.target.value as ExportPreset['format'])}><option value="jpeg">JPEG</option><option value="png">PNG</option><option value="original">原格式</option></select><input aria-label="JPEG 质量" type="number" min="1" max="100" disabled={presetFormat !== 'jpeg'} value={presetQuality} onChange={(event) => setPresetQuality(Number(event.target.value))} /><select aria-label="导出尺寸" value={presetMaxDimension ?? ''} onChange={(event) => setPresetMaxDimension(event.target.value ? Number(event.target.value) : null)}><option value="">原始尺寸</option><option value="2048">长边 2048px</option><option value="3840">长边 3840px</option><option value="6000">长边 6000px</option></select><button className="primary-action compact" type="button" disabled={!presetName.trim()} onClick={async () => { try { const saved = await window.desktopApi.saveExportPreset({ name: presetName.trim(), format: presetFormat, quality: presetQuality, maxDimension: presetMaxDimension, conflictPolicy: 'auto-rename', namingPattern: '{name}_{version}' }); setPresets((current) => { const next = [...current.filter((item) => item.id !== saved.id), saved]; onExportPresetsChange(next); return next; }); setPresetName(''); setPresetMessage('预设已保存'); } catch { setPresetMessage('名称已存在或保存失败'); } }}>保存预设</button></div>
+          <div className="preset-list">{presets.length === 0 ? <small>暂无导出预设</small> : presets.map((preset) => <div className="preset-item" key={preset.id}><span><strong>{preset.name}</strong><small>{preset.format === 'original' ? '原格式' : preset.format.toUpperCase()}{preset.format === 'jpeg' ? ` · 质量 ${preset.quality}` : ''}{preset.maxDimension ? ` · 长边 ${preset.maxDimension}px` : ''} · {preset.conflictPolicy === 'skip' ? '跳过同名' : '自动编号'}</small></span><button type="button" aria-label={`删除导出预设 ${preset.name}`} onClick={async () => { await window.desktopApi.deleteExportPreset(preset.id); setPresets((current) => { const next = current.filter((item) => item.id !== preset.id); onExportPresetsChange(next); return next; }); }}>删除</button></div>)}</div>
           {presetMessage && <div className="form-feedback" role="status">{presetMessage}</div>}
         </section>
         </>}
@@ -2039,7 +2060,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
-      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} exportPresets={exportPresets} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={setFavoriteOnly} sortBy={sortBy} onSortByChange={setSortBy} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onRelinkFolder={relinkFolder} onOpenTaskCenter={() => openWorkspaceTab('tasks')} onOpenTemplates={() => openWorkspaceTab('templates')} /> : activeTab === 'settings' ? <SettingsPage /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
+      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} exportPresets={exportPresets} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={setFavoriteOnly} sortBy={sortBy} onSortByChange={setSortBy} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onRelinkFolder={relinkFolder} onOpenTaskCenter={() => openWorkspaceTab('tasks')} onOpenTemplates={() => openWorkspaceTab('templates')} /> : activeTab === 'settings' ? <SettingsPage onExportPresetsChange={setExportPresets} /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
     </div>
   );
 }

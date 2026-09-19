@@ -46,7 +46,7 @@ test.beforeAll(async () => {
   sourcePath = path.join(sourceDirectory, 'ORIGINAL.jpg');
   await copyFile(path.resolve('apps/desktop/src/renderer/public/demo/portrait.jpg'), sourcePath);
   originalBytes = await readFile(sourcePath);
-  const generatedJpeg = await readFile(path.resolve('apps/desktop/src/renderer/public/demo/coast.jpg'));
+  const generatedJpeg = await readFile(path.resolve('apps/desktop/src/renderer/public/demo/portrait.jpg'));
 
   mockServer = createServer((request, response) => {
     response.writeHead(200, { 'content-type': 'application/json' });
@@ -102,6 +102,12 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await page.getByRole('button', { name: '保存配置' }).click();
   await expect(page.getByText('Generation Mock')).toBeVisible();
 
+  await page.getByLabel('导出预设名称').fill('PNG 交付');
+  await page.getByLabel('导出格式').selectOption('png');
+  await page.getByLabel('导出尺寸').selectOption('2048');
+  await page.getByRole('button', { name: '保存预设' }).click();
+  await expect(page.getByText('预设已保存', { exact: true })).toBeVisible();
+
   await page.getByRole('tab', { name: '图库' }).click();
   await page.getByRole('button', { name: '开始分析' }).click();
   await expect(page.getByText('可清理背景的人像')).toBeVisible({ timeout: 10_000 });
@@ -143,9 +149,15 @@ test('analyzes, generates, compares, and persists managed and portable results',
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory], bookmarks: [] });
   }, exportDirectory);
   await page.getByRole('button', { name: '关闭任务抽屉' }).click();
+  await page.getByLabel('导出预设').selectOption({ label: 'PNG 交付' });
   await page.getByRole('button', { name: '导出当前版本' }).click();
   await expect(page.getByText('已导出 1 个文件')).toBeVisible();
-  expect((await readdir(exportDirectory)).filter((name) => name.endsWith('.jpg'))).toHaveLength(1);
+  const exportedFiles = (await readdir(exportDirectory)).filter((name) => name.endsWith('.png'));
+  expect(exportedFiles).toHaveLength(1);
+  const exportedBytes = await readFile(path.join(exportDirectory, exportedFiles[0]!));
+  expect(exportedBytes.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  const exportedSize = await electronApp.evaluate(({ nativeImage }, filePath) => nativeImage.createFromPath(filePath).getSize(), path.join(exportDirectory, exportedFiles[0]!));
+  expect(exportedSize).toEqual({ width: 1638, height: 2048 });
   expect(await readFile(sourcePath)).toEqual(originalBytes);
 
   const generatedRoot = path.join(testRoot, 'user-data', 'library', 'generated');
