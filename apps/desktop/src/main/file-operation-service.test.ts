@@ -254,6 +254,23 @@ describe('safe catalog file moves', () => {
 });
 
 describe('catalog copies and renames', () => {
+  it('rejects Windows destination paths that exceed the compatibility limit', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const longDirectory = path.join(context.root, 'x'.repeat(210));
+    await mkdir(longDirectory);
+    const database = new DatabaseSync(context.databasePath);
+    database.prepare('UPDATE folders SET path = ? WHERE id = ?').run(longDirectory, context.targetFolderId);
+    database.close();
+    const service = new FileOperationService(context.databasePath, undefined, null, 'win32');
+    services.push(service);
+
+    await expect(service.copy({ assetIds: [asset.id], targetFolderId: context.targetFolderId }))
+      .rejects.toThrow('DESTINATION_PATH_TOO_LONG');
+    expect(await readdir(longDirectory)).toEqual([]);
+    expect(service.listHistory()).toEqual([]);
+  });
+
   it('rejects a copy before writing when aggregate free space is insufficient', async () => {
     const context = await fixture(['a.jpg', 'b.jpg']);
     const assets = context.catalog.listAssets();

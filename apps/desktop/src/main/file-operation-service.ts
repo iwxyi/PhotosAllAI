@@ -89,17 +89,20 @@ export class FileOperationService {
   readonly #database: DatabaseSync;
   readonly #fileSystem: FileSystemPort;
   readonly #systemTrash: SystemTrashPort | null;
+  readonly #platform: NodeJS.Platform;
   #pending: Promise<void> = Promise.resolve();
 
   constructor(
     databasePath: string,
     fileSystem: FileSystemPort = nodeFileSystem,
-    systemTrash: SystemTrashPort | null = null
+    systemTrash: SystemTrashPort | null = null,
+    platform: NodeJS.Platform = process.platform
   ) {
     this.#database = new DatabaseSync(databasePath);
     this.#database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.#fileSystem = fileSystem;
     this.#systemTrash = systemTrash;
+    this.#platform = platform;
     this.#migrate();
   }
 
@@ -592,6 +595,7 @@ export class FileOperationService {
         skipped: false, status: 'planned', resultAssetId: randomUUID()
       };
     });
+    this.#assertDestinationPaths(items);
     await this.#assertAvailableSpace(targetPath, items.reduce((total, item) => total + item.sizeBytes, 0));
     this.#persistPlan(operationId, 'copy', target.id, items);
     return items;
@@ -618,6 +622,7 @@ export class FileOperationService {
       previousFileName: asset.file_name, fileName, sizeBytes: asset.size_bytes,
       skipped: false, status: 'planned', resultAssetId: null
     };
+    this.#assertDestinationPaths([item]);
     this.#persistPlan(operationId, 'rename', asset.folder_id, [item]);
     return item;
   }
@@ -692,6 +697,7 @@ export class FileOperationService {
         resultAssetId: null
       };
     });
+    this.#assertDestinationPaths(items.filter((item) => !item.skipped));
 
     const crossVolumeBytes = (await Promise.all(items.filter((item) => !item.skipped).map(async (item) => {
       const sourceStats = await this.#fileSystem.stat(item.sourcePath);
@@ -731,6 +737,15 @@ export class FileOperationService {
     const availableBytes = await this.#fileSystem.availableBytes(directory);
     if (!Number.isFinite(availableBytes) || availableBytes < requiredBytes) {
       throw new Error('INSUFFICIENT_DISK_SPACE');
+    }
+  }
+
+  #assertDestinationPaths(items: readonly PlannedItem[]): void {
+    if (this.#platform !== 'win32') return;
+    for (const item of items) {
+      if (item.destinationPath.length >= 260 || item.temporaryPath.length >= 260) {
+        throw new Error('DESTINATION_PATH_TOO_LONG');
+      }
     }
   }
 
