@@ -13,6 +13,7 @@ import type {
   TrashedGenerationResult,
   FileOperationHistoryItem,
   PersistedTask,
+  TaskListCursor,
   PromptTemplate,
   ProviderProfile,
   ExportPreset,
@@ -1062,7 +1063,11 @@ function PopulatedLibraryWorkspace({
   useEffect(() => {
     if (isDemo) return;
     let active = true;
-    const refresh = () => { void window.desktopApi.listTasks().then((items) => { if (active) setTaskItems(items); }); };
+    const refresh = () => {
+      void window.desktopApi.listTaskPage({ limit: 20, cursor: null }).then((page) => {
+        if (active) setTaskItems(page.items);
+      });
+    };
     refresh();
     const interval = window.setInterval(refresh, 1_000);
     return () => { active = false; window.clearInterval(interval); };
@@ -1885,6 +1890,11 @@ const fileOperationStatusLabels: Record<FileOperationHistoryItem['status'], stri
 
 function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<void> }): React.JSX.Element {
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
+  const [nextTaskCursor, setNextTaskCursor] = useState<TaskListCursor | null>(null);
+  const [taskTotalCount, setTaskTotalCount] = useState(0);
+  const [taskCounts, setTaskCounts] = useState({ queued: 0, active: 0, failed: 0, failedGeneration: 0 });
+  const [loadingMoreTasks, setLoadingMoreTasks] = useState(false);
+  const loadedTaskHistory = useRef(false);
   const [fileOperations, setFileOperations] = useState<FileOperationHistoryItem[]>([]);
   const [message, setMessage] = useState('');
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
@@ -1897,19 +1907,39 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
   const [countDraft, setCountDraft] = useState(1);
   const [undoBusyId, setUndoBusyId] = useState<string | null>(null);
 
-  const refresh = () => window.desktopApi.listTasks().then(setTaskItems);
+  const applyTaskPage = (page: Awaited<ReturnType<typeof window.desktopApi.listTaskPage>>, append = false) => {
+    setTaskItems((current) => append
+      ? [...current, ...page.items.filter((item) => !current.some((existing) => existing.id === item.id))]
+      : page.items);
+    setNextTaskCursor(page.nextCursor);
+    setTaskTotalCount(page.totalCount);
+    setTaskCounts({
+      queued: page.queuedCount,
+      active: page.activeCount,
+      failed: page.failedCount,
+      failedGeneration: page.failedGenerationCount
+    });
+  };
+  const refresh = async () => {
+    const page = await window.desktopApi.listTaskPage({ limit: 50, cursor: null });
+    loadedTaskHistory.current = false;
+    applyTaskPage(page);
+  };
   useEffect(() => {
     let active = true;
-    const poll = () => {
-      void Promise.all([window.desktopApi.listTasks(), window.desktopApi.listFileOperationHistory()])
-        .then(([items, operations]) => {
-          if (active) {
-            setTaskItems(items);
-            setFileOperations(operations);
-          }
-        });
+    const poll = async () => {
+      const [page, operations] = await Promise.all([
+        loadedTaskHistory.current
+          ? Promise.resolve(null)
+          : window.desktopApi.listTaskPage({ limit: 50, cursor: null }),
+        window.desktopApi.listFileOperationHistory()
+      ]);
+      if (active) {
+        if (page && !loadedTaskHistory.current) applyTaskPage(page);
+        setFileOperations(operations);
+      }
     };
-    poll();
+    void poll();
     const interval = window.setInterval(poll, 1_000);
     return () => { active = false; window.clearInterval(interval); };
   }, []);
@@ -1929,20 +1959,29 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
     await refresh();
   };
   const moveQueued = async (taskId: string, direction: -1 | 1) => {
-    const queuedIds = taskItems.filter((task) => task.status === 'queued').map((task) => task.id);
-    const index = queuedIds.indexOf(taskId);
-    const destination = index + direction;
-    if (index < 0 || destination < 0 || destination >= queuedIds.length) return;
-    [queuedIds[index], queuedIds[destination]] = [queuedIds[destination]!, queuedIds[index]!];
-    setTaskItems(await window.desktopApi.reorderTasks(queuedIds));
+    await window.desktopApi.moveQueuedTask({ taskId, direction });
+    await refresh();
   };
   const retryFailedGeneration = async () => {
-    const failedIds = taskItems
-      .filter((task) => task.kind === 'generation' && task.status === 'failed')
-      .map((task) => task.id);
-    for (const taskId of failedIds) await window.desktopApi.retryTask(taskId);
-    setMessage(`已重新排队 ${failedIds.length} 个生成任务。`);
+    const report = await window.desktopApi.retryFailedGenerationTasks({ limit: 1_000 });
+    setMessage(report.remaining > 0
+      ? `已重新排队 ${report.retried} 个生成任务，仍有 ${report.remaining} 个待处理。`
+      : `已重新排队 ${report.retried} 个生成任务。`);
     await refresh();
+  };
+  const loadMoreTasks = async () => {
+    if (!nextTaskCursor || loadingMoreTasks) return;
+    setLoadingMoreTasks(true);
+    loadedTaskHistory.current = true;
+    try {
+      const page = await window.desktopApi.listTaskPage({ limit: 50, cursor: nextTaskCursor });
+      applyTaskPage(page, true);
+    } catch {
+      loadedTaskHistory.current = false;
+      setMessage('任务历史加载失败，请重试。');
+    } finally {
+      setLoadingMoreTasks(false);
+    }
   };
   const undoFileOperation = async (operation: FileOperationHistoryItem) => {
     setUndoBusyId(operation.id);
@@ -2040,19 +2079,19 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
     }
   };
 
-  const waiting = taskItems.filter((task) => task.status === 'queued').length;
-  const failed = taskItems.filter((task) => task.status === 'failed').length;
-  const failedGeneration = taskItems.filter((task) => task.kind === 'generation' && task.status === 'failed').length;
+  const waiting = taskCounts.queued;
+  const failed = taskCounts.failed;
+  const failedGeneration = taskCounts.failedGeneration;
   const queuedIds = taskItems.filter((task) => task.status === 'queued').map((task) => task.id);
 
   return (
     <div className="task-center-page">
       <div className="task-center-heading">
-        <div><h1>任务中心</h1><p>生成任务默认串行执行，等待任务可以调整或取消。</p></div>
+        <div><h1>任务中心</h1><p>生成任务默认串行执行，当前显示 {taskItems.length}/{taskTotalCount} 项。</p></div>
         <div className="task-heading-actions">
           {message && <span className="task-feedback" role="status">{message}</span>}
           <button className="secondary-action" type="button" disabled={failedGeneration === 0} onClick={() => void retryFailedGeneration()}><RotateCcw size={13} />重试失败生成 ({failedGeneration})</button>
-          <div className="task-summary"><span><i className="task-dot queued" />等待 {waiting}</span><span><i className="task-dot failed" />失败 {failed}</span></div>
+          <div className="task-summary"><span><i className="task-dot queued" />等待 {waiting}</span><span>运行 {taskCounts.active}</span><span><i className="task-dot failed" />失败 {failed}</span></div>
         </div>
       </div>
       <div className="task-table">
@@ -2067,13 +2106,14 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
             <span>{task.attempt + 1}</span>
             <span>{new Date(task.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
             <span className="task-row-actions">
-              {task.status === 'queued' && <><IconButton label="任务上移" disabled={queuedIds.indexOf(task.id) === 0} onClick={() => void moveQueued(task.id, -1)}><ArrowUp size={13} /></IconButton><IconButton label="任务下移" disabled={queuedIds.indexOf(task.id) === queuedIds.length - 1} onClick={() => void moveQueued(task.id, 1)}><ArrowDown size={13} /></IconButton></>}
+              {task.status === 'queued' && <><IconButton label="任务上移" disabled={queuedIds.indexOf(task.id) === 0} onClick={() => void moveQueued(task.id, -1)}><ArrowUp size={13} /></IconButton><IconButton label="任务下移" disabled={queuedIds.indexOf(task.id) === queuedIds.length - 1 && taskCounts.queued <= queuedIds.length} onClick={() => void moveQueued(task.id, 1)}><ArrowDown size={13} /></IconButton></>}
               {task.status === 'queued' && task.kind === 'generation' && <IconButton label="编辑生成提示词" onClick={() => openPromptEditor(task)}><FilePenLine size={13} /></IconButton>}
               {(task.status === 'queued' || task.status === 'preparing' || task.status === 'uploading' || task.status === 'processing' || task.status === 'downloading') && <button type="button" onClick={() => void cancel(task.id)}>取消</button>}
               {(task.status === 'failed' || task.status === 'canceled') && <button type="button" onClick={() => void retry(task.id)}>重试</button>}
             </span>
           </div>
         ))}
+        {nextTaskCursor && <div className="task-load-more"><button className="secondary-action compact" type="button" disabled={loadingMoreTasks} onClick={() => void loadMoreTasks()}>{loadingMoreTasks ? '加载中…' : '加载更多任务'}</button></div>}
       </div>
       {editingTaskId && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !editBusy) setEditingTaskId(null); }}><form className="rename-dialog task-prompt-editor" role="dialog" aria-modal="true" aria-labelledby="task-prompt-title" onSubmit={(event) => { event.preventDefault(); void savePrompt(); }}><header><div><span className="dialog-icon"><FilePenLine size={16} /></span><div><h2 id="task-prompt-title">编辑等待任务</h2><p>修改只作用于尚未开始的任务；同批生成数量会安全增减队尾任务。</p></div></div><IconButton label="关闭提示词编辑器" disabled={editBusy} onClick={() => setEditingTaskId(null)}><X size={15} /></IconButton></header><div className="form-grid two-columns"><label className="rename-field"><span>生成模型</span><select aria-label="任务生成模型" value={providerDraft} onChange={(event) => setProviderDraft(event.target.value)}>{generationProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label><label className="rename-field"><span>生成数量</span><input aria-label="任务生成数量" type="number" min="1" max="20" value={countDraft} onChange={(event) => setCountDraft(Number(event.target.value))} /></label></div><label className="rename-field"><span>提示词模板</span><select aria-label="任务提示词模板" value={templateDraft} disabled={!taskItems.find((item) => item.id === editingTaskId)?.payload.analysisRevisionId} onChange={(event) => void previewTaskTemplate(event.target.value)}><option value="">保留当前通用方案</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name} · V{template.version}</option>)}</select></label><label className="rename-field"><span>最终生成提示词</span><textarea autoFocus value={promptDraft} maxLength={50_000} onChange={(event) => setPromptDraft(event.target.value)} /></label><footer><span>{promptDraft.length.toLocaleString()} / 50,000</span><div><button className="quiet-button" type="button" disabled={editBusy} onClick={() => setEditingTaskId(null)}>取消</button><button className="primary-action compact" type="submit" disabled={!providerDraft || !promptDraft.trim() || countDraft < 1 || countDraft > 20 || editBusy}>{editBusy ? '保存中…' : '保存修改'}</button></div></footer></form></div>}
       <section className="operation-history">

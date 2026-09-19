@@ -4,13 +4,23 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   enqueueTaskInputSchema,
   generationTaskPayloadSchema,
+  listTaskPageInputSchema,
+  moveQueuedTaskInputSchema,
   persistedTaskSchema,
   resizeQueuedGenerationBatchInputSchema,
+  retryFailedGenerationTasksInputSchema,
+  retryFailedGenerationTasksReportSchema,
+  taskPageSchema,
   updateQueuedGenerationTaskInputSchema,
   updateQueuedGenerationTasksInputSchema,
   type EnqueueTaskInput,
+  type ListTaskPageInput,
+  type MoveQueuedTaskInput,
   type PersistedTask,
   type ResizeQueuedGenerationBatchInput,
+  type RetryFailedGenerationTasksInput,
+  type RetryFailedGenerationTasksReport,
+  type TaskPage,
   type UpdateQueuedGenerationTaskInput,
   type UpdateQueuedGenerationTasksInput
 } from '@photoallisai/contracts';
@@ -30,6 +40,8 @@ type TaskRow = {
   created_at: number;
   updated_at: number;
 };
+
+type TaskPageRow = TaskRow & { sort_group: number };
 
 const INTERRUPTED_STATUSES: TaskStatus[] = [
   'preparing', 'uploading', 'processing', 'downloading', 'saving'
@@ -67,6 +79,16 @@ export class TaskService {
         updated_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS tasks_queue_idx ON tasks(status, position, created_at);
+      CREATE INDEX IF NOT EXISTS tasks_history_idx ON tasks(
+        CASE
+          WHEN status IN ('queued', 'preparing', 'uploading', 'processing', 'downloading', 'saving') THEN 0
+          WHEN status = 'failed' THEN 1
+          ELSE 2
+        END,
+        position,
+        created_at DESC,
+        id
+      );
       CREATE TABLE IF NOT EXISTS task_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -118,6 +140,116 @@ export class TaskService {
       ORDER BY CASE status WHEN 'queued' THEN 0 WHEN 'failed' THEN 1 ELSE 2 END,
         position ASC, created_at DESC
     `).all() as TaskRow[]).map((row) => this.#toTask(row));
+  }
+
+  find(taskId: string): PersistedTask | null {
+    const row = this.#database.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as TaskRow | undefined;
+    return row ? this.#toTask(row) : null;
+  }
+
+  hasQueued(kinds: readonly PersistedTask['kind'][]): boolean {
+    if (kinds.length === 0) return false;
+    const placeholders = kinds.map(() => '?').join(', ');
+    return Boolean(this.#database.prepare(`
+      SELECT 1 FROM tasks WHERE status = 'queued' AND kind IN (${placeholders}) LIMIT 1
+    `).get(...kinds));
+  }
+
+  hasActiveTasks(): boolean {
+    return Boolean(this.#database.prepare(`
+      SELECT 1 FROM tasks
+      WHERE status IN ('queued', 'preparing', 'uploading', 'processing', 'downloading', 'saving')
+      LIMIT 1
+    `).get());
+  }
+
+  hasActiveProvider(providerProfileId: string): boolean {
+    const rows = this.#database.prepare(`
+      SELECT payload_json FROM tasks
+      WHERE status IN ('queued', 'preparing', 'uploading', 'processing', 'downloading', 'saving')
+    `).all() as { payload_json: string }[];
+    return rows.some((row) => {
+      try {
+        const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+        return payload.providerProfileId === providerProfileId;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  getStatusCounts(): Record<string, number> {
+    const rows = this.#database.prepare(`
+      SELECT status, COUNT(*) AS value FROM tasks GROUP BY status
+    `).all() as { status: string; value: number }[];
+    return Object.fromEntries(rows.map((row) => [row.status, row.value]));
+  }
+
+  listPage(rawInput: ListTaskPageInput): TaskPage {
+    const input = listTaskPageInputSchema.parse(rawInput);
+    const conditions: string[] = [];
+    const values: (string | number)[] = [];
+    if (input.cursor) {
+      conditions.push(`(
+        sort_group > ?
+        OR (sort_group = ? AND position > ?)
+        OR (sort_group = ? AND position = ? AND created_at < ?)
+        OR (sort_group = ? AND position = ? AND created_at = ? AND id > ?)
+      )`);
+      values.push(
+        input.cursor.sortGroup,
+        input.cursor.sortGroup, input.cursor.position,
+        input.cursor.sortGroup, input.cursor.position, input.cursor.createdAt,
+        input.cursor.sortGroup, input.cursor.position, input.cursor.createdAt, input.cursor.id
+      );
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+    const rows = this.#database.prepare(`
+      SELECT * FROM (
+        SELECT tasks.*,
+          CASE
+            WHEN status IN ('queued', 'preparing', 'uploading', 'processing', 'downloading', 'saving') THEN 0
+            WHEN status = 'failed' THEN 1
+            ELSE 2
+          END AS sort_group
+        FROM tasks
+      ) ranked
+      ${where}
+      ORDER BY sort_group ASC, position ASC, created_at DESC, id ASC
+      LIMIT ?
+    `).all(...values, input.limit + 1) as TaskPageRow[];
+    const hasMore = rows.length > input.limit;
+    const pageRows = hasMore ? rows.slice(0, input.limit) : rows;
+    const last = pageRows.at(-1);
+    const counts = this.#database.prepare(`
+      SELECT
+        COUNT(*) AS total_count,
+        SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_count,
+        SUM(CASE WHEN status IN ('preparing', 'uploading', 'processing', 'downloading', 'saving') THEN 1 ELSE 0 END) AS active_count,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
+        SUM(CASE WHEN status = 'failed' AND kind = 'generation' THEN 1 ELSE 0 END) AS failed_generation_count
+      FROM tasks
+    `).get() as {
+      total_count: number;
+      queued_count: number | null;
+      active_count: number | null;
+      failed_count: number | null;
+      failed_generation_count: number | null;
+    };
+    return taskPageSchema.parse({
+      items: pageRows.map((row) => this.#toTask(row)),
+      totalCount: counts.total_count,
+      queuedCount: counts.queued_count ?? 0,
+      activeCount: counts.active_count ?? 0,
+      failedCount: counts.failed_count ?? 0,
+      failedGenerationCount: counts.failed_generation_count ?? 0,
+      nextCursor: hasMore && last ? {
+        sortGroup: last.sort_group,
+        position: last.position,
+        createdAt: last.created_at,
+        id: last.id
+      } : null
+    });
   }
 
   enqueue(rawInput: EnqueueTaskInput): PersistedTask {
@@ -255,23 +387,73 @@ export class TaskService {
     return this.#get(task.id);
   }
 
-  reorder(taskIds: readonly string[]): PersistedTask[] {
-    const queued = this.list().filter((task) => task.status === 'queued');
-    const queuedIds = new Set(queued.map((task) => task.id));
-    if (taskIds.length !== queued.length || taskIds.some((id) => !queuedIds.has(id))) {
-      throw new Error('TASK_REORDER_SET_MISMATCH');
-    }
+  moveQueued(rawInput: MoveQueuedTaskInput): PersistedTask {
+    const input = moveQueuedTaskInputSchema.parse(rawInput);
+    const task = this.#get(input.taskId);
+    if (task.status !== 'queued') throw new Error('TASK_NOT_QUEUED');
+    const comparison = input.direction < 0 ? '<' : '>';
+    const order = input.direction < 0 ? 'DESC' : 'ASC';
+    const neighbor = this.#database.prepare(`
+      SELECT id, position FROM tasks
+      WHERE status = 'queued' AND position ${comparison} ?
+      ORDER BY position ${order}, created_at ${order}, id ${order}
+      LIMIT 1
+    `).get(task.position) as { id: string; position: number } | undefined;
+    if (!neighbor) return task;
+    const now = Date.now();
     this.#database.exec('BEGIN IMMEDIATE');
     try {
-      const update = this.#database.prepare('UPDATE tasks SET position = ?, updated_at = ? WHERE id = ?');
-      const now = Date.now();
-      taskIds.forEach((id, position) => update.run(position, now, id));
+      const moved = this.#database.prepare('UPDATE tasks SET position = ?, updated_at = ? WHERE id = ? AND status = \'queued\'')
+        .run(neighbor.position, now, task.id);
+      const displaced = this.#database.prepare('UPDATE tasks SET position = ?, updated_at = ? WHERE id = ? AND status = \'queued\'')
+        .run(task.position, now, neighbor.id);
+      if (moved.changes !== 1 || displaced.changes !== 1) throw new Error('TASK_QUEUE_CONCURRENT_CHANGE');
       this.#database.exec('COMMIT');
     } catch (error) {
       this.#database.exec('ROLLBACK');
       throw error;
     }
-    return this.list();
+    return this.#get(task.id);
+  }
+
+  retryFailedGenerations(rawInput: RetryFailedGenerationTasksInput = {}): RetryFailedGenerationTasksReport {
+    const input = retryFailedGenerationTasksInputSchema.parse(rawInput);
+    const failed = this.#database.prepare(`
+      SELECT id FROM tasks
+      WHERE kind = 'generation' AND status = 'failed'
+      ORDER BY updated_at ASC, id ASC
+      LIMIT ?
+    `).all(input.limit) as { id: string }[];
+    if (failed.length === 0) return retryFailedGenerationTasksReportSchema.parse({ retried: 0, remaining: 0 });
+    const now = Date.now();
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const maximum = this.#database.prepare(`
+        SELECT COALESCE(MAX(position), -1) AS value FROM tasks WHERE status = 'queued'
+      `).get() as { value: number };
+      const update = this.#database.prepare(`
+        UPDATE tasks SET status = 'queued', position = ?, progress = 0,
+          attempt = attempt + 1, result_json = NULL, error_code = NULL, updated_at = ?
+        WHERE id = ? AND kind = 'generation' AND status = 'failed'
+      `);
+      const event = this.#database.prepare(`
+        INSERT INTO task_events (task_id, from_status, to_status, occurred_at, details_json)
+        VALUES (?, 'failed', 'queued', ?, '{"reason":"batch_retry"}')
+      `);
+      failed.forEach((task, index) => {
+        const result = update.run(maximum.value + index + 1, now, task.id);
+        if (result.changes !== 1) throw new Error('TASK_BATCH_RETRY_CONCURRENT_CHANGE');
+        event.run(task.id, now);
+      });
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    const remaining = this.#database.prepare(`
+      SELECT COUNT(*) AS value FROM tasks WHERE kind = 'generation' AND status = 'failed'
+    `).get() as { value: number };
+    return retryFailedGenerationTasksReportSchema.parse({ retried: failed.length, remaining: remaining.value });
   }
 
   updateQueuedGeneration(rawInput: UpdateQueuedGenerationTaskInput): PersistedTask {

@@ -32,7 +32,9 @@ import {
   pruneImageCacheInputSchema,
   listAnalysisInputSchema,
   listCatalogAssetsInputSchema,
+  listTaskPageInputSchema,
   listGenerationResultsInputSchema,
+  moveQueuedTaskInputSchema,
   updateGenerationResultReviewInputSchema,
   moveCatalogAssetsInputSchema,
   moveCatalogAssetsReportSchema,
@@ -41,8 +43,8 @@ import {
   renameCatalogAssetsReportSchema,
   renameCatalogAssetReportSchema,
   relinkCatalogFolderResultSchema,
-  reorderTaskIdsSchema,
   resizeQueuedGenerationBatchInputSchema,
+  retryFailedGenerationTasksInputSchema,
   updateQueuedGenerationTaskInputSchema,
   updateQueuedGenerationTasksInputSchema,
   savePromptTemplateInputSchema,
@@ -114,10 +116,7 @@ let startupRecovery = {
 
 async function createDiagnosticSnapshot() {
   const [profiles, cacheStats, raw, integrity] = await Promise.all([providers.list(), imageCache.getStats(), imageCache.getDecoderCapabilities(), libraryIntegrity.scan()]);
-  const taskCounts = tasks.list().reduce<Record<string, number>>((counts, task) => {
-    counts[task.status] = (counts[task.status] ?? 0) + 1;
-    return counts;
-  }, {});
+  const taskCounts = tasks.getStatusCounts();
   return diagnosticSnapshotSchema.parse({
     appVersion: app.getVersion(),
     platform: process.platform,
@@ -396,8 +395,7 @@ function registerIpc(): void {
   );
   ipcMain.handle('providers.delete.v1', async (_event, input: unknown) => {
     const profileId = String(input);
-    const activeStatuses = new Set(['queued', 'preparing', 'uploading', 'processing', 'downloading', 'saving']);
-    if (tasks.list().some((task) => activeStatuses.has(task.status) && task.payload.providerProfileId === profileId)) {
+    if (tasks.hasActiveProvider(profileId)) {
       throw new Error('PROVIDER_HAS_ACTIVE_TASKS');
     }
     await providers.delete(profileId);
@@ -405,7 +403,10 @@ function registerIpc(): void {
   ipcMain.handle('providers.test.v1', (_event, input: unknown) =>
     providers.test(saveProviderProfileInputSchema.parse(input))
   );
-  ipcMain.handle('tasks.list.v1', () => tasks.list().map(toRendererTask));
+  ipcMain.handle('tasks.page.v1', (_event, input: unknown) => {
+    const page = tasks.listPage(listTaskPageInputSchema.parse(input));
+    return { ...page, items: page.items.map(toRendererTask) };
+  });
   ipcMain.handle('tasks.enqueue.v1', (_event, input: unknown) => {
     const parsed = enqueueTaskInputSchema.parse(input);
     if (parsed.kind === 'export') throw new Error('EXPORT_TASK_REQUIRES_DIRECTORY_SELECTION');
@@ -423,9 +424,14 @@ function registerIpc(): void {
     taskRunner.wake();
     return toRendererTask(task);
   });
-  ipcMain.handle('tasks.reorder.v1', (_event, taskIds: unknown) =>
-    tasks.reorder(reorderTaskIdsSchema.parse(taskIds)).map(toRendererTask)
+  ipcMain.handle('tasks.move.v1', (_event, input: unknown) =>
+    toRendererTask(tasks.moveQueued(moveQueuedTaskInputSchema.parse(input)))
   );
+  ipcMain.handle('tasks.generation.retry-failed.v1', (_event, input: unknown) => {
+    const report = tasks.retryFailedGenerations(retryFailedGenerationTasksInputSchema.parse(input ?? {}));
+    if (report.retried > 0) taskRunner.wake();
+    return report;
+  });
   ipcMain.handle('tasks.generation.update.v1', (_event, input: unknown) =>
     tasks.updateQueuedGeneration(updateQueuedGenerationTaskInputSchema.parse(input))
   );
@@ -653,7 +659,7 @@ app.whenReady().then(async () => {
     if (shuttingDown) return;
     contentHashTimer = setTimeout(async () => {
       if (shuttingDown) return;
-      const active = tasks.list().some((task) => !['completed', 'failed', 'canceled'].includes(task.status));
+      const active = tasks.hasActiveTasks();
       let nextDelay = active ? 10_000 : 60_000;
       if (!active && !contentHashPassRunning) {
         contentHashPassRunning = true;

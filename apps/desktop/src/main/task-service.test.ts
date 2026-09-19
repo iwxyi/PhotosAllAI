@@ -42,13 +42,98 @@ describe('persistent task service', () => {
     tasks.close();
   });
 
-  it('queues and reorders tasks deterministically', async () => {
+  it('queues tasks deterministically', async () => {
     const tasks = new TaskService(await databasePath());
     const first = tasks.enqueue({ kind: 'analysis', assetId: 'asset-1', payload: { depth: 'full' } });
     const second = tasks.enqueue({ kind: 'generation', assetId: 'asset-2', payload: { count: 1 } });
     expect(tasks.list().map((task) => task.id)).toEqual([first.id, second.id]);
-    expect(tasks.reorder([second.id, first.id]).map((task) => task.id)).toEqual([second.id, first.id]);
     tasks.close();
+  });
+
+  it('paginates growing task history with stable cursors and global counts', async () => {
+    const file = await databasePath();
+    const tasks = new TaskService(file);
+    const created = Array.from({ length: 7 }, (_, index) =>
+      tasks.enqueue({ kind: 'analysis', assetId: `asset-${index}`, payload: {} }));
+    const failed = tasks.claimNext(['analysis'])!;
+    tasks.advance(failed.id, 'processing', 0.2);
+    tasks.advance(failed.id, 'failed', 0.2, 'ANALYSIS_FAILED');
+    const active = tasks.claimNext(['analysis'])!;
+    tasks.advance(active.id, 'processing', 0.4);
+    tasks.cancel(created.at(-1)!.id);
+
+    const seen: string[] = [];
+    let cursor = null;
+    do {
+      const page = tasks.listPage({ limit: 2, cursor });
+      seen.push(...page.items.map((task) => task.id));
+      expect(page).toMatchObject({
+        totalCount: 7,
+        queuedCount: 4,
+        activeCount: 1,
+        failedCount: 1,
+        failedGenerationCount: 0
+      });
+      cursor = page.nextCursor;
+    } while (cursor);
+
+    expect(seen).toHaveLength(7);
+    expect(new Set(seen).size).toBe(7);
+    expect(seen[0]).toBe(active.id);
+    expect(seen.at(-2)).toBe(failed.id);
+    expect(seen.at(-1)).toBe(created.at(-1)!.id);
+    tasks.close();
+    const database = new DatabaseSync(file);
+    expect(database.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'tasks_history_idx'
+    `).get()).toEqual({ name: 'tasks_history_idx' });
+    database.close();
+  });
+
+  it('moves one queued task without requiring the complete queue from the renderer', async () => {
+    const tasks = new TaskService(await databasePath());
+    const first = tasks.enqueue({ kind: 'analysis', assetId: 'asset-1', payload: {} });
+    const second = tasks.enqueue({ kind: 'analysis', assetId: 'asset-2', payload: {} });
+    const third = tasks.enqueue({ kind: 'analysis', assetId: 'asset-3', payload: {} });
+
+    tasks.moveQueued({ taskId: third.id, direction: -1 });
+    expect(tasks.list().filter((task) => task.status === 'queued').map((task) => task.id))
+      .toEqual([first.id, third.id, second.id]);
+    expect(tasks.moveQueued({ taskId: first.id, direction: -1 }).id).toBe(first.id);
+    expect(tasks.list().filter((task) => task.status === 'queued').map((task) => task.id))
+      .toEqual([first.id, third.id, second.id]);
+    tasks.close();
+  });
+
+  it('retries failed generation tasks in bounded audited batches', async () => {
+    const file = await databasePath();
+    const tasks = new TaskService(file);
+    for (let index = 0; index < 3; index += 1) {
+      tasks.enqueue({ kind: 'generation', assetId: `asset-${index}`, payload: {} });
+      const task = tasks.claimNext(['generation'])!;
+      tasks.advance(task.id, 'processing', 0.5);
+      tasks.advance(task.id, 'failed', 0.5, 'GENERATION_FAILED');
+    }
+    tasks.enqueue({ kind: 'analysis', assetId: 'analysis-asset', payload: {} });
+    const analysis = tasks.claimNext(['analysis'])!;
+    tasks.advance(analysis.id, 'processing', 0.5);
+    tasks.advance(analysis.id, 'failed', 0.5, 'ANALYSIS_FAILED');
+
+    expect(tasks.retryFailedGenerations({ limit: 2 })).toEqual({ retried: 2, remaining: 1 });
+    expect(tasks.retryFailedGenerations({ limit: 2 })).toEqual({ retried: 1, remaining: 0 });
+    expect(tasks.list().filter((task) => task.kind === 'generation').every((task) =>
+      task.status === 'queued' && task.attempt === 1 && task.errorCode === null)).toBe(true);
+    expect(tasks.find(analysis.id)?.status).toBe('failed');
+    expect(tasks.hasActiveTasks()).toBe(true);
+    expect(tasks.hasQueued(['generation'])).toBe(true);
+    tasks.close();
+
+    const database = new DatabaseSync(file);
+    const events = database.prepare(`
+      SELECT COUNT(*) AS value FROM task_events WHERE details_json = '{"reason":"batch_retry"}'
+    `).get() as { value: number };
+    expect(events.value).toBe(3);
+    database.close();
   });
 
   it('cancels and retries a queued task without losing its payload', async () => {

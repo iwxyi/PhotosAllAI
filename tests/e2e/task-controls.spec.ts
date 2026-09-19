@@ -19,8 +19,6 @@ test.beforeAll(async () => {
   await mkdir(libraryDirectory, { recursive: true });
   databasePath = path.join(libraryDirectory, 'catalog.sqlite');
   const tasks = new TaskService(databasePath);
-  tasks.enqueue({ kind: 'export', assetId: 'asset-A', payload: {} });
-  tasks.enqueue({ kind: 'export', assetId: 'asset-B', payload: {} });
   const failed = tasks.enqueue({ kind: 'generation', assetId: 'asset-failed', payload: {} });
   tasks.close();
   const database = new DatabaseSync(databasePath);
@@ -33,6 +31,10 @@ test.beforeAll(async () => {
   });
   page = await electronApp.firstWindow();
   await page.waitForLoadState('domcontentloaded');
+  const queued = new TaskService(databasePath);
+  queued.enqueue({ kind: 'export', assetId: 'asset-A', payload: {} });
+  queued.enqueue({ kind: 'export', assetId: 'asset-B', payload: {} });
+  queued.close();
 });
 
 test.afterAll(async () => {
@@ -101,4 +103,29 @@ test('reorders queued work and batch-retries failed generation tasks', async () 
   expect(payloads.every((payload) => payload.prompt.includes('队列测试分析') && payload.prompt.includes('保留真实质感'))).toBe(true);
   expect(payloads.every((payload) => payload.providerProfileId === provider.id && payload.templateId === template.id && payload.templateVersion === template.version)).toBe(true);
   expect(payloads.map((payload) => payload.resultIndex).sort()).toEqual([1, 2, 3]);
+
+  const historyDatabase = new DatabaseSync(databasePath);
+  const insertHistory = historyDatabase.prepare(`
+    INSERT INTO tasks (
+      id, kind, asset_id, status, position, progress, attempt,
+      payload_json, result_json, error_code, created_at, updated_at
+    ) VALUES (?, 'analysis', ?, 'completed', ?, 1, 0, '{}', NULL, NULL, ?, ?)
+  `);
+  historyDatabase.exec('BEGIN IMMEDIATE');
+  for (let index = 0; index < 60; index += 1) {
+    insertHistory.run(
+      `10000000-0000-4000-8000-${index.toString().padStart(12, '0')}`,
+      `history-${index}`,
+      index,
+      index,
+      index
+    );
+  }
+  historyDatabase.exec('COMMIT');
+  historyDatabase.close();
+  await expect(page.getByText(/当前显示 50\/\d+ 项/)).toBeVisible();
+  await page.getByRole('button', { name: '加载更多任务' }).click();
+  await expect(rows).toHaveCount(66);
+  await expect(page.getByText('当前显示 66/66 项')).toBeVisible();
+  await page.screenshot({ path: 'test-results/task-history-pagination.png', animations: 'disabled' });
 });

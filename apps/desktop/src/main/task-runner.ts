@@ -13,7 +13,8 @@ interface TaskQueue {
   claimNext(kinds: readonly PersistedTask['kind'][]): PersistedTask | null;
   advance(taskId: string, status: TaskStatus, progress: number, errorCode?: string | null): PersistedTask;
   finish(taskId: string, status: 'completed' | 'failed', result: Record<string, unknown> | null, errorCode?: string | null): PersistedTask;
-  list(): PersistedTask[];
+  find(taskId: string): PersistedTask | null;
+  hasQueued(kinds: readonly PersistedTask['kind'][]): boolean;
 }
 
 interface AnalysisProcessor {
@@ -93,7 +94,7 @@ export class TaskRunner {
             this.#tasks.finish(task.id, 'completed', taskResult);
           }
         } catch (error) {
-          const current = this.#tasks.list().find((item) => item.id === task.id);
+          const current = this.#tasks.find(task.id);
           if (current && current.status !== 'canceled' && current.status !== 'failed') {
             const fallback = task.kind === 'generation' ? 'GENERATION_FAILED' : task.kind === 'export' ? 'EXPORT_FAILED' : 'ANALYSIS_FAILED';
             const errorCode = normalizeTaskErrorCode(error, fallback);
@@ -105,9 +106,7 @@ export class TaskRunner {
       }
     } finally {
       this.#running = false;
-      if (!this.#stopped && this.#tasks.list().some((task) =>
-        (task.kind === 'analysis' || task.kind === 'generation' || task.kind === 'export') && task.status === 'queued'
-      )) {
+      if (!this.#stopped && this.#tasks.hasQueued(['analysis', 'generation', 'export'])) {
         this.wake();
       }
     }

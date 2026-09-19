@@ -497,6 +497,48 @@ export const persistedTaskSchema = z.object({
 
 export type PersistedTask = z.infer<typeof persistedTaskSchema>;
 
+export const taskListCursorSchema = z.object({
+  sortGroup: z.number().int().min(0).max(2),
+  position: z.number().int().nonnegative(),
+  createdAt: z.number().nonnegative(),
+  id: z.string().uuid()
+});
+export type TaskListCursor = z.infer<typeof taskListCursorSchema>;
+
+export const listTaskPageInputSchema = z.object({
+  limit: z.number().int().min(1).max(200).default(50),
+  cursor: taskListCursorSchema.nullable().default(null)
+});
+export type ListTaskPageInput = z.input<typeof listTaskPageInputSchema>;
+
+export const taskPageSchema = z.object({
+  items: z.array(persistedTaskSchema),
+  totalCount: z.number().int().nonnegative(),
+  queuedCount: z.number().int().nonnegative(),
+  activeCount: z.number().int().nonnegative(),
+  failedCount: z.number().int().nonnegative(),
+  failedGenerationCount: z.number().int().nonnegative(),
+  nextCursor: taskListCursorSchema.nullable()
+});
+export type TaskPage = z.infer<typeof taskPageSchema>;
+
+export const moveQueuedTaskInputSchema = z.object({
+  taskId: z.string().uuid(),
+  direction: z.union([z.literal(-1), z.literal(1)])
+});
+export type MoveQueuedTaskInput = z.infer<typeof moveQueuedTaskInputSchema>;
+
+export const retryFailedGenerationTasksInputSchema = z.object({
+  limit: z.number().int().min(1).max(1_000).default(1_000)
+});
+export type RetryFailedGenerationTasksInput = z.input<typeof retryFailedGenerationTasksInputSchema>;
+
+export const retryFailedGenerationTasksReportSchema = z.object({
+  retried: z.number().int().nonnegative(),
+  remaining: z.number().int().nonnegative()
+});
+export type RetryFailedGenerationTasksReport = z.infer<typeof retryFailedGenerationTasksReportSchema>;
+
 export const enqueueTaskInputSchema = z.object({
   kind: taskKindSchema,
   assetId: z.string().nullable().default(null),
@@ -505,7 +547,6 @@ export const enqueueTaskInputSchema = z.object({
 
 export type EnqueueTaskInput = z.infer<typeof enqueueTaskInputSchema>;
 export const taskIdSchema = z.string().uuid();
-export const reorderTaskIdsSchema = z.array(taskIdSchema).max(10_000);
 export const updateQueuedGenerationTaskInputSchema = z.object({
   taskId: taskIdSchema,
   prompt: z.string().trim().min(1).max(50_000)
@@ -810,11 +851,12 @@ export interface DesktopApi {
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;
   deleteProviderProfile(profileId: string): Promise<void>;
   testProviderConnection(input: SaveProviderProfileInput): Promise<ConnectionTest>;
-  listTasks(): Promise<PersistedTask[]>;
+  listTaskPage(input: ListTaskPageInput): Promise<TaskPage>;
   enqueueTask(input: EnqueueTaskInput): Promise<PersistedTask>;
   cancelTask(taskId: string): Promise<PersistedTask>;
   retryTask(taskId: string): Promise<PersistedTask>;
-  reorderTasks(taskIds: string[]): Promise<PersistedTask[]>;
+  moveQueuedTask(input: MoveQueuedTaskInput): Promise<PersistedTask>;
+  retryFailedGenerationTasks(input?: RetryFailedGenerationTasksInput): Promise<RetryFailedGenerationTasksReport>;
   updateQueuedGenerationTask(input: UpdateQueuedGenerationTaskInput): Promise<PersistedTask>;
   updateQueuedGenerationTasks(input: UpdateQueuedGenerationTasksInput): Promise<PersistedTask[]>;
   resizeQueuedGenerationBatch(input: ResizeQueuedGenerationBatchInput): Promise<PersistedTask[]>;

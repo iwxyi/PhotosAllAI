@@ -76,15 +76,17 @@ const api: DesktopApi = {
     ipcRenderer.invoke('providers.delete.v1', profileId) as ReturnType<DesktopApi['deleteProviderProfile']>,
   testProviderConnection: (input) =>
     ipcRenderer.invoke('providers.test.v1', input) as ReturnType<DesktopApi['testProviderConnection']>,
-  listTasks: () => ipcRenderer.invoke('tasks.list.v1') as ReturnType<DesktopApi['listTasks']>,
+  listTaskPage: (input) => ipcRenderer.invoke('tasks.page.v1', input) as ReturnType<DesktopApi['listTaskPage']>,
   enqueueTask: (input) =>
     ipcRenderer.invoke('tasks.enqueue.v1', input) as ReturnType<DesktopApi['enqueueTask']>,
   cancelTask: (taskId) =>
     ipcRenderer.invoke('tasks.cancel.v1', taskId) as ReturnType<DesktopApi['cancelTask']>,
   retryTask: (taskId) =>
     ipcRenderer.invoke('tasks.retry.v1', taskId) as ReturnType<DesktopApi['retryTask']>,
-  reorderTasks: (taskIds) =>
-    ipcRenderer.invoke('tasks.reorder.v1', taskIds) as ReturnType<DesktopApi['reorderTasks']>,
+  moveQueuedTask: (input) =>
+    ipcRenderer.invoke('tasks.move.v1', input) as ReturnType<DesktopApi['moveQueuedTask']>,
+  retryFailedGenerationTasks: (input = {}) =>
+    ipcRenderer.invoke('tasks.generation.retry-failed.v1', input) as ReturnType<DesktopApi['retryFailedGenerationTasks']>,
   updateQueuedGenerationTask: (input) =>
     ipcRenderer.invoke('tasks.generation.update.v1', input) as ReturnType<DesktopApi['updateQueuedGenerationTask']>,
   updateQueuedGenerationTasks: (input) =>
