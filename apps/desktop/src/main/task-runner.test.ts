@@ -102,4 +102,42 @@ describe('analysis task runner', () => {
     runner.stop();
     queue.close();
   });
+
+  it('processes queued export work with its dedicated payload contract', async () => {
+    const queue = await tasks();
+    const exportTask = vi.fn().mockResolvedValue({ succeeded: 1 });
+    const payload = {
+      resultIds: ['32b027ec-aa41-4d0e-a9ea-5c42a2393108'],
+      destinationDirectory: '/tmp/photoallisai-export'
+    };
+    queue.enqueue({ kind: 'export', assetId: null, payload });
+    const runner = new TaskRunner(queue, { analyze: vi.fn() }, { generate: vi.fn() }, { export: exportTask });
+    runner.start();
+
+    await vi.waitFor(() => expect(queue.list()[0]?.status).toBe('completed'));
+    expect(exportTask).toHaveBeenCalledWith(expect.objectContaining(payload), expect.any(AbortSignal));
+    runner.stop();
+    queue.close();
+  });
+
+  it('records export-specific failures and keeps the task retryable', async () => {
+    const queue = await tasks();
+    queue.enqueue({
+      kind: 'export',
+      assetId: null,
+      payload: {
+        resultIds: ['32b027ec-aa41-4d0e-a9ea-5c42a2393108'],
+        destinationDirectory: '/tmp/photoallisai-export'
+      }
+    });
+    const runner = new TaskRunner(queue, { analyze: vi.fn() }, { generate: vi.fn() }, {
+      export: vi.fn().mockRejectedValue(new Error('EXPORT_DESTINATION_NOT_DIRECTORY'))
+    });
+    runner.start();
+
+    await vi.waitFor(() => expect(queue.list()[0]?.status).toBe('failed'));
+    expect(queue.list()[0]?.errorCode).toBe('EXPORT_DESTINATION_NOT_DIRECTORY');
+    runner.stop();
+    queue.close();
+  });
 });

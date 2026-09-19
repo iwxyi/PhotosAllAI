@@ -733,6 +733,14 @@ export const exportPresetSchema = z.object({
 });
 export type ExportPreset = z.infer<typeof exportPresetSchema>;
 
+export const exportTaskPayloadSchema = z.object({
+  resultIds: z.array(z.string().uuid()).min(1).max(10_000),
+  destinationDirectory: z.string().trim().min(1).max(4_096),
+  preset: exportPresetSchema.optional()
+});
+
+export type ExportTaskPayload = z.infer<typeof exportTaskPayloadSchema>;
+
 export const saveExportPresetInputSchema = exportPresetSchema.omit({ id: true, createdAt: true, updatedAt: true }).extend({
   id: z.string().uuid().optional(),
   quality: z.number().int().min(1).max(100).optional().default(90),

@@ -24,6 +24,7 @@ import {
   catalogCompanionPreviewSchema,
   enqueueTaskInputSchema,
   exportGenerationResultsInputSchema,
+  exportTaskPayloadSchema,
   generationResultIdInputSchema,
   exportReportSchema,
   saveExportPresetInputSchema,
@@ -617,7 +618,15 @@ app.whenReady().then(async () => {
   exportService = new ExportService(databasePath, generation);
   exportPresets = new ExportPresetService(databasePath);
   await migration.complete(APPLICATION_SCHEMA_VERSION, migrationCheckpoint);
-  taskRunner = new TaskRunner(tasks, analysis, generation);
+  taskRunner = new TaskRunner(tasks, analysis, generation, {
+    export: async (rawPayload, signal) => {
+      signal?.throwIfAborted();
+      const payload = exportTaskPayloadSchema.parse(rawPayload);
+      const report = await exportService.exportToDirectory(payload.resultIds, payload.destinationDirectory, payload.preset);
+      signal?.throwIfAborted();
+      return report;
+    }
+  });
   void databaseBackup.createAutomatic(join(libraryDirectory, 'backups'))
     .then((result) => {
       startupRecovery.automaticBackup.status = classifyAutomaticBackupResult(result);

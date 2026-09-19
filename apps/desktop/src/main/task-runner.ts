@@ -1,5 +1,6 @@
 import {
   analysisTaskPayloadSchema,
+  exportTaskPayloadSchema,
   generationTaskPayloadSchema,
   type PersistedTask
 } from '@photoallisai/contracts';
@@ -19,6 +20,10 @@ interface GenerationProcessor {
   generate(assetId: string, payload: unknown, signal?: AbortSignal): Promise<unknown>;
 }
 
+interface ExportProcessor {
+  export(payload: unknown, signal?: AbortSignal): Promise<unknown>;
+}
+
 export class TaskRunner {
   #running = false;
   #stopped = false;
@@ -26,11 +31,13 @@ export class TaskRunner {
   readonly #tasks: TaskQueue;
   readonly #analysis: AnalysisProcessor;
   readonly #generation: GenerationProcessor;
+  readonly #export: ExportProcessor;
 
-  constructor(tasks: TaskQueue, analysis: AnalysisProcessor, generation: GenerationProcessor) {
+  constructor(tasks: TaskQueue, analysis: AnalysisProcessor, generation: GenerationProcessor, exportProcessor: ExportProcessor = { export: async () => undefined }) {
     this.#tasks = tasks;
     this.#analysis = analysis;
     this.#generation = generation;
+    this.#export = exportProcessor;
   }
 
   start(): void {
@@ -56,19 +63,22 @@ export class TaskRunner {
   async #drain(): Promise<void> {
     try {
       while (!this.#stopped) {
-        const task = this.#tasks.claimNext(['analysis', 'generation']);
+        const task = this.#tasks.claimNext(['analysis', 'generation', 'export']);
         if (!task) break;
         const controller = new AbortController();
         this.#controllers.set(task.id, controller);
         try {
-          if (!task.assetId) throw new Error('TASK_ASSET_MISSING');
+          if (task.kind !== 'export' && !task.assetId) throw new Error('TASK_ASSET_MISSING');
           this.#tasks.advance(task.id, 'processing', 0.1);
           if (task.kind === 'analysis') {
             const payload = analysisTaskPayloadSchema.parse(task.payload);
-            await this.#analysis.analyze(task.assetId, payload.providerProfileId, controller.signal);
-          } else {
+            await this.#analysis.analyze(task.assetId!, payload.providerProfileId, controller.signal);
+          } else if (task.kind === 'generation') {
             const payload = generationTaskPayloadSchema.parse(task.payload);
-            await this.#generation.generate(task.assetId, payload, controller.signal);
+            await this.#generation.generate(task.assetId!, payload, controller.signal);
+          } else {
+            const payload = exportTaskPayloadSchema.parse(task.payload);
+            await this.#export.export(payload, controller.signal);
           }
           this.#tasks.advance(task.id, 'downloading', 0.85);
           this.#tasks.advance(task.id, 'saving', 0.95);
@@ -76,7 +86,7 @@ export class TaskRunner {
         } catch (error) {
           const current = this.#tasks.list().find((item) => item.id === task.id);
           if (current && current.status !== 'canceled' && current.status !== 'failed') {
-            const fallback = task.kind === 'generation' ? 'GENERATION_FAILED' : 'ANALYSIS_FAILED';
+            const fallback = task.kind === 'generation' ? 'GENERATION_FAILED' : task.kind === 'export' ? 'EXPORT_FAILED' : 'ANALYSIS_FAILED';
             const errorCode = error instanceof Error ? error.message.slice(0, 200) : fallback;
             this.#tasks.advance(task.id, 'failed', current.progress, errorCode);
           }
@@ -87,7 +97,7 @@ export class TaskRunner {
     } finally {
       this.#running = false;
       if (!this.#stopped && this.#tasks.list().some((task) =>
-        (task.kind === 'analysis' || task.kind === 'generation') && task.status === 'queued'
+        (task.kind === 'analysis' || task.kind === 'generation' || task.kind === 'export') && task.status === 'queued'
       )) {
         this.wake();
       }
