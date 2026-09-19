@@ -340,7 +340,7 @@ export class CatalogService {
     const values = [...baseValues];
     if (input.cursor) {
       if (input.sortBy === 'fileName') {
-        conditions.push('(file_name > ? OR (file_name = ? AND id > ?))');
+        conditions.push('(file_name COLLATE NOCASE > ? OR (file_name COLLATE NOCASE = ? AND id > ?))');
         values.push(typeof input.cursor.sortValue === 'string' ? input.cursor.sortValue : '', typeof input.cursor.sortValue === 'string' ? input.cursor.sortValue : '', input.cursor.id);
       } else if (input.sortBy === 'rating') {
         conditions.push('(rating < ? OR (rating = ? AND id > ?))');

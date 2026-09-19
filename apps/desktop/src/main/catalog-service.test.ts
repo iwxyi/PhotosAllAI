@@ -100,6 +100,27 @@ describe('catalog image discovery', () => {
     catalog.close();
   });
 
+  it('paginates case-insensitive filename sorting without repeats or omissions', async () => {
+    const root = await createTemporaryDirectory();
+    const photosDirectory = path.join(root, 'photos');
+    await mkdir(photosDirectory, { recursive: true });
+    for (const fileName of ['alpha.jpg', 'Bravo.jpg', 'charlie.jpg', 'Delta.jpg', 'echo.jpg']) {
+      await writeFile(path.join(photosDirectory, fileName), fileName);
+    }
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([photosDirectory]);
+    const fileNames: string[] = [];
+    let cursor = null;
+    do {
+      const page = catalog.listAssetPage({ folderId: null, sortBy: 'fileName', cursor, limit: 2 });
+      fileNames.push(...page.items.map((asset) => asset.fileName));
+      cursor = page.nextCursor;
+    } while (cursor);
+
+    expect(fileNames).toEqual(['alpha.jpg', 'Bravo.jpg', 'charlie.jpg', 'Delta.jpg', 'echo.jpg']);
+    catalog.close();
+  });
+
   it('manages virtual albums and dynamic smart collections without moving files', async () => {
     const root = await createTemporaryDirectory();
     const photosDirectory = path.join(root, 'photos');
