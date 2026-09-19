@@ -127,6 +127,7 @@ test('opens the task drawer and application tabs', async () => {
   await expect(page.getByText('尚未配置模型')).toBeVisible();
   await expect(page.getByRole('heading', { name: '导出预设' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '诊断摘要' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '导出诊断文件' })).toBeVisible();
   await page.getByRole('button', { name: '外观' }).click();
   await page.getByRole('radio', { name: /浅色/ }).check();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');

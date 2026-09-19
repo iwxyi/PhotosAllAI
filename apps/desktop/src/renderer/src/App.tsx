@@ -1341,6 +1341,7 @@ function SettingsPage(): React.JSX.Element {
   const [cacheBusy, setCacheBusy] = useState(false);
   const [diagnostics, setDiagnostics] = useState<DiagnosticSnapshot | null>(null);
   const [diagnosticMessage, setDiagnosticMessage] = useState('');
+  const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [generationStorageMode, setGenerationStorageMode] = useState<AppSettings['generationStorageMode']>('managed');
   const [theme, setTheme] = useState<AppSettings['theme']>('system');
   const [storageMessage, setStorageMessage] = useState('');
@@ -1424,6 +1425,17 @@ function SettingsPage(): React.JSX.Element {
       setDiagnosticMessage('诊断摘要已复制，可直接粘贴给支持团队。');
     } catch {
       setDiagnosticMessage('复制失败，请检查系统剪贴板权限。');
+    }
+  };
+  const exportDiagnostics = async () => {
+    setDiagnosticBusy(true);
+    try {
+      const result = await window.desktopApi.exportDiagnosticSnapshot();
+      setDiagnosticMessage(result.canceled ? '已取消诊断文件导出。' : `诊断文件已保存（${result.bytes.toLocaleString()} 字节）。`);
+    } catch {
+      setDiagnosticMessage('诊断文件导出失败，请检查目标目录权限。');
+    } finally {
+      setDiagnosticBusy(false);
     }
   };
 
@@ -1535,7 +1547,7 @@ function SettingsPage(): React.JSX.Element {
         </section>}
         <section className="settings-section diagnostics-section">
           <div className="settings-heading"><div><h2>诊断摘要</h2><p>仅包含运行统计，不包含路径、密钥、图片内容或模型响应。</p></div><span><ShieldCheck size={14} />可安全提交给支持团队</span></div>
-          {diagnostics && <div className="cache-actions"><button className="secondary-action compact" type="button" onClick={() => void copyDiagnostics()}><Copy size={13} />复制脱敏摘要</button><span role="status">{diagnosticMessage}</span></div>}
+          {diagnostics && <div className="cache-actions"><button className="secondary-action compact" type="button" onClick={() => void copyDiagnostics()}><Copy size={13} />复制脱敏摘要</button><button className="secondary-action compact" type="button" disabled={diagnosticBusy} onClick={() => void exportDiagnostics()}><Download size={13} />{diagnosticBusy ? '导出中…' : '导出诊断文件'}</button><span role="status">{diagnosticMessage}</span></div>}
           {diagnostics ? <div className="diagnostic-grid"><span>版本<strong>{diagnostics.appVersion}</strong></span><span>图库<strong>{diagnostics.catalog.assets} 张 · 离线 {diagnostics.catalog.offline}</strong></span><span>模型<strong>{diagnostics.providers.enabled}/{diagnostics.providers.total} 已启用</strong></span><span>缓存<strong>{(diagnostics.cache.bytes / 1_073_741_824).toFixed(2)} GiB</strong><small>命中 {diagnostics.cache.performance.hits} · 未命中 {diagnostics.cache.performance.misses}</small></span><span>解码<strong>{diagnostics.cache.performance.decodes} 次</strong><small>累计 {Math.round(diagnostics.cache.performance.decodeMsTotal)} ms</small></span><span>RAW 代理<strong>{diagnostics.cache.raw.imageMagick ? 'ImageMagick' : diagnostics.cache.raw.sips ? 'sips' : '未安装'}</strong><small>原生入口已启用；完整显影仍按发布计划推进</small></span></div> : <small>正在读取诊断摘要…</small>}
         </section>
       </main>

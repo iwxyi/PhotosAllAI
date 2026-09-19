@@ -28,6 +28,13 @@ export const diagnosticSnapshotSchema = z.object({
 });
 export type DiagnosticSnapshot = z.infer<typeof diagnosticSnapshotSchema>;
 
+export const diagnosticExportResultSchema = z.object({
+  canceled: z.boolean(),
+  bytes: z.number().int().nonnegative(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/).nullable()
+});
+export type DiagnosticExportResult = z.infer<typeof diagnosticExportResultSchema>;
+
 export const databaseBackupResultSchema = z.object({
   canceled: z.boolean(),
   destinationPath: z.string().nullable(),
@@ -567,6 +574,7 @@ export interface DesktopApi {
   getAppSettings(): Promise<AppSettings>;
   saveAppSettings(input: AppSettings): Promise<AppSettings>;
   getDiagnosticSnapshot(): Promise<DiagnosticSnapshot>;
+  exportDiagnosticSnapshot(): Promise<DiagnosticExportResult>;
   backupDatabase(): Promise<DatabaseBackupResult>;
   getWorkspaceSession(): Promise<WorkspaceSession>;
   saveWorkspaceSession(session: WorkspaceSession): Promise<WorkspaceSession>;

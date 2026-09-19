@@ -1,4 +1,6 @@
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
+import { rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -7,6 +9,7 @@ import {
   appInfoSchema,
   appSettingsSchema,
   diagnosticSnapshotSchema,
+  diagnosticExportResultSchema,
   databaseBackupResultSchema,
   catalogAssetRemovalInputSchema,
   catalogAssetRemovalReportSchema,
@@ -78,6 +81,22 @@ let workspace: WorkspaceService;
 let appSettings: AppSettingsService;
 let databaseBackup: DatabaseBackupService;
 
+async function createDiagnosticSnapshot() {
+  const [profiles, cacheStats, raw] = await Promise.all([providers.list(), imageCache.getStats(), imageCache.getDecoderCapabilities()]);
+  const taskCounts = tasks.list().reduce<Record<string, number>>((counts, task) => {
+    counts[task.status] = (counts[task.status] ?? 0) + 1;
+    return counts;
+  }, {});
+  return diagnosticSnapshotSchema.parse({
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    catalog: catalog.getStats(),
+    providers: { total: profiles.length, enabled: profiles.filter((profile) => profile.enabled).length },
+    tasks: taskCounts,
+    cache: { ...cacheStats, performance: imageCache.getPerformanceStats(), raw }
+  });
+}
+
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'photoasset',
@@ -111,19 +130,31 @@ function registerIpc(): void {
   ipcMain.handle('app.settings.save.v1', (_event, input: unknown) =>
     appSettings.save(appSettingsSchema.parse(input))
   );
-  ipcMain.handle('app.diagnostics.v1', async () => {
-    const [profiles, cacheStats, raw] = await Promise.all([providers.list(), imageCache.getStats(), imageCache.getDecoderCapabilities()]);
-    const taskCounts = tasks.list().reduce<Record<string, number>>((counts, task) => {
-      counts[task.status] = (counts[task.status] ?? 0) + 1;
-      return counts;
-    }, {});
-    return diagnosticSnapshotSchema.parse({
-      appVersion: app.getVersion(),
-      platform: process.platform,
-      catalog: catalog.getStats(),
-      providers: { total: profiles.length, enabled: profiles.filter((profile) => profile.enabled).length },
-      tasks: taskCounts,
-      cache: { ...cacheStats, performance: imageCache.getPerformanceStats(), raw }
+  ipcMain.handle('app.diagnostics.v1', createDiagnosticSnapshot);
+  ipcMain.handle('app.diagnostics.export.v1', async () => {
+    const selection = await dialog.showSaveDialog({
+      title: '导出脱敏诊断文件',
+      buttonLabel: '保存诊断文件',
+      defaultPath: join(app.getPath('documents'), `PhotoAllIsAI-diagnostics-${Date.now()}.json`),
+      filters: [{ name: 'JSON', extensions: ['json'] }]
+    });
+    if (selection.canceled || !selection.filePath) {
+      return diagnosticExportResultSchema.parse({ canceled: true, bytes: 0, sha256: null });
+    }
+    const content = Buffer.from(JSON.stringify({ generatedAt: new Date().toISOString(), snapshot: await createDiagnosticSnapshot() }, null, 2));
+    const temporaryPath = `${selection.filePath}.${process.pid}.tmp`;
+    try {
+      await writeFile(temporaryPath, content, { mode: 0o600 });
+      await unlink(selection.filePath).catch(() => undefined);
+      await rename(temporaryPath, selection.filePath);
+    } catch (error) {
+      await unlink(temporaryPath).catch(() => undefined);
+      throw error;
+    }
+    return diagnosticExportResultSchema.parse({
+      canceled: false,
+      bytes: content.byteLength,
+      sha256: createHash('sha256').update(content).digest('hex')
     });
   });
   ipcMain.handle('app.database.backup.v1', async () => {
