@@ -44,7 +44,7 @@ describe('OpenAI-compatible visual analysis', () => {
     const profile: ProviderProfile = {
       id: 'aa2888b2-4f07-4598-a876-710d702d14da', name: 'Vision',
       kind: 'openai-compatible', purpose: 'vision', baseUrl: `http://127.0.0.1:${address.port}/v1`,
-      modelId: 'vision-model', requestTimeoutMs: 300_000, retryCount: 2,
+      modelId: 'vision-model', requestTimeoutMs: 300_000, retryCount: 2, customHeaders: {},
       hasCredential: true, enabled: true, updatedAt: Date.now()
     };
     const analysis = new AnalysisService(
@@ -65,7 +65,7 @@ describe('OpenAI-compatible visual analysis', () => {
     const profile: ProviderProfile = {
       id: 'aa2888b2-4f07-4598-a876-710d702d14da', name: 'Generator',
       kind: 'nanobanana-compatible', purpose: 'generation', baseUrl: 'https://example.com/v1',
-      modelId: 'image-model', requestTimeoutMs: 300_000, retryCount: 2,
+      modelId: 'image-model', requestTimeoutMs: 300_000, retryCount: 2, customHeaders: {},
       hasCredential: true, enabled: true, updatedAt: Date.now()
     };
     const analysis = new AnalysisService(
@@ -101,7 +101,7 @@ describe('OpenAI-compatible visual analysis', () => {
     const profile: ProviderProfile = {
       id: 'e0668a39-803b-483e-91c4-8a36f95fbf44', name: 'Retry Vision',
       kind: 'openai-compatible', purpose: 'vision', baseUrl: `http://127.0.0.1:${address.port}/v1`,
-      modelId: 'vision-model', requestTimeoutMs: 10_000, retryCount: 1,
+      modelId: 'vision-model', requestTimeoutMs: 10_000, retryCount: 1, customHeaders: {},
       hasCredential: true, enabled: true, updatedAt: Date.now()
     };
     const analysis = new AnalysisService(

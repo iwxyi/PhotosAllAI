@@ -443,6 +443,31 @@ export type ProviderKind = z.infer<typeof providerKindSchema>;
 export const providerPurposeSchema = z.enum(['vision', 'generation']);
 export type ProviderPurpose = z.infer<typeof providerPurposeSchema>;
 
+const providerHeaderNameSchema = z.string().min(1).max(100).regex(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u);
+const providerHeaderValueSchema = z.string().max(2_000).refine((value) => !/[\r\n]/u.test(value));
+const forbiddenProviderHeaders = new Set([
+  'accept', 'authorization', 'connection', 'content-length', 'content-type', 'cookie', 'cookie2',
+  'expect', 'forwarded', 'host', 'origin', 'proxy-authorization', 'referer', 'set-cookie', 'te',
+  'trailer', 'transfer-encoding', 'upgrade', 'user-agent', 'via', 'x-forwarded-for',
+  'x-forwarded-host', 'x-forwarded-proto'
+]);
+
+export const providerCustomHeadersSchema = z.record(providerHeaderNameSchema, providerHeaderValueSchema)
+  .refine((headers) => Object.keys(headers).length <= 20, { message: 'Too many custom headers' })
+  .superRefine((headers, context) => {
+    const names = new Set<string>();
+    for (const name of Object.keys(headers)) {
+      const normalized = name.toLowerCase();
+      if (names.has(normalized)) {
+        context.addIssue({ code: 'custom', message: 'Duplicate custom header name', path: [name] });
+      }
+      names.add(normalized);
+      if (forbiddenProviderHeaders.has(normalized) || normalized.startsWith('proxy-') || normalized.startsWith('sec-')) {
+        context.addIssue({ code: 'custom', message: 'Forbidden custom header', path: [name] });
+      }
+    }
+  });
+
 export const providerProfileSchema = z.object({
   id: z.string().uuid(),
   name: z.string().min(1).max(80),
@@ -452,6 +477,7 @@ export const providerProfileSchema = z.object({
   modelId: z.string().min(1).max(200),
   requestTimeoutMs: z.number().int().min(10_000).max(600_000).default(300_000),
   retryCount: z.number().int().min(0).max(5).default(2),
+  customHeaders: providerCustomHeadersSchema.default({}),
   hasCredential: z.boolean(),
   enabled: z.boolean(),
   updatedAt: z.number().nonnegative()

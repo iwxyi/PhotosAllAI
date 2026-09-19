@@ -75,7 +75,7 @@ describe('provider service', () => {
     }]));
 
     await expect(providers.list()).resolves.toEqual([
-      expect.objectContaining({ requestTimeoutMs: 300_000, retryCount: 2 })
+      expect.objectContaining({ requestTimeoutMs: 300_000, retryCount: 2, customHeaders: {} })
     ]);
   });
 
@@ -101,8 +101,10 @@ describe('provider service', () => {
 
   it('tests a compatible endpoint without exposing the credential', async () => {
     let receivedAuthorization = '';
+    let receivedOrganization = '';
     const server = createServer((request, response) => {
       receivedAuthorization = request.headers.authorization ?? '';
+      receivedOrganization = String(request.headers['openai-organization'] ?? '');
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end('{"data":[]}');
     });
@@ -114,10 +116,25 @@ describe('provider service', () => {
     const providers = await service();
     const result = await providers.test({
       name: 'Local', kind: 'openai-compatible', purpose: 'vision',
-      baseUrl: `http://127.0.0.1:${address.port}/v1`, modelId: 'model', apiKey: 'test-key', enabled: true
+      baseUrl: `http://127.0.0.1:${address.port}/v1`, modelId: 'model', apiKey: 'test-key',
+      customHeaders: { 'OpenAI-Organization': 'org-local' }, enabled: true
     });
     expect(result.ok).toBe(true);
     expect(receivedAuthorization).toBe('Bearer test-key');
+    expect(receivedOrganization).toBe('org-local');
+  });
+
+  it('rejects security-sensitive and malformed custom headers', async () => {
+    const providers = await service();
+    const base = {
+      name: 'Headers', kind: 'openai-compatible' as const, purpose: 'vision' as const,
+      baseUrl: 'https://example.com/v1', modelId: 'model', apiKey: 'key', enabled: true
+    };
+
+    await expect(providers.save({ ...base, customHeaders: { Authorization: 'other-secret' } })).rejects.toThrow();
+    await expect(providers.save({ ...base, customHeaders: { 'Proxy-Authorization': 'secret' } })).rejects.toThrow();
+    await expect(providers.save({ ...base, customHeaders: { 'X-Route': 'ok\r\nX-Injected: true' } })).rejects.toThrow();
+    await expect(providers.save({ ...base, customHeaders: { 'Bad Header': 'value' } })).rejects.toThrow();
   });
 
   it('quarantines malformed provider settings and keeps the app usable', async () => {

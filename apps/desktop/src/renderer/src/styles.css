@@ -69,6 +69,7 @@
 [data-theme="light"] .tag-editor-popover input,
 [data-theme="light"] .provider-form input:not([type="checkbox"]),
 [data-theme="light"] .provider-form select,
+[data-theme="light"] .provider-form textarea,
 [data-theme="light"] .inline-search input,
 [data-theme="light"] .template-editor input,
 [data-theme="light"] .template-editor select,
@@ -336,9 +337,11 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 .form-title { display: flex; align-items: center; gap: 10px; margin-bottom: 3px; }.form-title > div { display: grid; gap: 4px; }.form-title small { color: var(--dim); font-size: 9px; }
 .provider-form label { display: grid; gap: 6px; color: var(--muted); font-size: 10px; }
 .provider-form label > small { color: var(--dim); font-size: 9px; }
-.provider-form input:not([type="checkbox"]), .provider-form select { width: 100%; height: 34px; padding: 0 9px; color: var(--text); background: #101210; border: 1px solid var(--line); border-radius: var(--radius-sm); outline: none; }
-.provider-form input:hover, .provider-form select:hover { border-color: var(--line-strong); }
-.provider-form input:focus, .provider-form select:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgb(200 243 93 / 8%); }
+.provider-form input:not([type="checkbox"]), .provider-form select, .provider-form textarea { width: 100%; padding: 0 9px; color: var(--text); background: #101210; border: 1px solid var(--line); border-radius: var(--radius-sm); outline: none; }
+.provider-form input:not([type="checkbox"]), .provider-form select { height: 34px; }
+.provider-form textarea { min-height: 76px; padding-block: 8px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; line-height: 1.45; }
+.provider-form input:hover, .provider-form select:hover, .provider-form textarea:hover { border-color: var(--line-strong); }
+.provider-form input:focus, .provider-form select:focus, .provider-form textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgb(200 243 93 / 8%); }
 .form-grid.two-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .secret-input { position: relative; }.secret-input svg { position: absolute; z-index: 1; top: 10px; left: 9px; color: var(--dim); }.secret-input input { padding-left: 30px !important; }
 .provider-form .enabled-row { display: flex; align-items: center; gap: 7px; color: var(--text); }.enabled-row input { accent-color: var(--accent); }

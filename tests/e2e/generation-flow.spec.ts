@@ -92,6 +92,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await page.getByLabel('Model ID').fill('vision-test');
   await page.getByLabel('模型请求超时').selectOption('120000');
   await page.getByLabel('模型自动重试次数').selectOption('3');
+  await page.getByLabel('模型自定义请求头').fill('{"OpenAI-Organization":"org-e2e"}');
   await page.getByLabel('API Key').fill('test-key');
   await page.getByRole('button', { name: '保存配置' }).click();
   await expect(page.getByText('配置已安全保存')).toBeVisible();
@@ -107,8 +108,12 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await page.getByRole('button', { name: '保存配置' }).click();
   await expect(page.getByText('Generation Mock')).toBeVisible();
   const savedProfiles = await page.evaluate(() => window.desktopApi.listProviderProfiles());
-  expect(savedProfiles.find((profile) => profile.name === 'Vision Mock')).toMatchObject({ requestTimeoutMs: 120_000, retryCount: 3 });
-  expect(savedProfiles.find((profile) => profile.name === 'Generation Mock')).toMatchObject({ requestTimeoutMs: 300_000, retryCount: 2 });
+  expect(savedProfiles.find((profile) => profile.name === 'Vision Mock')).toMatchObject({
+    requestTimeoutMs: 120_000, retryCount: 3, customHeaders: { 'OpenAI-Organization': 'org-e2e' }
+  });
+  expect(savedProfiles.find((profile) => profile.name === 'Generation Mock')).toMatchObject({
+    requestTimeoutMs: 300_000, retryCount: 2, customHeaders: {}
+  });
 
   await page.getByLabel('导出预设名称').fill('PNG 交付');
   await page.getByLabel('导出格式').selectOption('png');

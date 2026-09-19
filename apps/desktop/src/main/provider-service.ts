@@ -12,6 +12,7 @@ import {
 } from '@photoallisai/contracts';
 
 import { quarantineInvalidRegularFile, replaceRegularFileSafely } from './safe-file-write';
+import { createProviderRequestHeaders } from './provider-request-headers';
 
 type StoredProviderProfile = Omit<ProviderProfile, 'hasCredential'> & {
   encryptedCredential?: string;
@@ -89,6 +90,7 @@ export class ProviderService {
       modelId: input.modelId.trim(),
       requestTimeoutMs: input.requestTimeoutMs,
       retryCount: input.retryCount,
+      customHeaders: input.customHeaders,
       enabled: input.enabled,
       updatedAt: Date.now(),
       ...(encryptedCredential ? { encryptedCredential } : {})
@@ -126,7 +128,7 @@ export class ProviderService {
 
     try {
       const response = await fetch(endpoint, {
-        headers: { Authorization: `Bearer ${credential}`, Accept: 'application/json' },
+        headers: createProviderRequestHeaders(input.customHeaders, credential),
         redirect: 'error',
         signal: controller.signal
       });

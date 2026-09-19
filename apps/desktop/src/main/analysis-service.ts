@@ -12,6 +12,7 @@ import {
 import type { ImageCacheService } from './image-cache-service';
 import { fetchBounded } from './network-safety';
 import type { ProviderService } from './provider-service';
+import { createProviderRequestHeaders } from './provider-request-headers';
 import { normalizeSearchText, tokenizeSearchText } from './search-index';
 
 type ProviderResolver = Pick<ProviderService, 'resolve'>;
@@ -91,11 +92,7 @@ export class AnalysisService {
 
     const response = await fetchBounded(`${provider.profile.baseUrl}/chat/completions`, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${provider.apiKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json'
-      },
+      headers: createProviderRequestHeaders(provider.profile.customHeaders, provider.apiKey),
       redirect: 'error',
       body: JSON.stringify({
         model: provider.profile.modelId,

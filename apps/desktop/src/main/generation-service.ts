@@ -23,6 +23,7 @@ import type { CatalogService } from './catalog-service';
 import type { ImageCacheService } from './image-cache-service';
 import { downloadPinned, fetchBounded, isPrivateNetworkAddress } from './network-safety';
 import type { ProviderService, ResolvedProvider } from './provider-service';
+import { createProviderRequestHeaders } from './provider-request-headers';
 import { publishTemporaryFileSafely } from './safe-file-write';
 
 type ProviderResolver = Pick<ProviderService, 'resolve'>;
@@ -825,11 +826,7 @@ async function requestGeneratedImage(
 ): Promise<Buffer> {
   const response = await fetchBounded(`${provider.profile.baseUrl}/images/edits`, {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${provider.apiKey}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json'
-    },
+    headers: createProviderRequestHeaders(provider.profile.customHeaders, provider.apiKey),
     redirect: 'error',
     body: JSON.stringify({
       model: provider.profile.modelId,

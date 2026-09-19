@@ -61,6 +61,7 @@ async function fixture(
     modelId: 'image-model',
     requestTimeoutMs: 300_000,
     retryCount: 2,
+    customHeaders: {},
     hasCredential: true,
     enabled: true,
     updatedAt: Date.now()

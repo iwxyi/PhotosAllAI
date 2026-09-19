@@ -1579,6 +1579,7 @@ const emptyProviderForm: SaveProviderProfileInput = {
   modelId: '',
   requestTimeoutMs: 300_000,
   retryCount: 2,
+  customHeaders: {},
   apiKey: '',
   enabled: true
 };
@@ -1588,6 +1589,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('models');
   const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
   const [form, setForm] = useState<SaveProviderProfileInput>(emptyProviderForm);
+  const [customHeadersText, setCustomHeadersText] = useState('{}');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState<'save' | 'test' | null>(null);
   const [providerDeleteCandidate, setProviderDeleteCandidate] = useState<string | null>(null);
@@ -1696,6 +1698,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
       await window.desktopApi.deleteProviderProfile(form.id);
       setProfiles((current) => current.filter((profile) => profile.id !== form.id));
       setForm(emptyProviderForm);
+      setCustomHeadersText('{}');
       setProviderDeleteCandidate(null);
       setMessage('模型配置及其本地凭据已删除。');
     } catch {
@@ -1708,12 +1711,14 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
   const save = async () => {
     setBusy('save');
     try {
-      const saved = await window.desktopApi.saveProviderProfile(form);
+      const customHeaders = JSON.parse(customHeadersText) as SaveProviderProfileInput['customHeaders'];
+      const saved = await window.desktopApi.saveProviderProfile({ ...form, customHeaders });
       setProfiles((current) => [...current.filter((profile) => profile.id !== saved.id), saved]);
       setForm(emptyProviderForm);
+      setCustomHeadersText('{}');
       setMessage('配置已安全保存');
-    } catch {
-      setMessage('保存失败，请检查必填项和服务地址');
+    } catch (error) {
+      setMessage(error instanceof SyntaxError ? '自定义请求头必须是有效的 JSON 对象' : '保存失败，请检查必填项、服务地址和自定义请求头');
     } finally {
       setBusy(null);
     }
@@ -1722,10 +1727,11 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
   const testConnection = async () => {
     setBusy('test');
     try {
-      const result = await window.desktopApi.testProviderConnection(form);
+      const customHeaders = JSON.parse(customHeadersText) as SaveProviderProfileInput['customHeaders'];
+      const result = await window.desktopApi.testProviderConnection({ ...form, customHeaders });
       setMessage(`${result.message}${result.latencyMs > 0 ? ` · ${result.latencyMs} ms` : ''}`);
-    } catch {
-      setMessage('连接测试失败，请检查配置');
+    } catch (error) {
+      setMessage(error instanceof SyntaxError ? '自定义请求头必须是有效的 JSON 对象' : '连接测试失败，请检查配置和自定义请求头');
     } finally {
       setBusy(null);
     }
@@ -1871,8 +1877,9 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
                 modelId: profile.modelId,
                 requestTimeoutMs: profile.requestTimeoutMs,
                 retryCount: profile.retryCount,
+                customHeaders: profile.customHeaders,
                 enabled: profile.enabled
-              }); setProviderDeleteCandidate(null); }}>
+              }); setCustomHeadersText(JSON.stringify(profile.customHeaders, null, 2)); setProviderDeleteCandidate(null); }}>
                 <span className="provider-icon">{profile.purpose === 'vision' ? <Bot size={16} /> : <WandSparkles size={16} />}</span>
                 <span><strong>{profile.name}</strong><small>{profile.modelId}</small></span>
                 <i className={profile.enabled ? 'is-online' : ''} />
@@ -1893,6 +1900,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
               <label><span>请求超时</span><select aria-label="模型请求超时" value={form.requestTimeoutMs} onChange={(event) => patchForm('requestTimeoutMs', Number(event.target.value))}><option value={30_000}>30 秒</option><option value={60_000}>60 秒</option><option value={120_000}>2 分钟</option><option value={300_000}>5 分钟</option><option value={600_000}>10 分钟</option></select></label>
               <label><span>自动重试</span><select aria-label="模型自动重试次数" value={form.retryCount} onChange={(event) => patchForm('retryCount', Number(event.target.value))}><option value={0}>不重试</option><option value={1}>1 次</option><option value={2}>2 次</option><option value={3}>3 次</option><option value={5}>5 次</option></select><small>仅针对限流、网关和服务暂不可用；取消任务会中断等待。</small></label>
             </div>
+            <label><span>自定义请求头</span><textarea aria-label="模型自定义请求头" rows={4} spellCheck={false} value={customHeadersText} onChange={(event) => { setCustomHeadersText(event.target.value); setMessage(''); }} /><small>使用 JSON 对象；认证、Cookie、Host、来源及传输层请求头不可覆盖。敏感凭据请只填写 API Key。</small></label>
             <label><span>API Key</span><div className="secret-input"><KeyRound size={14} /><input type="password" autoComplete="off" placeholder={form.id ? '留空以保留已保存凭据' : '输入服务密钥'} value={form.apiKey ?? ''} onChange={(event) => patchForm('apiKey', event.target.value)} /></div><small>密钥不会写入图库数据库、日志或导出清单。</small></label>
             <label className="enabled-row"><input type="checkbox" checked={form.enabled} onChange={(event) => patchForm('enabled', event.target.checked)} /><span>启用此配置</span></label>
             <div className="form-feedback" role="status">{message}</div>
