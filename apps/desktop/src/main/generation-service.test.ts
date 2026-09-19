@@ -147,6 +147,30 @@ describe('managed generation results', () => {
     service.close();
   });
 
+  it('does not remove a result replaced by a competing file during later persistence', async () => {
+    let resultDestination = '';
+    let publishCalls = 0;
+    const publisher: ConstructorParameters<typeof GenerationService>[5] = async (target, temporary) => {
+      publishCalls += 1;
+      if (publishCalls === 1) {
+        resultDestination = target;
+        await publishTemporaryFileSafely(target, temporary);
+        return;
+      }
+      await writeFile(resultDestination, 'competing-after-publish');
+      throw new Error('simulated persistence failure');
+    };
+    const { service } = await fixture(
+      () => ({ data: [{ b64_json: png.toString('base64') }] }),
+      undefined,
+      publisher
+    );
+
+    await expect(service.generate('asset-1', payload())).rejects.toThrow('simulated persistence failure');
+    expect(await readFile(resultDestination, 'utf8')).toBe('competing-after-publish');
+    service.close();
+  });
+
   it('rejects a symbolic-link result destination without touching its target', async () => {
     let destination = '';
     const publisher: ConstructorParameters<typeof GenerationService>[5] = async (target, temporary) => {

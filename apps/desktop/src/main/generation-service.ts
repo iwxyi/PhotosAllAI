@@ -544,12 +544,10 @@ export class GenerationService {
     } catch (error) {
       this.#database.prepare('DELETE FROM generation_results WHERE id = ?').run(id);
       let cleanupFailed = false;
-      const cleanupCandidates = published ? [temporaryPath, filePath] : [temporaryPath];
-      for (const candidate of cleanupCandidates) {
-        await unlink(candidate).catch((cleanupError: NodeJS.ErrnoException) => {
-          if (cleanupError.code !== 'ENOENT') cleanupFailed = true;
-        });
-      }
+      await unlink(temporaryPath).catch((cleanupError: NodeJS.ErrnoException) => {
+        if (cleanupError.code !== 'ENOENT') cleanupFailed = true;
+      });
+      if (published && !await unlinkPublishedResultIfMatching(filePath, bytes)) cleanupFailed = true;
       if (await pathExists(path.join(batchDirectory, 'manifest.json'))) {
         await this.#refreshManifest(batchDirectory, assetId, payload.batchId).catch(() => { cleanupFailed = true; });
       }
@@ -777,6 +775,19 @@ async function pathExists(filePath: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function unlinkPublishedResultIfMatching(filePath: string, expectedBytes: Buffer): Promise<boolean> {
+  try {
+    const metadata = await lstat(filePath);
+    if (!metadata.isFile() || metadata.size !== expectedBytes.byteLength) return false;
+    const actualBytes = await readFile(filePath);
+    if (createHash('sha256').update(actualBytes).digest('hex') !== createHash('sha256').update(expectedBytes).digest('hex')) return false;
+    await unlink(filePath);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT';
   }
 }
 
