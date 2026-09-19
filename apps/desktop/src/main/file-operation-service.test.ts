@@ -371,10 +371,42 @@ describe('safe catalog file moves', () => {
     const service = new FileOperationService(context.databasePath);
     services.push(service);
 
-    expect(await service.recoverInterruptedOperations()).toBe(1);
+    expect(await service.recoverInterruptedOperations()).toEqual({ total: 1, resolved: 1, failed: 0 });
     expect(await readFile(sourcePath, 'utf8')).toBe('content:photo.jpg');
     await expect(stat(destinationPath)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(context.catalog.resolveAssetFile(asset.id)?.path).toBe(sourcePath);
+  });
+
+  it('reports an unresolved recovery conflict without deleting either file', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const bootstrap = new FileOperationService(context.databasePath);
+    bootstrap.close();
+    const sourcePath = path.join(context.source, 'photo.jpg');
+    const destinationPath = path.join(context.target, 'photo.jpg');
+    await writeFile(destinationPath, 'conflicting-content');
+    const operationId = randomUUID();
+    const database = new DatabaseSync(context.databasePath);
+    database.prepare(`INSERT INTO file_operations (id, kind, status, target_folder_id, created_at) VALUES (?, 'move', 'executing', ?, ?)`)
+      .run(operationId, context.targetFolderId, Date.now());
+    database.prepare(`
+      INSERT INTO file_operation_items (
+        id, operation_id, ordinal, asset_id, source_folder_id, destination_folder_id,
+        source_path, destination_path, temporary_path, original_file_name,
+        destination_file_name, size_bytes, status
+      ) VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, 'photo.jpg', 'photo.jpg', ?, 'moving')
+    `).run(
+      randomUUID(), operationId, asset.id, asset.folderId, context.targetFolderId,
+      sourcePath, destinationPath, path.join(context.target, '.recovery-conflict.tmp'), asset.sizeBytes
+    );
+    database.close();
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    expect(await service.recoverInterruptedOperations()).toEqual({ total: 1, resolved: 0, failed: 1 });
+    expect(await readFile(sourcePath, 'utf8')).toBe('content:photo.jpg');
+    expect(await readFile(destinationPath, 'utf8')).toBe('conflicting-content');
+    expect(service.listHistory()[0]).toMatchObject({ status: 'compensation_failed', errorCode: 'RECOVERY_FAILED' });
   });
 
   it('recovers an interrupted non-catalog XMP move from the persisted operation log', async () => {
@@ -403,7 +435,7 @@ describe('safe catalog file moves', () => {
     const service = new FileOperationService(context.databasePath);
     services.push(service);
 
-    expect(await service.recoverInterruptedOperations()).toBe(1);
+    expect(await service.recoverInterruptedOperations()).toEqual({ total: 1, resolved: 1, failed: 0 });
     expect(await readFile(sourcePath, 'utf8')).toBe('content:capture.xmp');
     await expect(stat(destinationPath)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(context.catalog.resolveAssetFile(asset.id)?.path).toBe(path.join(context.source, 'capture.NEF'));
@@ -424,7 +456,7 @@ describe('safe catalog file moves', () => {
     services.push(service);
     const changes: Array<{ assetId: string; previousPath: string; path: string }> = [];
 
-    expect(await service.recoverInterruptedOperations(async (change) => { changes.push(change); })).toBe(1);
+    expect(await service.recoverInterruptedOperations(async (change) => { changes.push(change); })).toEqual({ total: 1, resolved: 1, failed: 0 });
 
     expect(context.catalog.resolveAssetFile(asset.id)?.path).toBe(path.join(context.source, 'photo.jpg'));
     expect(changes).toEqual([{
@@ -585,7 +617,7 @@ describe('catalog copies and renames', () => {
     const service = new FileOperationService(context.databasePath);
     services.push(service);
 
-    expect(await service.recoverInterruptedOperations()).toBe(1);
+    expect(await service.recoverInterruptedOperations()).toEqual({ total: 1, resolved: 1, failed: 0 });
     await expect(stat(destinationPath)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(await readFile(sourcePath, 'utf8')).toBe('content:photo.jpg');
     expect(context.catalog.listAssets()).toHaveLength(1);
@@ -691,7 +723,7 @@ describe('catalog copies and renames', () => {
     const service = new FileOperationService(context.databasePath);
     services.push(service);
 
-    expect(await service.recoverInterruptedOperations()).toBe(1);
+    expect(await service.recoverInterruptedOperations()).toEqual({ total: 1, resolved: 1, failed: 0 });
     expect(await readFile(sourcePath, 'utf8')).toBe('content:photo.jpg');
     expect((await readdir(context.source)).filter((name) => normalizeForTest(name) === 'photo.jpg')).toHaveLength(1);
   });
@@ -854,7 +886,7 @@ describe('catalog removal and system trash', () => {
     const service = new FileOperationService(context.databasePath);
     services.push(service);
 
-    expect(await service.recoverInterruptedOperations()).toBe(1);
+    expect(await service.recoverInterruptedOperations()).toEqual({ total: 1, resolved: 1, failed: 0 });
     expect(context.catalog.listAssets()).toEqual([]);
     expect(service.listHistory()[0]).toMatchObject({ kind: 'trash', status: 'completed', succeeded: 1 });
   });

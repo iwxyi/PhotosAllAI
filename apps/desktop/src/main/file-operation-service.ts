@@ -246,20 +246,25 @@ export class FileOperationService {
 
   async recoverInterruptedOperations(
     onLocationChange?: (change: { assetId: string; previousPath: string; path: string; previousFileName: string; fileName: string }) => Promise<void>
-  ): Promise<number> {
+  ): Promise<{ total: number; resolved: number; failed: number }> {
     const operations = this.#database.prepare(`
       SELECT id, kind, status FROM file_operations WHERE status IN ('planned', 'executing', 'compensating', 'undoing')
       ORDER BY created_at ASC
     `).all() as { id: string; kind: FileOperationHistoryItem['kind']; status: string }[];
+    let resolved = 0;
+    let failed = 0;
     for (const operation of operations) {
       const items = this.#readOperationItems(operation.id).reverse();
       if (operation.status === 'undoing') {
         const changed = await this.#recoverInterruptedUndoOperation(operation.id, items);
         if (onLocationChange) await Promise.allSettled(changed.map(onLocationChange));
+        if (this.#operationRecoveryFailed(operation.id)) failed += 1;
+        else resolved += 1;
         continue;
       }
       if (operation.kind === 'trash') {
         await this.#recoverInterruptedTrashOperation(operation.id, items);
+        resolved += 1;
         continue;
       }
       let recovered = true;
@@ -281,8 +286,15 @@ export class FileOperationService {
       this.#database.prepare(`
         UPDATE file_operations SET status = ?, completed_at = ?, error_code = ? WHERE id = ?
       `).run(recovered ? 'failed' : 'compensation_failed', Date.now(), recovered ? 'INTERRUPTED_RECOVERED' : 'RECOVERY_FAILED', operation.id);
+      if (recovered) resolved += 1;
+      else failed += 1;
     }
-    return operations.length;
+    return { total: operations.length, resolved, failed };
+  }
+
+  #operationRecoveryFailed(operationId: string): boolean {
+    const row = this.#database.prepare('SELECT status FROM file_operations WHERE id = ?').get(operationId) as { status: string };
+    return row.status === 'compensation_failed';
   }
 
   async #executeUndo(operationId: string): Promise<UndoFileOperationReport> {

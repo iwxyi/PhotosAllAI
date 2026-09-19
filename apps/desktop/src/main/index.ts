@@ -105,7 +105,7 @@ let contentHashPassRunning = false;
 let shuttingDown = false;
 let startupRecovery = {
   trashPurges: { total: 0, recovered: 0, conflicts: 0, failed: 0 },
-  fileOperations: 0,
+  fileOperations: { total: 0, resolved: 0, failed: 0 },
   generationWrites: { total: 0, recovered: 0, failed: 0 }
 };
 

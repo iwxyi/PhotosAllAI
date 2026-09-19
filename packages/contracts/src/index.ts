@@ -52,7 +52,11 @@ export const diagnosticSnapshotSchema = z.object({
       conflicts: z.number().int().nonnegative(),
       failed: z.number().int().nonnegative()
     }),
-    fileOperations: z.number().int().nonnegative(),
+    fileOperations: z.object({
+      total: z.number().int().nonnegative(),
+      resolved: z.number().int().nonnegative(),
+      failed: z.number().int().nonnegative()
+    }),
     generationWrites: z.object({
       total: z.number().int().nonnegative(),
       recovered: z.number().int().nonnegative(),
