@@ -160,6 +160,23 @@ test('analyzes, generates, compares, and persists managed and portable results',
   expect(exportedSize).toEqual({ width: 1638, height: 2048 });
   expect(await readFile(sourcePath)).toEqual(originalBytes);
 
+  const diagnosticPath = path.join(testRoot, 'diagnostics.json');
+  await electronApp.evaluate(({ dialog }, filePath) => {
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath, bookmark: '' });
+  }, diagnosticPath);
+  await page.getByRole('tab', { name: /设置/ }).click();
+  await page.getByRole('button', { name: '导出诊断文件' }).click();
+  await expect(page.getByText(/诊断文件已保存/)).toBeVisible();
+  const diagnosticBytes = await readFile(diagnosticPath);
+  const diagnosticText = diagnosticBytes.toString('utf8');
+  const diagnostic = JSON.parse(diagnosticText) as Record<string, unknown>;
+  expect(Object.keys(diagnostic).sort()).toEqual(['generatedAt', 'snapshot']);
+  expect(diagnosticText).not.toContain('test-key');
+  expect(diagnosticText).not.toContain(baseUrl);
+  expect(diagnosticText).not.toContain(sourcePath);
+  expect(diagnosticText).not.toContain('移除背景路人');
+  expect(diagnosticBytes.byteLength).toBeGreaterThan(100);
+
   const generatedRoot = path.join(testRoot, 'user-data', 'library', 'generated');
   const firstLevel = await readdir(generatedRoot);
   expect(firstLevel).toHaveLength(1);
