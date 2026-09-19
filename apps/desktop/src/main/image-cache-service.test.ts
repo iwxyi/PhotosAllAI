@@ -1,10 +1,10 @@
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { ImageCacheService } from './image-cache-service';
+import { ImageCacheService, writeCacheFileAtomically } from './image-cache-service';
 
 const directories: string[] = [];
 
@@ -36,5 +36,65 @@ describe('image cache governance', () => {
     await writeFile(path.join(nested, 'later.jpg'), Buffer.alloc(15));
     expect(await service.setMaxBytes(20)).toEqual({ removedFiles: 1, removedBytes: 20 });
     expect(await service.getStats()).toEqual({ files: 1, bytes: 15 });
+  });
+
+  it('includes source size in the cache fingerprint', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-'));
+    directories.push(directory);
+    const assetId = 'asset-size-fingerprint';
+    const modifiedAt = 1234;
+    const variant = 'thumbnail';
+    const firstKey = `${assetId}-${modifiedAt}-10-${variant}`;
+    const secondKey = `${assetId}-${modifiedAt}-20-${variant}`;
+    const nested = path.join(directory, firstKey.slice(0, 2));
+    await mkdir(nested, { recursive: true });
+    await writeFile(path.join(nested, `${firstKey}.jpg`), 'first-preview');
+    await writeFile(path.join(nested, `${secondKey}.jpg`), 'second-preview');
+    let sizeBytes = 10;
+    const service = new ImageCacheService(directory, {
+      resolveAssetFile: () => ({ path: '/source.jpg', fileName: 'source.jpg', modifiedAt, sizeBytes })
+    } as never);
+
+    const first = await service.getOrCreate(assetId, variant);
+    sizeBytes = 20;
+    const second = await service.getOrCreate(assetId, variant);
+    expect(await readFile(first!, 'utf8')).toBe('first-preview');
+    expect(await readFile(second!, 'utf8')).toBe('second-preview');
+    expect(first).not.toBe(second);
+  });
+
+  it('removes only recognized regular cache temporary files', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-'));
+    directories.push(directory);
+    const nested = path.join(directory, 'aa');
+    await mkdir(nested, { recursive: true });
+    const legacy = path.join(nested, 'asset-preview.jpg.123.456.tmp');
+    const current = path.join(nested, 'asset-preview.jpg.123.5aa8e874-6f6c-4828-b1ea-a7f15a28b0d1.tmp');
+    const unknown = path.join(nested, 'keep-me.tmp');
+    const outside = path.join(directory, 'outside.txt');
+    const linked = path.join(nested, 'linked.jpg.123.456.tmp');
+    await writeFile(legacy, 'legacy');
+    await writeFile(current, 'current');
+    await writeFile(unknown, 'unknown');
+    await writeFile(outside, 'outside');
+    await symlink(outside, linked);
+    const service = new ImageCacheService(directory, {} as never);
+
+    await expect(service.cleanupTemporaryFiles()).resolves.toEqual({
+      removedFiles: 2,
+      removedBytes: Buffer.byteLength('legacycurrent')
+    });
+    expect(await readFile(unknown, 'utf8')).toBe('unknown');
+    expect(await readFile(linked, 'utf8')).toBe('outside');
+  });
+
+  it('cleans the temporary payload when atomic cache publication fails', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-'));
+    directories.push(directory);
+    const destination = path.join(directory, 'blocked.jpg');
+    await mkdir(destination);
+
+    await expect(writeCacheFileAtomically(destination, Buffer.from('preview'))).rejects.toThrow();
+    expect(await readdir(directory)).toEqual(['blocked.jpg']);
   });
 });

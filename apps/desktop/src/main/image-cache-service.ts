@@ -1,4 +1,5 @@
-import { access, mkdir, readFile, readdir, rename, stat, unlink, utimes, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, rename, stat, unlink, utimes, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { execFile as nodeExecFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
@@ -49,6 +50,35 @@ export class ImageCacheService {
     let bytes = 0;
     for (const file of files) bytes += file.size;
     return { files: files.length, bytes };
+  }
+
+  async cleanupTemporaryFiles(): Promise<{ removedFiles: number; removedBytes: number }> {
+    let removedFiles = 0;
+    let removedBytes = 0;
+    const directories = [this.#cacheDirectory];
+    while (directories.length > 0) {
+      const directory = directories.pop();
+      if (!directory) continue;
+      const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        const filePath = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          directories.push(filePath);
+          continue;
+        }
+        if (!entry.isFile() || !isCacheTemporaryFile(entry.name)) continue;
+        const metadata = await lstat(filePath).catch(() => null);
+        if (!metadata?.isFile()) continue;
+        try {
+          await unlink(filePath);
+          removedFiles += 1;
+          removedBytes += metadata.size;
+        } catch {
+          // A concurrent cleanup or locked file can be retried on the next startup.
+        }
+      }
+    }
+    return { removedFiles, removedBytes };
   }
 
   getPerformanceStats(): { hits: number; misses: number; decodes: number; decodeMsTotal: number } {
@@ -121,18 +151,15 @@ export class ImageCacheService {
     if (!source) return null;
 
     const specification = variants[variant];
-    const cacheKey = `${assetId}-${source.modifiedAt}-${variant}`;
+    const cacheKey = `${assetId}-${source.modifiedAt}-${source.sizeBytes}-${variant}`;
     const destination = path.join(this.#cacheDirectory, cacheKey.slice(0, 2), `${cacheKey}.jpg`);
 
-    try {
-      await access(destination);
+    if (await isRegularFile(destination)) {
       this.#hits += 1;
       await this.#touch(destination);
       return destination;
-    } catch {
-      // Cache miss.
-      this.#misses += 1;
     }
+    this.#misses += 1;
 
     const existing = this.#inFlight.get(cacheKey);
     if (existing) return existing;
@@ -197,19 +224,7 @@ export class ImageCacheService {
     }
     if (image.isEmpty() && !encoded) throw new Error('IMAGE_PREVIEW_UNAVAILABLE');
 
-    const temporaryPath = `${destination}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(temporaryPath, encoded ?? image.toJPEG(specification.quality), { flag: 'wx' });
-    try {
-      await rename(temporaryPath, destination);
-    } catch (error) {
-      try {
-        await access(destination);
-        return destination;
-      } catch {
-        throw error;
-      }
-    }
-    return destination;
+    return writeCacheFileAtomically(destination, encoded ?? image.toJPEG(specification.quality));
   }
 
   async #decodeWithExternalTools(sourcePath: string, destination: string, specification: { width: number; height: number; quality: number }): Promise<Buffer | null> {
@@ -273,4 +288,30 @@ function normalizeMaxBytes(value: number): number {
 
 function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error && error.code === code;
+}
+
+export async function writeCacheFileAtomically(destination: string, bytes: Buffer): Promise<string> {
+  const temporaryPath = `${destination}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, bytes, { flag: 'wx' });
+    await rename(temporaryPath, destination);
+    return destination;
+  } catch (error) {
+    if (await isRegularFile(destination)) return destination;
+    throw error;
+  } finally {
+    await unlink(temporaryPath).catch(() => undefined);
+  }
+}
+
+async function isRegularFile(filePath: string): Promise<boolean> {
+  try {
+    return (await lstat(filePath)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isCacheTemporaryFile(fileName: string): boolean {
+  return /\.jpg\.\d+\.(?:\d+|[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.tmp$/iu.test(fileName);
 }

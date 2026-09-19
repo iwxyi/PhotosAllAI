@@ -584,6 +584,7 @@ app.whenReady().then(async () => {
   imageCache = new ImageCacheService(
     join(app.getPath('userData'), 'cache', 'images'), catalog, undefined, initialAppSettings.cacheMaxBytes
   );
+  await imageCache.cleanupTemporaryFiles();
   void imageCache.prune(initialAppSettings.cacheMaxBytes);
   providers = new ProviderService(join(app.getPath('userData'), 'settings', 'providers.json'), {
     available: () => safeStorage.isEncryptionAvailable(),

@@ -64,7 +64,7 @@ async function fixture(
     path.join(directory, 'managed', 'generated'),
     { resolve: async () => ({ profile, apiKey: 'secret' }) },
     { getOrCreate: async () => previewPath },
-    { resolveAssetFile: () => ({ path: sourcePath, fileName: 'IMG_1024.CR3', modifiedAt: 1 }) }
+    { resolveAssetFile: () => ({ path: sourcePath, fileName: 'IMG_1024.CR3', modifiedAt: 1, sizeBytes: 18 }) }
   );
   return { service, directory, sourcePath };
 }
