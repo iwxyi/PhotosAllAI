@@ -528,13 +528,34 @@ function Viewer({
   const [showOriginal, setShowOriginal] = useState(false);
   const [selectedResultId, setSelectedResultId] = useState<string | null>(results[0]?.id ?? null);
   const [exportNotice, setExportNotice] = useState('');
+  const [zoom, setZoom] = useState(1);
+  const [imageAspectRatio, setImageAspectRatio] = useState(3 / 2);
+  const [fittedSize, setFittedSize] = useState({ width: 0, height: 0 });
+  const canvasWrapRef = useRef<HTMLDivElement>(null);
   const latestResultId = results[0]?.id ?? null;
   const selectedResult = selectedResultId ? results.find((result) => result.id === selectedResultId) : undefined;
   const generatedSource = isDemo ? photo.src : selectedResult?.resultUrl;
 
   useEffect(() => {
     setSelectedResultId(latestResultId);
+    setZoom(1);
+    setImageAspectRatio(3 / 2);
   }, [photo.id, latestResultId]);
+
+  useEffect(() => {
+    const container = canvasWrapRef.current;
+    if (!container) return;
+    const fit = () => {
+      const availableWidth = Math.max(1, container.clientWidth - 36);
+      const availableHeight = Math.max(1, container.clientHeight - 36);
+      const width = Math.min(availableWidth, availableHeight * imageAspectRatio);
+      setFittedSize({ width, height: width / imageAspectRatio });
+    };
+    fit();
+    const observer = new ResizeObserver(fit);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [imageAspectRatio]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -549,6 +570,15 @@ function Viewer({
       window.removeEventListener('keyup', onKey);
     };
   }, []);
+
+  const adjustZoom = (factor: number) => {
+    setZoom((current) => Math.min(4, Math.max(0.25, Math.round(current * factor * 100) / 100)));
+  };
+  const captureAspectRatio = (image: HTMLImageElement) => {
+    if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+      setImageAspectRatio(image.naturalWidth / image.naturalHeight);
+    }
+  };
 
   return (
     <section className="viewer">
@@ -574,23 +604,27 @@ function Viewer({
               <Columns2 size={13} /> 对比
             </button>
           </div>
-          <IconButton label="缩小"><ZoomOut size={15} /></IconButton>
-          <span className="zoom-value">38%</span>
-          <IconButton label="放大"><ZoomIn size={15} /></IconButton>
-          <IconButton label="适应窗口"><Maximize2 size={15} /></IconButton>
+          <IconButton label="缩小" disabled={zoom <= 0.25} onClick={() => adjustZoom(0.8)}><ZoomOut size={15} /></IconButton>
+          <span className="zoom-value" aria-live="polite">{Math.round(zoom * 100)}%</span>
+          <IconButton label="放大" disabled={zoom >= 4} onClick={() => adjustZoom(1.25)}><ZoomIn size={15} /></IconButton>
+          <IconButton label="适应窗口" active={zoom === 1} pressed={zoom === 1} onClick={() => setZoom(1)}><Maximize2 size={15} /></IconButton>
           {selectedResult && !isDemo && <span className="review-actions"><button type="button" aria-label="接受当前版本" className={selectedResult.reviewState === 'accepted' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'accepted')}>接受</button><button type="button" aria-label="标记为首选" className={selectedResult.reviewState === 'preferred' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'preferred')}><Star size={12} />首选</button><button type="button" aria-label="拒绝当前版本" className={selectedResult.reviewState === 'rejected' ? 'is-review-rejected' : ''} onClick={() => void onReview(selectedResult.id, 'rejected')}>拒绝</button></span>}
         </div>
       </div>
-      <div className="canvas-wrap">
-        <div className={`photo-canvas${compareMode === 'split' ? ' is-comparing' : ''}`}>
+      <div className="canvas-wrap" ref={canvasWrapRef}>
+        <div
+          className={`photo-canvas${compareMode === 'split' ? ' is-comparing' : ''}`}
+          style={{ width: fittedSize.width, height: fittedSize.height, transform: `scale(${zoom})` }}
+          onDoubleClick={() => setZoom((current) => current === 1 ? 2 : 1)}
+        >
           <div className="preview-unavailable"><Image size={36} /><strong>预览暂不可用</strong><span>图像服务将在后台生成屏幕预览</span></div>
-          {photo.src ? <img className="base-image" src={photo.src} alt={photo.fileName} onError={(event) => { event.currentTarget.style.display = 'none'; }} /> : null}
+          {photo.src ? <img className="base-image" src={photo.src} alt={photo.fileName} onLoad={(event) => captureAspectRatio(event.currentTarget)} onError={(event) => { event.currentTarget.style.display = 'none'; }} /> : null}
           {generatedSource && !showOriginal && (
             <div
               className="generated-layer"
               style={compareMode === 'split' ? { clipPath: `inset(0 ${100 - split}% 0 0)` } : undefined}
             >
-              <img src={generatedSource} alt="AI 生成版本" onError={(event) => { event.currentTarget.style.display = 'none'; }} />
+              <img src={generatedSource} alt="AI 生成版本" onLoad={(event) => { if (!photo.src) captureAspectRatio(event.currentTarget); }} onError={(event) => { event.currentTarget.style.display = 'none'; }} />
             </div>
           )}
           {compareMode === 'split' && (

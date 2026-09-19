@@ -66,7 +66,13 @@ test('starts with the secure library workspace', async () => {
   ).toBe(true);
 
   const canvas = await page.locator('.photo-canvas').boundingBox();
-  expect(canvas?.width).toBeGreaterThan(500);
+  expect(canvas?.width).toBeGreaterThan(300);
+  expect(canvas?.height).toBeGreaterThan(300);
+  const sourceRatio = await page.locator('.base-image').evaluate((image) => {
+    const element = image as HTMLImageElement;
+    return element.naturalWidth / element.naturalHeight;
+  });
+  expect(Math.abs((canvas!.width / canvas!.height) - sourceRatio)).toBeLessThan(0.02);
 });
 
 test('switches photos and comparison modes', async () => {
@@ -75,6 +81,15 @@ test('switches photos and comparison modes', async () => {
 
   await page.getByRole('button', { name: /对比/ }).click();
   await expect(page.getByLabel('调整原图和生成图分割线')).toBeVisible();
+
+  await expect(page.locator('.zoom-value')).toHaveText('100%');
+  const fittedCanvas = await page.locator('.photo-canvas').boundingBox();
+  await page.getByRole('button', { name: '放大' }).click();
+  await expect(page.locator('.zoom-value')).toHaveText('125%');
+  await expect.poll(async () => (await page.locator('.photo-canvas').boundingBox())?.width ?? 0)
+    .toBeGreaterThan(fittedCanvas!.width * 1.2);
+  await page.getByRole('button', { name: '适应窗口' }).click();
+  await expect(page.locator('.zoom-value')).toHaveText('100%');
 });
 
 test('supports additive, range, and select-all interactions', async () => {
