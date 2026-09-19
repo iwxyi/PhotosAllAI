@@ -47,9 +47,66 @@ describe('complete library backup', () => {
     expect(manifest.generated).toEqual([{ resultId: managedId, relativePath: `ab/${managedId}/result.jpg`, bytes: 14, sha256: createHash('sha256').update('managed-result').digest('hex') }]);
     expect(createHash('sha256').update(manifestBytes).digest('hex')).toBe(result.manifestSha256);
     expect(await readFile(path.join(result.destinationPath, 'generated', 'ab', managedId, 'result.jpg'), 'utf8')).toBe('managed-result');
+    await expect(service.verify(result.destinationPath)).resolves.toEqual({
+      createdAt: '2023-11-14T22:13:20.000Z',
+      databaseBytes: result.databaseBytes,
+      generatedFiles: 1,
+      generatedBytes: 14
+    });
     const snapshot = new DatabaseSync(path.join(result.destinationPath, 'catalog.sqlite'), { readOnly: true });
     expect(snapshot.prepare('SELECT COUNT(*) AS value FROM generation_results').get()).toEqual({ value: 2 });
     snapshot.close();
+    context.database.close();
+  });
+
+  it('rejects generated files that no longer match the hashed inventory', async () => {
+    const context = await fixture();
+    const resultId = randomUUID();
+    const managedPath = path.join(context.generated, resultId, 'result.jpg');
+    await mkdir(path.dirname(managedPath), { recursive: true });
+    await writeFile(managedPath, 'original-result');
+    context.database.prepare('INSERT INTO generation_results VALUES (?, ?, ?)').run(resultId, managedPath, 'managed');
+    const service = new LibraryBackupService(context.databasePath, context.generated);
+    const result = await service.create(context.destination, 44);
+    await writeFile(path.join(result.destinationPath, 'generated', resultId, 'result.jpg'), 'tampered-result');
+
+    await expect(service.verify(result.destinationPath)).rejects.toThrow('BACKUP_GENERATED_CHECKSUM_MISMATCH');
+    context.database.close();
+  });
+
+  it('rejects traversal paths before reading generated files', async () => {
+    const context = await fixture();
+    const resultId = randomUUID();
+    const managedPath = path.join(context.generated, resultId, 'result.jpg');
+    await mkdir(path.dirname(managedPath), { recursive: true });
+    await writeFile(managedPath, 'managed-result');
+    context.database.prepare('INSERT INTO generation_results VALUES (?, ?, ?)').run(resultId, managedPath, 'managed');
+    const service = new LibraryBackupService(context.databasePath, context.generated);
+    const result = await service.create(context.destination, 45);
+    const manifestPath = path.join(result.destinationPath, 'manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { generated: Array<{ relativePath: string }> };
+    manifest.generated[0]!.relativePath = '../outside.jpg';
+    await writeFile(manifestPath, JSON.stringify(manifest));
+
+    await expect(service.verify(result.destinationPath)).rejects.toThrow('BACKUP_MANIFEST_PATH_INVALID');
+    context.database.close();
+  });
+
+  it('rejects an inventory that omits a managed result from the catalog', async () => {
+    const context = await fixture();
+    const resultId = randomUUID();
+    const managedPath = path.join(context.generated, resultId, 'result.jpg');
+    await mkdir(path.dirname(managedPath), { recursive: true });
+    await writeFile(managedPath, 'managed-result');
+    context.database.prepare('INSERT INTO generation_results VALUES (?, ?, ?)').run(resultId, managedPath, 'managed');
+    const service = new LibraryBackupService(context.databasePath, context.generated);
+    const result = await service.create(context.destination, 46);
+    const manifestPath = path.join(result.destinationPath, 'manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as { generated: unknown[] };
+    manifest.generated = [];
+    await writeFile(manifestPath, JSON.stringify(manifest));
+
+    await expect(service.verify(result.destinationPath)).rejects.toThrow('BACKUP_CATALOG_RESULTS_MISSING');
     context.database.close();
   });
 

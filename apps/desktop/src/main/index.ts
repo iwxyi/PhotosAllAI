@@ -12,6 +12,7 @@ import {
   diagnosticExportResultSchema,
   databaseBackupResultSchema,
   libraryBackupResultSchema,
+  libraryBackupVerificationResultSchema,
   catalogAssetRemovalInputSchema,
   catalogAssetRemovalReportSchema,
   catalogSnapshotSchema,
@@ -186,6 +187,18 @@ function registerIpc(): void {
     }
     const result = await libraryBackup.create(selection.filePaths[0]);
     return libraryBackupResultSchema.parse({ canceled: false, ...result });
+  });
+  ipcMain.handle('app.library.backup.verify.v1', async () => {
+    const selection = await dialog.showOpenDialog({
+      title: '选择要验证的图库备份包',
+      buttonLabel: '验证此备份',
+      properties: ['openDirectory']
+    });
+    if (selection.canceled || !selection.filePaths[0]) {
+      return libraryBackupVerificationResultSchema.parse({ canceled: true, createdAt: null, databaseBytes: 0, generatedFiles: 0, generatedBytes: 0 });
+    }
+    const result = await libraryBackup.verify(selection.filePaths[0]);
+    return libraryBackupVerificationResultSchema.parse({ canceled: false, ...result });
   });
   ipcMain.handle('workspace.session.get.v1', () => workspace.get());
   ipcMain.handle('workspace.session.save.v1', (_event, input: unknown) =>

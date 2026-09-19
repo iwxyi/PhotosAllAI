@@ -1375,6 +1375,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
   const [backupBusy, setBackupBusy] = useState(false);
   const [backupMessage, setBackupMessage] = useState('');
   const [libraryBackupBusy, setLibraryBackupBusy] = useState(false);
+  const [backupVerifyBusy, setBackupVerifyBusy] = useState(false);
 
   useEffect(() => {
     void window.desktopApi.listProviderProfiles().then(setProfiles);
@@ -1517,6 +1518,20 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
       setLibraryBackupBusy(false);
     }
   };
+  const verifyCompleteLibraryBackup = async () => {
+    setBackupVerifyBusy(true);
+    setBackupMessage('');
+    try {
+      const result = await window.desktopApi.verifyLibraryBackup();
+      setBackupMessage(result.canceled
+        ? '已取消备份验证。'
+        : `备份验证通过：数据库 ${(result.databaseBytes / 1_048_576).toFixed(1)} MB，受管结果 ${result.generatedFiles} 个（${(result.generatedBytes / 1_048_576).toFixed(1)} MB）。`);
+    } catch {
+      setBackupMessage('备份验证失败；清单、数据库或受管结果可能缺失、损坏或互不一致。');
+    } finally {
+      setBackupVerifyBusy(false);
+    }
+  };
 
   return (
     <div className="settings-page">
@@ -1596,7 +1611,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
         </section>
         <section className="settings-section backup-section">
           <div className="settings-heading"><div><h2>图库备份</h2><p>数据库快照适合快速灾备；完整备份还包含集中受管的生成结果和逐文件校验清单，均不包含 API Key。</p></div><span><ShieldCheck size={14} />一致性快照</span></div>
-          <div className="cache-actions"><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy} onClick={() => void backupDatabase()}>{backupBusy ? '备份中…' : '仅备份数据库'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy} onClick={() => void backupCompleteLibrary()}>{libraryBackupBusy ? '备份中…' : '完整图库备份'}</button><span role="status">{backupMessage || '原图与原图旁便携结果不复制进备份包。'}</span></div>
+          <div className="cache-actions"><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy} onClick={() => void backupDatabase()}>{backupBusy ? '备份中…' : '仅备份数据库'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy} onClick={() => void backupCompleteLibrary()}>{libraryBackupBusy ? '备份中…' : '完整图库备份'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy} onClick={() => void verifyCompleteLibraryBackup()}>{backupVerifyBusy ? '验证中…' : '验证备份包'}</button><span role="status">{backupMessage || '原图与原图旁便携结果不复制进备份包。'}</span></div>
         </section>
         </>}
         {settingsSection === 'tasks' && <section className="settings-section settings-info-section">
