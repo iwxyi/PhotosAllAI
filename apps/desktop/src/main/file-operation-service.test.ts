@@ -32,6 +32,25 @@ async function fixture(fileNames = ['photo.jpg']) {
 }
 
 describe('safe catalog file moves', () => {
+  it('rejects a cross-volume move before writing when free space is insufficient', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const service = new FileOperationService(context.databasePath, {
+      copyFile, link, readdir, realpath, rename, stat: (async (filePath) => {
+        const stats = await stat(filePath);
+        return String(filePath) === context.target ? Object.assign(stats, { dev: stats.dev + 1 }) : stats;
+      }) as typeof stat, unlink,
+      availableBytes: async () => asset.sizeBytes - 1
+    });
+    services.push(service);
+
+    await expect(service.move({ assetIds: [asset.id], targetFolderId: context.targetFolderId }))
+      .rejects.toThrow('INSUFFICIENT_DISK_SPACE');
+    expect(await readFile(path.join(context.source, 'photo.jpg'), 'utf8')).toBe('content:photo.jpg');
+    expect(await readdir(context.target)).toEqual([]);
+    expect(service.listHistory()).toEqual([]);
+  });
+
   it('moves a file on the same volume and commits its catalog location', async () => {
     const context = await fixture();
     const asset = context.catalog.listAssets()[0]!;
@@ -235,6 +254,22 @@ describe('safe catalog file moves', () => {
 });
 
 describe('catalog copies and renames', () => {
+  it('rejects a copy before writing when aggregate free space is insufficient', async () => {
+    const context = await fixture(['a.jpg', 'b.jpg']);
+    const assets = context.catalog.listAssets();
+    const requiredBytes = assets.reduce((total, asset) => total + asset.sizeBytes, 0);
+    const service = new FileOperationService(context.databasePath, {
+      copyFile, link, readdir, realpath, rename, stat, unlink,
+      availableBytes: async () => requiredBytes - 1
+    });
+    services.push(service);
+
+    await expect(service.copy({ assetIds: assets.map((asset) => asset.id), targetFolderId: context.targetFolderId }))
+      .rejects.toThrow('INSUFFICIENT_DISK_SPACE');
+    expect(await readdir(context.target)).toEqual([]);
+    expect(service.listHistory()).toEqual([]);
+  });
+
   it('creates an independent asset copy with user metadata but no shared inode', async () => {
     const context = await fixture();
     const asset = context.catalog.listAssets()[0]!;

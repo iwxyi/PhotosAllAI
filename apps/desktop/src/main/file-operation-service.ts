@@ -7,6 +7,7 @@ import {
   realpath,
   rename,
   stat,
+  statfs,
   unlink
 } from 'node:fs/promises';
 import path from 'node:path';
@@ -43,6 +44,7 @@ type FileSystemPort = {
   realpath: typeof realpath;
   rename?: typeof rename;
   stat: typeof stat;
+  availableBytes?: (directory: string) => Promise<number>;
   unlink: typeof unlink;
 };
 
@@ -75,7 +77,13 @@ type AssetLocationRow = {
   size_bytes: number;
 };
 
-const nodeFileSystem: FileSystemPort = { copyFile, link, readdir, realpath, rename, stat, unlink };
+const nodeFileSystem: FileSystemPort = {
+  copyFile, link, readdir, realpath, rename, stat, unlink,
+  availableBytes: async (directory) => {
+    const stats = await statfs(directory);
+    return stats.bavail * stats.bsize;
+  }
+};
 
 export class FileOperationService {
   readonly #database: DatabaseSync;
@@ -584,6 +592,7 @@ export class FileOperationService {
         skipped: false, status: 'planned', resultAssetId: randomUUID()
       };
     });
+    await this.#assertAvailableSpace(targetPath, items.reduce((total, item) => total + item.sizeBytes, 0));
     this.#persistPlan(operationId, 'copy', target.id, items);
     return items;
   }
@@ -684,6 +693,12 @@ export class FileOperationService {
       };
     });
 
+    const crossVolumeBytes = (await Promise.all(items.filter((item) => !item.skipped).map(async (item) => {
+      const sourceStats = await this.#fileSystem.stat(item.sourcePath);
+      return sourceStats.dev === targetStats.dev ? 0 : item.sizeBytes;
+    }))).reduce((total, size) => total + size, 0);
+    await this.#assertAvailableSpace(targetPath, crossVolumeBytes);
+
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       this.#database.prepare(`
@@ -709,6 +724,14 @@ export class FileOperationService {
       throw error;
     }
     return items;
+  }
+
+  async #assertAvailableSpace(directory: string, requiredBytes: number): Promise<void> {
+    if (requiredBytes <= 0 || !this.#fileSystem.availableBytes) return;
+    const availableBytes = await this.#fileSystem.availableBytes(directory);
+    if (!Number.isFinite(availableBytes) || availableBytes < requiredBytes) {
+      throw new Error('INSUFFICIENT_DISK_SPACE');
+    }
   }
 
   async #transfer(source: string, destination: string, temporary: string): Promise<void> {
