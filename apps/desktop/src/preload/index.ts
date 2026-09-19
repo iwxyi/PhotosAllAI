@@ -100,6 +100,12 @@ const api: DesktopApi = {
     ipcRenderer.invoke('analysis.list.v1', { assetId }) as ReturnType<DesktopApi['listAnalysisRevisions']>,
   listGenerationResults: (assetId) =>
     ipcRenderer.invoke('generation.results.list.v1', { assetId }) as ReturnType<DesktopApi['listGenerationResults']>,
+  listTrashedGenerationResults: (assetId) =>
+    ipcRenderer.invoke('generation.results.trash.list.v1', { assetId }) as ReturnType<DesktopApi['listTrashedGenerationResults']>,
+  trashGenerationResult: (input) =>
+    ipcRenderer.invoke('generation.result.trash.v1', input) as ReturnType<DesktopApi['trashGenerationResult']>,
+  restoreGenerationResult: (input) =>
+    ipcRenderer.invoke('generation.result.restore.v1', input) as ReturnType<DesktopApi['restoreGenerationResult']>,
   updateGenerationResultReview: (input) =>
     ipcRenderer.invoke('generation.result.review.update.v1', input) as ReturnType<DesktopApi['updateGenerationResultReview']>,
   revealGenerationResult: (resultId) =>

@@ -634,6 +634,14 @@ export const generationResultSchema = z.object({
 
 export type GenerationResult = z.infer<typeof generationResultSchema>;
 
+export const trashedGenerationResultSchema = generationResultSchema.extend({
+  trashedAt: z.number().nonnegative()
+});
+export type TrashedGenerationResult = z.infer<typeof trashedGenerationResultSchema>;
+
+export const generationResultIdInputSchema = z.object({ resultId: z.string().uuid() });
+export type GenerationResultIdInput = z.infer<typeof generationResultIdInputSchema>;
+
 export const updateGenerationResultReviewInputSchema = z.object({
   resultId: z.string().uuid(),
   reviewState: z.enum(['undecided', 'accepted', 'rejected', 'preferred'])
@@ -740,6 +748,9 @@ export interface DesktopApi {
   archivePromptTemplate(templateId: string): Promise<void>;
   listAnalysisRevisions(assetId: string): Promise<AnalysisRevision[]>;
   listGenerationResults(assetId: string): Promise<GenerationResult[]>;
+  listTrashedGenerationResults(assetId: string): Promise<TrashedGenerationResult[]>;
+  trashGenerationResult(input: GenerationResultIdInput): Promise<TrashedGenerationResult>;
+  restoreGenerationResult(input: GenerationResultIdInput): Promise<GenerationResult>;
   updateGenerationResultReview(input: UpdateGenerationResultReviewInput): Promise<GenerationResult>;
   revealGenerationResult(resultId: string): Promise<boolean>;
   exportGenerationResults(input: ExportGenerationResultsInput): Promise<ExportReport>;

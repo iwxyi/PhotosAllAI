@@ -279,6 +279,9 @@ export class CatalogService {
 
   listAssetPage(rawInput: ListCatalogAssetsInput): CatalogAssetPage {
     const input = listCatalogAssetsInputSchema.parse(rawInput);
+    const activeGenerationPredicate = this.#tableExists('generation_results') && this.#columnExists('generation_results', 'trashed_at')
+      ? 'trashed_at IS NULL'
+      : '1';
     const baseConditions: string[] = ['removed_at IS NULL'];
     const baseValues: (string | number)[] = [];
     if (input.folderId) {
@@ -304,12 +307,12 @@ export class CatalogService {
     }
     if (input.smartCollection === 'generated') {
       baseConditions.push(this.#tableExists('generation_results')
-        ? 'id IN (SELECT asset_id FROM generation_results)'
+        ? `id IN (SELECT asset_id FROM generation_results WHERE ${activeGenerationPredicate})`
         : '0');
     }
     if (input.smartCollection === 'to-review') {
       baseConditions.push(this.#tableExists('generation_results')
-        ? "id IN (SELECT asset_id FROM generation_results WHERE review_state = 'undecided')"
+        ? `id IN (SELECT asset_id FROM generation_results WHERE review_state = 'undecided' AND ${activeGenerationPredicate})`
         : '0');
     }
     if (input.favoriteOnly) baseConditions.push('favorite = 1');
@@ -603,6 +606,9 @@ export class CatalogService {
     };
     const hasAnalysis = this.#tableExists('analysis_revisions');
     const hasGeneration = this.#tableExists('generation_results');
+    const activeGenerationPredicate = hasGeneration && this.#columnExists('generation_results', 'trashed_at')
+      ? 'trashed_at IS NULL'
+      : '1';
     return [
       catalogSmartCollectionSchema.parse({ id: 'recent', assetCount: count('imported_at >= ?', Date.now() - RECENT_IMPORT_WINDOW_MS) }),
       catalogSmartCollectionSchema.parse({ id: 'favorites', assetCount: count('favorite = 1') }),
@@ -613,11 +619,11 @@ export class CatalogService {
       }),
       catalogSmartCollectionSchema.parse({
         id: 'generated',
-        assetCount: hasGeneration ? count('id IN (SELECT asset_id FROM generation_results)') : 0
+        assetCount: hasGeneration ? count(`id IN (SELECT asset_id FROM generation_results WHERE ${activeGenerationPredicate})`) : 0
       }),
       catalogSmartCollectionSchema.parse({
         id: 'to-review',
-        assetCount: hasGeneration ? count("id IN (SELECT asset_id FROM generation_results WHERE review_state = 'undecided')") : 0
+        assetCount: hasGeneration ? count(`id IN (SELECT asset_id FROM generation_results WHERE review_state = 'undecided' AND ${activeGenerationPredicate})`) : 0
       })
     ];
   }
@@ -916,6 +922,11 @@ export class CatalogService {
     return Boolean(this.#database.prepare(`
       SELECT 1 AS value FROM sqlite_master WHERE type = 'table' AND name = ?
     `).get(tableName));
+  }
+
+  #columnExists(tableName: string, columnName: string): boolean {
+    return (this.#database.prepare(`PRAGMA table_info(${tableName})`).all() as { name: string }[])
+      .some((column) => column.name === columnName);
   }
 
   #findAlbum(albumId: string): CatalogAlbum {

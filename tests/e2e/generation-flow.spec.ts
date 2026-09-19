@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http';
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -143,12 +143,32 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await expect(page.getByText('V2', { exact: true })).toBeVisible({ timeout: 10_000 });
   await expect(page.getByRole('button', { name: '在文件管理器中显示生成版本' })).toBeEnabled();
 
+  await page.getByRole('button', { name: '关闭任务抽屉' }).click();
+  const generatedRoot = path.join(testRoot, 'user-data', 'library', 'generated');
+  const managedFiles = await readdir(generatedRoot, { recursive: true });
+  const managedResult = managedFiles.find((file) => file.endsWith('.jpg'));
+  expect(managedResult).toBeTruthy();
+  const managedResultPath = path.join(generatedRoot, managedResult!);
+  await page.getByRole('button', { name: '版本', exact: true }).click();
+  await page.getByRole('button', { name: '回收版本 V1' }).click();
+  await page.getByRole('button', { name: '确认', exact: true }).click();
+  await expect(page.getByText('版本回收站')).toBeVisible();
+  await expect(page.getByRole('status')).toContainText('生成版本已移到应用回收站');
+  await expect(stat(managedResultPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  const trashRoot = path.join(testRoot, 'user-data', 'library', 'trash', 'generation');
+  expect((await readdir(trashRoot, { recursive: true })).some((file) => file.endsWith('.jpg'))).toBe(true);
+  await page.screenshot({ path: path.resolve('test-results/generation-version-trash.png') });
+
+  await page.getByRole('button', { name: '恢复版本 V1' }).click();
+  await expect(page.getByText('版本回收站')).toHaveCount(0);
+  await expect(page.getByRole('status')).toContainText('生成版本已恢复');
+  expect((await stat(managedResultPath)).isFile()).toBe(true);
+
   const exportDirectory = path.join(testRoot, 'exported');
   await mkdir(exportDirectory, { recursive: true });
   await electronApp.evaluate(({ dialog }, directory) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory], bookmarks: [] });
   }, exportDirectory);
-  await page.getByRole('button', { name: '关闭任务抽屉' }).click();
   await page.getByLabel('导出预设').selectOption({ label: 'PNG 交付' });
   await page.getByRole('button', { name: '导出当前版本' }).click();
   await expect(page.getByText('已导出 1 个文件')).toBeVisible();
@@ -177,7 +197,6 @@ test('analyzes, generates, compares, and persists managed and portable results',
   expect(diagnosticText).not.toContain('移除背景路人');
   expect(diagnosticBytes.byteLength).toBeGreaterThan(100);
 
-  const generatedRoot = path.join(testRoot, 'user-data', 'library', 'generated');
   const firstLevel = await readdir(generatedRoot);
   expect(firstLevel).toHaveLength(1);
   const portableRoot = path.join(path.dirname(sourcePath), '_PhotoAllIsAI');

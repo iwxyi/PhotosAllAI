@@ -68,12 +68,15 @@ export class LibraryBackupService {
     const temporary = await mkdtemp(path.join(parent, '.photoallisai-library-backup-'));
     try {
       const snapshotPath = path.join(temporary, 'catalog.sqlite');
-      const database = await this.#databaseBackup.create(snapshotPath);
-      const snapshot = new DatabaseSync(snapshotPath, { readOnly: true });
+      await this.#databaseBackup.create(snapshotPath);
+      const snapshot = new DatabaseSync(snapshotPath);
       let rows: Array<{ id: string; file_path: string }> = [];
       try {
         const table = snapshot.prepare("SELECT 1 AS value FROM sqlite_master WHERE type = 'table' AND name = 'generation_results'").get();
         if (table) {
+          const hasTrashState = (snapshot.prepare('PRAGMA table_info(generation_results)').all() as { name: string }[])
+            .some((column) => column.name === 'trashed_at');
+          if (hasTrashState) snapshot.prepare('DELETE FROM generation_results WHERE trashed_at IS NOT NULL').run();
           rows = snapshot.prepare(`
             SELECT id, file_path FROM generation_results
             WHERE storage_mode = 'managed' ORDER BY id
@@ -82,6 +85,8 @@ export class LibraryBackupService {
       } finally {
         snapshot.close();
       }
+      const databaseStats = await stat(snapshotPath);
+      const database = { bytes: databaseStats.size, sha256: await hashFile(snapshotPath) };
 
       const generatedDirectory = rows.length > 0 ? await realpath(this.#generatedDirectory) : null;
       let generatedBytes = 0;
@@ -167,8 +172,10 @@ export class LibraryBackupService {
       const integrity = database.prepare('PRAGMA quick_check').all() as Array<Record<string, unknown>>;
       if (integrity.length !== 1 || !Object.values(integrity[0] ?? {}).includes('ok')) throw new Error('BACKUP_CATALOG_CORRUPT');
       const table = database.prepare("SELECT 1 AS value FROM sqlite_master WHERE type = 'table' AND name = 'generation_results'").get();
+      const hasTrashState = table && (database.prepare('PRAGMA table_info(generation_results)').all() as { name: string }[])
+        .some((column) => column.name === 'trashed_at');
       const managedRows = table
-        ? database.prepare("SELECT id FROM generation_results WHERE storage_mode = 'managed'").all() as Array<{ id: string }>
+        ? database.prepare(`SELECT id FROM generation_results WHERE storage_mode = 'managed'${hasTrashState ? ' AND trashed_at IS NULL' : ''}`).all() as Array<{ id: string }>
         : [];
       const managedIds = new Set(managedRows.map((row) => row.id));
       if (managedIds.size !== resultIds.size || [...managedIds].some((id) => !resultIds.has(id))) {

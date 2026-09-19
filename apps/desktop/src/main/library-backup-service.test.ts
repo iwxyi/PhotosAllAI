@@ -74,6 +74,30 @@ describe('complete library backup', () => {
     context.database.close();
   });
 
+  it('excludes recycled result records and payloads from a backup snapshot', async () => {
+    const context = await fixture();
+    context.database.exec('ALTER TABLE generation_results ADD COLUMN trashed_at INTEGER');
+    const activeId = randomUUID();
+    const trashedId = randomUUID();
+    const activePath = path.join(context.generated, activeId, 'active.jpg');
+    const trashPath = path.join(context.library, 'trash', 'generation', trashedId, 'trashed.jpg');
+    await Promise.all([mkdir(path.dirname(activePath), { recursive: true }), mkdir(path.dirname(trashPath), { recursive: true })]);
+    await Promise.all([writeFile(activePath, 'active'), writeFile(trashPath, 'trashed')]);
+    context.database.prepare('INSERT INTO generation_results VALUES (?, ?, ?, ?)').run(activeId, activePath, 'managed', null);
+    context.database.prepare('INSERT INTO generation_results VALUES (?, ?, ?, ?)').run(trashedId, path.join(context.generated, trashedId, 'trashed.jpg'), 'managed', Date.now());
+    const service = new LibraryBackupService(context.databasePath, context.generated);
+
+    const result = await service.create(context.destination, 47);
+
+    expect(result.generatedFiles).toBe(1);
+    const snapshot = new DatabaseSync(path.join(result.destinationPath, 'catalog.sqlite'), { readOnly: true });
+    expect(snapshot.prepare('SELECT id FROM generation_results ORDER BY id').all()).toEqual([{ id: activeId }]);
+    snapshot.close();
+    await expect(service.verify(result.destinationPath)).resolves.toMatchObject({ generatedFiles: 1 });
+    expect(await readFile(trashPath, 'utf8')).toBe('trashed');
+    context.database.close();
+  });
+
   it('rejects traversal paths before reading generated files', async () => {
     const context = await fixture();
     const resultId = randomUUID();

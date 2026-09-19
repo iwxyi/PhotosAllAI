@@ -25,6 +25,7 @@ import {
   catalogCompanionPreviewSchema,
   enqueueTaskInputSchema,
   exportGenerationResultsInputSchema,
+  generationResultIdInputSchema,
   exportReportSchema,
   saveExportPresetInputSchema,
   exportPresetSchema,
@@ -79,7 +80,7 @@ import { DatabaseMigrationService } from './database-migration-service';
 import { LibraryRestoreService } from './library-restore-service';
 
 const APP_ORIGIN = 'app://photoallisai';
-const APPLICATION_SCHEMA_VERSION = 3;
+const APPLICATION_SCHEMA_VERSION = 4;
 let catalog: CatalogService;
 let catalogWatcher: CatalogWatcher;
 let imageCache: ImageCacheService;
@@ -452,6 +453,16 @@ function registerIpc(): void {
     const { assetId } = listGenerationResultsInputSchema.parse(input);
     return generation.list(assetId);
   });
+  ipcMain.handle('generation.results.trash.list.v1', (_event, input: unknown) => {
+    const { assetId } = listGenerationResultsInputSchema.parse(input);
+    return generation.listTrashed(assetId);
+  });
+  ipcMain.handle('generation.result.trash.v1', (_event, input: unknown) =>
+    generation.trash(generationResultIdInputSchema.parse(input).resultId)
+  );
+  ipcMain.handle('generation.result.restore.v1', (_event, input: unknown) =>
+    generation.restore(generationResultIdInputSchema.parse(input).resultId)
+  );
   ipcMain.handle('generation.result.review.update.v1', (_event, input: unknown) =>
     generation.updateReview(updateGenerationResultReviewInputSchema.parse(input))
   );

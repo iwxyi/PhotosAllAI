@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http';
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -98,6 +98,18 @@ describe('managed generation results', () => {
     service.close();
   });
 
+  it('keeps manifests isolated per asset when a batch spans multiple photos', async () => {
+    const { service, directory } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const first = await service.generate('asset-1', payload());
+    const second = await service.generate('asset-2', payload());
+    const firstManifest = JSON.parse(await readFile(path.join(directory, 'managed', 'generated', 'as', 'asset-1', batchId, 'manifest.json'), 'utf8')) as { assetId: string; results: Array<{ id: string }> };
+    const secondManifest = JSON.parse(await readFile(path.join(directory, 'managed', 'generated', 'as', 'asset-2', batchId, 'manifest.json'), 'utf8')) as { assetId: string; results: Array<{ id: string }> };
+
+    expect(firstManifest).toMatchObject({ assetId: 'asset-1', results: [{ id: first.id }] });
+    expect(secondManifest).toMatchObject({ assetId: 'asset-2', results: [{ id: second.id }] });
+    service.close();
+  });
+
   it('writes portable results beside the original and records the strategy', async () => {
     const { service, directory, sourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
     const original = await readFile(sourcePath);
@@ -134,6 +146,47 @@ describe('managed generation results', () => {
     expect(service.updateReview({ resultId: second.id, reviewState: 'preferred' }).reviewState).toBe('preferred');
     expect(service.list('asset-1').find((result) => result.id === first.id)?.reviewState).toBe('accepted');
     expect(service.updateReview({ resultId: second.id, reviewState: 'rejected' }).reviewState).toBe('rejected');
+    service.close();
+  });
+
+  it('moves a generated version into the managed trash and restores it without reusing its version', async () => {
+    const { service, directory } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const first = await service.generate('asset-1', payload());
+    const originalPath = service.resolveResultFile(first.id)!;
+
+    const trashed = await service.trash(first.id);
+
+    expect(trashed).toMatchObject({ id: first.id, version: 1, trashedAt: expect.any(Number) });
+    expect(service.list('asset-1')).toEqual([]);
+    expect(service.resolveResultFile(first.id)).toBeNull();
+    expect(service.listTrashed('asset-1')).toEqual([expect.objectContaining({ id: first.id })]);
+    expect(() => service.updateReview({ resultId: first.id, reviewState: 'accepted' })).toThrow('GENERATION_RESULT_NOT_FOUND');
+    await expect(stat(originalPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    const manifestPath = path.join(directory, 'managed', 'generated', 'as', 'asset-1', batchId, 'manifest.json');
+    expect((JSON.parse(await readFile(manifestPath, 'utf8')) as { results: unknown[] }).results).toEqual([]);
+    const second = await service.generate('asset-1', payload(2));
+    expect(second.version).toBe(2);
+
+    const restored = await service.restore(first.id);
+
+    expect(restored).toMatchObject({ id: first.id, version: 1 });
+    expect(await readFile(originalPath)).toEqual(png);
+    expect(service.list('asset-1').map((result) => result.version)).toEqual([2, 1]);
+    expect(service.listTrashed('asset-1')).toEqual([]);
+    expect((JSON.parse(await readFile(manifestPath, 'utf8')) as { results: Array<{ version: number }> }).results.map((item) => item.version)).toEqual([1, 2]);
+    service.close();
+  });
+
+  it('refuses to restore over an unexpected file and leaves the trashed version recoverable', async () => {
+    const { service } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', payload());
+    const originalPath = service.resolveResultFile(result.id)!;
+    await service.trash(result.id);
+    await writeFile(originalPath, 'conflicting-file');
+
+    await expect(service.restore(result.id)).rejects.toThrow('GENERATION_RESULT_RESTORE_CONFLICT');
+    expect(service.listTrashed('asset-1')).toHaveLength(1);
+    expect(await readFile(originalPath, 'utf8')).toBe('conflicting-file');
     service.close();
   });
 

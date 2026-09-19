@@ -10,6 +10,7 @@ import type {
   AnalysisResult,
   AnalysisRevision,
   GenerationResult,
+  TrashedGenerationResult,
   FileOperationHistoryItem,
   PersistedTask,
   PromptTemplate,
@@ -632,6 +633,7 @@ function Viewer({
 function AiPanel({
   photo,
   results,
+  trashedResults,
   revision,
   isDemo,
   notice,
@@ -639,10 +641,13 @@ function AiPanel({
   generationProfiles,
   templates,
   onOpenTemplates,
-  onGenerate
+  onGenerate,
+  onTrashResult,
+  onRestoreResult
 }: {
   photo: Photo;
   results: GenerationResult[];
+  trashedResults: TrashedGenerationResult[];
   revision: AnalysisRevision | undefined;
   isDemo: boolean;
   notice: string;
@@ -651,6 +656,8 @@ function AiPanel({
   templates: PromptTemplate[];
   onOpenTemplates: () => void;
   onGenerate: (input: { providerProfileId: string; template: PromptTemplate | null; count: number; instruction: string; disabledActionIds: Set<string> }) => Promise<string>;
+  onTrashResult: (resultId: string) => Promise<void>;
+  onRestoreResult: (resultId: string) => Promise<void>;
 }): React.JSX.Element {
   const [actions, setActions] = useState({ people: true, light: true, texture: false });
   const [disabledActions, setDisabledActions] = useState<Set<string>>(new Set());
@@ -728,7 +735,7 @@ function AiPanel({
           </label>
           {!isDemo && generationNotice && <p className="generation-notice">{generationNotice}</p>}
         </div>
-      </> : inspectorTab === 'info' ? <InspectorInfo photo={photo} revision={revision} /> : <InspectorVersions results={results} />}</div>
+      </> : inspectorTab === 'info' ? <InspectorInfo photo={photo} revision={revision} /> : <InspectorVersions results={results} trashedResults={trashedResults} onTrashResult={onTrashResult} onRestoreResult={onRestoreResult} />}</div>
       <div className="generate-footer">
         <div className="generation-count"><span>生成数量</span><div><button type="button" aria-label="减少生成数量" onClick={() => setGenerationCount((value) => Math.max(1, value - 1))}>−</button><strong>{generationCount}</strong><button type="button" aria-label="增加生成数量" onClick={() => setGenerationCount((value) => Math.min(8, value + 1))}>+</button></div></div>
         <button className="primary-action" type="button" onClick={() => void queueGeneration()} disabled={!isDemo && (!result || generating)}><Sparkles size={16} />{generating ? '正在加入…' : '加入生成队列'}</button>
@@ -758,8 +765,36 @@ function InspectorInfo({ photo, revision }: { photo: Photo; revision: AnalysisRe
   return <div className="inspector-info"><section className="inspector-section"><div className="inspector-heading"><span>文件信息</span></div><div className="metadata-list">{fields.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div></section><section className="inspector-section"><div className="inspector-heading"><span>用户标签</span><span className="section-count">{photo.tags?.length ?? 0} 个</span></div>{photo.tags?.length ? <div className="metadata-tags">{photo.tags.map((tag) => <span key={tag.id}>{tag.name}</span>)}</div> : <div className="inline-empty">尚未添加标签</div>}</section>{revision && <section className="inspector-section"><div className="inspector-heading"><span>AI 编目</span></div><p className="analysis-copy">{revision.result.catalog.shortDescription}</p></section>}</div>;
 }
 
-function InspectorVersions({ results }: { results: GenerationResult[] }): React.JSX.Element {
-  return <div className="inspector-versions"><section className="inspector-section"><div className="inspector-heading"><span>生成版本</span><span className="section-count">{results.length} 个</span></div>{results.length === 0 ? <div className="inline-empty">尚未生成版本</div> : <div className="version-list">{[...results].sort((a, b) => b.version - a.version).map((result) => <div className="version-list-row" key={result.id}><span><strong>V{result.version}</strong><small>{result.reviewState === 'preferred' ? '首选' : result.reviewState === 'accepted' ? '已接受' : result.reviewState === 'rejected' ? '已拒绝' : '未审阅'}</small></span><em>{new Date(result.createdAt).toLocaleDateString()}</em></div>)}</div>}</section></div>;
+function InspectorVersions({ results, trashedResults, onTrashResult, onRestoreResult }: { results: GenerationResult[]; trashedResults: TrashedGenerationResult[]; onTrashResult: (resultId: string) => Promise<void>; onRestoreResult: (resultId: string) => Promise<void> }): React.JSX.Element {
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const run = async (resultId: string, operation: (id: string) => Promise<void>) => {
+    setBusyId(resultId);
+    try {
+      await operation(resultId);
+      setPendingId(null);
+    } catch {
+      // The workspace operation reports a specific failure through its status toast.
+    } finally {
+      setBusyId(null);
+    }
+  };
+  return <div className="inspector-versions">
+    <section className="inspector-section">
+      <div className="inspector-heading"><span>生成版本</span><span className="section-count">{results.length} 个</span></div>
+      {results.length === 0 ? <div className="inline-empty">尚无可用版本</div> : <div className="version-list">{[...results].sort((a, b) => b.version - a.version).map((result) => <div className={`version-list-row${pendingId === result.id ? ' is-pending' : ''}`} key={result.id}>
+        <span><strong>V{result.version}</strong><small>{result.reviewState === 'preferred' ? '首选' : result.reviewState === 'accepted' ? '已接受' : result.reviewState === 'rejected' ? '已拒绝' : '未审阅'}</small></span>
+        {pendingId === result.id ? <span className="version-confirm"><button type="button" disabled={busyId !== null} onClick={() => setPendingId(null)}>取消</button><button className="is-danger" type="button" disabled={busyId !== null} onClick={() => void run(result.id, onTrashResult)}>{busyId === result.id ? '回收中' : '确认'}</button></span> : <span className="version-row-actions"><em>{new Date(result.createdAt).toLocaleDateString()}</em><button type="button" aria-label={`回收版本 V${result.version}`} disabled={busyId !== null} onClick={() => setPendingId(result.id)}><Trash2 size={12} /></button></span>}
+      </div>)}</div>}
+    </section>
+    {trashedResults.length > 0 && <section className="inspector-section recycle-section">
+      <div className="inspector-heading"><span>版本回收站</span><span className="section-count">{trashedResults.length} 个</span></div>
+      <div className="version-list">{trashedResults.map((result) => <div className="version-list-row is-trashed" key={result.id}>
+        <span><strong>V{result.version}</strong><small>{new Date(result.trashedAt).toLocaleString()}</small></span>
+        <button type="button" aria-label={`恢复版本 V${result.version}`} title="恢复版本" disabled={busyId !== null} onClick={() => void run(result.id, onRestoreResult)}><RotateCcw className={busyId === result.id ? 'is-spinning' : ''} size={12} /></button>
+      </div>)}</div>
+    </section>}
+  </div>;
 }
 
 function TaskBar({ open, onToggle, onOpenTaskCenter, tasks }: { open: boolean; onToggle: () => void; onOpenTaskCenter: () => void; tasks: PersistedTask[] | null }): React.JSX.Element {
@@ -903,6 +938,7 @@ function PopulatedLibraryWorkspace({
   const [templateItems, setTemplateItems] = useState<PromptTemplate[]>([]);
   const [analysisRevision, setAnalysisRevision] = useState<AnalysisRevision>();
   const [generationResults, setGenerationResults] = useState<GenerationResult[]>([]);
+  const [trashedGenerationResults, setTrashedGenerationResults] = useState<TrashedGenerationResult[]>([]);
   const [analysisNotice, setAnalysisNotice] = useState('');
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
   const [tagEditorOpen, setTagEditorOpen] = useState(false);
@@ -997,11 +1033,18 @@ function PopulatedLibraryWorkspace({
     if (isDemo) return;
     let active = true;
     const refresh = () => {
-      void window.desktopApi.listGenerationResults(selected.id).then((items) => {
-        if (active) setGenerationResults(items);
+      void Promise.all([
+        window.desktopApi.listGenerationResults(selected.id),
+        window.desktopApi.listTrashedGenerationResults(selected.id)
+      ]).then(([items, trashedItems]) => {
+        if (active) {
+          setGenerationResults(items);
+          setTrashedGenerationResults(trashedItems);
+        }
       });
     };
     setGenerationResults([]);
+    setTrashedGenerationResults([]);
     refresh();
     const interval = window.setInterval(refresh, 1_000);
     return () => { active = false; window.clearInterval(interval); };
@@ -1175,6 +1218,39 @@ function PopulatedLibraryWorkspace({
     }
   };
 
+  const reloadGenerationResults = async (): Promise<void> => {
+    const [items, trashedItems] = await Promise.all([
+      window.desktopApi.listGenerationResults(selected.id),
+      window.desktopApi.listTrashedGenerationResults(selected.id)
+    ]);
+    setGenerationResults(items);
+    setTrashedGenerationResults(trashedItems);
+  };
+
+  const trashGenerationResult = async (resultId: string): Promise<void> => {
+    try {
+      await window.desktopApi.trashGenerationResult({ resultId });
+      await reloadGenerationResults();
+      setOperationNotice('生成版本已移到应用回收站，原图未受影响。');
+      await onRefreshCatalog();
+    } catch {
+      setOperationNotice('无法回收生成版本，请确认文件仍可访问。');
+      throw new Error('GENERATION_RESULT_TRASH_FAILED');
+    }
+  };
+
+  const restoreGenerationResult = async (resultId: string): Promise<void> => {
+    try {
+      await window.desktopApi.restoreGenerationResult({ resultId });
+      await reloadGenerationResults();
+      setOperationNotice('生成版本已恢复。');
+      await onRefreshCatalog();
+    } catch {
+      setOperationNotice('无法恢复生成版本：目标位置可能已有同名文件。');
+      throw new Error('GENERATION_RESULT_RESTORE_FAILED');
+    }
+  };
+
   const addTags = async () => {
     const names = tagDraft.split(',').map((name) => name.trim()).filter(Boolean);
     if (names.length === 0) return;
@@ -1331,7 +1407,7 @@ function PopulatedLibraryWorkspace({
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
         <Viewer photo={selected} results={generationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onFavorite={(favorite) => void favoriteSelection(favorite)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} onReview={reviewResult} onRevealOriginal={() => void window.desktopApi.revealCatalogAsset(selected.id)} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} />
       </main>
-      <AiPanel photo={selected} results={generationResults} revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onOpenTemplates={onOpenTemplates} onGenerate={generateSelection} />
+      <AiPanel photo={selected} results={generationResults} trashedResults={trashedGenerationResults} revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onOpenTemplates={onOpenTemplates} onGenerate={generateSelection} onTrashResult={trashGenerationResult} onRestoreResult={restoreGenerationResult} />
       {selection.selectedIds.size > 1 && (
         <div className="batch-actionbar">
           <strong>已选择 {selection.selectedIds.size} 张</strong>

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { constants } from 'node:fs';
 import { lookup } from 'node:dns/promises';
-import { access, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdir, readFile, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -8,7 +9,9 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   generationResultSchema,
   generationTaskPayloadSchema,
+  trashedGenerationResultSchema,
   type GenerationResult,
+  type TrashedGenerationResult,
   type UpdateGenerationResultReviewInput,
   updateGenerationResultReviewInputSchema,
   type ProviderProfile
@@ -36,6 +39,8 @@ type ResultRow = {
   storage_mode: 'managed' | 'portable';
   review_state: GenerationResult['reviewState'];
   created_at: number;
+  trashed_at: number | null;
+  trash_path: string | null;
 };
 
 const MAX_RESULT_BYTES = 50 * 1024 * 1024;
@@ -85,6 +90,12 @@ export class GenerationService {
     if (!columns.some((column) => column.name === 'storage_mode')) {
       this.#database.exec("ALTER TABLE generation_results ADD COLUMN storage_mode TEXT NOT NULL DEFAULT 'managed' CHECK(storage_mode IN ('managed', 'portable'))");
     }
+    if (!columns.some((column) => column.name === 'trashed_at')) {
+      this.#database.exec('ALTER TABLE generation_results ADD COLUMN trashed_at INTEGER');
+    }
+    if (!columns.some((column) => column.name === 'trash_path')) {
+      this.#database.exec('ALTER TABLE generation_results ADD COLUMN trash_path TEXT');
+    }
   }
 
   close(): void {
@@ -93,13 +104,73 @@ export class GenerationService {
 
   list(assetId: string): GenerationResult[] {
     return (this.#database.prepare(`
-      SELECT * FROM generation_results WHERE asset_id = ? ORDER BY version DESC
+      SELECT * FROM generation_results WHERE asset_id = ? AND trashed_at IS NULL ORDER BY version DESC
     `).all(assetId) as ResultRow[]).map((row) => this.#toResult(row));
   }
 
+  listTrashed(assetId: string): TrashedGenerationResult[] {
+    return (this.#database.prepare(`
+      SELECT * FROM generation_results WHERE asset_id = ? AND trashed_at IS NOT NULL ORDER BY trashed_at DESC
+    `).all(assetId) as ResultRow[]).map((row) => trashedGenerationResultSchema.parse({
+      ...this.#toResult(row),
+      trashedAt: row.trashed_at
+    }));
+  }
+
   resolveResultFile(resultId: string): string | null {
-    const row = this.#database.prepare('SELECT file_path FROM generation_results WHERE id = ?').get(resultId) as { file_path: string } | undefined;
+    const row = this.#database.prepare('SELECT file_path FROM generation_results WHERE id = ? AND trashed_at IS NULL').get(resultId) as { file_path: string } | undefined;
     return row?.file_path ?? null;
+  }
+
+  async trash(resultId: string): Promise<TrashedGenerationResult> {
+    const row = this.#findResult(resultId);
+    if (row.trashed_at !== null) throw new Error('GENERATION_RESULT_ALREADY_TRASHED');
+    if (!await pathExists(row.file_path)) throw new Error('GENERATION_RESULT_FILE_NOT_FOUND');
+    const trashPath = path.join(path.dirname(this.#generatedDirectory), 'trash', 'generation', row.id, row.file_name);
+    if (await pathExists(trashPath)) throw new Error('GENERATION_RESULT_TRASH_CONFLICT');
+    await mkdir(path.dirname(trashPath), { recursive: true });
+    await moveFileVerified(row.file_path, trashPath);
+    const trashedAt = Date.now();
+    try {
+      const result = this.#database.prepare(`
+        UPDATE generation_results SET trashed_at = ?, trash_path = ? WHERE id = ? AND trashed_at IS NULL
+      `).run(trashedAt, trashPath, resultId);
+      if (result.changes !== 1) throw new Error('GENERATION_RESULT_CONCURRENT_CHANGE');
+      await this.#refreshManifest(path.dirname(row.file_path), row.asset_id, row.batch_id);
+    } catch (error) {
+      this.#database.prepare(`
+        UPDATE generation_results SET trashed_at = NULL, trash_path = NULL
+        WHERE id = ? AND trash_path = ?
+      `).run(resultId, trashPath);
+      await moveFileVerified(trashPath, row.file_path).catch(() => undefined);
+      throw error;
+    }
+    return trashedGenerationResultSchema.parse({ ...this.#toResult(row), trashedAt });
+  }
+
+  async restore(resultId: string): Promise<GenerationResult> {
+    const row = this.#findResult(resultId);
+    if (row.trashed_at === null || !row.trash_path) throw new Error('GENERATION_RESULT_NOT_TRASHED');
+    if (!await pathExists(row.trash_path)) throw new Error('GENERATION_RESULT_TRASH_FILE_NOT_FOUND');
+    if (await pathExists(row.file_path)) throw new Error('GENERATION_RESULT_RESTORE_CONFLICT');
+    await mkdir(path.dirname(row.file_path), { recursive: true });
+    await moveFileVerified(row.trash_path, row.file_path);
+    try {
+      const result = this.#database.prepare(`
+        UPDATE generation_results SET trashed_at = NULL, trash_path = NULL WHERE id = ? AND trashed_at IS NOT NULL
+      `).run(resultId);
+      if (result.changes !== 1) throw new Error('GENERATION_RESULT_CONCURRENT_CHANGE');
+      await this.#refreshManifest(path.dirname(row.file_path), row.asset_id, row.batch_id);
+    } catch (error) {
+      this.#database.prepare(`
+        UPDATE generation_results SET trashed_at = ?, trash_path = ?
+        WHERE id = ? AND trashed_at IS NULL
+      `).run(row.trashed_at, row.trash_path, resultId);
+      await moveFileVerified(row.file_path, row.trash_path).catch(() => undefined);
+      throw error;
+    }
+    await rmdir(path.dirname(row.trash_path)).catch(() => undefined);
+    return this.#toResult({ ...row, trashed_at: null, trash_path: null });
   }
 
   async relocatePortableResults(
@@ -110,9 +181,9 @@ export class GenerationService {
     nextFileName: string
   ): Promise<void> {
     const rows = this.#database.prepare(`
-      SELECT id, batch_id, file_name, file_path FROM generation_results
+      SELECT id, batch_id, file_name, file_path, trashed_at FROM generation_results
       WHERE asset_id = ? AND storage_mode = 'portable'
-    `).all(assetId) as Array<{ id: string; batch_id: string; file_name: string; file_path: string }>;
+    `).all(assetId) as Array<{ id: string; batch_id: string; file_name: string; file_path: string; trashed_at: number | null }>;
     if (rows.length === 0) return;
 
     const shortAssetId = assetId.replaceAll('-', '').slice(0, 8).toUpperCase();
@@ -136,13 +207,13 @@ export class GenerationService {
     const update = this.#database.prepare('UPDATE generation_results SET file_path = ? WHERE id = ?');
     for (const row of rows) {
       const candidate = path.join(nextDirectory, row.batch_id, row.file_name);
-      if (await pathExists(candidate)) update.run(candidate, row.id);
+      if (row.trashed_at !== null || await pathExists(candidate)) update.run(candidate, row.id);
     }
   }
 
   updateReview(rawInput: UpdateGenerationResultReviewInput): GenerationResult {
     const input = updateGenerationResultReviewInputSchema.parse(rawInput);
-    const row = this.#database.prepare('SELECT asset_id FROM generation_results WHERE id = ?').get(input.resultId) as { asset_id: string } | undefined;
+    const row = this.#database.prepare('SELECT asset_id FROM generation_results WHERE id = ? AND trashed_at IS NULL').get(input.resultId) as { asset_id: string } | undefined;
     if (!row) throw new Error('GENERATION_RESULT_NOT_FOUND');
     this.#database.exec('BEGIN IMMEDIATE');
     try {
@@ -220,8 +291,8 @@ export class GenerationService {
   async #writeManifest(directory: string, assetId: string, batchId: string, profile: ProviderProfile, storageMode: 'managed' | 'portable'): Promise<void> {
     const rows = this.#database.prepare(`
       SELECT id, version, file_name, file_path, created_at FROM generation_results
-      WHERE batch_id = ? ORDER BY version ASC
-    `).all(batchId) as Array<{ id: string; version: number; file_name: string; file_path: string; created_at: number }>;
+      WHERE asset_id = ? AND batch_id = ? AND trashed_at IS NULL ORDER BY version ASC
+    `).all(assetId, batchId) as Array<{ id: string; version: number; file_name: string; file_path: string; created_at: number }>;
     const results = await Promise.all(rows.map(async (row) => {
       const resultBytes = await readFile(row.file_path);
       return {
@@ -247,6 +318,35 @@ export class GenerationService {
     await rename(temporary, destination);
   }
 
+  async #refreshManifest(directory: string, assetId: string, batchId: string): Promise<void> {
+    const destination = path.join(directory, 'manifest.json');
+    const existing = JSON.parse(await readFile(destination, 'utf8')) as Record<string, unknown>;
+    const rows = this.#database.prepare(`
+      SELECT id, version, file_name, file_path, created_at FROM generation_results
+      WHERE asset_id = ? AND batch_id = ? AND trashed_at IS NULL ORDER BY version ASC
+    `).all(assetId, batchId) as Array<{ id: string; version: number; file_name: string; file_path: string; created_at: number }>;
+    const results = await Promise.all(rows.map(async (row) => {
+      const resultBytes = await readFile(row.file_path);
+      return {
+        id: row.id,
+        version: row.version,
+        fileName: row.file_name,
+        format: path.extname(row.file_name).slice(1),
+        byteSize: resultBytes.byteLength,
+        sha256: createHash('sha256').update(resultBytes).digest('hex'),
+        createdAt: row.created_at
+      };
+    }));
+    const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporary, JSON.stringify({ ...existing, results }, null, 2), { mode: 0o600, flag: 'wx' });
+      await rename(temporary, destination);
+    } catch (error) {
+      await unlink(temporary).catch(() => undefined);
+      throw error;
+    }
+  }
+
   #toResult(row: ResultRow): GenerationResult {
     return generationResultSchema.parse({
       id: row.id, assetId: row.asset_id, batchId: row.batch_id, version: row.version,
@@ -256,6 +356,12 @@ export class GenerationService {
       , storageMode: row.storage_mode
     });
   }
+
+  #findResult(resultId: string): ResultRow {
+    const row = this.#database.prepare('SELECT * FROM generation_results WHERE id = ?').get(resultId) as ResultRow | undefined;
+    if (!row) throw new Error('GENERATION_RESULT_NOT_FOUND');
+    return row;
+  }
 }
 
 async function pathExists(filePath: string): Promise<boolean> {
@@ -264,6 +370,32 @@ async function pathExists(filePath: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function moveFileVerified(source: string, destination: string): Promise<void> {
+  try {
+    await rename(source, destination);
+    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
+  }
+  await copyFile(source, destination, constants.COPYFILE_EXCL);
+  try {
+    const [sourceStats, destinationStats, sourceBytes, destinationBytes] = await Promise.all([
+      stat(source),
+      stat(destination),
+      readFile(source),
+      readFile(destination)
+    ]);
+    if (sourceStats.size !== destinationStats.size
+      || createHash('sha256').update(sourceBytes).digest('hex') !== createHash('sha256').update(destinationBytes).digest('hex')) {
+      throw new Error('GENERATION_RESULT_MOVE_VERIFICATION_FAILED');
+    }
+    await unlink(source);
+  } catch (error) {
+    await unlink(destination).catch(() => undefined);
+    throw error;
   }
 }
 
