@@ -37,7 +37,8 @@ export const databaseBackupResultSchema = z.object({
 export type DatabaseBackupResult = z.infer<typeof databaseBackupResultSchema>;
 
 export const appSettingsSchema = z.object({
-  generationStorageMode: z.enum(['managed', 'portable']).default('managed')
+  generationStorageMode: z.enum(['managed', 'portable']).default('managed'),
+  theme: z.enum(['system', 'dark', 'light']).default('system')
 });
 export type AppSettings = z.infer<typeof appSettingsSchema>;
 

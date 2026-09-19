@@ -22,6 +22,59 @@
   --shadow-popover: 0 18px 50px rgb(0 0 0 / 35%);
 }
 
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #e9ede9;
+  --surface-1: #f8faf7;
+  --surface-2: #f0f3ef;
+  --surface-3: #e4e9e3;
+  --surface-4: #d8ded7;
+  --line: #d4dad3;
+  --line-strong: #b9c2b8;
+  --text: #1c231d;
+  --muted: #586259;
+  --dim: #778178;
+  --accent: #668500;
+  --accent-ink: #ffffff;
+  --cyan: #087e74;
+  --warning: #986500;
+  --danger: #b54545;
+  --shadow-popover: 0 18px 45px rgb(35 44 36 / 18%);
+}
+
+[data-theme="light"] .app-header,
+[data-theme="light"] .viewer-toolbar,
+[data-theme="light"] .viewer-footer,
+[data-theme="light"] .review-actions,
+[data-theme="light"] .generate-footer { background: var(--surface-1); }
+[data-theme="light"] .workspace-tab:hover,
+[data-theme="light"] .task-statusbar,
+[data-theme="light"] .task-drawer { background: var(--surface-2); }
+[data-theme="light"] .new-tab-menu,
+[data-theme="light"] .filter-popover,
+[data-theme="light"] .batch-actionbar,
+[data-theme="light"] .operation-toast,
+[data-theme="light"] .tag-editor-popover,
+[data-theme="light"] .album-dialog,
+[data-theme="light"] .move-dialog,
+[data-theme="light"] .rename-dialog,
+[data-theme="light"] .removal-dialog,
+[data-theme="light"] .template-preview-dialog { background: var(--surface-1); }
+[data-theme="light"] .search-trigger,
+[data-theme="light"] .segmented-control,
+[data-theme="light"] .instruction-field textarea,
+[data-theme="light"] .template-select,
+[data-theme="light"] .album-field input,
+[data-theme="light"] .rename-field input,
+[data-theme="light"] .tag-editor-popover input,
+[data-theme="light"] .provider-form input:not([type="checkbox"]),
+[data-theme="light"] .provider-form select,
+[data-theme="light"] .inline-search input,
+[data-theme="light"] .template-editor input,
+[data-theme="light"] .template-editor select,
+[data-theme="light"] .template-editor textarea,
+[data-theme="light"] .template-preview-body pre { color: var(--text); background: #ffffff; }
+
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 button, textarea { font: inherit; }

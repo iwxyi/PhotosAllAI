@@ -127,6 +127,13 @@ test('opens the task drawer and application tabs', async () => {
   await expect(page.getByText('尚未配置模型')).toBeVisible();
   await expect(page.getByRole('heading', { name: '导出预设' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '诊断摘要' })).toBeVisible();
+  await page.getByRole('button', { name: '外观' }).click();
+  await page.getByRole('radio', { name: /浅色/ }).check();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await page.screenshot({ path: 'test-results/settings-light-theme.png', animations: 'disabled' });
+  await page.getByRole('radio', { name: /深色/ }).check();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await page.getByRole('button', { name: 'AI 模型' }).click();
   await page.getByLabel('导出预设名称').fill('客户交付');
   await page.getByRole('button', { name: '保存预设' }).click();
   await expect(page.getByText('客户交付', { exact: true })).toBeVisible();
@@ -164,6 +171,7 @@ test('restores open tabs, active workspace, and selected photo', async () => {
   await page.screenshot({ path: 'test-results/workspace-tab-menu.png', animations: 'disabled' });
   await page.getByRole('menuitem', { name: '设置' }).click();
   await expect(page.getByRole('heading', { name: 'AI 模型' })).toBeVisible();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await page.getByRole('tab', { name: /图库/ }).click();
 });
 

@@ -61,6 +61,7 @@ import {
   RotateCcw,
   Sparkles,
   Star,
+  SunMoon,
   ShieldCheck,
   Tags,
   Trash2,
@@ -71,6 +72,15 @@ import {
 } from 'lucide-react';
 
 import { photos, type Photo } from './mock-data';
+
+const THEME_CHANGE_EVENT = 'photoallisai-theme-change';
+
+function applyTheme(theme: AppSettings['theme']): void {
+  const resolved = theme === 'system'
+    ? window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+    : theme;
+  document.documentElement.dataset.theme = resolved;
+}
 
 type CompareMode = 'single' | 'split';
 type CatalogSort = 'modifiedAt' | 'fileName' | 'rating';
@@ -1317,7 +1327,7 @@ const emptyProviderForm: SaveProviderProfileInput = {
 };
 
 function SettingsPage(): React.JSX.Element {
-  type SettingsSection = 'models' | 'storage' | 'tasks' | 'shortcuts' | 'privacy';
+  type SettingsSection = 'appearance' | 'models' | 'storage' | 'tasks' | 'shortcuts' | 'privacy';
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('models');
   const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
   const [form, setForm] = useState<SaveProviderProfileInput>(emptyProviderForm);
@@ -1332,6 +1342,7 @@ function SettingsPage(): React.JSX.Element {
   const [diagnostics, setDiagnostics] = useState<DiagnosticSnapshot | null>(null);
   const [diagnosticMessage, setDiagnosticMessage] = useState('');
   const [generationStorageMode, setGenerationStorageMode] = useState<AppSettings['generationStorageMode']>('managed');
+  const [theme, setTheme] = useState<AppSettings['theme']>('system');
   const [storageMessage, setStorageMessage] = useState('');
   const [storageBusy, setStorageBusy] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
@@ -1342,7 +1353,10 @@ function SettingsPage(): React.JSX.Element {
     void window.desktopApi.listExportPresets().then(setPresets);
     void window.desktopApi.getImageCacheStats().then(setCacheStats);
     void window.desktopApi.getDiagnosticSnapshot().then(setDiagnostics);
-    void window.desktopApi.getAppSettings().then((settings) => setGenerationStorageMode(settings.generationStorageMode));
+    void window.desktopApi.getAppSettings().then((settings) => {
+      setGenerationStorageMode(settings.generationStorageMode);
+      setTheme(settings.theme);
+    });
   }, []);
 
   const saveStorageMode = async (value: AppSettings['generationStorageMode']) => {
@@ -1350,13 +1364,25 @@ function SettingsPage(): React.JSX.Element {
     setStorageBusy(true);
     setStorageMessage('');
     try {
-      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode: value });
+      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode: value, theme });
       setGenerationStorageMode(saved.generationStorageMode);
       setStorageMessage('存储策略已保存，新加入队列的任务将使用该策略。');
     } catch {
       setStorageMessage('存储策略保存失败，请检查应用权限。');
     } finally {
       setStorageBusy(false);
+    }
+  };
+
+  const saveTheme = async (value: AppSettings['theme']) => {
+    setTheme(value);
+    try {
+      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode, theme: value });
+      setTheme(saved.theme);
+      applyTheme(saved.theme);
+      window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT, { detail: saved.theme }));
+    } catch {
+      setMessage('主题设置保存失败，请检查应用权限。');
     }
   };
 
@@ -1418,6 +1444,7 @@ function SettingsPage(): React.JSX.Element {
     <div className="settings-page">
       <aside className="settings-nav">
         <strong>设置</strong>
+        <button className={settingsSection === 'appearance' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('appearance')} aria-current={settingsSection === 'appearance' ? 'page' : undefined}><SunMoon size={14} />外观</button>
         <button className={settingsSection === 'models' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('models')} aria-current={settingsSection === 'models' ? 'page' : undefined}><Bot size={14} />AI 模型</button>
         <button className={settingsSection === 'storage' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('storage')} aria-current={settingsSection === 'storage' ? 'page' : undefined}><Folder size={14} />图库与存储</button>
         <button className={settingsSection === 'tasks' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('tasks')} aria-current={settingsSection === 'tasks' ? 'page' : undefined}><Clock3 size={14} />任务与重试</button>
@@ -1426,10 +1453,11 @@ function SettingsPage(): React.JSX.Element {
       </aside>
       <main className="settings-content">
         <div className="settings-heading">
-          <div><h1>{settingsSection === 'models' ? 'AI 模型' : settingsSection === 'storage' ? '图库与存储' : settingsSection === 'tasks' ? '任务与重试' : settingsSection === 'shortcuts' ? '快捷键' : '隐私与安全'}</h1><p>{settingsSection === 'models' ? '配置用于视觉分析与图片生成的兼容服务。应用不会提供默认密钥。' : settingsSection === 'storage' ? '管理预览缓存与生成结果的保存位置。' : settingsSection === 'tasks' ? '控制后台队列的执行节奏和失败恢复行为。' : settingsSection === 'shortcuts' ? '查看常用图库和任务操作的键盘入口。' : '了解图片上传、凭据和诊断数据的处理边界。'}</p></div>
+          <div><h1>{settingsSection === 'appearance' ? '外观' : settingsSection === 'models' ? 'AI 模型' : settingsSection === 'storage' ? '图库与存储' : settingsSection === 'tasks' ? '任务与重试' : settingsSection === 'shortcuts' ? '快捷键' : '隐私与安全'}</h1><p>{settingsSection === 'appearance' ? '选择适合当前环境的工作台表面，照片画布保持中性。' : settingsSection === 'models' ? '配置用于视觉分析与图片生成的兼容服务。应用不会提供默认密钥。' : settingsSection === 'storage' ? '管理预览缓存与生成结果的保存位置。' : settingsSection === 'tasks' ? '控制后台队列的执行节奏和失败恢复行为。' : settingsSection === 'shortcuts' ? '查看常用图库和任务操作的键盘入口。' : '了解图片上传、凭据和诊断数据的处理边界。'}</p></div>
           <span><ShieldCheck size={14} />本地优先</span>
         </div>
 
+        {settingsSection === 'appearance' && <section className="settings-section storage-section"><div className="settings-heading"><div><h2>界面主题</h2><p>跟随系统会在系统外观变化时即时切换，不需要重启应用。</p></div><span><SunMoon size={14} />照片优先</span></div><div className="storage-options" aria-label="界面主题">{([['system', '跟随系统', '自动使用 macOS 或 Windows 当前外观。'], ['dark', '深色', '适合暗光环境和长时间看图。'], ['light', '浅色', '适合明亮环境和文档型工作流。']] as const).map(([value, label, description]) => <label className={theme === value ? 'is-selected' : ''} key={value}><input type="radio" name="theme" checked={theme === value} onChange={() => void saveTheme(value)} /><span><strong>{label}</strong><small>{description}</small></span><Check size={15} /></label>)}</div></section>}
         {settingsSection === 'models' && <>
         <section className="provider-layout">
           <div className="provider-list">
@@ -1789,6 +1817,26 @@ export function App(): React.JSX.Element {
   const [favoriteOnly, setFavoriteOnly] = useState(false);
   const [sortBy, setSortBy] = useState<CatalogSort>('modifiedAt');
   const catalogRequest = useRef(0);
+
+  useEffect(() => {
+    let preference: AppSettings['theme'] = 'system';
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const refresh = () => applyTheme(preference);
+    const onThemeChange = (event: Event) => {
+      preference = (event as CustomEvent<AppSettings['theme']>).detail;
+      refresh();
+    };
+    void window.desktopApi.getAppSettings().then((settings) => {
+      preference = settings.theme;
+      refresh();
+    });
+    media.addEventListener('change', refresh);
+    window.addEventListener(THEME_CHANGE_EVENT, onThemeChange);
+    return () => {
+      media.removeEventListener('change', refresh);
+      window.removeEventListener(THEME_CHANGE_EVENT, onThemeChange);
+    };
+  }, []);
 
   useEffect(() => {
     void window.desktopApi.listExportPresets().then(setExportPresets);
