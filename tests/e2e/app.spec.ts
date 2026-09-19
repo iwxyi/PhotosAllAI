@@ -237,6 +237,10 @@ test('opens the task drawer and application tabs', async () => {
 
 test('restores open tabs, active workspace, and selected photo', async () => {
   await page.locator('.filmstrip [role="option"]').nth(2).click();
+  await page.getByRole('button', { name: /最近 30 天/ }).click();
+  await page.getByRole('button', { name: '筛选' }).click();
+  await page.getByRole('checkbox', { name: '仅显示首选照片' }).check();
+  await page.getByLabel('图库排序').selectOption('rating');
   await page.getByRole('button', { name: '关闭设置标签页' }).click();
   await expect(page.getByRole('tab', { name: '设置' })).toHaveCount(0);
   await page.getByRole('tab', { name: /任务中心/ }).click();
@@ -246,6 +250,10 @@ test('restores open tabs, active workspace, and selected photo', async () => {
   await expect(page.getByRole('tab', { name: /任务中心/ })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('tab', { name: '设置' })).toHaveCount(0);
   await page.getByRole('tab', { name: /图库/ }).click();
+  await expect(page.getByRole('button', { name: /最近 30 天/ })).toHaveClass(/is-active/);
+  await expect(page.getByRole('button', { name: '筛选 · 首选' })).toBeVisible();
+  await expect(page.getByLabel('图库排序')).toHaveValue('rating');
+  await expect(page.locator('.result-summary strong')).toHaveText('最近 30 天');
   await expect(page.getByText('A7R_0912.ARW', { exact: true }).last()).toBeVisible();
   await expect(page.locator('.generated-layer img')).toHaveCSS('object-fit', 'cover');
 

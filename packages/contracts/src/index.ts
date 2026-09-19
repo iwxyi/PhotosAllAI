@@ -77,7 +77,7 @@ export type AppSettings = z.infer<typeof appSettingsSchema>;
 export const workspaceTabSchema = z.enum(['library', 'templates', 'tasks', 'settings']);
 export type WorkspaceTab = z.infer<typeof workspaceTabSchema>;
 
-export const workspaceSessionSchema = z.object({
+export const workspaceSessionV1Schema = z.object({
   version: z.literal(1),
   openTabs: z.array(workspaceTabSchema).min(1).max(4)
     .refine((items) => new Set(items).size === items.length, 'Workspace tabs must be unique')
@@ -87,6 +87,27 @@ export const workspaceSessionSchema = z.object({
     selectedFolderId: z.string().min(1).nullable(),
     selectedTagId: z.string().uuid().nullable(),
     selectedAssetId: z.string().min(1).nullable(),
+    searchQuery: z.string().max(500)
+  })
+}).refine((session) => session.openTabs.includes(session.activeTab), {
+  message: 'Active workspace tab must be open'
+});
+export type WorkspaceSessionV1 = z.infer<typeof workspaceSessionV1Schema>;
+
+export const workspaceSessionSchema = z.object({
+  version: z.literal(2),
+  openTabs: z.array(workspaceTabSchema).min(1).max(4)
+    .refine((items) => new Set(items).size === items.length, 'Workspace tabs must be unique')
+    .refine((items) => items.includes('library'), 'Library tab must remain open'),
+  activeTab: workspaceTabSchema,
+  library: z.object({
+    selectedFolderId: z.string().min(1).nullable(),
+    selectedAlbumId: z.string().uuid().nullable(),
+    selectedSmartCollection: z.enum(['recent', 'favorites', 'unrated', 'unanalyzed', 'generated', 'to-review']).nullable(),
+    selectedTagId: z.string().uuid().nullable(),
+    selectedAssetId: z.string().min(1).nullable(),
+    favoriteOnly: z.boolean(),
+    sortBy: z.enum(['modifiedAt', 'fileName', 'rating']),
     searchQuery: z.string().max(500)
   })
 }).refine((session) => session.openTabs.includes(session.activeTab), {

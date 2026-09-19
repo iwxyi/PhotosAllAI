@@ -1,18 +1,23 @@
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  workspaceSessionV1Schema,
   workspaceSessionSchema,
   type WorkspaceSession
 } from '@photoallisai/contracts';
 
 export const defaultWorkspaceSession: WorkspaceSession = {
-  version: 1,
+  version: 2,
   openTabs: ['library', 'templates', 'tasks', 'settings'],
   activeTab: 'library',
   library: {
     selectedFolderId: null,
+    selectedAlbumId: null,
+    selectedSmartCollection: null,
     selectedTagId: null,
     selectedAssetId: null,
+    favoriteOnly: false,
+    sortBy: 'modifiedAt',
     searchQuery: ''
   }
 };
@@ -41,8 +46,18 @@ export class WorkspaceService {
     const row = this.#database.prepare(`
       SELECT schema_version, payload_json FROM application_state WHERE key = 'workspace_session'
     `).get() as { schema_version: number; payload_json: string } | undefined;
-    if (!row || row.schema_version !== 1) return structuredClone(defaultWorkspaceSession);
+    if (!row) return structuredClone(defaultWorkspaceSession);
     try {
+      if (row.schema_version === 1) {
+        const legacy = workspaceSessionV1Schema.parse(JSON.parse(row.payload_json));
+        return workspaceSessionSchema.parse({
+          ...defaultWorkspaceSession,
+          openTabs: legacy.openTabs,
+          activeTab: legacy.activeTab,
+          library: { ...defaultWorkspaceSession.library, ...legacy.library }
+        });
+      }
+      if (row.schema_version !== 2) return structuredClone(defaultWorkspaceSession);
       return workspaceSessionSchema.parse(JSON.parse(row.payload_json));
     } catch {
       return structuredClone(defaultWorkspaceSession);

@@ -2122,8 +2122,12 @@ export function App(): React.JSX.Element {
       setOpenTabs(session.openTabs);
       setActiveTab(session.activeTab);
       setSelectedFolderId(session.library.selectedFolderId);
+      setSelectedAlbumId(session.library.selectedAlbumId);
+      setSelectedSmartCollection(session.library.selectedSmartCollection);
       setSelectedTagId(session.library.selectedTagId);
       setSelectedAssetId(session.library.selectedAssetId);
+      setFavoriteOnly(session.library.favoriteOnly);
+      setSortBy(session.library.sortBy);
       setSearchDraft(session.library.searchQuery);
       setSearchQuery(session.library.searchQuery);
       setSessionReady(true);
@@ -2134,16 +2138,16 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     if (!sessionReady) return;
     const session: WorkspaceSession = {
-      version: 1,
+      version: 2,
       openTabs,
       activeTab,
-      library: { selectedFolderId, selectedTagId, selectedAssetId, searchQuery: searchDraft.trim() }
+      library: { selectedFolderId, selectedAlbumId, selectedSmartCollection, selectedTagId, selectedAssetId, favoriteOnly, sortBy, searchQuery: searchDraft.trim() }
     };
     const timeout = window.setTimeout(() => {
       void window.desktopApi.saveWorkspaceSession(session).catch(() => undefined);
     }, 400);
     return () => window.clearTimeout(timeout);
-  }, [activeTab, openTabs, searchDraft, selectedAssetId, selectedFolderId, selectedTagId, sessionReady]);
+  }, [activeTab, favoriteOnly, openTabs, searchDraft, selectedAlbumId, selectedAssetId, selectedFolderId, selectedSmartCollection, selectedTagId, sessionReady, sortBy]);
 
   const refreshCatalog = useCallback(async (folderId: string | null = selectedFolderId) => {
     const request = ++catalogRequest.current;
