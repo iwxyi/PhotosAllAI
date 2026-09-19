@@ -427,6 +427,30 @@ describe('managed generation results', () => {
     service.close();
   });
 
+  it('preserves an interrupted write when an existing parent is a symbolic link', async () => {
+    const { service, directory } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const generatedRoot = path.join(directory, 'managed', 'generated');
+    const linkedPrefix = path.join(generatedRoot, 'as');
+    const outside = path.join(directory, 'outside-generated');
+    await mkdir(generatedRoot, { recursive: true });
+    await mkdir(outside);
+    await symlink(outside, linkedPrefix, process.platform === 'win32' ? 'junction' : 'dir');
+    const fileName = 'pending.png';
+    const filePath = path.join(linkedPrefix, 'asset-1', batchId, fileName);
+    const temporaryPath = `${filePath}.4321.a014e63f-9674-4d47-97d0-ccee7bbf5575.tmp`;
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    database.prepare(`
+      INSERT INTO generation_write_intents (
+        result_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'managed', ?)
+    `).run('pending-parent-link', 'asset-1', batchId, fileName, filePath, temporaryPath, Date.now());
+
+    await expect(service.recoverInterruptedWrites()).resolves.toEqual({ total: 1, recovered: 0, failed: 1 });
+    expect((database.prepare('SELECT COUNT(*) AS value FROM generation_write_intents').get() as { value: number }).value).toBe(1);
+    database.close();
+    service.close();
+  });
+
   it('relocates an interrupted portable write with its original', async () => {
     const { service, directory, sourcePath, setSourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
     const result = await service.generate('asset-1', { ...payload(), storageMode: 'portable' });

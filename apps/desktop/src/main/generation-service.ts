@@ -676,16 +676,34 @@ export class GenerationService {
       if (!source) return false;
       root = path.join(path.dirname(source.path), '_PhotoAllIsAI');
     }
-    try {
-      const entry = await lstat(directory);
-      if (!entry.isDirectory()) return false;
-      const [resolvedRoot, resolvedDirectory] = await Promise.all([realpath(root), realpath(directory)]);
-      return isPathWithin(resolvedRoot, resolvedDirectory);
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code === 'ENOENT';
-    }
+    return isSafePlannedDirectory(directory, root);
   }
 
+}
+
+async function isSafePlannedDirectory(directory: string, requiredRoot: string): Promise<boolean> {
+  const root = path.resolve(requiredRoot);
+  const target = path.resolve(directory);
+  if (!isPathWithin(root, target)) return false;
+  try {
+    const rootEntry = await lstat(root);
+    if (!rootEntry.isDirectory()) return false;
+    const resolvedRoot = await realpath(root);
+    let candidate = root;
+    for (const segment of path.relative(root, target).split(path.sep).filter(Boolean)) {
+      candidate = path.join(candidate, segment);
+      try {
+        const entry = await lstat(candidate);
+        if (!entry.isDirectory() || !isPathWithin(resolvedRoot, await realpath(candidate))) return false;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+        return false;
+      }
+    }
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT';
+  }
 }
 
 async function inspectOptionalRegularFile(filePath: string): Promise<Awaited<ReturnType<typeof lstat>> | null | false> {
