@@ -159,6 +159,37 @@ describe('managed generation results', () => {
     service.close();
   });
 
+  it('surfaces a restore rollback failure instead of hiding the file/database mismatch', async () => {
+    let failRestoreManifest = false;
+    const publisher: ConstructorParameters<typeof GenerationService>[5] = async (destination, temporary) => {
+      if (failRestoreManifest) throw new Error('simulated restore manifest failure');
+      await publishTemporaryFileSafely(destination, temporary);
+    };
+    let moveCalls = 0;
+    const mover: ConstructorParameters<typeof GenerationService>[6] = async (source, destination) => {
+      moveCalls += 1;
+      if (moveCalls === 3) throw new Error('simulated restore rollback failure');
+      await rename(source, destination);
+    };
+    const { service, directory } = await fixture(
+      () => ({ data: [{ b64_json: png.toString('base64') }] }),
+      undefined,
+      publisher,
+      mover
+    );
+    const result = await service.generate('asset-1', payload());
+    await service.trash(result.id);
+    failRestoreManifest = true;
+
+    await expect(service.restore(result.id)).rejects.toMatchObject({
+      message: 'GENERATION_RESTORE_ROLLBACK_FAILED',
+      errors: [expect.objectContaining({ message: 'simulated restore manifest failure' }), expect.objectContaining({ message: 'simulated restore rollback failure' })]
+    });
+    expect(service.listTrashed('asset-1')).toHaveLength(1);
+    expect(await stat(path.join(directory, 'managed', 'generated', 'as', 'asset-1', batchId, result.fileName))).toBeTruthy();
+    service.close();
+  });
+
   it('downloads a localhost URL result', async () => {
     const { service } = await fixture((origin) => ({ images: [{ url: `${origin}/result.png` }] }), png);
     await expect(service.generate('asset-1', payload())).resolves.toMatchObject({ version: 1 });
