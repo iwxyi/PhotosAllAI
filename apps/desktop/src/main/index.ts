@@ -83,6 +83,7 @@ import { DatabaseMigrationService } from './database-migration-service';
 import { LibraryRestoreService } from './library-restore-service';
 import { LibraryIntegrityService } from './library-integrity-service';
 import { classifyAutomaticBackupFailure, classifyAutomaticBackupResult, type AutomaticBackupStatus } from './automatic-backup-status';
+import { settleBeforeShutdown } from './shutdown-coordinator';
 
 const APP_ORIGIN = 'app://photoallisai';
 const APPLICATION_SCHEMA_VERSION = 4;
@@ -105,8 +106,11 @@ let libraryBackup: LibraryBackupService;
 let libraryRestore: LibraryRestoreService;
 let libraryIntegrity: LibraryIntegrityService;
 let contentHashTimer: NodeJS.Timeout | undefined;
+let contentHashPass: Promise<void> | undefined;
 let contentHashPassRunning = false;
 let shuttingDown = false;
+let shutdownStarted = false;
+let shutdownFinished = false;
 let startupRecovery = {
   trashPurges: { total: 0, recovered: 0, conflicts: 0, failed: 0 },
   fileOperations: { total: 0, resolved: 0, failed: 0 },
@@ -674,14 +678,18 @@ app.whenReady().then(async () => {
       let nextDelay = active ? 10_000 : 60_000;
       if (!active && !contentHashPassRunning) {
         contentHashPassRunning = true;
-        try {
-          const result = await catalog.indexPendingContentHashes(1);
-          nextDelay = result.remaining === 0 ? 5 * 60_000 : result.indexed > 0 ? 2_000 : 60_000;
-        } catch {
-          // Hash indexing is opportunistic and must never block normal catalog work.
-        } finally {
-          contentHashPassRunning = false;
-        }
+        contentHashPass = (async () => {
+          try {
+            const result = await catalog.indexPendingContentHashes(1);
+            nextDelay = result.remaining === 0 ? 5 * 60_000 : result.indexed > 0 ? 2_000 : 60_000;
+          } catch {
+            // Hash indexing is opportunistic and must never block normal catalog work.
+          } finally {
+            contentHashPassRunning = false;
+          }
+        })();
+        await contentHashPass;
+        contentHashPass = undefined;
       }
       scheduleContentHashPass(nextDelay);
     }, delayMs);
@@ -734,18 +742,32 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (shutdownFinished) return;
+  event.preventDefault();
+  if (shutdownStarted) return;
+  shutdownStarted = true;
   shuttingDown = true;
   if (contentHashTimer) clearTimeout(contentHashTimer);
   catalogWatcher?.stop();
-  taskRunner?.stop();
-  workspace?.close();
-  generation?.close();
-  exportService?.close();
-  exportPresets?.close();
-  analysis?.close();
-  templates?.close();
-  tasks?.close();
-  fileOperations?.close();
-  catalog?.close();
+  void settleBeforeShutdown([
+    ...(taskRunner ? [taskRunner.stop()] : []),
+    ...(contentHashPass ? [contentHashPass] : [])
+  ], 10_000).then((result) => {
+    if (result === 'timed-out') {
+      app.exit(0);
+      return;
+    }
+    workspace?.close();
+    generation?.close();
+    exportService?.close();
+    exportPresets?.close();
+    analysis?.close();
+    templates?.close();
+    tasks?.close();
+    fileOperations?.close();
+    catalog?.close();
+    shutdownFinished = true;
+    app.quit();
+  });
 });

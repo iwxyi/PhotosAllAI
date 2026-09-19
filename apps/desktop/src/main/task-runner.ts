@@ -32,6 +32,7 @@ interface ExportProcessor {
 export class TaskRunner {
   #running = false;
   #stopped = false;
+  #drainPromise: Promise<void> | null = null;
   readonly #controllers = new Map<string, AbortController>();
   readonly #tasks: TaskQueue;
   readonly #analysis: AnalysisProcessor;
@@ -50,9 +51,10 @@ export class TaskRunner {
     this.wake();
   }
 
-  stop(): void {
+  stop(): Promise<void> {
     this.#stopped = true;
     for (const controller of this.#controllers.values()) controller.abort();
+    return this.#drainPromise ?? Promise.resolve();
   }
 
   cancel(taskId: string): void {
@@ -62,7 +64,7 @@ export class TaskRunner {
   wake(): void {
     if (this.#running || this.#stopped) return;
     this.#running = true;
-    queueMicrotask(() => void this.#drain());
+    this.#drainPromise = Promise.resolve().then(() => this.#drain());
   }
 
   async #drain(): Promise<void> {
@@ -95,7 +97,7 @@ export class TaskRunner {
           }
         } catch (error) {
           const current = this.#tasks.find(task.id);
-          if (current && current.status !== 'canceled' && current.status !== 'failed') {
+          if (!this.#stopped && current && current.status !== 'canceled' && current.status !== 'failed') {
             const fallback = task.kind === 'generation' ? 'GENERATION_FAILED' : task.kind === 'export' ? 'EXPORT_FAILED' : 'ANALYSIS_FAILED';
             const errorCode = normalizeTaskErrorCode(error, fallback);
             this.#tasks.advance(task.id, 'failed', current.progress, errorCode);
@@ -106,6 +108,7 @@ export class TaskRunner {
       }
     } finally {
       this.#running = false;
+      this.#drainPromise = null;
       if (!this.#stopped && this.#tasks.hasQueued(['analysis', 'generation', 'export'])) {
         this.wake();
       }

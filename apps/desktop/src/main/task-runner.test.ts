@@ -21,6 +21,33 @@ afterEach(async () => {
 });
 
 describe('analysis task runner', () => {
+  it('leaves active work recoverable when shutdown aborts the processor', async () => {
+    const queue = await tasks();
+    const task = queue.enqueue({ kind: 'analysis', assetId: 'asset-shutdown', payload: { providerProfileId, mode: 'full' } });
+    const analyze = vi.fn((_assetId: string, _providerProfileId: string, signal?: AbortSignal) =>
+      new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+      })
+    );
+    const runner = new TaskRunner(queue, { analyze }, { generate: vi.fn() });
+    runner.start();
+    await vi.waitFor(() => expect(queue.find(task.id)?.status).toBe('processing'));
+
+    await runner.stop();
+    expect(queue.find(task.id)?.status).toBe('processing');
+    const databasePath = path.join(temporaryDirectories.at(-1)!, 'catalog.sqlite');
+    queue.close();
+
+    const recoveredQueue = new TaskService(databasePath);
+    expect(recoveredQueue.find(task.id)).toMatchObject({
+      status: 'queued',
+      progress: 0,
+      attempt: 1,
+      errorCode: 'APP_INTERRUPTED'
+    });
+    recoveredQueue.close();
+  });
+
   it('processes queued analysis work through completion', async () => {
     const queue = await tasks();
     const analyze = vi.fn().mockResolvedValue({});
