@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
   CatalogAsset,
   CatalogAlbum,
@@ -1491,7 +1491,7 @@ function PopulatedLibraryWorkspace({
     }
   };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!moveDialogOpen && !renameDialogOpen && !removalMode) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !moveBusy) setMoveDialogOpen(false);
