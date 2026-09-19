@@ -1,6 +1,7 @@
 import {
   analysisTaskPayloadSchema,
   exportTaskPayloadSchema,
+  exportReportSchema,
   generationTaskPayloadSchema,
   type PersistedTask
 } from '@photoallisai/contracts';
@@ -9,6 +10,7 @@ import type { TaskStatus } from '@photoallisai/domain';
 interface TaskQueue {
   claimNext(kinds: readonly PersistedTask['kind'][]): PersistedTask | null;
   advance(taskId: string, status: TaskStatus, progress: number, errorCode?: string | null): PersistedTask;
+  finish(taskId: string, status: 'completed' | 'failed', result: Record<string, unknown> | null, errorCode?: string | null): PersistedTask;
   list(): PersistedTask[];
 }
 
@@ -70,6 +72,7 @@ export class TaskRunner {
         try {
           if (task.kind !== 'export' && !task.assetId) throw new Error('TASK_ASSET_MISSING');
           this.#tasks.advance(task.id, 'processing', 0.1);
+          let taskResult: Record<string, unknown> | null = null;
           if (task.kind === 'analysis') {
             const payload = analysisTaskPayloadSchema.parse(task.payload);
             await this.#analysis.analyze(task.assetId!, payload.providerProfileId, controller.signal);
@@ -78,11 +81,15 @@ export class TaskRunner {
             await this.#generation.generate(task.assetId!, payload, controller.signal);
           } else {
             const payload = exportTaskPayloadSchema.parse(task.payload);
-            await this.#export.export(payload, controller.signal);
+            taskResult = exportReportSchema.parse(await this.#export.export(payload, controller.signal));
           }
           this.#tasks.advance(task.id, 'downloading', 0.85);
           this.#tasks.advance(task.id, 'saving', 0.95);
-          this.#tasks.advance(task.id, 'completed', 1);
+          if (task.kind === 'export' && taskResult && Number(taskResult.failed) > 0) {
+            this.#tasks.finish(task.id, 'failed', taskResult, 'EXPORT_PARTIAL_FAILURE');
+          } else {
+            this.#tasks.finish(task.id, 'completed', taskResult);
+          }
         } catch (error) {
           const current = this.#tasks.list().find((item) => item.id === task.id);
           if (current && current.status !== 'canceled' && current.status !== 'failed') {

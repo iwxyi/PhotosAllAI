@@ -20,6 +20,28 @@ afterEach(async () => {
 });
 
 describe('persistent task service', () => {
+  it('adds persisted task results to an existing task database', async () => {
+    const file = await databasePath();
+    const legacy = new DatabaseSync(file);
+    legacy.exec(`
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY, kind TEXT NOT NULL, asset_id TEXT, status TEXT NOT NULL,
+        position INTEGER NOT NULL, progress REAL NOT NULL DEFAULT 0,
+        attempt INTEGER NOT NULL DEFAULT 0, payload_json TEXT NOT NULL, error_code TEXT,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+    `);
+    legacy.close();
+
+    const tasks = new TaskService(file);
+    const inspection = new DatabaseSync(file);
+    const columns = inspection.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+    expect(columns.map((column) => column.name)).toContain('result_json');
+    inspection.close();
+    expect(tasks.enqueue({ kind: 'analysis', assetId: 'asset-1', payload: {} }).result).toBeNull();
+    tasks.close();
+  });
+
   it('queues and reorders tasks deterministically', async () => {
     const tasks = new TaskService(await databasePath());
     const first = tasks.enqueue({ kind: 'analysis', assetId: 'asset-1', payload: { depth: 'full' } });

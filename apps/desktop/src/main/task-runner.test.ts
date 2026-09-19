@@ -105,7 +105,12 @@ describe('analysis task runner', () => {
 
   it('processes queued export work with its dedicated payload contract', async () => {
     const queue = await tasks();
-    const exportTask = vi.fn().mockResolvedValue({ succeeded: 1 });
+    const exportTask = vi.fn().mockResolvedValue({
+      id: '04b31e0b-71d4-4654-8d56-8f197632e612', canceled: false,
+      total: 1, succeeded: 1, failed: 0,
+      files: [{ resultId: '32b027ec-aa41-4d0e-a9ea-5c42a2393108', fileName: 'photo.png' }],
+      failures: []
+    });
     const payload = {
       resultIds: ['32b027ec-aa41-4d0e-a9ea-5c42a2393108'],
       destinationDirectory: '/tmp/photoallisai-export'
@@ -116,6 +121,7 @@ describe('analysis task runner', () => {
 
     await vi.waitFor(() => expect(queue.list()[0]?.status).toBe('completed'));
     expect(exportTask).toHaveBeenCalledWith(expect.objectContaining(payload), expect.any(AbortSignal));
+    expect(queue.list()[0]?.result).toMatchObject({ succeeded: 1, failed: 0 });
     runner.stop();
     queue.close();
   });
@@ -137,6 +143,37 @@ describe('analysis task runner', () => {
 
     await vi.waitFor(() => expect(queue.list()[0]?.status).toBe('failed'));
     expect(queue.list()[0]?.errorCode).toBe('EXPORT_DESTINATION_NOT_DIRECTORY');
+    runner.stop();
+    queue.close();
+  });
+
+  it('persists a partial export report as a retryable failure', async () => {
+    const queue = await tasks();
+    queue.enqueue({
+      kind: 'export', assetId: null,
+      payload: {
+        resultIds: ['32b027ec-aa41-4d0e-a9ea-5c42a2393108'],
+        destinationDirectory: '/tmp/photoallisai-export'
+      }
+    });
+    const report = {
+      id: '04b31e0b-71d4-4654-8d56-8f197632e612', canceled: false,
+      total: 1, succeeded: 0, failed: 1, files: [],
+      failures: [{ resultId: '32b027ec-aa41-4d0e-a9ea-5c42a2393108', errorCode: 'EXPORT_NAME_EXISTS' }]
+    };
+    const runner = new TaskRunner(queue, { analyze: vi.fn() }, { generate: vi.fn() }, {
+      export: vi.fn().mockResolvedValue(report)
+    });
+    runner.start();
+
+    await vi.waitFor(() => expect(queue.list()[0]?.status).toBe('failed'));
+    expect(queue.list()[0]).toMatchObject({
+      progress: 1,
+      errorCode: 'EXPORT_PARTIAL_FAILURE',
+      result: report
+    });
+    const retried = queue.retry(queue.list()[0]!.id);
+    expect(retried).toMatchObject({ status: 'queued', progress: 0, result: null });
     runner.stop();
     queue.close();
   });

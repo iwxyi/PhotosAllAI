@@ -489,6 +489,7 @@ export const persistedTaskSchema = z.object({
   progress: z.number().min(0).max(1),
   attempt: z.number().int().nonnegative(),
   payload: z.record(z.string(), z.unknown()),
+  result: z.record(z.string(), z.unknown()).nullable().default(null),
   errorCode: z.string().nullable(),
   createdAt: z.number().nonnegative(),
   updatedAt: z.number().nonnegative()

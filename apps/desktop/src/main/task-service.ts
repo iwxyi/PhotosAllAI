@@ -25,6 +25,7 @@ type TaskRow = {
   progress: number;
   attempt: number;
   payload_json: string;
+  result_json: string | null;
   error_code: string | null;
   created_at: number;
   updated_at: number;
@@ -60,6 +61,7 @@ export class TaskService {
         progress REAL NOT NULL DEFAULT 0,
         attempt INTEGER NOT NULL DEFAULT 0,
         payload_json TEXT NOT NULL,
+        result_json TEXT,
         error_code TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
@@ -75,6 +77,10 @@ export class TaskService {
       );
       COMMIT;
     `);
+    const columns = this.#database.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+    if (!columns.some((column) => column.name === 'result_json')) {
+      this.#database.exec('ALTER TABLE tasks ADD COLUMN result_json TEXT');
+    }
   }
 
   #recoverInterrupted(): void {
@@ -194,6 +200,27 @@ export class TaskService {
     return this.#get(taskId);
   }
 
+  finish(taskId: string, status: 'completed' | 'failed', result: Record<string, unknown> | null, errorCode: string | null = null): PersistedTask {
+    const task = this.#get(taskId);
+    assertTaskTransition(task.status, status);
+    const now = Date.now();
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      this.#database.prepare(`
+        UPDATE tasks SET status = ?, progress = 1, result_json = ?, error_code = ?, updated_at = ? WHERE id = ?
+      `).run(status, result === null ? null : JSON.stringify(result), errorCode, now, taskId);
+      this.#database.prepare(`
+        INSERT INTO task_events (task_id, from_status, to_status, occurred_at, details_json)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(taskId, task.status, status, now, JSON.stringify(errorCode ? { errorCode } : {}));
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    return this.#get(taskId);
+  }
+
   cancel(taskId: string): PersistedTask {
     const task = this.#get(taskId);
     if (task.status === 'canceled') return task;
@@ -214,7 +241,7 @@ export class TaskService {
       const position = maximum.value + 1;
       this.#database.prepare(`
         UPDATE tasks SET status = 'queued', position = ?, progress = 0,
-          attempt = attempt + 1, error_code = NULL, updated_at = ? WHERE id = ?
+          attempt = attempt + 1, result_json = NULL, error_code = NULL, updated_at = ? WHERE id = ?
       `).run(position, now, task.id);
       this.#database.prepare(`
         INSERT INTO task_events (task_id, from_status, to_status, occurred_at, details_json)
@@ -394,8 +421,9 @@ export class TaskService {
     try {
       this.#database.prepare(`
         UPDATE tasks SET status = ?, position = ?, progress = 0,
-          attempt = attempt + ?, error_code = NULL, updated_at = ? WHERE id = ?
-      `).run(status, position, incrementAttempt, now, task.id);
+          attempt = attempt + ?, result_json = CASE WHEN ? = 'queued' THEN NULL ELSE result_json END,
+          error_code = NULL, updated_at = ? WHERE id = ?
+      `).run(status, position, incrementAttempt, status, now, task.id);
       this.#database.prepare(`
         INSERT INTO task_events (task_id, from_status, to_status, occurred_at)
         VALUES (?, ?, ?, ?)
@@ -424,6 +452,7 @@ export class TaskService {
       progress: row.progress,
       attempt: row.attempt,
       payload: JSON.parse(row.payload_json) as unknown,
+      result: row.result_json === null ? null : JSON.parse(row.result_json) as unknown,
       errorCode: row.error_code,
       createdAt: row.created_at,
       updatedAt: row.updated_at

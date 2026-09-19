@@ -15,6 +15,7 @@ const baseTask: PersistedTask = {
     resultIds: ['32b027ec-aa41-4d0e-a9ea-5c42a2393108'],
     destinationDirectory: '/Users/private/Pictures/export'
   },
+  result: null,
   errorCode: null,
   createdAt: 1,
   updatedAt: 1
@@ -31,5 +32,14 @@ describe('renderer task sanitization', () => {
   it('preserves non-export task payloads', () => {
     const generation = { ...baseTask, kind: 'generation' as const, assetId: 'asset-1', payload: { prompt: 'clean' } };
     expect(toRendererTask(generation)).toBe(generation);
+  });
+
+  it('drops malformed export results instead of exposing unknown fields', () => {
+    const sanitized = toRendererTask({
+      ...baseTask,
+      result: { destinationDirectory: '/Users/private/Pictures/export', succeeded: 1 }
+    });
+
+    expect(sanitized.result).toBeNull();
   });
 });
