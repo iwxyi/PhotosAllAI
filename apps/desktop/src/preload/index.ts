@@ -53,6 +53,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke('catalog.folders.import.v1') as ReturnType<
       DesktopApi['importFolders']
     >,
+  relinkCatalogFolder: (folderId) =>
+    ipcRenderer.invoke('catalog.folder.relink.v1', folderId) as ReturnType<DesktopApi['relinkCatalogFolder']>,
   listProviderProfiles: () =>
     ipcRenderer.invoke('providers.list.v1') as ReturnType<DesktopApi['listProviderProfiles']>,
   saveProviderProfile: (input) =>

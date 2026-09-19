@@ -32,6 +32,7 @@ import {
   renameCatalogAssetsInputSchema,
   renameCatalogAssetsReportSchema,
   renameCatalogAssetReportSchema,
+  relinkCatalogFolderResultSchema,
   reorderTaskIdsSchema,
   savePromptTemplateInputSchema,
   saveProviderProfileInputSchema,
@@ -221,6 +222,26 @@ function registerIpc(): void {
     const importedCount = await catalog.importFolders(result.filePaths);
     catalogWatcher.watchFolders(catalog.listFolderPaths());
     return catalogSnapshotSchema.parse({ assets: catalog.listAssets(), importedCount });
+  });
+  ipcMain.handle('catalog.folder.relink.v1', async (_event, input: unknown) => {
+    const folderId = String(input);
+    if (!/^[a-f0-9]{32}$/u.test(folderId)) throw new Error('INVALID_FOLDER_ID');
+    const result = await dialog.showOpenDialog({
+      title: '重新定位照片文件夹',
+      buttonLabel: '选择新位置',
+      properties: ['openDirectory']
+    });
+    if (result.canceled || !result.filePaths[0]) return null;
+    const report = await catalog.relinkFolder(folderId, result.filePaths[0]);
+    await Promise.allSettled(report.relocations.map((item) => generation.relocatePortableResults(
+      item.assetId,
+      item.previousPath,
+      item.nextPath,
+      item.previousFileName,
+      item.nextFileName
+    )));
+    catalogWatcher.watchFolders(catalog.listFolderPaths());
+    return relinkCatalogFolderResultSchema.parse(report);
   });
 
   ipcMain.handle('providers.list.v1', () => providers.list());

@@ -8,6 +8,7 @@ import {
   catalogAssetSchema,
   catalogAssetPageSchema,
   catalogFolderSchema,
+  relinkCatalogFolderResultSchema,
   catalogSmartCollectionSchema,
   catalogTagSchema,
   deleteCatalogTagInputSchema,
@@ -18,6 +19,7 @@ import {
   type CatalogAsset,
   type CatalogAssetPage,
   type CatalogFolder,
+  type RelinkCatalogFolderResult,
   type CatalogSmartCollection,
   type CatalogTag,
   type ListCatalogAssetsInput,
@@ -49,6 +51,16 @@ type AssetRow = {
   rating: number;
   favorite: number;
   offline_at: number | null;
+};
+
+export type RelinkCatalogFolderOperationResult = RelinkCatalogFolderResult & {
+  relocations: Array<{
+    assetId: string;
+    previousPath: string;
+    nextPath: string;
+    previousFileName: string;
+    nextFileName: string;
+  }>;
 };
 
 export function isSupportedImage(filePath: string): boolean {
@@ -342,17 +354,95 @@ export class CatalogService {
 
   listFolders(): CatalogFolder[] {
     const rows = this.#database.prepare(`
-      SELECT folders.id, folders.name, COUNT(assets.id) AS asset_count
+      SELECT folders.id, folders.name, COUNT(assets.id) AS asset_count,
+        SUM(CASE WHEN assets.offline_at IS NOT NULL THEN 1 ELSE 0 END) AS offline_count
       FROM folders
       LEFT JOIN assets ON assets.folder_id = folders.id AND assets.removed_at IS NULL
       GROUP BY folders.id, folders.name
       ORDER BY folders.name COLLATE NOCASE ASC, folders.id ASC
-    `).all() as { id: string; name: string; asset_count: number }[];
+    `).all() as { id: string; name: string; asset_count: number; offline_count: number | null }[];
     return rows.map((row) => catalogFolderSchema.parse({
       id: row.id,
       name: row.name,
-      assetCount: row.asset_count
+      assetCount: row.asset_count,
+      offlineCount: row.offline_count ?? 0
     }));
+  }
+
+  async relinkFolder(folderId: string, requestedPath: string): Promise<RelinkCatalogFolderOperationResult> {
+    const folder = this.#database.prepare('SELECT id, path FROM folders WHERE id = ?')
+      .get(folderId) as { id: string; path: string } | undefined;
+    if (!folder) throw new Error('CATALOG_FOLDER_NOT_FOUND');
+    const nextRoot = await realpath(requestedPath);
+    if (!(await stat(nextRoot)).isDirectory()) throw new Error('TARGET_NOT_DIRECTORY');
+    const collision = this.#database.prepare('SELECT id FROM folders WHERE path = ? AND id <> ?').get(nextRoot, folderId);
+    if (collision) throw new Error('RELINK_TARGET_ALREADY_IMPORTED');
+
+    const existing = this.#database.prepare(`
+      SELECT id, path, file_name FROM assets WHERE folder_id = ? AND removed_at IS NULL
+    `).all(folderId) as { id: string; path: string; file_name: string }[];
+    const exact = new Map(existing.map((asset) => [path.relative(folder.path, asset.path), asset]));
+    const normalized = new Map<string, { id: string; path: string; file_name: string } | null>();
+    for (const [relative, asset] of exact) {
+      const key = normalizeRelativePath(relative);
+      normalized.set(key, normalized.has(key) ? null : asset);
+    }
+    const files: { path: string; relative: string; size: number; modifiedAt: number }[] = [];
+    for await (const filePath of walkImages(nextRoot)) {
+      const metadata = await stat(filePath);
+      files.push({ path: filePath, relative: path.relative(nextRoot, filePath), size: metadata.size, modifiedAt: Math.trunc(metadata.mtimeMs) });
+    }
+    const foreignPath = this.#database.prepare('SELECT folder_id FROM assets WHERE path = ? AND folder_id <> ? LIMIT 1');
+    for (const file of files) {
+      if (foreignPath.get(file.path, folderId)) throw new Error('RELINK_PATH_ALREADY_CATALOGED');
+    }
+
+    let matched = 0;
+    let discovered = 0;
+    const relocations: RelinkCatalogFolderOperationResult['relocations'] = [];
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      this.#database.prepare('UPDATE folders SET path = ?, name = ? WHERE id = ?')
+        .run(nextRoot, path.basename(nextRoot), folderId);
+      this.#database.prepare('UPDATE assets SET offline_at = ? WHERE folder_id = ? AND removed_at IS NULL')
+        .run(Date.now(), folderId);
+      const update = this.#database.prepare(`
+        UPDATE assets SET path = ?, file_name = ?, extension = ?, size_bytes = ?, modified_at = ?, offline_at = NULL
+        WHERE id = ?
+      `);
+      const insert = this.#database.prepare(`
+        INSERT OR IGNORE INTO assets (
+          id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at, offline_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+      `);
+      for (const file of files) {
+        const asset = exact.get(file.relative) ?? normalized.get(normalizeRelativePath(file.relative));
+        if (asset) {
+          const nextFileName = path.basename(file.path);
+          update.run(file.path, nextFileName, path.extname(file.path).toLowerCase(), file.size, file.modifiedAt, asset.id);
+          relocations.push({
+            assetId: asset.id,
+            previousPath: asset.path,
+            nextPath: file.path,
+            previousFileName: asset.file_name,
+            nextFileName
+          });
+          matched += 1;
+        } else if (insert.run(randomUUID(), folderId, file.path, path.basename(file.path), path.extname(file.path).toLowerCase(), file.size, file.modifiedAt, Date.now()).changes === 1) {
+          discovered += 1;
+        }
+      }
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    const relinked = this.listFolders().find((item) => item.id === folderId);
+    if (!relinked) throw new Error('CATALOG_FOLDER_NOT_FOUND');
+    return {
+      ...relinkCatalogFolderResultSchema.parse({ folder: relinked, matched, discovered, offline: relinked.offlineCount }),
+      relocations
+    };
   }
 
   listFolderPaths(): string[] {
@@ -721,6 +811,10 @@ export class CatalogService {
       previewUrl: `photoasset://preview/${row.id}`
     });
   }
+}
+
+function normalizeRelativePath(value: string): string {
+  return value.split(path.sep).map((part) => part.normalize('NFC').toLocaleLowerCase('en-US')).join('/');
 }
 
 function escapeLike(value: string): string {

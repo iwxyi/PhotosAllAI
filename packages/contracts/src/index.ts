@@ -126,10 +126,19 @@ export type CatalogAssetPage = z.infer<typeof catalogAssetPageSchema>;
 export const catalogFolderSchema = z.object({
   id: z.string(),
   name: z.string().min(1),
-  assetCount: z.number().int().nonnegative()
+  assetCount: z.number().int().nonnegative(),
+  offlineCount: z.number().int().nonnegative()
 });
 
 export type CatalogFolder = z.infer<typeof catalogFolderSchema>;
+
+export const relinkCatalogFolderResultSchema = z.object({
+  folder: catalogFolderSchema,
+  matched: z.number().int().nonnegative(),
+  discovered: z.number().int().nonnegative(),
+  offline: z.number().int().nonnegative()
+});
+export type RelinkCatalogFolderResult = z.infer<typeof relinkCatalogFolderResultSchema>;
 
 export const catalogAlbumSchema = z.object({
   id: z.string().uuid(),
@@ -575,6 +584,7 @@ export interface DesktopApi {
   trashCatalogAssets(input: CatalogAssetRemovalInput): Promise<CatalogAssetRemovalReport>;
   listFileOperationHistory(): Promise<FileOperationHistoryItem[]>;
   importFolders(): Promise<CatalogSnapshot | null>;
+  relinkCatalogFolder(folderId: string): Promise<RelinkCatalogFolderResult | null>;
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;
   testProviderConnection(input: SaveProviderProfileInput): Promise<ConnectionTest>;

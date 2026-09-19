@@ -69,6 +69,7 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 .sidebar-section { margin-top: 19px; }
 .section-heading { height: 25px; padding: 0 7px; display: flex; align-items: center; justify-content: space-between; color: var(--dim); font-size: 10px; font-weight: 700; text-transform: uppercase; }
 .section-heading button { display: grid; place-items: center; padding: 3px; border: 0; color: var(--dim); background: none; }
+.section-heading > span:last-child { display: flex; align-items: center; gap: 3px; }
 .folder-row { padding-left: 3px; }
 .folder-row.is-selected { color: var(--text); }
 .folder-row.is-selected svg:not(.disclosure) { color: var(--warning); fill: rgb(240 182 91 / 15%); }

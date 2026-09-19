@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -43,7 +43,7 @@ describe('catalog image discovery', () => {
 
     expect(imported).toBe(2);
     expect(assets.map((asset) => asset.fileName).sort()).toEqual(['raw.NEF', 'visible.jpg']);
-    expect(catalog.listFolders()).toEqual([{ id: assets[0]?.folderId, name: 'photos', assetCount: 2 }]);
+    expect(catalog.listFolders()).toEqual([{ id: assets[0]?.folderId, name: 'photos', assetCount: 2, offlineCount: 0 }]);
     const updated = catalog.updateMetadata({ assetIds: assets.map((asset) => asset.id), rating: 4 });
     expect(updated.every((asset) => asset.rating === 4)).toBe(true);
     const firstPage = catalog.listAssetPage({ folderId: null, cursor: null, limit: 1 });
@@ -156,6 +156,29 @@ describe('catalog image discovery', () => {
     await expect(catalog.reconcileImportedFolders()).resolves.toMatchObject({ discovered: 0, offline: 1 });
     expect(catalog.listAssets().find((asset) => asset.fileName === 'first.jpg')?.offline).toBe(true);
     expect(catalog.listAssets().find((asset) => asset.fileName === 'second.jpg')?.offline).toBe(false);
+    catalog.close();
+  });
+
+  it('relinks a moved folder while preserving asset identities and discovering new files', async () => {
+    const root = await createTemporaryDirectory();
+    const original = path.join(root, 'original');
+    const relocated = path.join(root, 'relocated');
+    await mkdir(path.join(original, 'nested'), { recursive: true });
+    await writeFile(path.join(original, 'nested', 'tracked.jpg'), 'tracked');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([original]);
+    const asset = catalog.listAssets()[0]!;
+    await import('node:fs/promises').then(({ rename }) => rename(original, relocated));
+    await writeFile(path.join(relocated, 'new.jpg'), 'new');
+    await catalog.reconcileImportedFolders();
+    expect(catalog.listAssets()[0]?.offline).toBe(true);
+
+    const result = await catalog.relinkFolder(asset.folderId, relocated);
+
+    expect(result).toMatchObject({ matched: 1, discovered: 1, offline: 0 });
+    expect(result.relocations).toEqual([expect.objectContaining({ assetId: asset.id, previousFileName: 'tracked.jpg', nextFileName: 'tracked.jpg' })]);
+    expect(catalog.resolveAssetFile(asset.id)?.path).toBe(path.join(await realpath(relocated), 'nested', 'tracked.jpg'));
+    expect(catalog.listAssets()).toHaveLength(2);
     catalog.close();
   });
 });
