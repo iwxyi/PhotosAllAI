@@ -126,6 +126,8 @@ test('analyzes, generates, compares, and persists managed and portable results',
   const generated = page.locator('.generated-layer img');
   await expect(generated).toHaveAttribute('src', /^photoresult:\/\/result\//);
   await expect.poll(() => generated.evaluate((image) => image.naturalWidth)).toBeGreaterThan(0);
+  expect(await page.locator('.base-image').evaluate((image) => getComputedStyle(image).filter)).toBe('none');
+  expect(await generated.evaluate((image) => getComputedStyle(image).filter)).toBe('none');
 
   await page.getByRole('button', { name: '关闭任务抽屉' }).click();
   await page.getByRole('button', { name: '标记为首选' }).click();
