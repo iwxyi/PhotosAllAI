@@ -1,16 +1,20 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { LibraryBackupService } from './library-backup-service';
 import { LibraryRestoreService } from './library-restore-service';
 
+const roots: string[] = [];
+afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
+
 async function fixture() {
   const root = await mkdtemp(path.join(tmpdir(), 'photoallisai-restore-'));
+  roots.push(root);
   const library = path.join(root, 'library');
   const generated = path.join(library, 'generated');
   const backups = path.join(root, 'external');
@@ -68,5 +72,25 @@ describe('library restore service', () => {
     expect(live.prepare('SELECT value FROM marker').get()).toEqual({ value: 'backup' });
     live.close();
     expect(await readdir(context.root)).toContain('library-restore-pending.json');
+  });
+
+  it('keeps failed marker evidence unique and rejects marker symlinks', async () => {
+    const context = await fixture();
+    const service = new LibraryRestoreService(context.library, context.backupService);
+    await service.stage(context.backup.destinationPath, 600);
+    const first = await service.quarantinePending(700);
+    expect(first).toBe(path.join(context.root, 'library-restore-pending.json.failed-700'));
+
+    await writeFile(path.join(context.root, 'library-restore-pending.json'), 'invalid');
+    const second = await service.quarantinePending(700);
+    expect(second).toBe(path.join(context.root, 'library-restore-pending.json.failed-700-1'));
+    expect(await readdir(context.root)).toEqual(expect.arrayContaining([
+      'library-restore-pending.json.failed-700',
+      'library-restore-pending.json.failed-700-1'
+    ]));
+
+    await symlink(first!, path.join(context.root, 'library-restore-pending.json'));
+    await expect(service.applyPending(800)).rejects.toThrow('LIBRARY_RESTORE_MARKER_UNSAFE');
+    await expect(service.quarantinePending(800)).rejects.toThrow('LIBRARY_RESTORE_MARKER_UNSAFE');
   });
 });

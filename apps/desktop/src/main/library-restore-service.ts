@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, statfs, unlink, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, statfs, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
@@ -30,7 +30,8 @@ export class LibraryRestoreService {
 
   async stage(requestedBackup: string, now = Date.now()): Promise<LibraryBackupVerificationResult> {
     await mkdir(this.#parentDirectory, { recursive: true });
-    if (await exists(this.#pendingPath)) throw new Error('LIBRARY_RESTORE_ALREADY_PENDING');
+    if (await regularFileExists(this.#pendingPath)) throw new Error('LIBRARY_RESTORE_ALREADY_PENDING');
+    if (await pathExists(this.#pendingPath)) throw new Error('LIBRARY_RESTORE_MARKER_UNSAFE');
     const inspected = await this.#backups.inspect(requestedBackup);
     await assertAvailableSpace(this.#parentDirectory, inspected.databaseBytes + inspected.generatedBytes);
     const staging = await mkdtemp(path.join(this.#parentDirectory, '.photoallisai-restore-stage-'));
@@ -51,13 +52,11 @@ export class LibraryRestoreService {
   }
 
   async applyPending(now = Date.now()): Promise<AppliedLibraryRestore | null> {
-    let markerRaw: string;
-    try {
-      markerRaw = await readFile(this.#pendingPath, 'utf8');
-    } catch (error) {
-      if (isNodeError(error, 'ENOENT')) return null;
-      throw error;
+    if (!(await regularFileExists(this.#pendingPath))) {
+      if (await pathExists(this.#pendingPath)) throw new Error('LIBRARY_RESTORE_MARKER_UNSAFE');
+      return null;
     }
+    const markerRaw = await readFile(this.#pendingPath, 'utf8');
     let marker: z.infer<typeof pendingRestoreSchema>;
     try {
       marker = pendingRestoreSchema.parse(JSON.parse(markerRaw));
@@ -78,7 +77,7 @@ export class LibraryRestoreService {
       await copyInspectedBackup(inspected, replacement);
       rewriteManagedResultPaths(path.join(replacement, 'catalog.sqlite'), path.join(liveLibrary, 'generated'), inspected);
       await unlink(path.join(replacement, 'manifest.json'));
-      if (await exists(liveLibrary)) {
+      if (await pathExists(liveLibrary)) {
         recoveryPath = await availableRecoveryPath(parent, now);
         await rename(liveLibrary, recoveryPath);
       }
@@ -104,8 +103,11 @@ export class LibraryRestoreService {
   }
 
   async quarantinePending(now = Date.now()): Promise<string | null> {
-    if (!(await exists(this.#pendingPath))) return null;
-    const destination = `${this.#pendingPath}.failed-${now}`;
+    if (!(await regularFileExists(this.#pendingPath))) {
+      if (await pathExists(this.#pendingPath)) throw new Error('LIBRARY_RESTORE_MARKER_UNSAFE');
+      return null;
+    }
+    const destination = await availableFailedPath(this.#pendingPath, now);
     await rename(this.#pendingPath, destination);
     return destination;
   }
@@ -150,19 +152,37 @@ async function availableRecoveryPath(parent: string, now: number): Promise<strin
   for (let index = 0; index < 10_000; index += 1) {
     const suffix = index === 0 ? '' : `-${index}`;
     const candidate = path.join(parent, `library.before-restore-${now}${suffix}`);
-    if (!(await exists(candidate))) return candidate;
+    if (!(await pathExists(candidate))) return candidate;
   }
   throw new Error('LIBRARY_RESTORE_RECOVERY_NAME_EXHAUSTED');
 }
 
-async function exists(filePath: string): Promise<boolean> {
+async function pathExists(filePath: string): Promise<boolean> {
   try {
-    await stat(filePath);
+    await lstat(filePath);
     return true;
   } catch (error) {
     if (isNodeError(error, 'ENOENT')) return false;
     throw error;
   }
+}
+
+async function regularFileExists(filePath: string): Promise<boolean> {
+  try {
+    return (await lstat(filePath)).isFile();
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) return false;
+    throw error;
+  }
+}
+
+async function availableFailedPath(pendingPath: string, now: number): Promise<string> {
+  for (let index = 0; index < 10_000; index += 1) {
+    const suffix = index === 0 ? '' : `-${index}`;
+    const candidate = `${pendingPath}.failed-${now}${suffix}`;
+    if (!(await pathExists(candidate))) return candidate;
+  }
+  throw new Error('LIBRARY_RESTORE_FAILURE_NAME_EXHAUSTED');
 }
 
 function isNodeError(error: unknown, code: string): boolean {
