@@ -181,4 +181,58 @@ describe('catalog image discovery', () => {
     expect(catalog.listAssets()).toHaveLength(2);
     catalog.close();
   });
+
+  it('preserves identity after a unique file is renamed and moved inside a relocated folder', async () => {
+    const root = await createTemporaryDirectory();
+    const original = path.join(root, 'original');
+    const relocated = path.join(root, 'relocated');
+    await mkdir(path.join(original, 'old'), { recursive: true });
+    await writeFile(path.join(original, 'old', 'camera-name.jpg'), 'unique-photo-content');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([original]);
+    const asset = catalog.listAssets()[0]!;
+    const { rename } = await import('node:fs/promises');
+    await rename(original, relocated);
+    await mkdir(path.join(relocated, 'organized'), { recursive: true });
+    await rename(path.join(relocated, 'old', 'camera-name.jpg'), path.join(relocated, 'organized', 'final-name.jpg'));
+
+    const result = await catalog.relinkFolder(asset.folderId, relocated);
+
+    expect(result).toMatchObject({ matched: 1, discovered: 0, offline: 0 });
+    expect(result.relocations).toEqual([expect.objectContaining({
+      assetId: asset.id,
+      previousFileName: 'camera-name.jpg',
+      nextFileName: 'final-name.jpg'
+    })]);
+    expect(catalog.resolveAssetFile(asset.id)?.path).toBe(path.join(await realpath(relocated), 'organized', 'final-name.jpg'));
+    catalog.close();
+  });
+
+  it('does not guess identity when metadata fingerprints are ambiguous', async () => {
+    const root = await createTemporaryDirectory();
+    const original = path.join(root, 'original');
+    const relocated = path.join(root, 'relocated');
+    await mkdir(original, { recursive: true });
+    const firstPath = path.join(original, 'first.jpg');
+    const secondPath = path.join(original, 'second.jpg');
+    await Promise.all([writeFile(firstPath, 'same'), writeFile(secondPath, 'same')]);
+    const timestamp = new Date('2026-01-01T00:00:00.000Z');
+    const { rename, utimes } = await import('node:fs/promises');
+    await Promise.all([utimes(firstPath, timestamp, timestamp), utimes(secondPath, timestamp, timestamp)]);
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([original]);
+    const assets = catalog.listAssets();
+    const originalIds = new Set(assets.map((asset) => asset.id));
+    await rename(original, relocated);
+    await Promise.all([
+      rename(path.join(relocated, 'first.jpg'), path.join(relocated, 'renamed-a.jpg')),
+      rename(path.join(relocated, 'second.jpg'), path.join(relocated, 'renamed-b.jpg'))
+    ]);
+
+    const result = await catalog.relinkFolder(assets[0]!.folderId, relocated);
+
+    expect(result).toMatchObject({ matched: 0, discovered: 2, offline: 2 });
+    expect(catalog.listAssets().filter((asset) => originalIds.has(asset.id)).every((asset) => asset.offline)).toBe(true);
+    catalog.close();
+  });
 });

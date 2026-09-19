@@ -379,10 +379,10 @@ export class CatalogService {
     if (collision) throw new Error('RELINK_TARGET_ALREADY_IMPORTED');
 
     const existing = this.#database.prepare(`
-      SELECT id, path, file_name FROM assets WHERE folder_id = ? AND removed_at IS NULL
-    `).all(folderId) as { id: string; path: string; file_name: string }[];
+      SELECT id, path, file_name, size_bytes, modified_at FROM assets WHERE folder_id = ? AND removed_at IS NULL
+    `).all(folderId) as RelinkAsset[];
     const exact = new Map(existing.map((asset) => [path.relative(folder.path, asset.path), asset]));
-    const normalized = new Map<string, { id: string; path: string; file_name: string } | null>();
+    const normalized = new Map<string, RelinkAsset | null>();
     for (const [relative, asset] of exact) {
       const key = normalizeRelativePath(relative);
       normalized.set(key, normalized.has(key) ? null : asset);
@@ -395,6 +395,23 @@ export class CatalogService {
     const foreignPath = this.#database.prepare('SELECT folder_id FROM assets WHERE path = ? AND folder_id <> ? LIMIT 1');
     for (const file of files) {
       if (foreignPath.get(file.path, folderId)) throw new Error('RELINK_PATH_ALREADY_CATALOGED');
+    }
+
+    const matches = new Map<string, RelinkAsset>();
+    const usedAssetIds = new Set<string>();
+    for (const file of files) {
+      const asset = exact.get(file.relative) ?? normalized.get(normalizeRelativePath(file.relative));
+      if (!asset || usedAssetIds.has(asset.id)) continue;
+      matches.set(file.path, asset);
+      usedAssetIds.add(asset.id);
+    }
+    const remainingAssets = groupUnique(existing.filter((asset) => !usedAssetIds.has(asset.id)), relinkMetadataKey);
+    const remainingFiles = groupUnique(files.filter((file) => !matches.has(file.path)), relinkMetadataKey);
+    for (const [key, asset] of remainingAssets) {
+      const file = remainingFiles.get(key);
+      if (!asset || !file) continue;
+      matches.set(file.path, asset);
+      usedAssetIds.add(asset.id);
     }
 
     let matched = 0;
@@ -416,7 +433,7 @@ export class CatalogService {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
       `);
       for (const file of files) {
-        const asset = exact.get(file.relative) ?? normalized.get(normalizeRelativePath(file.relative));
+        const asset = matches.get(file.path);
         if (asset) {
           const nextFileName = path.basename(file.path);
           update.run(file.path, nextFileName, path.extname(file.path).toLowerCase(), file.size, file.modifiedAt, asset.id);
@@ -815,6 +832,27 @@ export class CatalogService {
 
 function normalizeRelativePath(value: string): string {
   return value.split(path.sep).map((part) => part.normalize('NFC').toLocaleLowerCase('en-US')).join('/');
+}
+
+type RelinkAsset = {
+  id: string;
+  path: string;
+  file_name: string;
+  size_bytes: number;
+  modified_at: number;
+};
+
+function relinkMetadataKey(value: RelinkAsset | { size: number; modifiedAt: number }): string {
+  return 'size' in value ? `${value.size}:${value.modifiedAt}` : `${value.size_bytes}:${value.modified_at}`;
+}
+
+function groupUnique<Value>(values: readonly Value[], keyOf: (value: Value) => string): Map<string, Value | null> {
+  const result = new Map<string, Value | null>();
+  for (const value of values) {
+    const key = keyOf(value);
+    result.set(key, result.has(key) ? null : value);
+  }
+  return result;
 }
 
 function escapeLike(value: string): string {
