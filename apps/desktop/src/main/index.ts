@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
-import { rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -69,6 +68,7 @@ import { ExportService } from './export-service';
 import { ExportPresetService } from './export-preset-service';
 import { FileOperationService } from './file-operation-service';
 import { ProviderService } from './provider-service';
+import { replaceRegularFileSafely } from './safe-file-write';
 import { TaskService } from './task-service';
 import { TaskRunner } from './task-runner';
 import { TemplateService } from './template-service';
@@ -177,15 +177,7 @@ function registerIpc(): void {
       return diagnosticExportResultSchema.parse({ canceled: true, bytes: 0, sha256: null });
     }
     const content = Buffer.from(JSON.stringify({ generatedAt: new Date().toISOString(), snapshot: await createDiagnosticSnapshot() }, null, 2));
-    const temporaryPath = `${selection.filePath}.${process.pid}.tmp`;
-    try {
-      await writeFile(temporaryPath, content, { mode: 0o600 });
-      await unlink(selection.filePath).catch(() => undefined);
-      await rename(temporaryPath, selection.filePath);
-    } catch (error) {
-      await unlink(temporaryPath).catch(() => undefined);
-      throw error;
-    }
+    await replaceRegularFileSafely(selection.filePath, content);
     return diagnosticExportResultSchema.parse({
       canceled: false,
       bytes: content.byteLength,
