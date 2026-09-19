@@ -1324,6 +1324,8 @@ function SettingsPage(): React.JSX.Element {
   const [generationStorageMode, setGenerationStorageMode] = useState<AppSettings['generationStorageMode']>('managed');
   const [storageMessage, setStorageMessage] = useState('');
   const [storageBusy, setStorageBusy] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupMessage, setBackupMessage] = useState('');
 
   useEffect(() => {
     void window.desktopApi.listProviderProfiles().then(setProfiles);
@@ -1386,6 +1388,19 @@ function SettingsPage(): React.JSX.Element {
       setDiagnosticMessage('诊断摘要已复制，可直接粘贴给支持团队。');
     } catch {
       setDiagnosticMessage('复制失败，请检查系统剪贴板权限。');
+    }
+  };
+
+  const backupDatabase = async () => {
+    setBackupBusy(true);
+    setBackupMessage('');
+    try {
+      const result = await window.desktopApi.backupDatabase();
+      setBackupMessage(result.canceled ? '已取消数据库备份。' : `数据库快照已保存（${(result.bytes / 1_048_576).toFixed(1)} MB）。`);
+    } catch {
+      setBackupMessage('数据库备份失败，请确认目标目录可写且磁盘空间充足。');
+    } finally {
+      setBackupBusy(false);
     }
   };
 
@@ -1462,6 +1477,10 @@ function SettingsPage(): React.JSX.Element {
         <section className="settings-section cache-section">
           <div className="settings-heading"><div><h2>预览缓存</h2><p>缓存可安全重建，不会删除原图、生成结果或分析数据。</p></div><span>{cacheStats ? `${cacheStats.files} 个文件 · ${(cacheStats.bytes / 1_073_741_824).toFixed(2)} GiB` : '正在读取'}</span></div>
           <div className="cache-actions"><button className="secondary-action" type="button" disabled={cacheBusy || !cacheStats || cacheStats.bytes === 0} onClick={async () => { setCacheBusy(true); try { const result = await window.desktopApi.pruneImageCache({ maxBytes: 0 }); setCacheMessage(`已清理 ${result.removedFiles} 个缓存文件。`); setCacheStats(await window.desktopApi.getImageCacheStats()); } catch { setCacheMessage('缓存清理失败，请稍后重试。'); } finally { setCacheBusy(false); } }}>{cacheBusy ? '清理中…' : '清理全部可重建缓存'}</button><span role="status">{cacheMessage}</span></div>
+        </section>
+        <section className="settings-section backup-section">
+          <div className="settings-heading"><div><h2>图库数据库</h2><p>创建一致性 SQLite 快照，用于迁移、灾备或故障排查；不包含 API Key。</p></div><span><ShieldCheck size={14} />可恢复</span></div>
+          <div className="cache-actions"><button className="secondary-action" type="button" disabled={backupBusy} onClick={() => void backupDatabase()}>{backupBusy ? '备份中…' : '备份图库数据库'}</button><span role="status">{backupMessage || '生成结果文件仍需单独备份或导出。'}</span></div>
         </section>
         </>}
         {settingsSection === 'tasks' && <section className="settings-section settings-info-section">

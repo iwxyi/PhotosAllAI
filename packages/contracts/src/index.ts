@@ -28,6 +28,14 @@ export const diagnosticSnapshotSchema = z.object({
 });
 export type DiagnosticSnapshot = z.infer<typeof diagnosticSnapshotSchema>;
 
+export const databaseBackupResultSchema = z.object({
+  canceled: z.boolean(),
+  destinationPath: z.string().nullable(),
+  bytes: z.number().int().nonnegative(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/).nullable()
+});
+export type DatabaseBackupResult = z.infer<typeof databaseBackupResultSchema>;
+
 export const appSettingsSchema = z.object({
   generationStorageMode: z.enum(['managed', 'portable']).default('managed')
 });
@@ -544,6 +552,7 @@ export interface DesktopApi {
   getAppSettings(): Promise<AppSettings>;
   saveAppSettings(input: AppSettings): Promise<AppSettings>;
   getDiagnosticSnapshot(): Promise<DiagnosticSnapshot>;
+  backupDatabase(): Promise<DatabaseBackupResult>;
   getWorkspaceSession(): Promise<WorkspaceSession>;
   saveWorkspaceSession(session: WorkspaceSession): Promise<WorkspaceSession>;
   listCatalogAssets(): Promise<CatalogAsset[]>;

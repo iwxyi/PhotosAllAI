@@ -18,6 +18,7 @@ test-results/
 *.sqlite-wal
 .cache/
 .temp/
+test_data/
 
 # Local configuration and secrets
 .env

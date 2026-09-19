@@ -7,6 +7,7 @@ import {
   appInfoSchema,
   appSettingsSchema,
   diagnosticSnapshotSchema,
+  databaseBackupResultSchema,
   catalogAssetRemovalInputSchema,
   catalogAssetRemovalReportSchema,
   catalogSnapshotSchema,
@@ -56,6 +57,7 @@ import { TaskRunner } from './task-runner';
 import { TemplateService } from './template-service';
 import { WorkspaceService } from './workspace-service';
 import { AppSettingsService } from './app-settings-service';
+import { DatabaseBackupService } from './database-backup-service';
 
 const APP_ORIGIN = 'app://photoallisai';
 let catalog: CatalogService;
@@ -72,6 +74,7 @@ let fileOperations: FileOperationService;
 let taskRunner: TaskRunner;
 let workspace: WorkspaceService;
 let appSettings: AppSettingsService;
+let databaseBackup: DatabaseBackupService;
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -120,6 +123,19 @@ function registerIpc(): void {
       tasks: taskCounts,
       cache: { ...cacheStats, performance: imageCache.getPerformanceStats(), raw }
     });
+  });
+  ipcMain.handle('app.database.backup.v1', async () => {
+    const selection = await dialog.showSaveDialog({
+      title: '备份图库数据库',
+      buttonLabel: '保存备份',
+      defaultPath: join(app.getPath('documents'), 'PhotoAllIsAI-catalog.sqlite'),
+      filters: [{ name: 'SQLite 数据库', extensions: ['sqlite'] }]
+    });
+    if (selection.canceled || !selection.filePath) {
+      return databaseBackupResultSchema.parse({ canceled: true, destinationPath: null, bytes: 0, sha256: null });
+    }
+    const result = await databaseBackup.create(selection.filePath);
+    return databaseBackupResultSchema.parse({ canceled: false, ...result });
   });
   ipcMain.handle('workspace.session.get.v1', () => workspace.get());
   ipcMain.handle('workspace.session.save.v1', (_event, input: unknown) =>
@@ -327,6 +343,7 @@ app.whenReady().then(async () => {
   const databasePath = join(libraryDirectory, 'catalog.sqlite');
   workspace = new WorkspaceService(databasePath);
   appSettings = new AppSettingsService(join(app.getPath('userData'), 'settings', 'app.json'));
+  databaseBackup = new DatabaseBackupService(databasePath);
   catalog = new CatalogService(databasePath);
   await catalog.reconcileImportedFolders();
   catalogWatcher = new CatalogWatcher(catalog);

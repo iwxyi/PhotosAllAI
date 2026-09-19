@@ -252,6 +252,7 @@ interface ImageGenerationProvider {
 - 日志采用结构化 JSON，包含时间、级别、模块、operationId 和 causeId。
 - 默认脱敏路径中的用户名，不记录 API Key、请求头、图片内容和完整提示词。
 - 诊断包由用户主动生成，可预览内容后导出。
+- 图库数据库备份使用 SQLite 一致性快照（`VACUUM INTO`），不直接复制活动数据库、WAL 或 SHM 文件；备份结果返回字节数和 SHA-256，Provider 凭据不进入快照之外的导出路径。
 - 采集本地性能指标：首图时间、缩略图命中率、解码耗时、队列等待时间、内存峰值和掉帧区间。
 - 任何远程遥测默认关闭，未来加入时必须独立征得同意。
 
@@ -281,4 +282,3 @@ interface ImageGenerationProvider {
 - 错误可通过 operationId 在日志追踪。
 - 任务在进程崩溃后可恢复到一致状态。
 - macOS 与 Windows 的关键路径均有验证记录。
-
