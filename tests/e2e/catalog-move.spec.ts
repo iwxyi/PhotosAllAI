@@ -138,4 +138,10 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await page.getByRole('tab', { name: /任务中心/ }).click();
   await expect(page.getByText('文件操作', { exact: true })).toBeVisible();
   await expect(page.getByText('从图库移除', { exact: true })).toBeVisible();
+  await page.getByLabel('撤销重命名').click();
+  await expect(page.getByRole('status')).toContainText('已撤销重命名');
+  expect(await readFile(path.join(targetDirectory, 'MOVE_ME.jpg'))).not.toHaveLength(0);
+  await expect(stat(path.join(targetDirectory, 'RENAMED.jpg'))).rejects.toMatchObject({ code: 'ENOENT' });
+  await expect(page.getByText('已撤销', { exact: true })).toBeVisible();
+  await page.screenshot({ path: 'test-results/file-operation-undo.png', animations: 'disabled' });
 });

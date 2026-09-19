@@ -55,6 +55,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke('catalog.assets.trash.v1', input) as ReturnType<DesktopApi['trashCatalogAssets']>,
   listFileOperationHistory: () =>
     ipcRenderer.invoke('files.operations.list.v1') as ReturnType<DesktopApi['listFileOperationHistory']>,
+  undoFileOperation: (input) =>
+    ipcRenderer.invoke('files.operations.undo.v1', input) as ReturnType<DesktopApi['undoFileOperation']>,
   importFolders: () =>
     ipcRenderer.invoke('catalog.folders.import.v1') as ReturnType<
       DesktopApi['importFolders']

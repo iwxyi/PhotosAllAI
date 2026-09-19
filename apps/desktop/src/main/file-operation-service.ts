@@ -26,6 +26,8 @@ import {
   renameCatalogAssetReportSchema,
   renameCatalogAssetsInputSchema,
   renameCatalogAssetsReportSchema,
+  undoFileOperationInputSchema,
+  undoFileOperationReportSchema,
   type CatalogAssetRemovalInput,
   type CatalogAssetRemovalReport,
   type CopyCatalogAssetsInput,
@@ -35,8 +37,10 @@ import {
   type MoveCatalogAssetsInput,
   type MoveCatalogAssetsReport,
   type RenameCatalogAssetInput,
-  type RenameCatalogAssetReport
-  , type RenameCatalogAssetsInput, type RenameCatalogAssetsReport
+  type RenameCatalogAssetReport,
+  type RenameCatalogAssetsInput,
+  type RenameCatalogAssetsReport,
+  type UndoFileOperationInput, type UndoFileOperationReport
 } from '@photoallisai/contracts';
 
 type FileSystemPort = {
@@ -164,13 +168,40 @@ export class FileOperationService {
     return this.#serialize(() => this.#executeRemoval(input, 'trash'));
   }
 
+  async undo(rawInput: UndoFileOperationInput): Promise<UndoFileOperationReport> {
+    const input = undoFileOperationInputSchema.parse(rawInput);
+    return this.#serialize(() => this.#executeUndo(input.operationId));
+  }
+
+  getUndoAssetIds(operationId: string): string[] {
+    undoFileOperationInputSchema.parse({ operationId });
+    return this.#readOperationItems(operationId)
+      .filter((item) => !item.skipped && item.catalogManaged !== false)
+      .map((item) => item.assetId);
+  }
+
   listHistory(limit = 100): FileOperationHistoryItem[] {
     const rows = this.#database.prepare(`
       SELECT operations.id, operations.kind, operations.status, operations.created_at,
         operations.completed_at, operations.error_code,
         COUNT(CASE WHEN items.catalog_managed = 1 THEN 1 END) AS total,
-        SUM(CASE WHEN items.catalog_managed = 1 AND items.status IN ('moved', 'copied', 'removed', 'trashed', 'skipped') THEN 1 ELSE 0 END) AS succeeded,
-        SUM(CASE WHEN items.catalog_managed = 1 AND items.status IN ('failed', 'compensation_failed') THEN 1 ELSE 0 END) AS failed
+        SUM(CASE WHEN items.catalog_managed = 1 AND items.status IN ('moved', 'copied', 'removed', 'trashed', 'skipped', 'undone') THEN 1 ELSE 0 END) AS succeeded,
+        SUM(CASE WHEN items.catalog_managed = 1 AND items.status IN ('failed', 'compensation_failed') THEN 1 ELSE 0 END) AS failed,
+        CASE WHEN operations.status = 'completed' AND operations.kind IN ('move', 'rename')
+          AND EXISTS (
+            SELECT 1 FROM file_operation_items active_items
+            WHERE active_items.operation_id = operations.id AND active_items.catalog_managed = 1
+              AND active_items.status <> 'skipped'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM file_operation_items current_items
+            WHERE current_items.operation_id = operations.id AND current_items.catalog_managed = 1
+              AND current_items.status <> 'skipped' AND NOT EXISTS (
+                SELECT 1 FROM assets
+                WHERE assets.id = current_items.asset_id AND assets.path = current_items.destination_path
+                  AND assets.removed_at IS NULL
+              )
+          ) THEN 1 ELSE 0 END AS undoable
       FROM file_operations operations
       LEFT JOIN file_operation_items items ON items.operation_id = operations.id
       GROUP BY operations.id
@@ -179,7 +210,7 @@ export class FileOperationService {
     `).all(Math.max(1, Math.min(limit, 500))) as Array<{
       id: string; kind: FileOperationHistoryItem['kind']; status: FileOperationHistoryItem['status'];
       created_at: number; completed_at: number | null; error_code: string | null;
-      total: number; succeeded: number; failed: number;
+      total: number; succeeded: number; failed: number; undoable: number;
     }>;
     const names = this.#database.prepare(`
       SELECT destination_file_name FROM file_operation_items
@@ -196,7 +227,8 @@ export class FileOperationService {
         .map((item) => item.destination_file_name),
       createdAt: row.created_at,
       completedAt: row.completed_at,
-      errorCode: row.error_code
+      errorCode: row.error_code,
+      undoable: row.undoable === 1
     }));
   }
 
@@ -212,13 +244,20 @@ export class FileOperationService {
     }
   }
 
-  async recoverInterruptedOperations(): Promise<number> {
+  async recoverInterruptedOperations(
+    onLocationChange?: (change: { assetId: string; previousPath: string; path: string; previousFileName: string; fileName: string }) => Promise<void>
+  ): Promise<number> {
     const operations = this.#database.prepare(`
-      SELECT id, kind FROM file_operations WHERE status IN ('planned', 'executing', 'compensating')
+      SELECT id, kind, status FROM file_operations WHERE status IN ('planned', 'executing', 'compensating', 'undoing')
       ORDER BY created_at ASC
-    `).all() as { id: string; kind: FileOperationHistoryItem['kind'] }[];
+    `).all() as { id: string; kind: FileOperationHistoryItem['kind']; status: string }[];
     for (const operation of operations) {
       const items = this.#readOperationItems(operation.id).reverse();
+      if (operation.status === 'undoing') {
+        const changed = await this.#recoverInterruptedUndoOperation(operation.id, items);
+        if (onLocationChange) await Promise.allSettled(changed.map(onLocationChange));
+        continue;
+      }
       if (operation.kind === 'trash') {
         await this.#recoverInterruptedTrashOperation(operation.id, items);
         continue;
@@ -244,6 +283,199 @@ export class FileOperationService {
       `).run(recovered ? 'failed' : 'compensation_failed', Date.now(), recovered ? 'INTERRUPTED_RECOVERED' : 'RECOVERY_FAILED', operation.id);
     }
     return operations.length;
+  }
+
+  async #executeUndo(operationId: string): Promise<UndoFileOperationReport> {
+    const operation = this.#database.prepare(`
+      SELECT kind, status FROM file_operations WHERE id = ?
+    `).get(operationId) as { kind: FileOperationHistoryItem['kind']; status: string } | undefined;
+    if (!operation || !['move', 'rename'].includes(operation.kind) || operation.status !== 'completed') {
+      throw new Error('FILE_OPERATION_NOT_UNDOABLE');
+    }
+    const items = this.#readOperationItems(operationId);
+    const activeItems = items.filter((item) => !item.skipped);
+    if (activeItems.length === 0) throw new Error('FILE_OPERATION_NOT_UNDOABLE');
+    const catalogItems = activeItems.filter((item) => item.catalogManaged !== false);
+    this.#assertNoActiveTasks(catalogItems.map((item) => item.assetId));
+    for (const item of activeItems) await this.#assertUndoReady(item, operation.kind);
+    await this.#assertUndoSpace(activeItems);
+
+    this.#database.prepare(`
+      UPDATE file_operations SET status = 'undoing', completed_at = NULL, error_code = NULL
+      WHERE id = ? AND status = 'completed'
+    `).run(operationId);
+    const completed: PlannedItem[] = [];
+    try {
+      for (const item of [...activeItems].reverse()) {
+        this.#setItemStatus(item.id, 'undoing', null);
+        await this.#reverseItem(item, operation.kind);
+        completed.push(item);
+        this.#setItemStatus(item.id, 'undone', null);
+      }
+      this.#commitUndo(operationId, activeItems);
+      return this.#undoReport(operationId, activeItems, 'completed', false, null);
+    } catch (error) {
+      const code = errorCode(error);
+      let rolledBack = true;
+      for (const item of completed.reverse()) {
+        try {
+          await this.#forwardItem(item, operation.kind);
+          this.#setItemStatus(item.id, 'moved', null);
+        } catch (compensationError) {
+          rolledBack = false;
+          this.#setItemStatus(item.id, 'compensation_failed', errorCode(compensationError));
+        }
+      }
+      if (rolledBack) {
+        for (const item of activeItems) this.#setItemStatus(item.id, 'moved', null);
+      }
+      this.#database.prepare(`
+        UPDATE file_operations SET status = ?, completed_at = ?, error_code = ? WHERE id = ?
+      `).run(rolledBack ? 'completed' : 'compensation_failed', Date.now(), code, operationId);
+      return this.#undoReport(operationId, activeItems, 'failed', rolledBack, code);
+    }
+  }
+
+  async #assertUndoReady(item: PlannedItem, kind: FileOperationHistoryItem['kind']): Promise<void> {
+    if (this.#platform === 'win32' && (item.sourcePath.length >= 260 || undoTemporaryPath(item).length >= 260)) {
+      throw new Error('DESTINATION_PATH_TOO_LONG');
+    }
+    if (item.catalogManaged !== false) {
+      const asset = this.#database.prepare(`
+        SELECT path FROM assets WHERE id = ? AND removed_at IS NULL
+      `).get(item.assetId) as { path: string } | undefined;
+      if (!asset || asset.path !== item.destinationPath) throw new Error('FILE_OPERATION_SUPERSEDED');
+    }
+    const sourceDirectory = path.dirname(item.sourcePath);
+    if (!(await this.#fileSystem.stat(sourceDirectory)).isDirectory()) throw new Error('UNDO_SOURCE_DIRECTORY_MISSING');
+    if (kind === 'rename' && normalizeFileName(item.previousFileName) === normalizeFileName(item.fileName)) {
+      const entries = await this.#fileSystem.readdir(sourceDirectory);
+      if (!entries.includes(item.fileName) || entries.includes(item.previousFileName)) {
+        throw new Error('UNDO_SOURCE_CONFLICT');
+      }
+      return;
+    }
+    const [sourceExists, destinationExists] = await Promise.all([
+      exists(this.#fileSystem, item.sourcePath), exists(this.#fileSystem, item.destinationPath)
+    ]);
+    if (sourceExists) throw new Error('UNDO_SOURCE_CONFLICT');
+    if (!destinationExists) throw new Error('UNDO_DESTINATION_MISSING');
+  }
+
+  async #assertUndoSpace(items: PlannedItem[]): Promise<void> {
+    if (!this.#fileSystem.availableBytes) return;
+    const bytesByDirectory = new Map<string, number>();
+    for (const item of items) {
+      const targetDirectory = path.dirname(item.sourcePath);
+      const [sourceStats, targetStats] = await Promise.all([
+        this.#fileSystem.stat(item.destinationPath), this.#fileSystem.stat(targetDirectory)
+      ]);
+      if (sourceStats.dev === targetStats.dev) continue;
+      bytesByDirectory.set(targetDirectory, (bytesByDirectory.get(targetDirectory) ?? 0) + sourceStats.size);
+    }
+    for (const [directory, bytes] of bytesByDirectory) await this.#assertAvailableSpace(directory, bytes);
+  }
+
+  async #reverseItem(item: PlannedItem, kind: FileOperationHistoryItem['kind']): Promise<void> {
+    if (kind === 'rename') await this.#moveRenameItem(item, true);
+    else await this.#transfer(item.destinationPath, item.sourcePath, undoTemporaryPath(item));
+  }
+
+  async #forwardItem(item: PlannedItem, kind: FileOperationHistoryItem['kind']): Promise<void> {
+    if (kind === 'rename') await this.#moveRenameItem(item, false);
+    else await this.#transfer(item.sourcePath, item.destinationPath, item.temporaryPath);
+  }
+
+  #commitUndo(operationId: string, items: PlannedItem[]): void {
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const updateAsset = this.#database.prepare(`
+        UPDATE assets SET folder_id = ?, path = ?, file_name = ?
+        WHERE id = ? AND path = ? AND removed_at IS NULL
+      `);
+      const markItem = this.#database.prepare(`
+        UPDATE file_operation_items SET status = 'undone', error_code = NULL WHERE id = ?
+      `);
+      for (const item of items) {
+        if (item.catalogManaged !== false) {
+          const result = updateAsset.run(
+            item.sourceFolderId, item.sourcePath, item.previousFileName, item.assetId, item.destinationPath
+          );
+          if (result.changes !== 1) throw new Error('CATALOG_CONCURRENT_CHANGE');
+        }
+        markItem.run(item.id);
+      }
+      this.#database.prepare(`
+        UPDATE file_operations SET status = 'undone', completed_at = ?, error_code = NULL WHERE id = ?
+      `).run(Date.now(), operationId);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  #undoReport(
+    operationId: string,
+    items: PlannedItem[],
+    status: 'completed' | 'failed',
+    rolledBack: boolean,
+    code: string | null
+  ): UndoFileOperationReport {
+    const catalogItems = items.filter((item) => item.catalogManaged !== false);
+    return undoFileOperationReportSchema.parse({
+      operationId,
+      status,
+      total: catalogItems.length,
+      undone: status === 'completed' ? catalogItems.length : 0,
+      rolledBack,
+      files: status === 'completed' ? catalogItems.map((item) => ({
+        assetId: item.assetId,
+        previousFileName: item.fileName,
+        fileName: item.previousFileName
+      })) : [],
+      errorCode: code
+    });
+  }
+
+  async #recoverInterruptedUndoOperation(
+    operationId: string,
+    items: PlannedItem[]
+  ): Promise<Array<{ assetId: string; previousPath: string; path: string; previousFileName: string; fileName: string }>> {
+    const operation = this.#database.prepare('SELECT kind FROM file_operations WHERE id = ?')
+      .get(operationId) as { kind: FileOperationHistoryItem['kind'] };
+    try {
+      for (const item of items) {
+        if (item.skipped) continue;
+        if (operation.kind === 'rename' && normalizeFileName(item.previousFileName) === normalizeFileName(item.fileName)) {
+          const entries = await this.#fileSystem.readdir(path.dirname(item.sourcePath));
+          const sourceExists = entries.includes(item.previousFileName);
+          const destinationExists = entries.includes(item.fileName);
+          if (!sourceExists && destinationExists) await this.#reverseItem(item, operation.kind);
+          else if (!sourceExists || destinationExists) throw new Error('UNDO_RECOVERY_CONFLICT');
+        } else {
+          const sourceExists = await exists(this.#fileSystem, item.sourcePath);
+          const destinationExists = await exists(this.#fileSystem, item.destinationPath);
+          if (!sourceExists && destinationExists) await this.#reverseItem(item, operation.kind);
+          else if (!sourceExists || destinationExists) throw new Error('UNDO_RECOVERY_CONFLICT');
+        }
+        this.#setItemStatus(item.id, 'undone', null);
+      }
+      const activeItems = items.filter((item) => !item.skipped);
+      this.#commitUndo(operationId, activeItems);
+      return activeItems.filter((item) => item.catalogManaged !== false).map((item) => ({
+        assetId: item.assetId,
+        previousPath: item.destinationPath,
+        path: item.sourcePath,
+        previousFileName: item.fileName,
+        fileName: item.previousFileName
+      }));
+    } catch (error) {
+      this.#database.prepare(`
+        UPDATE file_operations SET status = 'compensation_failed', completed_at = ?, error_code = ? WHERE id = ?
+      `).run(Date.now(), errorCode(error), operationId);
+      return [];
+    }
   }
 
   #migrate(): void {
@@ -1196,6 +1428,10 @@ function reserveFileName(original: string, reserved: Set<string>): string {
   }
   reserved.add(normalizeFileName(candidate));
   return candidate;
+}
+
+function undoTemporaryPath(item: PlannedItem): string {
+  return path.join(path.dirname(item.sourcePath), `.photoallisai-undo-${item.id}.tmp`);
 }
 
 function reserveGroupedFileNames(

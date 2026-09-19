@@ -303,16 +303,34 @@ export type CatalogAssetRemovalReport = z.infer<typeof catalogAssetRemovalReport
 export const fileOperationHistoryItemSchema = z.object({
   id: z.string().uuid(),
   kind: z.enum(['move', 'copy', 'rename', 'remove', 'trash']),
-  status: z.enum(['planned', 'executing', 'compensating', 'completed', 'partial', 'failed', 'compensation_failed']),
+  status: z.enum(['planned', 'executing', 'compensating', 'undoing', 'completed', 'undone', 'partial', 'failed', 'compensation_failed']),
   total: z.number().int().nonnegative(),
   succeeded: z.number().int().nonnegative(),
   failed: z.number().int().nonnegative(),
   fileNames: z.array(z.string().min(1)),
   createdAt: z.number().nonnegative(),
   completedAt: z.number().nonnegative().nullable(),
-  errorCode: z.string().nullable()
+  errorCode: z.string().nullable(),
+  undoable: z.boolean()
 });
 export type FileOperationHistoryItem = z.infer<typeof fileOperationHistoryItemSchema>;
+
+export const undoFileOperationInputSchema = z.object({ operationId: z.string().uuid() });
+export type UndoFileOperationInput = z.infer<typeof undoFileOperationInputSchema>;
+export const undoFileOperationReportSchema = z.object({
+  operationId: z.string().uuid(),
+  status: z.enum(['completed', 'failed']),
+  total: z.number().int().nonnegative(),
+  undone: z.number().int().nonnegative(),
+  rolledBack: z.boolean(),
+  files: z.array(z.object({
+    assetId: z.string().min(1),
+    previousFileName: z.string().min(1),
+    fileName: z.string().min(1)
+  })),
+  errorCode: z.string().min(1).nullable()
+});
+export type UndoFileOperationReport = z.infer<typeof undoFileOperationReportSchema>;
 
 export const updateCatalogMetadataInputSchema = z.object({
   assetIds: z.array(z.string().min(1)).min(1).max(10_000),
@@ -669,6 +687,7 @@ export interface DesktopApi {
   removeCatalogAssets(input: CatalogAssetRemovalInput): Promise<CatalogAssetRemovalReport>;
   trashCatalogAssets(input: CatalogAssetRemovalInput): Promise<CatalogAssetRemovalReport>;
   listFileOperationHistory(): Promise<FileOperationHistoryItem[]>;
+  undoFileOperation(input: UndoFileOperationInput): Promise<UndoFileOperationReport>;
   importFolders(): Promise<CatalogSnapshot | null>;
   relinkCatalogFolder(folderId: string): Promise<RelinkCatalogFolderResult | null>;
   revealCatalogAsset(assetId: string): Promise<boolean>;

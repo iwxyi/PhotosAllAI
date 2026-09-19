@@ -50,6 +50,8 @@ import {
   taskIdSchema,
   updateCatalogMetadataInputSchema,
   updateCatalogTagsInputSchema,
+  undoFileOperationInputSchema,
+  undoFileOperationReportSchema,
   saveCatalogAlbumInputSchema,
   updateCatalogAlbumAssetsInputSchema,
   workspaceSessionSchema
@@ -321,6 +323,18 @@ function registerIpc(): void {
     )
   );
   ipcMain.handle('files.operations.list.v1', () => fileOperations.listHistory());
+  ipcMain.handle('files.operations.undo.v1', async (_event, input: unknown) => {
+    const parsed = undoFileOperationInputSchema.parse(input);
+    const previous = new Map(fileOperations.getUndoAssetIds(parsed.operationId)
+      .map((assetId) => [assetId, catalog.resolveAssetFile(assetId)]));
+    const report = undoFileOperationReportSchema.parse(await fileOperations.undo(parsed));
+    if (report.status === 'completed') {
+      await Promise.allSettled(report.files.map((file) =>
+        relocatePortableAfterFileOperation(file.assetId, previous.get(file.assetId) ?? null)
+      ));
+    }
+    return report;
+  });
 
   ipcMain.handle('catalog.folders.import.v1', async () => {
     const result = await dialog.showOpenDialog({
@@ -541,7 +555,6 @@ app.whenReady().then(async () => {
   fileOperations = new FileOperationService(databasePath, undefined, {
     trashItem: (filePath) => shell.trashItem(filePath)
   });
-  await fileOperations.recoverInterruptedOperations();
   tasks = new TaskService(databasePath);
   templates = new TemplateService(databasePath);
   imageCache = new ImageCacheService(
@@ -561,6 +574,11 @@ app.whenReady().then(async () => {
     imageCache,
     catalog
   );
+  await fileOperations.recoverInterruptedOperations(async (change) => {
+    await generation.relocatePortableResults(
+      change.assetId, change.previousPath, change.path, change.previousFileName, change.fileName
+    );
+  });
   exportService = new ExportService(databasePath, generation);
   exportPresets = new ExportPresetService(databasePath);
   await migration.complete(APPLICATION_SCHEMA_VERSION, migrationCheckpoint);

@@ -1698,11 +1698,11 @@ const fileOperationLabels: Record<FileOperationHistoryItem['kind'], string> = {
 };
 
 const fileOperationStatusLabels: Record<FileOperationHistoryItem['status'], string> = {
-  planned: '已计划', executing: '执行中', compensating: '恢复中', completed: '已完成',
+  planned: '已计划', executing: '执行中', compensating: '恢复中', undoing: '撤销中', completed: '已完成', undone: '已撤销',
   partial: '部分完成', failed: '失败', compensation_failed: '需处理'
 };
 
-function TaskCenterPage(): React.JSX.Element {
+function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<void> }): React.JSX.Element {
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
   const [fileOperations, setFileOperations] = useState<FileOperationHistoryItem[]>([]);
   const [message, setMessage] = useState('');
@@ -1714,6 +1714,7 @@ function TaskCenterPage(): React.JSX.Element {
   const [providerDraft, setProviderDraft] = useState('');
   const [templateDraft, setTemplateDraft] = useState('');
   const [countDraft, setCountDraft] = useState(1);
+  const [undoBusyId, setUndoBusyId] = useState<string | null>(null);
 
   const refresh = () => window.desktopApi.listTasks().then(setTaskItems);
   useEffect(() => {
@@ -1761,6 +1762,24 @@ function TaskCenterPage(): React.JSX.Element {
     for (const taskId of failedIds) await window.desktopApi.retryTask(taskId);
     setMessage(`已重新排队 ${failedIds.length} 个生成任务。`);
     await refresh();
+  };
+  const undoFileOperation = async (operation: FileOperationHistoryItem) => {
+    setUndoBusyId(operation.id);
+    setMessage('');
+    try {
+      const report = await window.desktopApi.undoFileOperation({ operationId: operation.id });
+      setMessage(report.status === 'completed'
+        ? `已撤销${fileOperationLabels[operation.kind]}，恢复 ${report.undone} 张照片。`
+        : `撤销失败（${report.errorCode ?? 'UNKNOWN'}），${report.rolledBack ? '文件已恢复到撤销前状态。' : '请检查操作历史。'}`);
+      setFileOperations(await window.desktopApi.listFileOperationHistory());
+      await onCatalogChanged();
+    } catch (error) {
+      const code = error instanceof Error ? error.message : 'UNKNOWN';
+      setMessage(`无法撤销此操作（${code}）。`);
+      setFileOperations(await window.desktopApi.listFileOperationHistory());
+    } finally {
+      setUndoBusyId(null);
+    }
   };
   const openPromptEditor = (task: PersistedTask) => {
     const prompt = typeof task.payload.prompt === 'string' ? task.payload.prompt : '';
@@ -1886,6 +1905,7 @@ function TaskCenterPage(): React.JSX.Element {
                 <span className={`operation-state state-${operation.status}`}>{fileOperationStatusLabels[operation.status]}</span>
                 <span>{operation.succeeded}/{operation.total}</span>
                 <time>{new Date(operation.createdAt).toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</time>
+                <span className="operation-actions">{operation.undoable && <IconButton label={`撤销${fileOperationLabels[operation.kind]}`} disabled={undoBusyId !== null} onClick={() => void undoFileOperation(operation)}><RotateCcw size={13} /></IconButton>}</span>
               </div>
             ))}
           </div>
@@ -2210,7 +2230,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
-      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} exportPresets={exportPresets} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={setFavoriteOnly} sortBy={sortBy} onSortByChange={setSortBy} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onRelinkFolder={relinkFolder} onOpenTaskCenter={() => openWorkspaceTab('tasks')} onOpenTemplates={() => openWorkspaceTab('templates')} /> : activeTab === 'settings' ? <SettingsPage onExportPresetsChange={setExportPresets} /> : activeTab === 'tasks' ? <TaskCenterPage /> : <TemplatePage />}
+      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} exportPresets={exportPresets} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={setFavoriteOnly} sortBy={sortBy} onSortByChange={setSortBy} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onRelinkFolder={relinkFolder} onOpenTaskCenter={() => openWorkspaceTab('tasks')} onOpenTemplates={() => openWorkspaceTab('templates')} /> : activeTab === 'settings' ? <SettingsPage onExportPresetsChange={setExportPresets} /> : activeTab === 'tasks' ? <TaskCenterPage onCatalogChanged={refreshCatalog} /> : <TemplatePage />}
     </div>
   );
 }

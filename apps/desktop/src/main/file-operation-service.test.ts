@@ -69,6 +69,67 @@ describe('safe catalog file moves', () => {
     expect(service.listHistory()[0]?.fileNames.sort()).toEqual(['capture.NEF', 'capture.jpg']);
   });
 
+  it('undoes a completed RAW, JPEG, and XMP move as one transaction', async () => {
+    const context = await fixture(['capture.NEF', 'capture.jpg', 'capture.xmp']);
+    const assets = context.catalog.listAssets();
+    const raw = assets.find((asset) => asset.fileName === 'capture.NEF')!;
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+    const moved = await service.move({ assetIds: [raw.id], targetFolderId: context.targetFolderId, includeCompanions: true });
+
+    expect(service.listHistory()[0]?.undoable).toBe(true);
+    const report = await service.undo({ operationId: moved.operationId });
+
+    expect(report).toMatchObject({ status: 'completed', total: 2, undone: 2, rolledBack: false });
+    expect((await readdir(context.source)).sort()).toEqual(['capture.NEF', 'capture.jpg', 'capture.xmp']);
+    expect(await readdir(context.target)).toEqual([]);
+    for (const asset of assets) {
+      expect(context.catalog.resolveAssetFile(asset.id)?.path).toBe(path.join(context.source, asset.fileName));
+    }
+    expect(service.listHistory()[0]).toMatchObject({ status: 'undone', succeeded: 2, undoable: false });
+  });
+
+  it('refuses undo when the original source path has been occupied', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+    const moved = await service.move({ assetIds: [asset.id], targetFolderId: context.targetFolderId });
+    await writeFile(path.join(context.source, 'photo.jpg'), 'new-source-file');
+
+    await expect(service.undo({ operationId: moved.operationId })).rejects.toThrow('UNDO_SOURCE_CONFLICT');
+
+    expect(await readFile(path.join(context.source, 'photo.jpg'), 'utf8')).toBe('new-source-file');
+    expect(await readFile(path.join(context.target, 'photo.jpg'), 'utf8')).toBe('content:photo.jpg');
+    expect(context.catalog.resolveAssetFile(asset.id)?.path).toBe(path.join(context.target, 'photo.jpg'));
+  });
+
+  it('restores the moved group when a later undo item fails', async () => {
+    const context = await fixture(['capture.NEF', 'capture.jpg', 'capture.xmp']);
+    const raw = context.catalog.listAssets().find((asset) => asset.fileName === 'capture.NEF')!;
+    const bootstrap = new FileOperationService(context.databasePath);
+    const moved = await bootstrap.move({ assetIds: [raw.id], targetFolderId: context.targetFolderId, includeCompanions: true });
+    bootstrap.close();
+    const service = new FileOperationService(context.databasePath, {
+      copyFile, readdir, realpath, stat, unlink,
+      link: async (source, destination) => {
+        if (String(source).endsWith(`${path.sep}capture.NEF`) && String(source).startsWith(context.target)) {
+          throw Object.assign(new Error('denied'), { code: 'EACCES' });
+        }
+        await link(source, destination);
+      }
+    });
+    services.push(service);
+
+    const report = await service.undo({ operationId: moved.operationId });
+
+    expect(report).toMatchObject({ status: 'failed', undone: 0, rolledBack: true, errorCode: 'EACCES' });
+    expect(await readdir(context.source)).toEqual([]);
+    expect((await readdir(context.target)).sort()).toEqual(['capture.NEF', 'capture.jpg', 'capture.xmp']);
+    expect(context.catalog.resolveAssetFile(raw.id)?.path).toBe(path.join(context.target, 'capture.NEF'));
+    expect(service.listHistory()[0]).toMatchObject({ status: 'completed', undoable: true });
+  });
+
   it('uses one conflict suffix for every file in an associated camera group', async () => {
     const context = await fixture(['capture.NEF', 'capture.jpg', 'capture.xmp']);
     await writeFile(path.join(context.target, 'capture.jpg'), 'existing-target');
@@ -348,6 +409,34 @@ describe('safe catalog file moves', () => {
     expect(context.catalog.resolveAssetFile(asset.id)?.path).toBe(path.join(context.source, 'capture.NEF'));
   });
 
+  it('finishes an interrupted undo and reports catalog location changes', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const bootstrap = new FileOperationService(context.databasePath);
+    const moved = await bootstrap.move({ assetIds: [asset.id], targetFolderId: context.targetFolderId });
+    bootstrap.close();
+    await rename(path.join(context.target, 'photo.jpg'), path.join(context.source, 'photo.jpg'));
+    const database = new DatabaseSync(context.databasePath);
+    database.prepare("UPDATE file_operations SET status = 'undoing', completed_at = NULL WHERE id = ?").run(moved.operationId);
+    database.prepare("UPDATE file_operation_items SET status = 'undone' WHERE operation_id = ?").run(moved.operationId);
+    database.close();
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+    const changes: Array<{ assetId: string; previousPath: string; path: string }> = [];
+
+    expect(await service.recoverInterruptedOperations(async (change) => { changes.push(change); })).toBe(1);
+
+    expect(context.catalog.resolveAssetFile(asset.id)?.path).toBe(path.join(context.source, 'photo.jpg'));
+    expect(changes).toEqual([{
+      assetId: asset.id,
+      previousPath: path.join(context.target, 'photo.jpg'),
+      path: path.join(context.source, 'photo.jpg'),
+      previousFileName: 'photo.jpg',
+      fileName: 'photo.jpg'
+    }]);
+    expect(service.listHistory()[0]).toMatchObject({ status: 'undone', undoable: false });
+  });
+
   it('does not touch managed generation content while moving an original', async () => {
     const context = await fixture();
     const generated = path.join(context.root, 'library-generated', 'result.png');
@@ -514,6 +603,36 @@ describe('catalog copies and renames', () => {
     expect(await readFile(path.join(context.source, 'portrait-final.jpg'), 'utf8')).toBe('content:photo.jpg');
     await expect(stat(path.join(context.source, 'photo.jpg'))).rejects.toMatchObject({ code: 'ENOENT' });
     expect(context.catalog.resolveAssetFile(asset.id)?.fileName).toBe('portrait-final.jpg');
+  });
+
+  it('undoes a rename while preserving the asset identity', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+    const renamed = await service.rename({ assetId: asset.id, fileName: 'portrait-final.jpg' });
+
+    const report = await service.undo({ operationId: renamed.operationId });
+
+    expect(report).toMatchObject({ status: 'completed', undone: 1 });
+    expect(await readFile(path.join(context.source, 'photo.jpg'), 'utf8')).toBe('content:photo.jpg');
+    await expect(stat(path.join(context.source, 'portrait-final.jpg'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(context.catalog.resolveAssetFile(asset.id)?.fileName).toBe('photo.jpg');
+    expect(context.catalog.listAssets()[0]?.id).toBe(asset.id);
+  });
+
+  it('undoes a case-only rename using the filesystem rename primitive', async () => {
+    const context = await fixture();
+    const asset = context.catalog.listAssets()[0]!;
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+    const renamed = await service.rename({ assetId: asset.id, fileName: 'PHOTO.jpg' });
+
+    const report = await service.undo({ operationId: renamed.operationId });
+
+    expect(report.status).toBe('completed');
+    expect((await readdir(context.source)).filter((name) => normalizeForTest(name) === 'photo.jpg')).toEqual(['photo.jpg']);
+    expect(context.catalog.resolveAssetFile(asset.id)?.fileName).toBe('photo.jpg');
   });
 
   it('supports a case-only rename while preserving the asset id', async () => {
