@@ -43,6 +43,7 @@ const SUPPORTED_EXTENSIONS = new Set([
 
 const IGNORED_DIRECTORIES = new Set(['_PhotoAllIsAI', '.git', 'node_modules']);
 const RECENT_IMPORT_WINDOW_MS = 30 * 24 * 60 * 60 * 1_000;
+const IMPORT_BATCH_SIZE = 256;
 
 type AssetRow = {
   id: string;
@@ -799,6 +800,9 @@ export class CatalogService {
 
       const folderId = stableFolderId(folderPath);
       const now = Date.now();
+      const knownPaths = new Set((this.#database.prepare(`
+        SELECT path FROM assets WHERE folder_id = ? AND removed_at IS NULL
+      `).all(folderId) as { path: string }[]).map((row) => row.path));
       this.#database
         .prepare(`
           INSERT INTO folders (id, path, name, imported_at)
@@ -807,50 +811,68 @@ export class CatalogService {
         `)
         .run(folderId, folderPath, path.basename(folderPath), now);
 
-      this.#database.exec('BEGIN IMMEDIATE');
-      try {
-        const upsert = this.#database.prepare(`
-          INSERT INTO assets (
-            id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at, offline_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
-          ON CONFLICT(path) DO UPDATE SET
-            folder_id = excluded.folder_id,
-            file_name = excluded.file_name,
-            extension = excluded.extension,
-            content_hash = CASE
-              WHEN assets.size_bytes = excluded.size_bytes AND assets.modified_at = excluded.modified_at THEN assets.content_hash
-              ELSE NULL
-            END,
-            size_bytes = excluded.size_bytes,
-            modified_at = excluded.modified_at,
-            removed_at = NULL,
-            trashed_at = NULL,
-            offline_at = NULL
-        `);
-
-        for await (const filePath of walkImages(folderPath)) {
-          try {
-            const fileStats = await stat(filePath);
-            const result = upsert.run(
+      const upsert = this.#database.prepare(`
+        INSERT INTO assets (
+          id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at, offline_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+        ON CONFLICT(path) DO UPDATE SET
+          folder_id = excluded.folder_id,
+          file_name = excluded.file_name,
+          extension = excluded.extension,
+          content_hash = CASE
+            WHEN assets.size_bytes = excluded.size_bytes AND assets.modified_at = excluded.modified_at THEN assets.content_hash
+            ELSE NULL
+          END,
+          size_bytes = excluded.size_bytes,
+          modified_at = excluded.modified_at,
+          removed_at = NULL,
+          trashed_at = NULL,
+          offline_at = NULL
+      `);
+      const batch: Array<{ path: string; size: number; modifiedAt: number }> = [];
+      const flush = () => {
+        if (batch.length === 0) return;
+        let newlyImported = 0;
+        this.#database.exec('BEGIN IMMEDIATE');
+        try {
+          for (const file of batch) {
+            upsert.run(
               randomUUID(),
               folderId,
-              filePath,
-              path.basename(filePath),
-              path.extname(filePath).toLowerCase(),
-              fileStats.size,
-              Math.trunc(fileStats.mtimeMs),
+              file.path,
+              path.basename(file.path),
+              path.extname(file.path).toLowerCase(),
+              file.size,
+              file.modifiedAt,
               now
             );
-            if (result.changes > 0) importedCount += 1;
-          } catch {
-            // A single unreadable file must not abort the rest of the import.
+            if (!knownPaths.has(file.path)) {
+              knownPaths.add(file.path);
+              newlyImported += 1;
+            }
           }
+          this.#database.exec('COMMIT');
+          importedCount += newlyImported;
+        } catch (error) {
+          this.#database.exec('ROLLBACK');
+          throw error;
+        } finally {
+          batch.length = 0;
         }
-        this.#database.exec('COMMIT');
-      } catch (error) {
-        this.#database.exec('ROLLBACK');
-        throw error;
+      };
+
+      for await (const filePath of walkImages(folderPath)) {
+        let fileStats;
+        try {
+          fileStats = await stat(filePath);
+        } catch {
+          // A single unreadable file must not abort the rest of the import.
+          continue;
+        }
+        batch.push({ path: filePath, size: fileStats.size, modifiedAt: Math.trunc(fileStats.mtimeMs) });
+        if (batch.length >= IMPORT_BATCH_SIZE) flush();
       }
+      flush();
     }
 
     return importedCount;
@@ -892,10 +914,7 @@ export class CatalogService {
 
   async reconcileImportedFolders(): Promise<{ discovered: number; offline: number }> {
     const folders = this.#database.prepare('SELECT id, path FROM folders WHERE removed_at IS NULL').all() as { id: string; path: string }[];
-    const before = new Set<string>();
     for (const folder of folders) {
-      const rows = this.#database.prepare('SELECT path FROM assets WHERE folder_id = ? AND removed_at IS NULL').all(folder.id) as { path: string }[];
-      rows.forEach((row) => before.add(row.path));
       this.#database.prepare('UPDATE assets SET offline_at = ? WHERE folder_id = ? AND removed_at IS NULL').run(Date.now(), folder.id);
     }
     let discovered = 0;
@@ -907,7 +926,7 @@ export class CatalogService {
       }
     }
     const row = this.#database.prepare('SELECT COUNT(*) AS value FROM assets WHERE offline_at IS NOT NULL AND removed_at IS NULL').get() as { value: number };
-    return { discovered: Math.max(0, discovered - before.size), offline: row.value };
+    return { discovered, offline: row.value };
   }
 
   resolveAssetFile(assetId: string): { path: string; fileName: string; modifiedAt: number } | null {

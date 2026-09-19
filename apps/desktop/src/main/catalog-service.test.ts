@@ -121,6 +121,35 @@ describe('catalog image discovery', () => {
     catalog.close();
   });
 
+  it('does not hold the catalog write lock while inspecting source files', async () => {
+    const root = await createTemporaryDirectory();
+    const photosDirectory = path.join(root, 'photos');
+    const databasePath = path.join(root, 'catalog.sqlite');
+    await mkdir(photosDirectory, { recursive: true });
+    await Promise.all(Array.from({ length: 300 }, (_value, index) =>
+      writeFile(path.join(photosDirectory, `photo-${String(index).padStart(3, '0')}.jpg`), `photo-${index}`)
+    ));
+    const catalog = new CatalogService(databasePath);
+    const observer = new DatabaseSync(databasePath);
+    observer.exec('PRAGMA busy_timeout = 1');
+    let importFinished = false;
+    const importing = catalog.importFolders([photosDirectory]).finally(() => { importFinished = true; });
+    let folderVisible = false;
+    for (let attempt = 0; attempt < 100 && !folderVisible; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      folderVisible = Boolean(observer.prepare('SELECT 1 FROM folders LIMIT 1').get());
+    }
+    expect(folderVisible).toBe(true);
+    expect(importFinished).toBe(false);
+
+    expect(() => observer.prepare(`
+      INSERT INTO tags (id, name, normalized_name) VALUES ('concurrent-tag', 'Concurrent', 'concurrent')
+    `).run()).not.toThrow();
+    await expect(importing).resolves.toBe(300);
+    observer.close();
+    catalog.close();
+  });
+
   it('manages virtual albums and dynamic smart collections without moving files', async () => {
     const root = await createTemporaryDirectory();
     const photosDirectory = path.join(root, 'photos');
@@ -183,6 +212,25 @@ describe('catalog image discovery', () => {
     await writeFile(photoPath, 'photo-restored');
     await catalog.reconcileImportedFolders();
     expect(catalog.listAssets()[0]?.offline).toBe(false);
+    catalog.close();
+  });
+
+  it('reports newly discovered files when another file disappears in the same reconciliation', async () => {
+    const root = await createTemporaryDirectory();
+    const photosDirectory = path.join(root, 'photos');
+    await mkdir(photosDirectory, { recursive: true });
+    const removedPath = path.join(photosDirectory, 'removed.jpg');
+    await writeFile(removedPath, 'removed');
+    await writeFile(path.join(photosDirectory, 'kept.jpg'), 'kept');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await expect(catalog.importFolders([photosDirectory])).resolves.toBe(2);
+    await unlink(removedPath);
+    await writeFile(path.join(photosDirectory, 'new.jpg'), 'new');
+
+    await expect(catalog.reconcileImportedFolders()).resolves.toEqual({ discovered: 1, offline: 1 });
+    expect(catalog.listAssets().find((asset) => asset.fileName === 'removed.jpg')?.offline).toBe(true);
+    expect(catalog.listAssets().find((asset) => asset.fileName === 'new.jpg')?.offline).toBe(false);
+    await expect(catalog.importFolders([photosDirectory])).resolves.toBe(0);
     catalog.close();
   });
 
