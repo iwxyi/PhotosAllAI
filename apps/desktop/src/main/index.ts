@@ -84,6 +84,7 @@ import { LibraryRestoreService } from './library-restore-service';
 import { LibraryIntegrityService } from './library-integrity-service';
 import { classifyAutomaticBackupFailure, classifyAutomaticBackupResult, type AutomaticBackupStatus } from './automatic-backup-status';
 import { settleBeforeShutdown } from './shutdown-coordinator';
+import { createStartupFailureDialog } from './startup-failure';
 
 const APP_ORIGIN = 'app://photoallisai';
 const APPLICATION_SCHEMA_VERSION = 4;
@@ -736,6 +737,10 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow();
   });
+}).catch((error: unknown) => {
+  const failure = createStartupFailureDialog(error);
+  dialog.showErrorBox(failure.title, failure.content);
+  app.exit(1);
 });
 
 app.on('window-all-closed', () => {
