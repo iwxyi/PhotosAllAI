@@ -121,6 +121,7 @@ async function createDiagnosticSnapshot() {
     appVersion: app.getVersion(),
     platform: process.platform,
     catalog: catalog.getStats(),
+    catalogWatcher: catalogWatcher.getStats(),
     providers: { total: profiles.length, enabled: profiles.filter((profile) => profile.enabled).length },
     tasks: taskCounts,
     cache: { ...cacheStats, performance: imageCache.getPerformanceStats(), raw },

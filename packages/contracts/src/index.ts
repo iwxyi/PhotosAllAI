@@ -32,6 +32,12 @@ export const diagnosticSnapshotSchema = z.object({
   appVersion: z.string(),
   platform: z.enum(['darwin', 'win32', 'linux']),
   catalog: z.object({ assets: z.number().int().nonnegative(), offline: z.number().int().nonnegative() }),
+  catalogWatcher: z.object({
+    watchedFolders: z.number().int().nonnegative(),
+    activeWatchers: z.number().int().nonnegative(),
+    watchFailures: z.number().int().nonnegative(),
+    reconciliationFailures: z.number().int().nonnegative()
+  }),
   providers: z.object({ total: z.number().int().nonnegative(), enabled: z.number().int().nonnegative() }),
   tasks: z.record(z.string(), z.number().int().nonnegative()),
   cache: z.object({

@@ -88,6 +88,28 @@ describe('catalog watcher', () => {
     expect(handles[0]!.close).toHaveBeenCalledOnce();
     expect(factory).toHaveBeenCalledTimes(3);
     expect(reconcile).toHaveBeenCalledTimes(3);
+    expect(watcher.getStats()).toEqual({ watchedFolders: 1, activeWatchers: 1, watchFailures: 2, reconciliationFailures: 0 });
+    watcher.stop();
+  });
+
+  it('counts reconciliation failures without stopping future passes', async () => {
+    vi.useFakeTimers();
+    let notify: () => void = () => undefined;
+    const reconcile = vi.fn()
+      .mockRejectedValueOnce(new Error('temporary'))
+      .mockResolvedValue({ discovered: 0, offline: 0 });
+    const watcher = new CatalogWatcher(
+      { reconcileImportedFolders: reconcile },
+      { debounceMs: 5, watchFactory: (_folder, onChange) => { notify = onChange; return new FakeWatcher(); } }
+    );
+    watcher.watchFolders(['/photos']);
+    notify();
+    await vi.advanceTimersByTimeAsync(5);
+    notify();
+    await vi.advanceTimersByTimeAsync(5);
+
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(watcher.getStats().reconciliationFailures).toBe(1);
     watcher.stop();
   });
 

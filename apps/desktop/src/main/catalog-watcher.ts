@@ -24,6 +24,8 @@ export class CatalogWatcher {
   #running = false;
   #dirty = false;
   #active = false;
+  #watchFailures = 0;
+  #reconciliationFailures = 0;
 
   constructor(
     catalog: CatalogReconciler,
@@ -63,6 +65,15 @@ export class CatalogWatcher {
     this.#dirty = false;
   }
 
+  getStats(): { watchedFolders: number; activeWatchers: number; watchFailures: number; reconciliationFailures: number } {
+    return {
+      watchedFolders: this.#folders.size,
+      activeWatchers: this.#watchers.size,
+      watchFailures: this.#watchFailures,
+      reconciliationFailures: this.#reconciliationFailures
+    };
+  }
+
   #attach(folder: string): boolean {
     if (this.#watchers.has(folder) || !this.#folders.has(folder)) return false;
     try {
@@ -70,6 +81,7 @@ export class CatalogWatcher {
       this.#watchers.set(folder, watcher);
       watcher.on('error', () => {
         if (this.#watchers.get(folder) !== watcher) return;
+        this.#watchFailures += 1;
         watcher.close();
         this.#watchers.delete(folder);
         this.#scheduleReconciliation();
@@ -77,6 +89,7 @@ export class CatalogWatcher {
       });
       return true;
     } catch {
+      this.#watchFailures += 1;
       return false;
     }
   }
@@ -98,7 +111,9 @@ export class CatalogWatcher {
     try {
       while (this.#dirty) {
         this.#dirty = false;
-        await this.#catalog.reconcileImportedFolders().catch(() => undefined);
+        await this.#catalog.reconcileImportedFolders().catch(() => {
+          this.#reconciliationFailures += 1;
+        });
       }
     } finally {
       this.#running = false;
