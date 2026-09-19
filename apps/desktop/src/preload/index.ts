@@ -7,6 +7,7 @@ const api: DesktopApi = {
   saveAppSettings: (input) => ipcRenderer.invoke('app.settings.save.v1', input) as ReturnType<DesktopApi['saveAppSettings']>,
   getDiagnosticSnapshot: () => ipcRenderer.invoke('app.diagnostics.v1') as ReturnType<DesktopApi['getDiagnosticSnapshot']>,
   exportDiagnosticSnapshot: () => ipcRenderer.invoke('app.diagnostics.export.v1') as ReturnType<DesktopApi['exportDiagnosticSnapshot']>,
+  runLibraryIntegrityCheck: () => ipcRenderer.invoke('app.integrity.scan.v1') as ReturnType<DesktopApi['runLibraryIntegrityCheck']>,
   backupDatabase: () => ipcRenderer.invoke('app.database.backup.v1') as ReturnType<DesktopApi['backupDatabase']>,
   backupLibrary: () => ipcRenderer.invoke('app.library.backup.v1') as ReturnType<DesktopApi['backupLibrary']>,
   verifyLibraryBackup: () => ipcRenderer.invoke('app.library.backup.verify.v1') as ReturnType<DesktopApi['verifyLibraryBackup']>,

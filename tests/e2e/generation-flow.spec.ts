@@ -197,6 +197,11 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await expect(stat(managedResultPath)).rejects.toMatchObject({ code: 'ENOENT' });
   expect((await readdir(trashRoot, { recursive: true })).some((file) => file.endsWith('.jpg'))).toBe(false);
   expect(await readFile(sourcePath)).toEqual(originalBytes);
+  await expect(page.locator('.integrity-result')).toContainText('完整性正常');
+  await page.getByRole('button', { name: '重新检查图库' }).click();
+  await expect(page.locator('.diagnostics-section').getByRole('status')).toContainText('图库完整性检查通过');
+  await page.locator('.diagnostics-section').scrollIntoViewIfNeeded();
+  await page.screenshot({ path: path.resolve('test-results/library-integrity-diagnostics.png'), animations: 'disabled' });
 
   const diagnosticPath = path.join(testRoot, 'diagnostics.json');
   await electronApp.evaluate(({ dialog }, filePath) => {
@@ -212,6 +217,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
   expect(diagnosticText).not.toContain(baseUrl);
   expect(diagnosticText).not.toContain(sourcePath);
   expect(diagnosticText).not.toContain('移除背景路人');
+  expect(diagnosticText).toContain('"integrity"');
   expect(diagnosticBytes.byteLength).toBeGreaterThan(100);
 
   const firstLevel = await readdir(generatedRoot);

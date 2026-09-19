@@ -78,6 +78,7 @@ import { DatabaseBackupService } from './database-backup-service';
 import { LibraryBackupService } from './library-backup-service';
 import { DatabaseMigrationService } from './database-migration-service';
 import { LibraryRestoreService } from './library-restore-service';
+import { LibraryIntegrityService } from './library-integrity-service';
 
 const APP_ORIGIN = 'app://photoallisai';
 const APPLICATION_SCHEMA_VERSION = 4;
@@ -98,12 +99,13 @@ let appSettings: AppSettingsService;
 let databaseBackup: DatabaseBackupService;
 let libraryBackup: LibraryBackupService;
 let libraryRestore: LibraryRestoreService;
+let libraryIntegrity: LibraryIntegrityService;
 let contentHashTimer: NodeJS.Timeout | undefined;
 let contentHashPassRunning = false;
 let shuttingDown = false;
 
 async function createDiagnosticSnapshot() {
-  const [profiles, cacheStats, raw] = await Promise.all([providers.list(), imageCache.getStats(), imageCache.getDecoderCapabilities()]);
+  const [profiles, cacheStats, raw, integrity] = await Promise.all([providers.list(), imageCache.getStats(), imageCache.getDecoderCapabilities(), libraryIntegrity.scan()]);
   const taskCounts = tasks.list().reduce<Record<string, number>>((counts, task) => {
     counts[task.status] = (counts[task.status] ?? 0) + 1;
     return counts;
@@ -114,7 +116,8 @@ async function createDiagnosticSnapshot() {
     catalog: catalog.getStats(),
     providers: { total: profiles.length, enabled: profiles.filter((profile) => profile.enabled).length },
     tasks: taskCounts,
-    cache: { ...cacheStats, performance: imageCache.getPerformanceStats(), raw }
+    cache: { ...cacheStats, performance: imageCache.getPerformanceStats(), raw },
+    integrity
   });
 }
 
@@ -156,6 +159,7 @@ function registerIpc(): void {
     return saved;
   });
   ipcMain.handle('app.diagnostics.v1', createDiagnosticSnapshot);
+  ipcMain.handle('app.integrity.scan.v1', () => libraryIntegrity.scan());
   ipcMain.handle('app.diagnostics.export.v1', async () => {
     const selection = await dialog.showSaveDialog({
       title: '导出脱敏诊断文件',
@@ -594,6 +598,7 @@ app.whenReady().then(async () => {
     imageCache,
     catalog
   );
+  libraryIntegrity = new LibraryIntegrityService(databasePath, join(libraryDirectory, 'generated'));
   await fileOperations.recoverInterruptedOperations(async (change) => {
     await generation.relocatePortableResults(
       change.assetId, change.previousPath, change.path, change.previousFileName, change.fileName

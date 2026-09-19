@@ -8,6 +8,23 @@ export const appInfoSchema = z.object({
 
 export type AppInfo = z.infer<typeof appInfoSchema>;
 
+export const libraryIntegrityReportSchema = z.object({
+  status: z.enum(['healthy', 'warning', 'error']),
+  databaseStatus: z.enum(['ok', 'corrupt', 'unreadable']),
+  activeGenerationResults: z.number().int().nonnegative(),
+  trashedGenerationResults: z.number().int().nonnegative(),
+  missingActiveFiles: z.number().int().nonnegative(),
+  missingTrashFiles: z.number().int().nonnegative(),
+  unsafeManagedPaths: z.number().int().nonnegative(),
+  unsafeTrashPaths: z.number().int().nonnegative(),
+  nonRegularFiles: z.number().int().nonnegative(),
+  inaccessibleFiles: z.number().int().nonnegative(),
+  unexpectedGeneratedFiles: z.number().int().nonnegative(),
+  unexpectedTrashFiles: z.number().int().nonnegative(),
+  checkedAt: z.number().int().nonnegative()
+});
+export type LibraryIntegrityReport = z.infer<typeof libraryIntegrityReportSchema>;
+
 export const diagnosticSnapshotSchema = z.object({
   appVersion: z.string(),
   platform: z.enum(['darwin', 'win32', 'linux']),
@@ -24,7 +41,8 @@ export const diagnosticSnapshotSchema = z.object({
       decodeMsTotal: z.number().nonnegative()
     }),
     raw: z.object({ nativeImage: z.boolean(), imageMagick: z.boolean(), sips: z.boolean() })
-  })
+  }),
+  integrity: libraryIntegrityReportSchema
 });
 export type DiagnosticSnapshot = z.infer<typeof diagnosticSnapshotSchema>;
 
@@ -717,6 +735,7 @@ export interface DesktopApi {
   saveAppSettings(input: AppSettings): Promise<AppSettings>;
   getDiagnosticSnapshot(): Promise<DiagnosticSnapshot>;
   exportDiagnosticSnapshot(): Promise<DiagnosticExportResult>;
+  runLibraryIntegrityCheck(): Promise<LibraryIntegrityReport>;
   backupDatabase(): Promise<DatabaseBackupResult>;
   backupLibrary(): Promise<LibraryBackupResult>;
   verifyLibraryBackup(): Promise<LibraryBackupVerificationResult>;
