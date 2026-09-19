@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import {
@@ -11,7 +11,7 @@ import {
   type SaveProviderProfileInput
 } from '@photoallisai/contracts';
 
-import { replaceRegularFileSafely } from './safe-file-write';
+import { quarantineInvalidRegularFile, replaceRegularFileSafely } from './safe-file-write';
 
 type StoredProviderProfile = Omit<ProviderProfile, 'hasCredential'> & {
   encryptedCredential?: string;
@@ -155,29 +155,34 @@ export class ProviderService {
     try {
       const value: unknown = JSON.parse(await readFile(this.#settingsPath, 'utf8'));
       if (!Array.isArray(value)) {
-        await this.#quarantineCorruptFile();
+        await quarantineInvalidRegularFile(this.#settingsPath);
         return [];
       }
-      return value.flatMap((item) => {
+      const profiles: StoredProviderProfile[] = [];
+      for (const item of value) {
         const parsed = providerProfileSchema.omit({ hasCredential: true }).safeParse(item);
-        if (!parsed.success || typeof item !== 'object' || item === null) return [];
+        if (!parsed.success || typeof item !== 'object' || item === null) {
+          await quarantineInvalidRegularFile(this.#settingsPath);
+          return [];
+        }
         const encryptedCredential = 'encryptedCredential' in item && typeof item.encryptedCredential === 'string'
           ? item.encryptedCredential
           : undefined;
-        return [{ ...parsed.data, ...(encryptedCredential ? { encryptedCredential } : {}) }];
-      });
+        if ('encryptedCredential' in item && item.encryptedCredential !== undefined && !encryptedCredential) {
+          await quarantineInvalidRegularFile(this.#settingsPath);
+          return [];
+        }
+        profiles.push({ ...parsed.data, ...(encryptedCredential ? { encryptedCredential } : {}) });
+      }
+      return profiles;
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return [];
       if (error instanceof SyntaxError) {
-        await this.#quarantineCorruptFile();
+        await quarantineInvalidRegularFile(this.#settingsPath);
         return [];
       }
       throw error;
     }
-  }
-
-  async #quarantineCorruptFile(): Promise<void> {
-    await rename(this.#settingsPath, `${this.#settingsPath}.corrupt-${Date.now()}`).catch(() => undefined);
   }
 
   async #write(profiles: readonly StoredProviderProfile[]): Promise<void> {

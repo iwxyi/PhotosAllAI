@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -116,5 +116,37 @@ describe('provider service', () => {
       name: 'Recovered', kind: 'openai-compatible', purpose: 'vision',
       baseUrl: 'https://example.com/v1', modelId: 'model', enabled: true
     })).resolves.toMatchObject({ name: 'Recovered' });
+  });
+
+  it('quarantines the complete provider file when any profile is invalid', async () => {
+    const { providers, settingsPath, directory } = await serviceWithPath();
+    await writeFile(settingsPath, JSON.stringify([
+      {
+        id: '7b70df33-5011-4e1c-a4b4-6f73b9d8820e', name: 'Valid',
+        kind: 'openai-compatible', purpose: 'vision', baseUrl: 'https://example.com/v1',
+        modelId: 'vision-model', enabled: true, updatedAt: 1
+      },
+      { name: 'Invalid and previously discarded silently' }
+    ]));
+
+    await expect(providers.list()).resolves.toEqual([]);
+    const entries = await readdir(directory);
+    expect(entries).toEqual([expect.stringMatching(/^providers\.json\.corrupt-/)]);
+    expect(JSON.parse(await readFile(path.join(directory, entries[0]!), 'utf8'))).toHaveLength(2);
+  });
+
+  it('does not move directories or symbolic links when provider settings cannot be parsed', async () => {
+    const { providers, settingsPath, directory } = await serviceWithPath();
+    await mkdir(settingsPath);
+    await expect(providers.list()).rejects.toThrow();
+    expect(await readdir(directory)).toContain('providers.json');
+
+    await rm(settingsPath, { recursive: true });
+    const outside = path.join(directory, 'outside.json');
+    await writeFile(outside, '{not-json');
+    await symlink(outside, settingsPath);
+    await expect(providers.list()).rejects.toThrow('QUARANTINE_SOURCE_NOT_REGULAR_FILE');
+    expect(await readFile(outside, 'utf8')).toBe('{not-json');
+    expect(await readdir(directory)).toContain('providers.json');
   });
 });

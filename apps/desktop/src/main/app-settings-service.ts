@@ -1,9 +1,9 @@
-import { mkdir, readFile, rename } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { appSettingsSchema, type AppSettings } from '@photoallisai/contracts';
 
-import { replaceRegularFileSafely } from './safe-file-write';
+import { quarantineInvalidRegularFile, replaceRegularFileSafely } from './safe-file-write';
 
 export class AppSettingsService {
   readonly #settingsPath: string;
@@ -17,12 +17,12 @@ export class AppSettingsService {
       const parsed: unknown = JSON.parse(await readFile(this.#settingsPath, 'utf8'));
       const result = appSettingsSchema.safeParse(parsed);
       if (result.success) return result.data;
-      await this.#quarantineCorruptFile();
+      await quarantineInvalidRegularFile(this.#settingsPath);
       return appSettingsSchema.parse({});
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return appSettingsSchema.parse({});
       if (error instanceof SyntaxError) {
-        await this.#quarantineCorruptFile();
+        await quarantineInvalidRegularFile(this.#settingsPath);
         return appSettingsSchema.parse({});
       }
       throw error;
@@ -36,8 +36,4 @@ export class AppSettingsService {
     return settings;
   }
 
-  async #quarantineCorruptFile(): Promise<void> {
-    const quarantinePath = `${this.#settingsPath}.corrupt-${Date.now()}`;
-    await rename(this.#settingsPath, quarantinePath).catch(() => undefined);
-  }
 }

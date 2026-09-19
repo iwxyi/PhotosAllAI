@@ -5,7 +5,11 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { publishTemporaryFileSafely, replaceRegularFileSafely } from './safe-file-write';
+import {
+  publishTemporaryFileSafely,
+  quarantineInvalidRegularFile,
+  replaceRegularFileSafely
+} from './safe-file-write';
 
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))));
@@ -87,5 +91,34 @@ describe('safe user-selected file replacement', () => {
     await expect(replaceRegularFileSafely(destination, Buffer.from('next')))
       .rejects.toThrow('DESTINATION_NOT_REGULAR_FILE');
     expect(await readFile(outside, 'utf8')).toBe('outside');
+  });
+
+  it('quarantines regular files under unique names without overwriting earlier evidence', async () => {
+    const { root, destination } = await fixture();
+    await writeFile(destination, 'first invalid value');
+    const first = await quarantineInvalidRegularFile(destination);
+    await writeFile(destination, 'second invalid value');
+    const second = await quarantineInvalidRegularFile(destination);
+
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(second).not.toBe(first);
+    expect(await readFile(first!, 'utf8')).toBe('first invalid value');
+    expect(await readFile(second!, 'utf8')).toBe('second invalid value');
+    expect(await readdir(root)).toHaveLength(2);
+  });
+
+  it('refuses to quarantine directories and symbolic links', async () => {
+    const { root, destination } = await fixture();
+    const outside = path.join(root, 'outside.json');
+    await writeFile(outside, 'outside');
+    await symlink(outside, destination);
+
+    await expect(quarantineInvalidRegularFile(destination))
+      .rejects.toThrow('QUARANTINE_SOURCE_NOT_REGULAR_FILE');
+    expect(await readFile(outside, 'utf8')).toBe('outside');
+    expect(await quarantineInvalidRegularFile(path.join(root, 'missing.json'))).toBeNull();
+    await expect(quarantineInvalidRegularFile(root))
+      .rejects.toThrow('QUARANTINE_SOURCE_NOT_REGULAR_FILE');
   });
 });

@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -35,6 +35,36 @@ describe('app settings service', () => {
     const service = new AppSettingsService(settingsPath);
     await expect(service.get()).resolves.toEqual({ generationStorageMode: 'managed', theme: 'system', cacheMaxBytes: 5 * 1024 ** 3 });
     expect((await readdir(directory)).some((name) => name.startsWith('app.json.corrupt-'))).toBe(true);
+  });
+
+  it('quarantines schema-invalid settings rather than silently replacing them', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-settings-invalid-'));
+    temporaryDirectories.push(directory);
+    const settingsPath = path.join(directory, 'app.json');
+    await writeFile(settingsPath, JSON.stringify({ theme: 'ultraviolet' }));
+
+    await expect(new AppSettingsService(settingsPath).get()).resolves.toEqual({
+      generationStorageMode: 'managed', theme: 'system', cacheMaxBytes: 5 * 1024 ** 3
+    });
+    expect(await readdir(directory)).toEqual([expect.stringMatching(/^app\.json\.corrupt-/)]);
+  });
+
+  it('does not move directories or symbolic links when settings cannot be parsed', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-settings-boundary-'));
+    temporaryDirectories.push(directory);
+    const settingsPath = path.join(directory, 'app.json');
+    await mkdir(settingsPath);
+    await expect(new AppSettingsService(settingsPath).get()).rejects.toThrow();
+    expect((await readdir(directory))).toContain('app.json');
+
+    await rm(settingsPath, { recursive: true });
+    const outside = path.join(directory, 'outside.json');
+    await writeFile(outside, '{not-json');
+    await symlink(outside, settingsPath);
+    await expect(new AppSettingsService(settingsPath).get())
+      .rejects.toThrow('QUARANTINE_SOURCE_NOT_REGULAR_FILE');
+    expect(await readFile(outside, 'utf8')).toBe('{not-json');
+    expect((await readdir(directory))).toContain('app.json');
   });
 
   it('adds new defaults when loading a valid legacy settings file', async () => {

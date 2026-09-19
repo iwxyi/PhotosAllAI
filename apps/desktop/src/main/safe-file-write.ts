@@ -62,6 +62,23 @@ export async function publishTemporaryFileSafely(
   }
 }
 
+export async function quarantineInvalidRegularFile(
+  source: string,
+  fileSystem: Pick<SafeWriteFileSystem, 'lstat' | 'rename'> = nodeFileSystem
+): Promise<string | null> {
+  try {
+    const metadata = await fileSystem.lstat(source);
+    if (!metadata.isFile()) throw new Error('QUARANTINE_SOURCE_NOT_REGULAR_FILE');
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) return null;
+    throw error;
+  }
+
+  const quarantine = `${source}.corrupt-${Date.now()}-${randomUUID()}`;
+  await fileSystem.rename(source, quarantine);
+  return quarantine;
+}
+
 function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error && error.code === code;
 }
