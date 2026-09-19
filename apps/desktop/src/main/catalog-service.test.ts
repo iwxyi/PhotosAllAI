@@ -235,4 +235,54 @@ describe('catalog image discovery', () => {
     expect(catalog.listAssets().filter((asset) => originalIds.has(asset.id)).every((asset) => asset.offline)).toBe(true);
     catalog.close();
   });
+
+  it('uses indexed content hashes to resolve metadata-ambiguous renamed files', async () => {
+    const root = await createTemporaryDirectory();
+    const original = path.join(root, 'original');
+    const relocated = path.join(root, 'relocated');
+    await mkdir(original, { recursive: true });
+    const firstPath = path.join(original, 'first.jpg');
+    const secondPath = path.join(original, 'second.jpg');
+    await Promise.all([writeFile(firstPath, 'AAAA'), writeFile(secondPath, 'BBBB')]);
+    const timestamp = new Date('2026-01-01T00:00:00.000Z');
+    const { rename, utimes } = await import('node:fs/promises');
+    await Promise.all([utimes(firstPath, timestamp, timestamp), utimes(secondPath, timestamp, timestamp)]);
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([original]);
+    await expect(catalog.indexPendingContentHashes(2)).resolves.toEqual({ indexed: 2, remaining: 0 });
+    const assets = catalog.listAssets();
+    const firstId = assets.find((asset) => asset.fileName === 'first.jpg')!.id;
+    const secondId = assets.find((asset) => asset.fileName === 'second.jpg')!.id;
+    await rename(original, relocated);
+    await Promise.all([
+      rename(path.join(relocated, 'first.jpg'), path.join(relocated, 'renamed-a.jpg')),
+      rename(path.join(relocated, 'second.jpg'), path.join(relocated, 'renamed-b.jpg'))
+    ]);
+
+    const result = await catalog.relinkFolder(assets[0]!.folderId, relocated);
+
+    expect(result).toMatchObject({ matched: 2, discovered: 0, offline: 0 });
+    expect(catalog.resolveAssetFile(firstId)?.fileName).toBe('renamed-a.jpg');
+    expect(catalog.resolveAssetFile(secondId)?.fileName).toBe('renamed-b.jpg');
+    catalog.close();
+  });
+
+  it('invalidates a content hash when an imported file changes', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    const filePath = path.join(photos, 'changed.jpg');
+    await mkdir(photos, { recursive: true });
+    await writeFile(filePath, 'before');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([photos]);
+    await expect(catalog.indexPendingContentHashes()).resolves.toEqual({ indexed: 1, remaining: 0 });
+    await writeFile(filePath, 'content-after-change');
+    const changedTime = new Date(Date.now() + 2_000);
+    await import('node:fs/promises').then(({ utimes }) => utimes(filePath, changedTime, changedTime));
+
+    await catalog.importFolders([photos]);
+
+    await expect(catalog.indexPendingContentHashes()).resolves.toEqual({ indexed: 1, remaining: 0 });
+    catalog.close();
+  });
 });

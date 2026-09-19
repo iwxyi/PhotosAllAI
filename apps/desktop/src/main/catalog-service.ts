@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { opendir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -51,6 +52,7 @@ type AssetRow = {
   rating: number;
   favorite: number;
   offline_at: number | null;
+  content_hash: string | null;
 };
 
 export type RelinkCatalogFolderOperationResult = RelinkCatalogFolderResult & {
@@ -224,6 +226,16 @@ export class CatalogService {
         COMMIT;
       `);
     }
+    const contentHashVersion = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (contentHashVersion.user_version < 8) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE assets ADD COLUMN content_hash TEXT CHECK(content_hash IS NULL OR length(content_hash) = 64);
+        CREATE INDEX assets_content_hash_idx ON assets(content_hash) WHERE content_hash IS NOT NULL;
+        PRAGMA user_version = 8;
+        COMMIT;
+      `);
+    }
   }
 
   close(): void {
@@ -379,7 +391,7 @@ export class CatalogService {
     if (collision) throw new Error('RELINK_TARGET_ALREADY_IMPORTED');
 
     const existing = this.#database.prepare(`
-      SELECT id, path, file_name, size_bytes, modified_at FROM assets WHERE folder_id = ? AND removed_at IS NULL
+      SELECT id, path, file_name, size_bytes, modified_at, content_hash FROM assets WHERE folder_id = ? AND removed_at IS NULL
     `).all(folderId) as RelinkAsset[];
     const exact = new Map(existing.map((asset) => [path.relative(folder.path, asset.path), asset]));
     const normalized = new Map<string, RelinkAsset | null>();
@@ -387,7 +399,7 @@ export class CatalogService {
       const key = normalizeRelativePath(relative);
       normalized.set(key, normalized.has(key) ? null : asset);
     }
-    const files: { path: string; relative: string; size: number; modifiedAt: number }[] = [];
+    const files: RelinkFile[] = [];
     for await (const filePath of walkImages(nextRoot)) {
       const metadata = await stat(filePath);
       files.push({ path: filePath, relative: path.relative(nextRoot, filePath), size: metadata.size, modifiedAt: Math.trunc(metadata.mtimeMs) });
@@ -414,6 +426,31 @@ export class CatalogService {
       usedAssetIds.add(asset.id);
     }
 
+    const hashAssets = groupUnique(
+      existing.filter((asset) => !usedAssetIds.has(asset.id) && asset.content_hash),
+      (asset) => asset.content_hash!
+    );
+    const relevantSizes = new Set(
+      existing.filter((asset) => !usedAssetIds.has(asset.id) && asset.content_hash).map((asset) => asset.size_bytes)
+    );
+    const hashFiles: RelinkFile[] = [];
+    for (const file of files) {
+      if (matches.has(file.path) || !relevantSizes.has(file.size)) continue;
+      try {
+        file.contentHash = await hashFile(file.path);
+        hashFiles.push(file);
+      } catch {
+        // Unreadable candidates remain unmatched and are handled as new files.
+      }
+    }
+    const uniqueHashFiles = groupUnique(hashFiles, (file) => file.contentHash!);
+    for (const [hash, asset] of hashAssets) {
+      const file = uniqueHashFiles.get(hash);
+      if (!asset || !file) continue;
+      matches.set(file.path, asset);
+      usedAssetIds.add(asset.id);
+    }
+
     let matched = 0;
     let discovered = 0;
     const relocations: RelinkCatalogFolderOperationResult['relocations'] = [];
@@ -424,19 +461,25 @@ export class CatalogService {
       this.#database.prepare('UPDATE assets SET offline_at = ? WHERE folder_id = ? AND removed_at IS NULL')
         .run(Date.now(), folderId);
       const update = this.#database.prepare(`
-        UPDATE assets SET path = ?, file_name = ?, extension = ?, size_bytes = ?, modified_at = ?, offline_at = NULL
+        UPDATE assets SET path = ?, file_name = ?, extension = ?,
+          content_hash = CASE WHEN size_bytes = ? AND modified_at = ? THEN COALESCE(?, content_hash) ELSE ? END,
+          size_bytes = ?, modified_at = ?, offline_at = NULL
         WHERE id = ?
       `);
       const insert = this.#database.prepare(`
         INSERT OR IGNORE INTO assets (
-          id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at, offline_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+          id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at, offline_at, content_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
       `);
       for (const file of files) {
         const asset = matches.get(file.path);
         if (asset) {
           const nextFileName = path.basename(file.path);
-          update.run(file.path, nextFileName, path.extname(file.path).toLowerCase(), file.size, file.modifiedAt, asset.id);
+          update.run(
+            file.path, nextFileName, path.extname(file.path).toLowerCase(),
+            file.size, file.modifiedAt, file.contentHash ?? null, file.contentHash ?? null,
+            file.size, file.modifiedAt, asset.id
+          );
           relocations.push({
             assetId: asset.id,
             previousPath: asset.path,
@@ -445,7 +488,7 @@ export class CatalogService {
             nextFileName
           });
           matched += 1;
-        } else if (insert.run(randomUUID(), folderId, file.path, path.basename(file.path), path.extname(file.path).toLowerCase(), file.size, file.modifiedAt, Date.now()).changes === 1) {
+        } else if (insert.run(randomUUID(), folderId, file.path, path.basename(file.path), path.extname(file.path).toLowerCase(), file.size, file.modifiedAt, Date.now(), file.contentHash ?? null).changes === 1) {
           discovered += 1;
         }
       }
@@ -703,6 +746,10 @@ export class CatalogService {
             folder_id = excluded.folder_id,
             file_name = excluded.file_name,
             extension = excluded.extension,
+            content_hash = CASE
+              WHEN assets.size_bytes = excluded.size_bytes AND assets.modified_at = excluded.modified_at THEN assets.content_hash
+              ELSE NULL
+            END,
             size_bytes = excluded.size_bytes,
             modified_at = excluded.modified_at,
             removed_at = NULL,
@@ -736,6 +783,40 @@ export class CatalogService {
     }
 
     return importedCount;
+  }
+
+  async indexPendingContentHashes(maxFiles = 1, maxBytes = 512 * 1024 * 1024): Promise<{ indexed: number; remaining: number }> {
+    const safeFiles = Math.max(1, Math.min(Math.trunc(maxFiles), 32));
+    const safeBytes = Math.max(1, Math.min(Math.trunc(maxBytes), 2 * 1024 * 1024 * 1024));
+    const candidates = this.#database.prepare(`
+      SELECT id, path, size_bytes, modified_at FROM assets
+      WHERE removed_at IS NULL AND offline_at IS NULL AND content_hash IS NULL
+      ORDER BY imported_at ASC, id ASC LIMIT ?
+    `).all(safeFiles * 4) as Array<Pick<AssetRow, 'id' | 'path' | 'size_bytes' | 'modified_at'>>;
+    let indexed = 0;
+    let scheduledBytes = 0;
+    for (const candidate of candidates) {
+      if (indexed >= safeFiles || (indexed > 0 && scheduledBytes + candidate.size_bytes > safeBytes)) break;
+      scheduledBytes += candidate.size_bytes;
+      try {
+        const hash = await hashFile(candidate.path);
+        const after = await stat(candidate.path);
+        if (after.size !== candidate.size_bytes || Math.trunc(after.mtimeMs) !== candidate.modified_at) continue;
+        const result = this.#database.prepare(`
+          UPDATE assets SET content_hash = ?
+          WHERE id = ? AND path = ? AND size_bytes = ? AND modified_at = ?
+            AND offline_at IS NULL AND removed_at IS NULL AND content_hash IS NULL
+        `).run(hash, candidate.id, candidate.path, candidate.size_bytes, candidate.modified_at);
+        if (result.changes === 1) indexed += 1;
+      } catch {
+        // External changes and transient read errors are retried by a later pass.
+      }
+    }
+    const remaining = this.#database.prepare(`
+      SELECT COUNT(*) AS value FROM assets
+      WHERE removed_at IS NULL AND offline_at IS NULL AND content_hash IS NULL
+    `).get() as { value: number };
+    return { indexed, remaining: remaining.value };
   }
 
   async reconcileImportedFolders(): Promise<{ discovered: number; offline: number }> {
@@ -840,7 +921,10 @@ type RelinkAsset = {
   file_name: string;
   size_bytes: number;
   modified_at: number;
+  content_hash: string | null;
 };
+
+type RelinkFile = { path: string; relative: string; size: number; modifiedAt: number; contentHash?: string };
 
 function relinkMetadataKey(value: RelinkAsset | { size: number; modifiedAt: number }): string {
   return 'size' in value ? `${value.size}:${value.modifiedAt}` : `${value.size_bytes}:${value.modified_at}`;
@@ -857,4 +941,10 @@ function groupUnique<Value>(values: readonly Value[], keyOf: (value: Value) => s
 
 function escapeLike(value: string): string {
   return value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
+}
+
+async function hashFile(filePath: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(filePath)) hash.update(chunk as Buffer);
+  return hash.digest('hex');
 }

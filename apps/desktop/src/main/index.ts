@@ -71,7 +71,7 @@ import { LibraryBackupService } from './library-backup-service';
 import { DatabaseMigrationService } from './database-migration-service';
 
 const APP_ORIGIN = 'app://photoallisai';
-const APPLICATION_SCHEMA_VERSION = 1;
+const APPLICATION_SCHEMA_VERSION = 2;
 let catalog: CatalogService;
 let catalogWatcher: CatalogWatcher;
 let imageCache: ImageCacheService;
@@ -88,6 +88,9 @@ let workspace: WorkspaceService;
 let appSettings: AppSettingsService;
 let databaseBackup: DatabaseBackupService;
 let libraryBackup: LibraryBackupService;
+let contentHashTimer: NodeJS.Timeout | undefined;
+let contentHashPassRunning = false;
+let shuttingDown = false;
 
 async function createDiagnosticSnapshot() {
   const [profiles, cacheStats, raw] = await Promise.all([providers.list(), imageCache.getStats(), imageCache.getDecoderCapabilities()]);
@@ -509,6 +512,28 @@ app.whenReady().then(async () => {
   await migration.complete(APPLICATION_SCHEMA_VERSION, migrationCheckpoint);
   taskRunner = new TaskRunner(tasks, analysis, generation);
   void databaseBackup.createAutomatic(join(libraryDirectory, 'backups')).catch(() => undefined);
+  const scheduleContentHashPass = (delayMs = 2_000) => {
+    if (shuttingDown) return;
+    contentHashTimer = setTimeout(async () => {
+      if (shuttingDown) return;
+      const active = tasks.list().some((task) => !['completed', 'failed', 'canceled'].includes(task.status));
+      let nextDelay = active ? 10_000 : 60_000;
+      if (!active && !contentHashPassRunning) {
+        contentHashPassRunning = true;
+        try {
+          const result = await catalog.indexPendingContentHashes(1);
+          nextDelay = result.remaining === 0 ? 5 * 60_000 : result.indexed > 0 ? 2_000 : 60_000;
+        } catch {
+          // Hash indexing is opportunistic and must never block normal catalog work.
+        } finally {
+          contentHashPassRunning = false;
+        }
+      }
+      scheduleContentHashPass(nextDelay);
+    }, delayMs);
+    contentHashTimer.unref();
+  };
+  scheduleContentHashPass();
 
   protocol.handle('photoasset', async (request) => {
     const url = new URL(request.url);
@@ -556,6 +581,8 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  shuttingDown = true;
+  if (contentHashTimer) clearTimeout(contentHashTimer);
   catalogWatcher?.stop();
   taskRunner?.stop();
   workspace?.close();
