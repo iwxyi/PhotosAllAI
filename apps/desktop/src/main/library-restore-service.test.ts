@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename as fsRename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -92,5 +92,30 @@ describe('library restore service', () => {
     await symlink(first!, path.join(context.root, 'library-restore-pending.json'));
     await expect(service.applyPending(800)).rejects.toThrow('LIBRARY_RESTORE_MARKER_UNSAFE');
     await expect(service.quarantinePending(800)).rejects.toThrow('LIBRARY_RESTORE_MARKER_UNSAFE');
+  });
+
+  it('surfaces rollback failure when publishing the replacement library fails', async () => {
+    const context = await fixture();
+    const service = new LibraryRestoreService(context.library, context.backupService);
+    await service.stage(context.backup.destinationPath, 900);
+
+    let renameCalls = 0;
+    const fileSystem = {
+      rename: async (source: Parameters<typeof fsRename>[0], destination: Parameters<typeof fsRename>[1]) => {
+        renameCalls += 1;
+        if (renameCalls === 2) throw new Error('PUBLISH_FAILED');
+        if (renameCalls === 3) throw new Error('ROLLBACK_FAILED');
+        await fsRename(source, destination);
+      }
+    };
+    const failingService = new LibraryRestoreService(context.library, context.backupService, fileSystem);
+
+    await expect(failingService.applyPending(901)).rejects.toMatchObject({
+      message: 'LIBRARY_RESTORE_ROLLBACK_FAILED',
+      errors: [expect.objectContaining({ message: 'PUBLISH_FAILED' }), expect.objectContaining({ message: 'ROLLBACK_FAILED' })]
+    });
+    expect(await readdir(context.root)).toContain('library-restore-pending.json');
+    expect(await readdir(context.root)).toContain('library.before-restore-901');
+    expect(await readdir(context.root)).not.toContain('library');
   });
 });

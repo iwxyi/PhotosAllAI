@@ -6,6 +6,9 @@ import { z } from 'zod';
 
 import type { InspectedLibraryBackup, LibraryBackupService, LibraryBackupVerificationResult } from './library-backup-service';
 
+type LibraryRestoreFileSystem = { rename: typeof rename };
+const nodeFileSystem: LibraryRestoreFileSystem = { rename };
+
 const pendingRestoreSchema = z.object({
   schemaVersion: z.literal(1),
   stagingName: z.string().regex(/^\.photoallisai-restore-stage-[A-Za-z0-9_-]+$/u),
@@ -20,12 +23,14 @@ export class LibraryRestoreService {
   readonly #parentDirectory: string;
   readonly #pendingPath: string;
   readonly #backups: LibraryBackupService;
+  readonly #fileSystem: LibraryRestoreFileSystem;
 
-  constructor(libraryDirectory: string, backups: LibraryBackupService) {
+  constructor(libraryDirectory: string, backups: LibraryBackupService, fileSystem: LibraryRestoreFileSystem = nodeFileSystem) {
     this.#libraryDirectory = path.resolve(libraryDirectory);
     this.#parentDirectory = path.dirname(this.#libraryDirectory);
     this.#pendingPath = path.join(this.#parentDirectory, 'library-restore-pending.json');
     this.#backups = backups;
+    this.#fileSystem = fileSystem;
   }
 
   async stage(requestedBackup: string, now = Date.now()): Promise<LibraryBackupVerificationResult> {
@@ -79,12 +84,18 @@ export class LibraryRestoreService {
       await unlink(path.join(replacement, 'manifest.json'));
       if (await pathExists(liveLibrary)) {
         recoveryPath = await availableRecoveryPath(parent, now);
-        await rename(liveLibrary, recoveryPath);
+        await this.#fileSystem.rename(liveLibrary, recoveryPath);
       }
       try {
-        await rename(replacement, liveLibrary);
+        await this.#fileSystem.rename(replacement, liveLibrary);
       } catch (error) {
-        if (recoveryPath) await rename(recoveryPath, liveLibrary).catch(() => undefined);
+        if (recoveryPath) {
+          try {
+            await this.#fileSystem.rename(recoveryPath, liveLibrary);
+          } catch (rollbackError) {
+            throw new AggregateError([error, rollbackError], 'LIBRARY_RESTORE_ROLLBACK_FAILED');
+          }
+        }
         throw error;
       }
       await unlink(this.#pendingPath);
@@ -108,7 +119,7 @@ export class LibraryRestoreService {
       return null;
     }
     const destination = await availableFailedPath(this.#pendingPath, now);
-    await rename(this.#pendingPath, destination);
+    await this.#fileSystem.rename(this.#pendingPath, destination);
     return destination;
   }
 }
