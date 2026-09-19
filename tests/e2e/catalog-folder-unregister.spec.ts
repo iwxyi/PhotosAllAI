@@ -54,6 +54,16 @@ test.afterAll(async () => {
 
 test('unregisters a source folder without touching files and restores its catalog identity', async () => {
   await page.getByRole('button', { name: /source 1/ }).click();
+  const unfavorite = page.getByRole('button', { name: '取消收藏照片' });
+  await expect(unfavorite).toHaveAttribute('aria-pressed', 'true');
+  await unfavorite.click();
+  await expect(page.getByRole('status')).toContainText('已取消收藏 1 张照片');
+  await expect(page.getByRole('button', { name: /首选 0/ })).toBeVisible();
+  const favorite = page.getByRole('button', { name: '收藏照片' });
+  await expect(favorite).toHaveAttribute('aria-pressed', 'false');
+  await favorite.click();
+  await expect(page.getByRole('status')).toContainText('已收藏 1 张照片');
+  await expect(page.getByRole('button', { name: /首选 1/ })).toBeVisible();
   await page.getByRole('button', { name: '从图库移除文件夹 source' }).click();
   const dialog = page.getByRole('alertdialog', { name: '从图库移除文件夹「source」？' });
   await expect(dialog).toBeVisible();

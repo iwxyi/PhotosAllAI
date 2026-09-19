@@ -56,8 +56,16 @@ test('loads cursor pages at the virtualized filmstrip boundary', async () => {
   await expect(allPhotos).not.toHaveClass(/is-active/);
   await expect(page.locator('.library-summary')).toContainText('1 个文件夹 · 205 张照片');
   await allPhotos.click();
-  const options = page.getByRole('option');
+  const options = page.locator('.filmstrip [role="option"]');
   expect(await options.count()).toBeLessThan(30);
+  await options.nth(0).click();
+  await options.nth(1).click({ modifiers: ['Meta'] });
+  await expect(page.locator('.batch-actionbar')).toContainText('已选择 2 张');
+  await page.locator('.batch-actionbar').getByRole('button', { name: '收藏', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('已收藏 2 张照片');
+  await expect(page.getByRole('button', { name: /首选 2/ })).toBeVisible();
+  await page.screenshot({ path: 'test-results/catalog-batch-favorite.png', animations: 'disabled' });
+  await page.getByRole('button', { name: '清除选择' }).click();
 
   const filmstrip = page.locator('.filmstrip');
   await filmstrip.evaluate((element) => { element.scrollLeft = element.scrollWidth; });

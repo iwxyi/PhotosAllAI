@@ -248,13 +248,17 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 .primary-action:hover { background: #d4fa70; }.primary-action:active { transform: translateY(1px); }
 
 .task-statusbar { grid-column: 1 / -1; height: 29px; padding: 0 11px; display: flex; align-items: center; gap: 13px; color: var(--muted); background: #181b18; border: 0; border-top: 1px solid var(--line); font-size: 10px; text-align: left; }
-.batch-actionbar { position: absolute; z-index: 9; left: 50%; bottom: 43px; min-width: 510px; height: 42px; padding: 0 7px 0 13px; display: flex; align-items: center; gap: 4px; background: #262a25; border: 1px solid var(--line-strong); border-radius: var(--radius-md); box-shadow: var(--shadow-popover); transform: translateX(-50%); animation: batch-in 160ms ease-out; }
-.batch-actionbar > span { width: 1px; height: 20px; margin: 0 5px; background: var(--line-strong); }
-.batch-actionbar button:not(.icon-button) { height: 28px; padding: 0 8px; display: flex; align-items: center; gap: 5px; color: var(--muted); background: transparent; border: 0; border-radius: var(--radius-sm); }
-.batch-actionbar select { height: 28px; max-width: 120px; padding: 0 5px; color: var(--muted); background: var(--surface-3); border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.batch-actionbar { position: absolute; z-index: 9; left: calc(224px + (100% - 524px) / 2); bottom: 43px; width: max-content; max-width: calc(100% - 548px); height: 42px; padding: 0 7px 0 13px; display: flex; align-items: center; gap: 8px; background: #262a25; border: 1px solid var(--line-strong); border-radius: var(--radius-md); box-shadow: var(--shadow-popover); transform: translateX(-50%); animation: batch-in 160ms ease-out; }
+.batch-actionbar > strong, .batch-actionbar > .icon-button { flex: 0 0 auto; white-space: nowrap; }
+.batch-actions-scroll { min-width: 0; display: flex; align-items: center; gap: 4px; overflow-x: auto; scrollbar-width: none; border-inline: 1px solid var(--line-strong); padding-inline: 5px; }
+.batch-actions-scroll::-webkit-scrollbar { display: none; }
+.batch-actions-scroll > button, .batch-actions-scroll > select { flex: 0 0 auto; white-space: nowrap; }
+.batch-actions-scroll button { height: 28px; padding: 0 8px; display: flex; align-items: center; gap: 5px; color: var(--muted); background: transparent; border: 0; border-radius: var(--radius-sm); }
+.batch-actions-scroll select { height: 28px; max-width: 120px; padding: 0 5px; color: var(--muted); background: var(--surface-3); border: 1px solid var(--line); border-radius: var(--radius-sm); }
 .batch-actionbar button:hover { color: var(--text); background: var(--surface-4); }
-.batch-actionbar button.is-danger { color: #e0a2a2; }.batch-actionbar button.is-danger:hover { color: #ffd0d0; background: rgb(224 96 96 / 10%); }
+.batch-actions-scroll button.is-danger { color: #e0a2a2; }.batch-actions-scroll button.is-danger:hover { color: #ffd0d0; background: rgb(224 96 96 / 10%); }
 .operation-toast { position: absolute; z-index: 12; right: 304px; bottom: 42px; min-height: 34px; max-width: 340px; padding: 7px 7px 7px 11px; display: flex; align-items: center; gap: 9px; color: var(--text); background: #262a25; border: 1px solid var(--line-strong); border-radius: var(--radius-md); box-shadow: var(--shadow-popover); }
+.workspace:has(.batch-actionbar) .operation-toast { bottom: 92px; }
 .operation-toast button { width: 22px; height: 22px; display: grid; place-items: center; color: var(--muted); background: transparent; border: 0; border-radius: 3px; }
 .modal-backdrop { position: absolute; z-index: 30; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(5 7 5 / 68%); backdrop-filter: blur(3px); animation: modal-fade-in 140ms ease-out; }
 .sidebar-modal { position: fixed; }
@@ -387,6 +391,7 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
   .brand { padding-left: 68px; }
   .search-trigger { width: 150px; }
   .workspace { grid-template-columns: 195px minmax(0, 1fr) 280px; }
+  .batch-actionbar { left: calc(195px + (100% - 475px) / 2); max-width: calc(100% - 499px); }
   .thumb { flex-basis: 112px; }
 }
 

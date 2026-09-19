@@ -46,6 +46,7 @@ import {
   FolderOpen,
   GalleryHorizontalEnd,
   Grid2X2,
+  Heart,
   History,
   Image,
   Info,
@@ -119,6 +120,7 @@ function mapCatalogAssets(assets: CatalogAsset[]): Photo[] {
     format: asset.format,
     dimensions: `${(asset.sizeBytes / 1_048_576).toFixed(1)} MB`,
     rating: asset.rating,
+    favorite: asset.favorite,
     tags: asset.tags,
     offline: asset.offline
   }));
@@ -128,12 +130,14 @@ function IconButton({
   label,
   children,
   active = false,
+  pressed,
   onClick,
   disabled = false
 }: {
   label: string;
   children: React.ReactNode;
   active?: boolean;
+  pressed?: boolean;
   onClick?: () => void;
   disabled?: boolean;
 }): React.JSX.Element {
@@ -142,6 +146,7 @@ function IconButton({
       className={`icon-button${active ? ' is-active' : ''}`}
       title={label}
       aria-label={label}
+      aria-pressed={pressed}
       onClick={onClick}
       disabled={disabled}
       type="button"
@@ -472,6 +477,7 @@ function Viewer({
   onExportPresetChange,
   onExport,
   onRate,
+  onFavorite,
   onRegenerate,
   onEditTags,
   onMove,
@@ -491,6 +497,7 @@ function Viewer({
   onExportPresetChange: (presetId: string | null) => void;
   onExport: (resultIds: string[], presetId?: string | null) => Promise<string>;
   onRate: (rating: number) => void;
+  onFavorite: (favorite: boolean) => void;
   onRegenerate: (result: GenerationResult) => Promise<string>;
   onEditTags: () => void;
   onMove: () => void;
@@ -591,7 +598,7 @@ function Viewer({
         </div>
       </div>
       <div className="viewer-footer">
-        <div className="viewer-meta-actions"><div className="rating">{[1, 2, 3, 4, 5].map((value) => <button type="button" aria-label={`设置评分 ${value}`} key={value} onClick={() => onRate(photo.rating === value ? 0 : value)}><Star size={13} fill={value <= photo.rating ? 'currentColor' : 'none'} /></button>)}</div>{!isDemo && <><IconButton label="在文件管理器中显示原图" onClick={onRevealOriginal}><FolderOpen size={13} /></IconButton><IconButton label="重命名照片" onClick={onRename}><FilePenLine size={13} /></IconButton><IconButton label="复制到文件夹" onClick={onCopy}><Copy size={13} /></IconButton><IconButton label="移动到文件夹" onClick={onMove}><FolderInput size={13} /></IconButton><IconButton label="仅从图库移除" onClick={onRemove}><LibraryBig size={13} /></IconButton><IconButton label="移到系统回收站" onClick={onTrash}><Trash2 size={13} /></IconButton></>}<IconButton label="添加标签" onClick={onEditTags}><Tags size={13} /></IconButton></div>
+        <div className="viewer-meta-actions"><div className="rating">{[1, 2, 3, 4, 5].map((value) => <button type="button" aria-label={`设置评分 ${value}`} key={value} onClick={() => onRate(photo.rating === value ? 0 : value)}><Star size={13} fill={value <= photo.rating ? 'currentColor' : 'none'} /></button>)}</div>{!isDemo && <IconButton label={photo.favorite ? '取消收藏照片' : '收藏照片'} active={Boolean(photo.favorite)} pressed={Boolean(photo.favorite)} onClick={() => onFavorite(!photo.favorite)}><Heart size={13} fill={photo.favorite ? 'currentColor' : 'none'} /></IconButton>}{!isDemo && <><IconButton label="在文件管理器中显示原图" onClick={onRevealOriginal}><FolderOpen size={13} /></IconButton><IconButton label="重命名照片" onClick={onRename}><FilePenLine size={13} /></IconButton><IconButton label="复制到文件夹" onClick={onCopy}><Copy size={13} /></IconButton><IconButton label="移动到文件夹" onClick={onMove}><FolderInput size={13} /></IconButton><IconButton label="仅从图库移除" onClick={onRemove}><LibraryBig size={13} /></IconButton><IconButton label="移到系统回收站" onClick={onTrash}><Trash2 size={13} /></IconButton></>}<IconButton label="添加标签" onClick={onEditTags}><Tags size={13} /></IconButton></div>
         <div className="version-switcher">
           <button type="button" onMouseDown={() => setShowOriginal(true)} onMouseUp={() => setShowOriginal(false)} onMouseLeave={() => setShowOriginal(false)}>
             按住查看原图 <kbd>O</kbd>
@@ -1037,6 +1044,14 @@ function PopulatedLibraryWorkspace({
     await onRefreshCatalog();
   };
 
+  const favoriteSelection = async (favorite: boolean) => {
+    if (isDemo) return;
+    const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+    await window.desktopApi.updateCatalogMetadata({ assetIds, favorite });
+    setOperationNotice(favorite ? `已收藏 ${assetIds.length} 张照片。` : `已取消收藏 ${assetIds.length} 张照片。`);
+    await onRefreshCatalog();
+  };
+
   const generateSelection = async ({
     providerProfileId,
     template,
@@ -1314,22 +1329,24 @@ function PopulatedLibraryWorkspace({
       <Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={totalCount} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={onSelectFolder} onSelectAlbum={onSelectAlbum} onSelectSmartCollection={onSelectSmartCollection} onRefreshAlbums={onRefreshAlbums} onImportFolders={onImportFolders} onRelinkFolder={onRelinkFolder} onUnregisterFolder={onUnregisterFolder} onSelectTag={onSelectTag} isDemo={isDemo} />
       <main className="library-main">
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
-        <Viewer photo={selected} results={generationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} onReview={reviewResult} onRevealOriginal={() => void window.desktopApi.revealCatalogAsset(selected.id)} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} />
+        <Viewer photo={selected} results={generationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onFavorite={(favorite) => void favoriteSelection(favorite)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} onReview={reviewResult} onRevealOriginal={() => void window.desktopApi.revealCatalogAsset(selected.id)} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} />
       </main>
       <AiPanel photo={selected} results={generationResults} revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onOpenTemplates={onOpenTemplates} onGenerate={generateSelection} />
       {selection.selectedIds.size > 1 && (
         <div className="batch-actionbar">
           <strong>已选择 {selection.selectedIds.size} 张</strong>
-          <span />
-          <button type="button" onClick={() => void rateSelection(5)}><Star size={14} />5 星</button>
-          <button type="button" onClick={() => setTagEditorOpen(true)}><Tags size={14} />标签</button>
-          {!isDemo && <><button type="button" onClick={() => openFolderDialog('copy')}><Copy size={14} />复制</button><button type="button" onClick={() => openFolderDialog('move')}><FolderInput size={14} />移动</button></>}
-          <button type="button" onClick={() => void analyzeSelection()}><Sparkles size={14} />AI 分析</button>
-          <button type="button" onClick={() => void generateSelection({ providerProfileId: generationProfiles[0]?.id ?? '', template: null, count: 1, instruction: '', disabledActionIds: new Set() })} disabled={generationProfiles.length === 0}><WandSparkles size={14} />批量生成</button>
-          <select aria-label="导出预设" value={selectedExportPresetId ?? ''} onChange={(event) => setSelectedExportPresetId(event.target.value || null)}><option value="">默认命名</option>{exportPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select><button type="button" onClick={() => void exportLatestSelection()}><Download size={14} />导出</button>
-          {!isDemo && <button type="button" onClick={() => setBatchRenameDialogOpen(true)}><FilePenLine size={14} />批量重命名</button>}
-          {!isDemo && catalogAlbums.length > 0 && <><select aria-label="目标相册" value={albumTargetId} onChange={(event) => setAlbumTargetId(event.target.value)}><option value="">相册</option>{catalogAlbums.map((album) => <option key={album.id} value={album.id}>{album.name}</option>)}</select><button type="button" disabled={!albumTargetId} onClick={() => void updateAlbumMembership('add')}><FolderHeart size={14} />加入</button>{selectedAlbumId && <button type="button" onClick={() => void updateAlbumMembership('remove')}><FolderHeart size={14} />移出</button>}</>}
-          {!isDemo && <><button type="button" onClick={() => setRemovalMode('remove')}><LibraryBig size={14} />移除</button><button className="is-danger" type="button" onClick={() => setRemovalMode('trash')}><Trash2 size={14} />回收站</button></>}
+          <div className="batch-actions-scroll">
+            <button type="button" onClick={() => void rateSelection(5)}><Star size={14} />5 星</button>
+            <button type="button" onClick={() => void favoriteSelection(![...selection.selectedIds].every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite))}><Heart size={14} />{[...selection.selectedIds].every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite) ? '取消收藏' : '收藏'}</button>
+            <button type="button" onClick={() => setTagEditorOpen(true)}><Tags size={14} />标签</button>
+            {!isDemo && <><button type="button" onClick={() => openFolderDialog('copy')}><Copy size={14} />复制</button><button type="button" onClick={() => openFolderDialog('move')}><FolderInput size={14} />移动</button></>}
+            <button type="button" onClick={() => void analyzeSelection()}><Sparkles size={14} />AI 分析</button>
+            <button type="button" onClick={() => void generateSelection({ providerProfileId: generationProfiles[0]?.id ?? '', template: null, count: 1, instruction: '', disabledActionIds: new Set() })} disabled={generationProfiles.length === 0}><WandSparkles size={14} />批量生成</button>
+            <select aria-label="导出预设" value={selectedExportPresetId ?? ''} onChange={(event) => setSelectedExportPresetId(event.target.value || null)}><option value="">默认命名</option>{exportPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select><button type="button" onClick={() => void exportLatestSelection()}><Download size={14} />导出</button>
+            {!isDemo && <button type="button" onClick={() => setBatchRenameDialogOpen(true)}><FilePenLine size={14} />批量重命名</button>}
+            {!isDemo && catalogAlbums.length > 0 && <><select aria-label="目标相册" value={albumTargetId} onChange={(event) => setAlbumTargetId(event.target.value)}><option value="">相册</option>{catalogAlbums.map((album) => <option key={album.id} value={album.id}>{album.name}</option>)}</select><button type="button" disabled={!albumTargetId} onClick={() => void updateAlbumMembership('add')}><FolderHeart size={14} />加入</button>{selectedAlbumId && <button type="button" onClick={() => void updateAlbumMembership('remove')}><FolderHeart size={14} />移出</button>}</>}
+            {!isDemo && <><button type="button" onClick={() => setRemovalMode('remove')}><LibraryBig size={14} />移除</button><button className="is-danger" type="button" onClick={() => setRemovalMode('trash')}><Trash2 size={14} />回收站</button></>}
+          </div>
           <IconButton label="清除选择" onClick={() => setSelection({ selectedIds: new Set(), anchorId: null, focusId: selected.id })}><X size={14} /></IconButton>
         </div>
       )}
