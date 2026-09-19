@@ -79,6 +79,7 @@ import { LibraryBackupService } from './library-backup-service';
 import { DatabaseMigrationService } from './database-migration-service';
 import { LibraryRestoreService } from './library-restore-service';
 import { LibraryIntegrityService } from './library-integrity-service';
+import { classifyAutomaticBackupFailure, classifyAutomaticBackupResult, type AutomaticBackupStatus } from './automatic-backup-status';
 
 const APP_ORIGIN = 'app://photoallisai';
 const APPLICATION_SCHEMA_VERSION = 4;
@@ -106,7 +107,8 @@ let shuttingDown = false;
 let startupRecovery = {
   trashPurges: { total: 0, recovered: 0, conflicts: 0, failed: 0 },
   fileOperations: { total: 0, resolved: 0, failed: 0 },
-  generationWrites: { total: 0, recovered: 0, failed: 0 }
+  generationWrites: { total: 0, recovered: 0, failed: 0 },
+  automaticBackup: { status: 'pending' as AutomaticBackupStatus }
 };
 
 async function createDiagnosticSnapshot() {
@@ -604,13 +606,24 @@ app.whenReady().then(async () => {
     );
   });
   const generationWrites = await generation.recoverInterruptedWrites();
-  startupRecovery = { trashPurges, fileOperations: recoveredFileOperations, generationWrites };
+  startupRecovery = {
+    trashPurges,
+    fileOperations: recoveredFileOperations,
+    generationWrites,
+    automaticBackup: { status: 'pending' as AutomaticBackupStatus }
+  };
   libraryIntegrity = new LibraryIntegrityService(databasePath, join(libraryDirectory, 'generated'));
   exportService = new ExportService(databasePath, generation);
   exportPresets = new ExportPresetService(databasePath);
   await migration.complete(APPLICATION_SCHEMA_VERSION, migrationCheckpoint);
   taskRunner = new TaskRunner(tasks, analysis, generation);
-  void databaseBackup.createAutomatic(join(libraryDirectory, 'backups')).catch(() => undefined);
+  void databaseBackup.createAutomatic(join(libraryDirectory, 'backups'))
+    .then((result) => {
+      startupRecovery.automaticBackup.status = classifyAutomaticBackupResult(result);
+    })
+    .catch(() => {
+      startupRecovery.automaticBackup.status = classifyAutomaticBackupFailure();
+    });
   const scheduleContentHashPass = (delayMs = 2_000) => {
     if (shuttingDown) return;
     contentHashTimer = setTimeout(async () => {

@@ -61,6 +61,9 @@ export const diagnosticSnapshotSchema = z.object({
       total: z.number().int().nonnegative(),
       recovered: z.number().int().nonnegative(),
       failed: z.number().int().nonnegative()
+    }),
+    automaticBackup: z.object({
+      status: z.enum(['pending', 'completed', 'skipped', 'failed'])
     })
   }),
   integrity: libraryIntegrityReportSchema
