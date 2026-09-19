@@ -111,7 +111,10 @@ export class DatabaseMigrationService {
       await rename(temporary, this.#databasePath);
     } catch (error) {
       await rm(temporary, { force: true });
-      for (const item of moved.reverse()) await rename(item.from, item.to).catch(() => undefined);
+      const rollbackErrors = await rollbackMigrationMoves(moved);
+      if (rollbackErrors.length > 0) {
+        throw new Error('MIGRATION_RESTORE_ROLLBACK_FAILED', { cause: { original: error, rollback: rollbackErrors } });
+      }
       throw error;
     }
     if (checkpoint.sourceVersion === 0) await rm(this.#statePath, { force: true });
@@ -128,6 +131,21 @@ export class DatabaseMigrationService {
       throw new Error('MIGRATION_STATE_INVALID');
     }
   }
+}
+
+export async function rollbackMigrationMoves(
+  moved: ReadonlyArray<{ from: string; to: string }>,
+  renameFile: (from: string, to: string) => Promise<void> = rename
+): Promise<unknown[]> {
+  const errors: unknown[] = [];
+  for (const item of [...moved].reverse()) {
+    try {
+      await renameFile(item.from, item.to);
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  return errors;
 }
 
 async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {

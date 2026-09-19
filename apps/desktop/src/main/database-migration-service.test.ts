@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { DatabaseMigrationService } from './database-migration-service';
+import { DatabaseMigrationService, rollbackMigrationMoves } from './database-migration-service';
 
 const roots: string[] = [];
 
@@ -24,6 +24,15 @@ async function fixture() {
 }
 
 describe('database migration checkpoints', () => {
+  it('reports compensation failures instead of hiding them', async () => {
+    const errors = await rollbackMigrationMoves(
+      [{ from: 'failed.sqlite', to: 'catalog.sqlite' }, { from: 'failed.sqlite-wal', to: 'catalog.sqlite-wal' }],
+      async (from) => { if (from.endsWith('-wal')) throw new Error('permission'); }
+    );
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(Error);
+  });
+
   it('commits the application schema version only after migration succeeds', async () => {
     const context = await fixture();
     const service = new DatabaseMigrationService(context.databasePath);
