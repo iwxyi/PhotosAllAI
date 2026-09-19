@@ -146,6 +146,35 @@ describe('persistent task service', () => {
     tasks.close();
   });
 
+  it('pauses queued and active tasks and resumes them at the queue tail', async () => {
+    const tasks = new TaskService(await databasePath());
+    const queued = tasks.enqueue({ kind: 'analysis', assetId: 'asset-queued', payload: {} });
+    const active = tasks.enqueue({ kind: 'analysis', assetId: 'asset-active', payload: {} });
+    tasks.claimNext(['analysis']);
+    tasks.advance(queued.id, 'processing', 0.4);
+
+    expect(tasks.pause(queued.id)).toMatchObject({ status: 'paused', progress: 0.4 });
+    expect(tasks.pause(active.id)).toMatchObject({ status: 'paused', progress: 0 });
+    expect(tasks.listPage({ limit: 10, cursor: null })).toMatchObject({
+      queuedCount: 0, pausedCount: 2, activeCount: 0
+    });
+
+    const saving = tasks.enqueue({ kind: 'analysis', assetId: 'asset-saving', payload: {} });
+    tasks.claimNext(['analysis']);
+    tasks.advance(saving.id, 'processing', 0.5);
+    tasks.advance(saving.id, 'downloading', 0.85);
+    tasks.advance(saving.id, 'saving', 0.95);
+    expect(() => tasks.pause(saving.id)).toThrow('TASK_NOT_PAUSABLE');
+
+    const resumedActive = tasks.resume(active.id);
+    const resumedQueued = tasks.resume(queued.id);
+    expect(resumedActive).toMatchObject({ status: 'queued', progress: 0, attempt: 0 });
+    expect(resumedQueued).toMatchObject({ status: 'queued', progress: 0, attempt: 1 });
+    expect(tasks.list().filter((task) => task.status === 'queued').map((task) => task.id))
+      .toEqual([active.id, queued.id]);
+    tasks.close();
+  });
+
   it('assigns retried tasks after the current queue tail', async () => {
     const tasks = new TaskService(await databasePath());
     const queued = tasks.enqueue({ kind: 'analysis', assetId: 'asset-queued', payload: {} });

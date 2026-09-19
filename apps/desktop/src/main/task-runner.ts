@@ -97,7 +97,7 @@ export class TaskRunner {
           }
         } catch (error) {
           const current = this.#tasks.find(task.id);
-          if (!this.#stopped && current && current.status !== 'canceled' && current.status !== 'failed') {
+          if (!this.#stopped && current && current.status !== 'paused' && current.status !== 'canceled' && current.status !== 'failed') {
             const fallback = task.kind === 'generation' ? 'GENERATION_FAILED' : task.kind === 'export' ? 'EXPORT_FAILED' : 'ANALYSIS_FAILED';
             const errorCode = normalizeTaskErrorCode(error, fallback);
             this.#tasks.advance(task.id, 'failed', current.progress, errorCode);

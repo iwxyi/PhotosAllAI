@@ -20,5 +20,13 @@ describe('generation task state', () => {
     expect(canTransitionTask('failed', 'queued')).toBe(true);
     expect(canTransitionTask('canceled', 'queued')).toBe(true);
   });
-});
 
+  it('allows pausing resumable work but not committed or saving work', () => {
+    expect(canTransitionTask('queued', 'paused')).toBe(true);
+    expect(canTransitionTask('processing', 'paused')).toBe(true);
+    expect(canTransitionTask('paused', 'queued')).toBe(true);
+    expect(canTransitionTask('paused', 'canceled')).toBe(true);
+    expect(canTransitionTask('saving', 'paused')).toBe(false);
+    expect(canTransitionTask('completed', 'paused')).toBe(false);
+  });
+});

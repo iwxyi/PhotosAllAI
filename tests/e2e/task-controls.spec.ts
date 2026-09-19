@@ -69,6 +69,15 @@ test('reorders queued work and batch-retries failed generation tasks', async () 
   await expect(rows.nth(0)).toContainText('asset-B');
   await expect(rows.nth(1)).toContainText('asset-A');
 
+  const exportRow = rows.filter({ hasText: 'asset-A' });
+  await exportRow.getByRole('button', { name: '暂停任务' }).click();
+  await expect(exportRow.getByText('已暂停')).toBeVisible();
+  await expect(page.getByText('暂停 1', { exact: true })).toBeVisible();
+  await exportRow.getByRole('button', { name: '恢复任务' }).click();
+  await expect.poll(async () => (await page.evaluate((taskId) => window.desktopApi.getTask(taskId), queuedExportTaskId))?.status)
+    .not.toBe('paused');
+  await expect(exportRow.getByRole('button', { name: '恢复任务' })).toHaveCount(0);
+
   await page.getByRole('button', { name: '重试失败生成 (1)' }).click();
   await expect(page.getByText('已重新排队 1 个生成任务。')).toBeVisible();
   await expect.poll(async () => rows.filter({ hasText: 'asset-failed' }).getByText('失败').count()).toBe(1);

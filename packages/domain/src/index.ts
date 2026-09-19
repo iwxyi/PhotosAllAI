@@ -1,6 +1,7 @@
 export type TaskStatus =
   | 'draft'
   | 'queued'
+  | 'paused'
   | 'preparing'
   | 'uploading'
   | 'processing'
@@ -12,11 +13,12 @@ export type TaskStatus =
 
 const transitions: Readonly<Record<TaskStatus, readonly TaskStatus[]>> = {
   draft: ['queued', 'canceled'],
-  queued: ['preparing', 'canceled'],
-  preparing: ['uploading', 'processing', 'failed', 'canceled'],
-  uploading: ['processing', 'failed', 'canceled'],
-  processing: ['downloading', 'failed', 'canceled'],
-  downloading: ['saving', 'failed', 'canceled'],
+  queued: ['preparing', 'paused', 'canceled'],
+  paused: ['queued', 'canceled'],
+  preparing: ['uploading', 'processing', 'paused', 'failed', 'canceled'],
+  uploading: ['processing', 'paused', 'failed', 'canceled'],
+  processing: ['downloading', 'paused', 'failed', 'canceled'],
+  downloading: ['saving', 'paused', 'failed', 'canceled'],
   saving: ['completed', 'failed'],
   completed: [],
   failed: ['queued', 'canceled'],

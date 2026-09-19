@@ -504,7 +504,7 @@ export type ConnectionTest = z.infer<typeof connectionTestSchema>;
 
 export const taskKindSchema = z.enum(['analysis', 'generation', 'export']);
 export const taskStatusSchema = z.enum([
-  'draft', 'queued', 'preparing', 'uploading', 'processing',
+  'draft', 'queued', 'paused', 'preparing', 'uploading', 'processing',
   'downloading', 'saving', 'completed', 'failed', 'canceled'
 ]);
 
@@ -543,6 +543,7 @@ export const taskPageSchema = z.object({
   items: z.array(persistedTaskSchema),
   totalCount: z.number().int().nonnegative(),
   queuedCount: z.number().int().nonnegative(),
+  pausedCount: z.number().int().nonnegative(),
   activeCount: z.number().int().nonnegative(),
   failedCount: z.number().int().nonnegative(),
   failedGenerationCount: z.number().int().nonnegative(),
@@ -883,6 +884,8 @@ export interface DesktopApi {
   getTask(taskId: string): Promise<PersistedTask | null>;
   enqueueTask(input: EnqueueTaskInput): Promise<PersistedTask>;
   cancelTask(taskId: string): Promise<PersistedTask>;
+  pauseTask(taskId: string): Promise<PersistedTask>;
+  resumeTask(taskId: string): Promise<PersistedTask>;
   retryTask(taskId: string): Promise<PersistedTask>;
   moveQueuedTask(input: MoveQueuedTaskInput): Promise<PersistedTask>;
   retryFailedGenerationTasks(input?: RetryFailedGenerationTasksInput): Promise<RetryFailedGenerationTasksReport>;

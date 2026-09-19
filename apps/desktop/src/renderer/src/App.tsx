@@ -850,6 +850,7 @@ function TaskBar({ open, onToggle, onOpenTaskCenter, tasks }: { open: boolean; o
   const runningCount = isDemo ? 1 : visibleTasks.filter((task) => ['preparing', 'uploading', 'processing', 'downloading', 'saving'].includes(task.status)).length;
   const waitingCount = isDemo ? 4 : visibleTasks.filter((task) => task.status === 'queued').length;
   const failedCount = isDemo ? 1 : visibleTasks.filter((task) => task.status === 'failed').length;
+  const pausedCount = isDemo ? 0 : visibleTasks.filter((task) => task.status === 'paused').length;
 
   return (
     <>
@@ -860,7 +861,7 @@ function TaskBar({ open, onToggle, onOpenTaskCenter, tasks }: { open: boolean; o
         </div>
       )}
       <button className="task-statusbar" type="button" onClick={onToggle} aria-expanded={open}>
-        <span className={`working-pulse${runningCount === 0 ? ' is-idle' : ''}`} /><strong>处理中 {runningCount}</strong><span>等待 {waitingCount}</span><span className="failed-count">失败 {failedCount}</span><span className="status-spacer" /><span>串行任务</span><PanelBottomOpen size={15} className={open ? 'is-open' : ''} />
+        <span className={`working-pulse${runningCount === 0 ? ' is-idle' : ''}`} /><strong>处理中 {runningCount}</strong><span>等待 {waitingCount}</span>{pausedCount > 0 && <span>暂停 {pausedCount}</span>}<span className="failed-count">失败 {failedCount}</span><span className="status-spacer" /><span>串行任务</span><PanelBottomOpen size={15} className={open ? 'is-open' : ''} />
       </button>
     </>
   );
@@ -1975,7 +1976,7 @@ const taskLabels: Record<PersistedTask['kind'], string> = {
 const statusLabels: Record<PersistedTask['status'], string> = {
   draft: '草稿', queued: '等待中', preparing: '准备输入', uploading: '上传中',
   processing: '处理中', downloading: '下载中', saving: '保存中', completed: '已完成',
-  failed: '失败', canceled: '已取消'
+  paused: '已暂停', failed: '失败', canceled: '已取消'
 };
 
 function taskSubtitle(task: PersistedTask): string {
@@ -2015,7 +2016,7 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
   const [nextTaskCursor, setNextTaskCursor] = useState<TaskListCursor | null>(null);
   const [taskTotalCount, setTaskTotalCount] = useState(0);
-  const [taskCounts, setTaskCounts] = useState({ queued: 0, active: 0, failed: 0, failedGeneration: 0 });
+  const [taskCounts, setTaskCounts] = useState({ queued: 0, paused: 0, active: 0, failed: 0, failedGeneration: 0 });
   const [loadingMoreTasks, setLoadingMoreTasks] = useState(false);
   const loadedTaskHistory = useRef(false);
   const [fileOperations, setFileOperations] = useState<FileOperationHistoryItem[]>([]);
@@ -2039,6 +2040,7 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
     setTaskTotalCount(page.totalCount);
     setTaskCounts({
       queued: page.queuedCount,
+      paused: page.pausedCount,
       active: page.activeCount,
       failed: page.failedCount,
       failedGeneration: page.failedGenerationCount
@@ -2080,6 +2082,14 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
   };
   const retry = async (taskId: string) => {
     await window.desktopApi.retryTask(taskId);
+    await refresh();
+  };
+  const pause = async (taskId: string) => {
+    await window.desktopApi.pauseTask(taskId);
+    await refresh();
+  };
+  const resume = async (taskId: string) => {
+    await window.desktopApi.resumeTask(taskId);
     await refresh();
   };
   const moveQueued = async (taskId: string, direction: -1 | 1) => {
@@ -2215,7 +2225,7 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
         <div className="task-heading-actions">
           {message && <span className="task-feedback" role="status">{message}</span>}
           <button className="secondary-action" type="button" disabled={failedGeneration === 0} onClick={() => void retryFailedGeneration()}><RotateCcw size={13} />重试失败生成 ({failedGeneration})</button>
-          <div className="task-summary"><span><i className="task-dot queued" />等待 {waiting}</span><span>运行 {taskCounts.active}</span><span><i className="task-dot failed" />失败 {failed}</span></div>
+          <div className="task-summary"><span><i className="task-dot queued" />等待 {waiting}</span><span>运行 {taskCounts.active}</span><span>暂停 {taskCounts.paused}</span><span><i className="task-dot failed" />失败 {failed}</span></div>
         </div>
       </div>
       <div className="task-table">
@@ -2235,7 +2245,9 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
             <span className="task-row-actions">
               {task.status === 'queued' && <><IconButton label="任务上移" disabled={queuedIds.indexOf(task.id) === 0} onClick={() => void moveQueued(task.id, -1)}><ArrowUp size={13} /></IconButton><IconButton label="任务下移" disabled={queuedIds.indexOf(task.id) === queuedIds.length - 1 && taskCounts.queued <= queuedIds.length} onClick={() => void moveQueued(task.id, 1)}><ArrowDown size={13} /></IconButton></>}
               {task.status === 'queued' && task.kind === 'generation' && <IconButton label="编辑生成提示词" onClick={() => openPromptEditor(task)}><FilePenLine size={13} /></IconButton>}
-              {(task.status === 'queued' || task.status === 'preparing' || task.status === 'uploading' || task.status === 'processing' || task.status === 'downloading') && <button type="button" onClick={() => void cancel(task.id)}>取消</button>}
+              {(task.status === 'queued' || task.status === 'preparing' || task.status === 'uploading' || task.status === 'processing' || task.status === 'downloading') && <IconButton label="暂停任务" onClick={() => void pause(task.id)}><Pause size={13} /></IconButton>}
+              {task.status === 'paused' && <IconButton label="恢复任务" onClick={() => void resume(task.id)}><Play size={13} /></IconButton>}
+              {(task.status === 'queued' || task.status === 'paused' || task.status === 'preparing' || task.status === 'uploading' || task.status === 'processing' || task.status === 'downloading') && <button type="button" onClick={() => void cancel(task.id)}>取消</button>}
               {(task.status === 'failed' || task.status === 'canceled') && <button type="button" onClick={() => void retry(task.id)}>重试</button>}
               {report && <IconButton label={reportOpen ? '收起导出报告' : '查看导出报告'} active={reportOpen} pressed={reportOpen} onClick={() => setExpandedExportTaskId(reportOpen ? null : task.id)}>{reportOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</IconButton>}
             </span>

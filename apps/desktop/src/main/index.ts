@@ -428,6 +428,17 @@ function registerIpc(): void {
     taskRunner.cancel(id);
     return toRendererTask(tasks.cancel(id));
   });
+  ipcMain.handle('tasks.pause.v1', (_event, taskId: unknown) => {
+    const id = taskIdSchema.parse(taskId);
+    const task = tasks.pause(id);
+    taskRunner.cancel(id);
+    return toRendererTask(task);
+  });
+  ipcMain.handle('tasks.resume.v1', (_event, taskId: unknown) => {
+    const task = tasks.resume(taskIdSchema.parse(taskId));
+    taskRunner.wake();
+    return toRendererTask(task);
+  });
   ipcMain.handle('tasks.retry.v1', (_event, taskId: unknown) => {
     const task = tasks.retry(taskIdSchema.parse(taskId));
     taskRunner.wake();

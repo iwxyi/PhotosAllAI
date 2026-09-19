@@ -82,6 +82,10 @@ const api: DesktopApi = {
     ipcRenderer.invoke('tasks.enqueue.v1', input) as ReturnType<DesktopApi['enqueueTask']>,
   cancelTask: (taskId) =>
     ipcRenderer.invoke('tasks.cancel.v1', taskId) as ReturnType<DesktopApi['cancelTask']>,
+  pauseTask: (taskId) =>
+    ipcRenderer.invoke('tasks.pause.v1', taskId) as ReturnType<DesktopApi['pauseTask']>,
+  resumeTask: (taskId) =>
+    ipcRenderer.invoke('tasks.resume.v1', taskId) as ReturnType<DesktopApi['resumeTask']>,
   retryTask: (taskId) =>
     ipcRenderer.invoke('tasks.retry.v1', taskId) as ReturnType<DesktopApi['retryTask']>,
   moveQueuedTask: (input) =>

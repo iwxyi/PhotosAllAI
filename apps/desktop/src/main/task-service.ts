@@ -89,6 +89,16 @@ export class TaskService {
         created_at DESC,
         id
       );
+      CREATE INDEX IF NOT EXISTS tasks_history_paused_idx ON tasks(
+        CASE
+          WHEN status IN ('queued', 'paused', 'preparing', 'uploading', 'processing', 'downloading', 'saving') THEN 0
+          WHEN status = 'failed' THEN 1
+          ELSE 2
+        END,
+        position,
+        created_at DESC,
+        id
+      );
       CREATE TABLE IF NOT EXISTS task_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -166,7 +176,7 @@ export class TaskService {
   hasActiveProvider(providerProfileId: string): boolean {
     const rows = this.#database.prepare(`
       SELECT payload_json FROM tasks
-      WHERE status IN ('queued', 'preparing', 'uploading', 'processing', 'downloading', 'saving')
+      WHERE status IN ('queued', 'paused', 'preparing', 'uploading', 'processing', 'downloading', 'saving')
     `).all() as { payload_json: string }[];
     return rows.some((row) => {
       try {
@@ -208,7 +218,7 @@ export class TaskService {
       SELECT * FROM (
         SELECT tasks.*,
           CASE
-            WHEN status IN ('queued', 'preparing', 'uploading', 'processing', 'downloading', 'saving') THEN 0
+            WHEN status IN ('queued', 'paused', 'preparing', 'uploading', 'processing', 'downloading', 'saving') THEN 0
             WHEN status = 'failed' THEN 1
             ELSE 2
           END AS sort_group
@@ -225,6 +235,7 @@ export class TaskService {
       SELECT
         COUNT(*) AS total_count,
         SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_count,
+        SUM(CASE WHEN status = 'paused' THEN 1 ELSE 0 END) AS paused_count,
         SUM(CASE WHEN status IN ('preparing', 'uploading', 'processing', 'downloading', 'saving') THEN 1 ELSE 0 END) AS active_count,
         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count,
         SUM(CASE WHEN status = 'failed' AND kind = 'generation' THEN 1 ELSE 0 END) AS failed_generation_count
@@ -232,6 +243,7 @@ export class TaskService {
     `).get() as {
       total_count: number;
       queued_count: number | null;
+      paused_count: number | null;
       active_count: number | null;
       failed_count: number | null;
       failed_generation_count: number | null;
@@ -240,6 +252,7 @@ export class TaskService {
       items: pageRows.map((row) => this.#toTask(row)),
       totalCount: counts.total_count,
       queuedCount: counts.queued_count ?? 0,
+      pausedCount: counts.paused_count ?? 0,
       activeCount: counts.active_count ?? 0,
       failedCount: counts.failed_count ?? 0,
       failedGenerationCount: counts.failed_generation_count ?? 0,
@@ -358,6 +371,42 @@ export class TaskService {
     if (task.status === 'canceled') return task;
     if (task.status === 'completed') throw new Error('TASK_ALREADY_COMPLETED');
     return this.#transition(task, 'canceled');
+  }
+
+  pause(taskId: string): PersistedTask {
+    const task = this.#get(taskId);
+    if (task.status === 'paused') return task;
+    if (!['queued', 'preparing', 'uploading', 'processing', 'downloading'].includes(task.status)) {
+      throw new Error('TASK_NOT_PAUSABLE');
+    }
+    return this.#transition(task, 'paused');
+  }
+
+  resume(taskId: string): PersistedTask {
+    const task = this.#get(taskId);
+    if (task.status !== 'paused') throw new Error('TASK_NOT_PAUSED');
+    assertTaskTransition(task.status, 'queued');
+    const now = Date.now();
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const maximum = this.#database.prepare(`
+        SELECT COALESCE(MAX(position), -1) AS value FROM tasks WHERE status = 'queued'
+      `).get() as { value: number };
+      this.#database.prepare(`
+        UPDATE tasks SET status = 'queued', position = ?, progress = 0,
+          attempt = attempt + CASE WHEN progress > 0 THEN 1 ELSE 0 END,
+          error_code = NULL, updated_at = ? WHERE id = ? AND status = 'paused'
+      `).run(maximum.value + 1, now, task.id);
+      this.#database.prepare(`
+        INSERT INTO task_events (task_id, from_status, to_status, occurred_at, details_json)
+        VALUES (?, 'paused', 'queued', ?, '{"reason":"resume"}')
+      `).run(task.id, now);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    return this.#get(task.id);
   }
 
   retry(taskId: string): PersistedTask {
@@ -602,10 +651,10 @@ export class TaskService {
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       this.#database.prepare(`
-        UPDATE tasks SET status = ?, position = ?, progress = 0,
+        UPDATE tasks SET status = ?, position = ?, progress = CASE WHEN ? = 'paused' THEN progress ELSE 0 END,
           attempt = attempt + ?, result_json = CASE WHEN ? = 'queued' THEN NULL ELSE result_json END,
           error_code = NULL, updated_at = ? WHERE id = ?
-      `).run(status, position, incrementAttempt, status, now, task.id);
+      `).run(status, position, status, incrementAttempt, status, now, task.id);
       this.#database.prepare(`
         INSERT INTO task_events (task_id, from_status, to_status, occurred_at)
         VALUES (?, ?, ?, ?)

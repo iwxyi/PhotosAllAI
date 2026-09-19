@@ -21,6 +21,29 @@ afterEach(async () => {
 });
 
 describe('analysis task runner', () => {
+  it('keeps an actively paused task paused after aborting its processor', async () => {
+    const queue = await tasks();
+    const task = queue.enqueue({ kind: 'analysis', assetId: 'asset-paused', payload: { providerProfileId, mode: 'full' } });
+    let receivedSignal: AbortSignal | undefined;
+    const analyze = vi.fn((_assetId: string, _providerProfileId: string, signal?: AbortSignal) => {
+      receivedSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+      });
+    });
+    const runner = new TaskRunner(queue, { analyze }, { generate: vi.fn() });
+    runner.start();
+    await vi.waitFor(() => expect(queue.find(task.id)?.status).toBe('processing'));
+
+    queue.pause(task.id);
+    runner.cancel(task.id);
+    await vi.waitFor(() => expect(receivedSignal?.aborted).toBe(true));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(queue.find(task.id)?.status).toBe('paused');
+    await runner.stop();
+    queue.close();
+  });
+
   it('leaves active work recoverable when shutdown aborts the processor', async () => {
     const queue = await tasks();
     const task = queue.enqueue({ kind: 'analysis', assetId: 'asset-shutdown', payload: { providerProfileId, mode: 'full' } });
