@@ -7,6 +7,8 @@ import {
 } from '@photoallisai/contracts';
 import type { TaskStatus } from '@photoallisai/domain';
 
+import { normalizeTaskErrorCode } from './task-error-code';
+
 interface TaskQueue {
   claimNext(kinds: readonly PersistedTask['kind'][]): PersistedTask | null;
   advance(taskId: string, status: TaskStatus, progress: number, errorCode?: string | null): PersistedTask;
@@ -94,7 +96,7 @@ export class TaskRunner {
           const current = this.#tasks.list().find((item) => item.id === task.id);
           if (current && current.status !== 'canceled' && current.status !== 'failed') {
             const fallback = task.kind === 'generation' ? 'GENERATION_FAILED' : task.kind === 'export' ? 'EXPORT_FAILED' : 'ANALYSIS_FAILED';
-            const errorCode = error instanceof Error ? error.message.slice(0, 200) : fallback;
+            const errorCode = normalizeTaskErrorCode(error, fallback);
             this.#tasks.advance(task.id, 'failed', current.progress, errorCode);
           }
         } finally {

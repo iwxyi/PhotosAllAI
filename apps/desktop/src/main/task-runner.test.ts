@@ -51,6 +51,24 @@ describe('analysis task runner', () => {
     queue.close();
   });
 
+  it('does not persist free-form failure details', async () => {
+    const queue = await tasks();
+    queue.enqueue({ kind: 'analysis', assetId: 'asset-1', payload: { providerProfileId, mode: 'full' } });
+    const privateDetail = '/Users/private/Pictures/client.raw';
+    const runner = new TaskRunner(
+      queue,
+      { analyze: vi.fn().mockRejectedValue(new Error(`failed reading ${privateDetail}`)) },
+      { generate: vi.fn() }
+    );
+    runner.start();
+
+    await vi.waitFor(() => expect(queue.list()[0]?.status).toBe('failed'));
+    expect(queue.list()[0]?.errorCode).toBe('ANALYSIS_FAILED');
+    expect(JSON.stringify(queue.list()[0])).not.toContain(privateDetail);
+    runner.stop();
+    queue.close();
+  });
+
   it('processes generation work in the shared serial queue', async () => {
     const queue = await tasks();
     const generate = vi.fn().mockResolvedValue({});

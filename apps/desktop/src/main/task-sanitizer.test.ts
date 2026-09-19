@@ -42,4 +42,26 @@ describe('renderer task sanitization', () => {
 
     expect(sanitized.result).toBeNull();
   });
+
+  it('replaces historical free-form errors before returning tasks to the renderer', () => {
+    const privateDetail = '/Users/private/Pictures/export';
+    const exportTask = toRendererTask({ ...baseTask, errorCode: `ENOENT: no such directory, ${privateDetail}` });
+    const generationTask = toRendererTask({
+      ...baseTask,
+      kind: 'generation',
+      assetId: 'asset-1',
+      payload: {},
+      errorCode: `provider echoed ${privateDetail}`
+    });
+
+    expect(exportTask.errorCode).toBe('EXPORT_FAILED');
+    expect(generationTask.errorCode).toBe('GENERATION_FAILED');
+    expect(JSON.stringify([exportTask, generationTask])).not.toContain(privateDetail);
+  });
+
+  it('preserves stable task error codes', () => {
+    expect(toRendererTask({ ...baseTask, errorCode: 'EXPORT_DESTINATION_NOT_DIRECTORY' }).errorCode)
+      .toBe('EXPORT_DESTINATION_NOT_DIRECTORY');
+    expect(toRendererTask({ ...baseTask, errorCode: 'PRIVATE_SECRET' }).errorCode).toBe('EXPORT_FAILED');
+  });
 });
