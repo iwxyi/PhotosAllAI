@@ -103,6 +103,11 @@ let libraryIntegrity: LibraryIntegrityService;
 let contentHashTimer: NodeJS.Timeout | undefined;
 let contentHashPassRunning = false;
 let shuttingDown = false;
+let startupRecovery = {
+  trashPurges: { total: 0, recovered: 0, conflicts: 0, failed: 0 },
+  fileOperations: 0,
+  generationWrites: { total: 0, recovered: 0, failed: 0 }
+};
 
 async function createDiagnosticSnapshot() {
   const [profiles, cacheStats, raw, integrity] = await Promise.all([providers.list(), imageCache.getStats(), imageCache.getDecoderCapabilities(), libraryIntegrity.scan()]);
@@ -117,6 +122,7 @@ async function createDiagnosticSnapshot() {
     providers: { total: profiles.length, enabled: profiles.filter((profile) => profile.enabled).length },
     tasks: taskCounts,
     cache: { ...cacheStats, performance: imageCache.getPerformanceStats(), raw },
+    startupRecovery,
     integrity
   });
 }
@@ -599,13 +605,14 @@ app.whenReady().then(async () => {
     imageCache,
     catalog
   );
-  await generation.recoverInterruptedTrashPurges();
-  await fileOperations.recoverInterruptedOperations(async (change) => {
+  const trashPurges = await generation.recoverInterruptedTrashPurges();
+  const recoveredFileOperations = await fileOperations.recoverInterruptedOperations(async (change) => {
     await generation.relocatePortableResults(
       change.assetId, change.previousPath, change.path, change.previousFileName, change.fileName
     );
   });
-  await generation.recoverInterruptedWrites();
+  const generationWrites = await generation.recoverInterruptedWrites();
+  startupRecovery = { trashPurges, fileOperations: recoveredFileOperations, generationWrites };
   libraryIntegrity = new LibraryIntegrityService(databasePath, join(libraryDirectory, 'generated'));
   exportService = new ExportService(databasePath, generation);
   exportPresets = new ExportPresetService(databasePath);

@@ -45,6 +45,20 @@ export const diagnosticSnapshotSchema = z.object({
     }),
     raw: z.object({ nativeImage: z.boolean(), imageMagick: z.boolean(), sips: z.boolean() })
   }),
+  startupRecovery: z.object({
+    trashPurges: z.object({
+      total: z.number().int().nonnegative(),
+      recovered: z.number().int().nonnegative(),
+      conflicts: z.number().int().nonnegative(),
+      failed: z.number().int().nonnegative()
+    }),
+    fileOperations: z.number().int().nonnegative(),
+    generationWrites: z.object({
+      total: z.number().int().nonnegative(),
+      recovered: z.number().int().nonnegative(),
+      failed: z.number().int().nonnegative()
+    })
+  }),
   integrity: libraryIntegrityReportSchema
 });
 export type DiagnosticSnapshot = z.infer<typeof diagnosticSnapshotSchema>;
