@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { constants, createReadStream } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
@@ -64,7 +64,7 @@ export class LibraryBackupService {
     if (!(await stat(parent)).isDirectory()) throw new Error('BACKUP_DESTINATION_NOT_DIRECTORY');
     const libraryDirectory = await realpath(this.#libraryDirectory);
     if (isWithin(libraryDirectory, parent)) throw new Error('BACKUP_DESTINATION_INSIDE_LIBRARY');
-    const destination = await availableDestination(parent, `PhotoAllIsAI-library-${now}`);
+    const baseName = `PhotoAllIsAI-library-${now}`;
     const temporary = await mkdtemp(path.join(parent, '.photoallisai-library-backup-'));
     try {
       const snapshotPath = path.join(temporary, 'catalog.sqlite');
@@ -124,7 +124,7 @@ export class LibraryBackupService {
         generated: files
       }, null, 2));
       await writeFile(path.join(temporary, 'manifest.json'), manifest, { flag: 'wx', mode: 0o600 });
-      await rename(temporary, destination);
+      const destination = await publishToAvailableDestination(temporary, parent, baseName);
       return {
         destinationPath: destination,
         databaseBytes: database.bytes,
@@ -214,17 +214,32 @@ export class LibraryBackupService {
   }
 }
 
-async function availableDestination(parent: string, baseName: string): Promise<string> {
+async function publishToAvailableDestination(temporary: string, parent: string, baseName: string): Promise<string> {
   for (let index = 0; index < 10_000; index += 1) {
     const candidate = path.join(parent, index === 0 ? baseName : `${baseName} (${index})`);
     try {
-      await stat(candidate);
+      await lstat(candidate);
+      continue;
     } catch (error) {
-      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return candidate;
-      throw error;
+      if (!isNodeError(error, 'ENOENT')) throw error;
+    }
+    try {
+      await rename(temporary, candidate);
+      return candidate;
+    } catch (publishError) {
+      try {
+        await lstat(candidate);
+      } catch (inspectionError) {
+        if (isNodeError(inspectionError, 'ENOENT')) throw publishError;
+        throw inspectionError;
+      }
     }
   }
   throw new Error('BACKUP_NAME_EXHAUSTED');
+}
+
+function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error && error.code === code;
 }
 
 function isWithin(root: string, candidate: string): boolean {

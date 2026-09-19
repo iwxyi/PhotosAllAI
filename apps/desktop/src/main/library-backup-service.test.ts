@@ -184,6 +184,26 @@ describe('complete library backup', () => {
     context.database.close();
   });
 
+  it('publishes concurrent backups with the same timestamp under distinct names', async () => {
+    const context = await fixture();
+    const service = new LibraryBackupService(context.databasePath, context.generated);
+
+    const results = await Promise.all([
+      service.create(context.destination, 50),
+      service.create(context.destination, 50)
+    ]);
+
+    expect(results.map((result) => path.basename(result.destinationPath)).sort()).toEqual([
+      'PhotoAllIsAI-library-50',
+      'PhotoAllIsAI-library-50 (1)'
+    ]);
+    await Promise.all(results.map((result) => expect(service.verify(result.destinationPath)).resolves.toMatchObject({
+      generatedFiles: 0,
+      generatedBytes: 0
+    })));
+    context.database.close();
+  });
+
   it('cleans up the temporary bundle when a referenced result is missing', async () => {
     const context = await fixture();
     context.database.prepare('INSERT INTO generation_results VALUES (?, ?, ?)').run(randomUUID(), path.join(context.generated, 'missing.jpg'), 'managed');
