@@ -11,6 +11,7 @@ import {
   diagnosticSnapshotSchema,
   diagnosticExportResultSchema,
   databaseBackupResultSchema,
+  libraryBackupResultSchema,
   catalogAssetRemovalInputSchema,
   catalogAssetRemovalReportSchema,
   catalogSnapshotSchema,
@@ -65,6 +66,7 @@ import { TemplateService } from './template-service';
 import { WorkspaceService } from './workspace-service';
 import { AppSettingsService } from './app-settings-service';
 import { DatabaseBackupService } from './database-backup-service';
+import { LibraryBackupService } from './library-backup-service';
 
 const APP_ORIGIN = 'app://photoallisai';
 let catalog: CatalogService;
@@ -82,6 +84,7 @@ let taskRunner: TaskRunner;
 let workspace: WorkspaceService;
 let appSettings: AppSettingsService;
 let databaseBackup: DatabaseBackupService;
+let libraryBackup: LibraryBackupService;
 
 async function createDiagnosticSnapshot() {
   const [profiles, cacheStats, raw] = await Promise.all([providers.list(), imageCache.getStats(), imageCache.getDecoderCapabilities()]);
@@ -171,6 +174,18 @@ function registerIpc(): void {
     }
     const result = await databaseBackup.create(selection.filePath);
     return databaseBackupResultSchema.parse({ canceled: false, ...result });
+  });
+  ipcMain.handle('app.library.backup.v1', async () => {
+    const selection = await dialog.showOpenDialog({
+      title: '选择完整图库备份位置',
+      buttonLabel: '备份到此处',
+      properties: ['openDirectory', 'createDirectory']
+    });
+    if (selection.canceled || !selection.filePaths[0]) {
+      return libraryBackupResultSchema.parse({ canceled: true, databaseBytes: 0, generatedFiles: 0, generatedBytes: 0, manifestSha256: null });
+    }
+    const result = await libraryBackup.create(selection.filePaths[0]);
+    return libraryBackupResultSchema.parse({ canceled: false, ...result });
   });
   ipcMain.handle('workspace.session.get.v1', () => workspace.get());
   ipcMain.handle('workspace.session.save.v1', (_event, input: unknown) =>
@@ -446,6 +461,7 @@ app.whenReady().then(async () => {
   workspace = new WorkspaceService(databasePath);
   appSettings = new AppSettingsService(join(app.getPath('userData'), 'settings', 'app.json'));
   databaseBackup = new DatabaseBackupService(databasePath);
+  libraryBackup = new LibraryBackupService(databasePath, join(libraryDirectory, 'generated'));
   catalog = new CatalogService(databasePath);
   await catalog.reconcileImportedFolders();
   catalogWatcher = new CatalogWatcher(catalog);

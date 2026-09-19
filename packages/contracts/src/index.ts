@@ -42,6 +42,14 @@ export const databaseBackupResultSchema = z.object({
   sha256: z.string().regex(/^[a-f0-9]{64}$/).nullable()
 });
 export type DatabaseBackupResult = z.infer<typeof databaseBackupResultSchema>;
+export const libraryBackupResultSchema = z.object({
+  canceled: z.boolean(),
+  databaseBytes: z.number().int().nonnegative(),
+  generatedFiles: z.number().int().nonnegative(),
+  generatedBytes: z.number().int().nonnegative(),
+  manifestSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable()
+});
+export type LibraryBackupResult = z.infer<typeof libraryBackupResultSchema>;
 
 export const appSettingsSchema = z.object({
   generationStorageMode: z.enum(['managed', 'portable']).default('managed'),
@@ -606,6 +614,7 @@ export interface DesktopApi {
   getDiagnosticSnapshot(): Promise<DiagnosticSnapshot>;
   exportDiagnosticSnapshot(): Promise<DiagnosticExportResult>;
   backupDatabase(): Promise<DatabaseBackupResult>;
+  backupLibrary(): Promise<LibraryBackupResult>;
   getWorkspaceSession(): Promise<WorkspaceSession>;
   saveWorkspaceSession(session: WorkspaceSession): Promise<WorkspaceSession>;
   listCatalogAssets(): Promise<CatalogAsset[]>;

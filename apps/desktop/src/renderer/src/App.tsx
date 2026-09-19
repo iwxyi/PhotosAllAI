@@ -1374,6 +1374,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
   const [storageBusy, setStorageBusy] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
   const [backupMessage, setBackupMessage] = useState('');
+  const [libraryBackupBusy, setLibraryBackupBusy] = useState(false);
 
   useEffect(() => {
     void window.desktopApi.listProviderProfiles().then(setProfiles);
@@ -1502,6 +1503,20 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
       setBackupBusy(false);
     }
   };
+  const backupCompleteLibrary = async () => {
+    setLibraryBackupBusy(true);
+    setBackupMessage('');
+    try {
+      const result = await window.desktopApi.backupLibrary();
+      setBackupMessage(result.canceled
+        ? '已取消完整图库备份。'
+        : `完整图库已备份：数据库 ${(result.databaseBytes / 1_048_576).toFixed(1)} MB，受管结果 ${result.generatedFiles} 个（${(result.generatedBytes / 1_048_576).toFixed(1)} MB）。`);
+    } catch {
+      setBackupMessage('完整图库备份失败；请确认目标在图库外、空间充足，且受管结果文件完整。');
+    } finally {
+      setLibraryBackupBusy(false);
+    }
+  };
 
   return (
     <div className="settings-page">
@@ -1580,8 +1595,8 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
           <div className="cache-actions"><button className="secondary-action" type="button" disabled={cacheBusy || !cacheStats || cacheStats.bytes === 0} onClick={async () => { setCacheBusy(true); try { const result = await window.desktopApi.pruneImageCache({ maxBytes: 0 }); setCacheMessage(`已清理 ${result.removedFiles} 个缓存文件。`); setCacheStats(await window.desktopApi.getImageCacheStats()); } catch { setCacheMessage('缓存清理失败，请稍后重试。'); } finally { setCacheBusy(false); } }}>{cacheBusy ? '清理中…' : '清理全部可重建缓存'}</button><span role="status">{cacheMessage}</span></div>
         </section>
         <section className="settings-section backup-section">
-          <div className="settings-heading"><div><h2>图库数据库</h2><p>创建一致性 SQLite 快照，用于迁移、灾备或故障排查；不包含 API Key。</p></div><span><ShieldCheck size={14} />可恢复</span></div>
-          <div className="cache-actions"><button className="secondary-action" type="button" disabled={backupBusy} onClick={() => void backupDatabase()}>{backupBusy ? '备份中…' : '备份图库数据库'}</button><span role="status">{backupMessage || '生成结果文件仍需单独备份或导出。'}</span></div>
+          <div className="settings-heading"><div><h2>图库备份</h2><p>数据库快照适合快速灾备；完整备份还包含集中受管的生成结果和逐文件校验清单，均不包含 API Key。</p></div><span><ShieldCheck size={14} />一致性快照</span></div>
+          <div className="cache-actions"><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy} onClick={() => void backupDatabase()}>{backupBusy ? '备份中…' : '仅备份数据库'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy} onClick={() => void backupCompleteLibrary()}>{libraryBackupBusy ? '备份中…' : '完整图库备份'}</button><span role="status">{backupMessage || '原图与原图旁便携结果不复制进备份包。'}</span></div>
         </section>
         </>}
         {settingsSection === 'tasks' && <section className="settings-section settings-info-section">

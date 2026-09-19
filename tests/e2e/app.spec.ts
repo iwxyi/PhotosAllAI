@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 import { _electron as electron, expect, test, type ElectronApplication, type Page } from '@playwright/test';
@@ -7,9 +7,11 @@ import { _electron as electron, expect, test, type ElectronApplication, type Pag
 let electronApp: ElectronApplication;
 let page: Page;
 let userDataDirectory: string;
+let backupDirectory: string;
 
 test.beforeAll(async () => {
   userDataDirectory = await mkdtemp(path.join(tmpdir(), 'photoallisai-e2e-'));
+  backupDirectory = await mkdtemp(path.join(tmpdir(), 'photoallisai-e2e-backup-'));
   electronApp = await electron.launch({
     args: [path.resolve('apps/desktop/out/main/index.js')],
     env: { ...process.env, PHOTOALLISAI_USER_DATA: userDataDirectory }
@@ -20,7 +22,10 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   if (electronApp) await electronApp.close();
-  await rm(userDataDirectory, { recursive: true, force: true });
+  await Promise.all([
+    rm(userDataDirectory, { recursive: true, force: true }),
+    rm(backupDirectory, { recursive: true, force: true })
+  ]);
 });
 
 test('starts with the secure library workspace', async () => {
@@ -147,6 +152,31 @@ test('opens the task drawer and application tabs', async () => {
   await expect(page.getByRole('heading', { name: '图库与存储' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '生成结果存储' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '预览缓存' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '图库备份' })).toBeVisible();
+  await electronApp.evaluate(({ dialog }, directory) => {
+    const state = globalThis as typeof globalThis & { photoAllIsAiOriginalShowOpenDialog?: typeof dialog.showOpenDialog };
+    state.photoAllIsAiOriginalShowOpenDialog = dialog.showOpenDialog;
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory], bookmarks: [] });
+  }, backupDirectory);
+  try {
+    await page.getByRole('button', { name: '完整图库备份' }).click();
+    await expect(page.locator('.backup-section').getByRole('status')).toContainText('完整图库已备份');
+  } finally {
+    await electronApp.evaluate(({ dialog }) => {
+      const state = globalThis as typeof globalThis & { photoAllIsAiOriginalShowOpenDialog?: typeof dialog.showOpenDialog };
+      if (state.photoAllIsAiOriginalShowOpenDialog) {
+        dialog.showOpenDialog = state.photoAllIsAiOriginalShowOpenDialog;
+        delete state.photoAllIsAiOriginalShowOpenDialog;
+      }
+    });
+  }
+  const backupNames = (await readdir(backupDirectory)).filter((name) => name.startsWith('PhotoAllIsAI-library-'));
+  expect(backupNames).toHaveLength(1);
+  const backupPath = path.join(backupDirectory, backupNames[0]!);
+  expect((await stat(path.join(backupPath, 'catalog.sqlite'))).isFile()).toBe(true);
+  const manifest = JSON.parse(await readFile(path.join(backupPath, 'manifest.json'), 'utf8')) as Record<string, unknown>;
+  expect(Object.keys(manifest)).toEqual(['schemaVersion', 'createdAt', 'catalog', 'generated']);
+  expect(manifest.generated).toEqual([]);
   await page.getByRole('button', { name: '任务与重试' }).click();
   await expect(page.getByRole('heading', { name: '队列执行' })).toBeVisible();
   await page.getByRole('button', { name: '快捷键' }).click();

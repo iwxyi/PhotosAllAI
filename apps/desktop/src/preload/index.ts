@@ -8,6 +8,7 @@ const api: DesktopApi = {
   getDiagnosticSnapshot: () => ipcRenderer.invoke('app.diagnostics.v1') as ReturnType<DesktopApi['getDiagnosticSnapshot']>,
   exportDiagnosticSnapshot: () => ipcRenderer.invoke('app.diagnostics.export.v1') as ReturnType<DesktopApi['exportDiagnosticSnapshot']>,
   backupDatabase: () => ipcRenderer.invoke('app.database.backup.v1') as ReturnType<DesktopApi['backupDatabase']>,
+  backupLibrary: () => ipcRenderer.invoke('app.library.backup.v1') as ReturnType<DesktopApi['backupLibrary']>,
   getWorkspaceSession: () =>
     ipcRenderer.invoke('workspace.session.get.v1') as ReturnType<DesktopApi['getWorkspaceSession']>,
   saveWorkspaceSession: (session) =>
