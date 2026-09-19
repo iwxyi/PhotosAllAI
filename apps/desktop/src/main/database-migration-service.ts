@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { copyFile, lstat, mkdir, readFile, realpath, rename, rm, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
@@ -86,7 +86,10 @@ export class DatabaseMigrationService {
     if (await hashFile(backupPath) !== checkpoint.backupSha256) throw new Error('MIGRATION_BACKUP_CHECKSUM_MISMATCH');
     assertHealthyDatabase(backupPath);
 
-    const temporary = `${this.#databasePath}.${process.pid}.restore.tmp`;
+    // Recovery may be invoked concurrently by multiple app processes. A
+    // fixed pid-based path lets one invocation delete or publish another
+    // invocation's staged database. Use a per-attempt nonce instead.
+    const temporary = `${this.#databasePath}.${process.pid}.${randomUUID()}.restore.tmp`;
     await rm(temporary, { force: true });
     await copyFile(backupPath, temporary);
     assertHealthyDatabase(temporary);

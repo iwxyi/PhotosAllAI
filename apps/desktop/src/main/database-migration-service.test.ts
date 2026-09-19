@@ -82,6 +82,26 @@ describe('database migration checkpoints', () => {
     expect(await readFile(`${context.databasePath}.migration-failed-600-1`, 'utf8')).toContain('SQLite format 3');
   });
 
+  it('uses isolated staging files when recovery is triggered concurrently', async () => {
+    const context = await fixture();
+    const service = new DatabaseMigrationService(context.databasePath);
+    await service.prepare(1, 650);
+    const migrated = new DatabaseSync(context.databasePath);
+    migrated.exec("UPDATE records SET value = 'after';");
+    migrated.close();
+
+    const results = await Promise.allSettled([
+      service.recoverPending(651),
+      service.recoverPending(652)
+    ]);
+    expect(results.some((result) => result.status === 'fulfilled' && result.value)).toBe(true);
+
+    const restored = new DatabaseSync(context.databasePath, { readOnly: true });
+    expect(restored.prepare('SELECT value FROM records').get()).toEqual({ value: 'before' });
+    restored.close();
+    expect((await readdir(context.root)).filter((name) => name.endsWith('.restore.tmp'))).toEqual([]);
+  });
+
   it('rejects a database created by a newer application schema', async () => {
     const context = await fixture();
     const service = new DatabaseMigrationService(context.databasePath);
