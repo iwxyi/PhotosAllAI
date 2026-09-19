@@ -259,7 +259,7 @@ interface ImageGenerationProvider {
 ## 13. 升级与兼容
 
 - 应用版本遵循 SemVer；数据库和 sidecar 协议独立版本化。
-- 升级前备份数据库；迁移失败自动回滚到原数据库。
+- 任何服务打开数据库并执行 Schema 迁移前，先用 `VACUUM INTO` 创建带 SHA-256 的一致性 checkpoint；全部服务成功初始化后才提交应用 Schema 版本。若进程在迁移中失败或崩溃，下次启动会在业务连接建立前校验并恢复 checkpoint，同时保留失败数据库用于诊断。高版本图库拒绝由低版本应用打开。
 - Main 启动时验证 sidecar 版本和能力，不兼容时拒绝打开图库并提供修复信息。
 - Provider 请求与分析结果保存 schema 版本，读取层负责兼容旧版本。
 - 自动更新包必须签名；macOS 使用公证，Windows 使用代码签名。

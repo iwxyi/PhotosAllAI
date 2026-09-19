@@ -68,8 +68,10 @@ import { WorkspaceService } from './workspace-service';
 import { AppSettingsService } from './app-settings-service';
 import { DatabaseBackupService } from './database-backup-service';
 import { LibraryBackupService } from './library-backup-service';
+import { DatabaseMigrationService } from './database-migration-service';
 
 const APP_ORIGIN = 'app://photoallisai';
+const APPLICATION_SCHEMA_VERSION = 1;
 let catalog: CatalogService;
 let catalogWatcher: CatalogWatcher;
 let imageCache: ImageCacheService;
@@ -471,6 +473,8 @@ app.whenReady().then(async () => {
   const libraryDirectory = join(app.getPath('userData'), 'library');
   mkdirSync(libraryDirectory, { recursive: true });
   const databasePath = join(libraryDirectory, 'catalog.sqlite');
+  const migration = new DatabaseMigrationService(databasePath);
+  const migrationCheckpoint = await migration.prepare(APPLICATION_SCHEMA_VERSION);
   workspace = new WorkspaceService(databasePath);
   appSettings = new AppSettingsService(join(app.getPath('userData'), 'settings', 'app.json'));
   databaseBackup = new DatabaseBackupService(databasePath);
@@ -502,6 +506,7 @@ app.whenReady().then(async () => {
   );
   exportService = new ExportService(databasePath, generation);
   exportPresets = new ExportPresetService(databasePath);
+  await migration.complete(APPLICATION_SCHEMA_VERSION, migrationCheckpoint);
   taskRunner = new TaskRunner(tasks, analysis, generation);
   void databaseBackup.createAutomatic(join(libraryDirectory, 'backups')).catch(() => undefined);
 
