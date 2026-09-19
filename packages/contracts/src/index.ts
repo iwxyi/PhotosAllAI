@@ -642,6 +642,23 @@ export type TrashedGenerationResult = z.infer<typeof trashedGenerationResultSche
 export const generationResultIdInputSchema = z.object({ resultId: z.string().uuid() });
 export type GenerationResultIdInput = z.infer<typeof generationResultIdInputSchema>;
 
+export const generationTrashSummarySchema = z.object({
+  resultCount: z.number().int().nonnegative(),
+  totalBytes: z.number().int().nonnegative(),
+  missingFiles: z.number().int().nonnegative(),
+  unsafePaths: z.number().int().nonnegative()
+});
+export type GenerationTrashSummary = z.infer<typeof generationTrashSummarySchema>;
+
+export const emptyGenerationTrashReportSchema = z.object({
+  total: z.number().int().nonnegative(),
+  purged: z.number().int().nonnegative(),
+  missingFiles: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  freedBytes: z.number().int().nonnegative()
+});
+export type EmptyGenerationTrashReport = z.infer<typeof emptyGenerationTrashReportSchema>;
+
 export const updateGenerationResultReviewInputSchema = z.object({
   resultId: z.string().uuid(),
   reviewState: z.enum(['undecided', 'accepted', 'rejected', 'preferred'])
@@ -751,6 +768,8 @@ export interface DesktopApi {
   listTrashedGenerationResults(assetId: string): Promise<TrashedGenerationResult[]>;
   trashGenerationResult(input: GenerationResultIdInput): Promise<TrashedGenerationResult>;
   restoreGenerationResult(input: GenerationResultIdInput): Promise<GenerationResult>;
+  getGenerationTrashSummary(): Promise<GenerationTrashSummary>;
+  emptyGenerationTrash(): Promise<EmptyGenerationTrashReport>;
   updateGenerationResultReview(input: UpdateGenerationResultReviewInput): Promise<GenerationResult>;
   revealGenerationResult(resultId: string): Promise<boolean>;
   exportGenerationResults(input: ExportGenerationResultsInput): Promise<ExportReport>;

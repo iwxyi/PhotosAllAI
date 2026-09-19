@@ -180,11 +180,28 @@ test('analyzes, generates, compares, and persists managed and portable results',
   expect(exportedSize).toEqual({ width: 1638, height: 2048 });
   expect(await readFile(sourcePath)).toEqual(originalBytes);
 
+  await page.getByRole('button', { name: '回收版本 V1' }).click();
+  await page.getByRole('button', { name: '确认', exact: true }).click();
+  await expect(page.getByText('版本回收站')).toBeVisible();
+  await page.getByRole('tab', { name: /设置/ }).click();
+  await page.getByRole('button', { name: '图库与存储' }).click();
+  await expect(page.getByRole('heading', { name: '生成版本回收站' })).toBeVisible();
+  await expect(page.getByText(/1 个版本/)).toBeVisible();
+  await page.getByRole('button', { name: '清空回收站' }).click();
+  const emptyTrashDialog = page.getByRole('alertdialog', { name: /永久清理 1 个生成版本/ });
+  await expect(emptyTrashDialog).toBeVisible();
+  await page.screenshot({ path: path.resolve('test-results/generation-trash-empty-confirmation.png'), animations: 'disabled' });
+  await emptyTrashDialog.getByRole('button', { name: '永久清理' }).click();
+  await expect(page.locator('.generation-trash-section').getByRole('status')).toContainText('已永久清理 1 个版本');
+  await expect(page.getByText('回收站为空')).toBeVisible();
+  await expect(stat(managedResultPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  expect((await readdir(trashRoot, { recursive: true })).some((file) => file.endsWith('.jpg'))).toBe(false);
+  expect(await readFile(sourcePath)).toEqual(originalBytes);
+
   const diagnosticPath = path.join(testRoot, 'diagnostics.json');
   await electronApp.evaluate(({ dialog }, filePath) => {
     dialog.showSaveDialog = async () => ({ canceled: false, filePath, bookmark: '' });
   }, diagnosticPath);
-  await page.getByRole('tab', { name: /设置/ }).click();
   await page.getByRole('button', { name: '导出诊断文件' }).click();
   await expect(page.getByText(/诊断文件已保存/)).toBeVisible();
   const diagnosticBytes = await readFile(diagnosticPath);

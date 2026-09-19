@@ -106,6 +106,10 @@ const api: DesktopApi = {
     ipcRenderer.invoke('generation.result.trash.v1', input) as ReturnType<DesktopApi['trashGenerationResult']>,
   restoreGenerationResult: (input) =>
     ipcRenderer.invoke('generation.result.restore.v1', input) as ReturnType<DesktopApi['restoreGenerationResult']>,
+  getGenerationTrashSummary: () =>
+    ipcRenderer.invoke('generation.trash.summary.v1') as ReturnType<DesktopApi['getGenerationTrashSummary']>,
+  emptyGenerationTrash: () =>
+    ipcRenderer.invoke('generation.trash.empty.v1') as ReturnType<DesktopApi['emptyGenerationTrash']>,
   updateGenerationResultReview: (input) =>
     ipcRenderer.invoke('generation.result.review.update.v1', input) as ReturnType<DesktopApi['updateGenerationResultReview']>,
   revealGenerationResult: (resultId) =>

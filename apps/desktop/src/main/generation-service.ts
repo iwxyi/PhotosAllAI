@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lookup } from 'node:dns/promises';
-import { access, copyFile, mkdir, readFile, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, copyFile, lstat, mkdir, readFile, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -9,8 +9,12 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   generationResultSchema,
   generationTaskPayloadSchema,
+  generationTrashSummarySchema,
+  emptyGenerationTrashReportSchema,
   trashedGenerationResultSchema,
   type GenerationResult,
+  type GenerationTrashSummary,
+  type EmptyGenerationTrashReport,
   type TrashedGenerationResult,
   type UpdateGenerationResultReviewInput,
   updateGenerationResultReviewInputSchema,
@@ -171,6 +175,80 @@ export class GenerationService {
     }
     await rmdir(path.dirname(row.trash_path)).catch(() => undefined);
     return this.#toResult({ ...row, trashed_at: null, trash_path: null });
+  }
+
+  async getTrashSummary(): Promise<GenerationTrashSummary> {
+    const rows = this.#database.prepare(`
+      SELECT * FROM generation_results WHERE trashed_at IS NOT NULL ORDER BY trashed_at ASC
+    `).all() as ResultRow[];
+    let totalBytes = 0;
+    let missingFiles = 0;
+    let unsafePaths = 0;
+    for (const row of rows) {
+      if (!this.#isSafeTrashPath(row)) {
+        unsafePaths += 1;
+        continue;
+      }
+      try {
+        const file = await lstat(row.trash_path!);
+        if (!file.isFile()) unsafePaths += 1;
+        else totalBytes += file.size;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') missingFiles += 1;
+        else unsafePaths += 1;
+      }
+    }
+    return generationTrashSummarySchema.parse({ resultCount: rows.length, totalBytes, missingFiles, unsafePaths });
+  }
+
+  async emptyTrash(): Promise<EmptyGenerationTrashReport> {
+    const rows = this.#database.prepare(`
+      SELECT * FROM generation_results WHERE trashed_at IS NOT NULL ORDER BY trashed_at ASC
+    `).all() as ResultRow[];
+    let purged = 0;
+    let missingFiles = 0;
+    let failed = 0;
+    let freedBytes = 0;
+    const removeRecord = this.#database.prepare('DELETE FROM generation_results WHERE id = ? AND trashed_at IS NOT NULL');
+    for (const row of rows) {
+      if (!this.#isSafeTrashPath(row)) {
+        failed += 1;
+        continue;
+      }
+      const trashPath = row.trash_path!;
+      let fileSize = 0;
+      try {
+        const file = await lstat(trashPath);
+        if (!file.isFile()) {
+          failed += 1;
+          continue;
+        }
+        fileSize = file.size;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          failed += 1;
+          continue;
+        }
+        missingFiles += 1;
+        if (removeRecord.run(row.id).changes === 1) purged += 1;
+        else failed += 1;
+        continue;
+      }
+
+      const stagedPath = path.join(path.dirname(trashPath), `.${row.file_name}.${randomUUID()}.purge`);
+      try {
+        await rename(trashPath, stagedPath);
+        await unlink(stagedPath);
+        if (removeRecord.run(row.id).changes !== 1) throw new Error('GENERATION_RESULT_CONCURRENT_CHANGE');
+        purged += 1;
+        freedBytes += fileSize;
+        await rmdir(path.dirname(trashPath)).catch(() => undefined);
+      } catch {
+        await rename(stagedPath, trashPath).catch(() => undefined);
+        failed += 1;
+      }
+    }
+    return emptyGenerationTrashReportSchema.parse({ total: rows.length, purged, missingFiles, failed, freedBytes });
   }
 
   async relocatePortableResults(
@@ -362,6 +440,13 @@ export class GenerationService {
     if (!row) throw new Error('GENERATION_RESULT_NOT_FOUND');
     return row;
   }
+
+  #isSafeTrashPath(row: ResultRow): boolean {
+    if (!row.trash_path) return false;
+    const expected = path.resolve(path.dirname(this.#generatedDirectory), 'trash', 'generation', row.id, row.file_name);
+    return path.resolve(row.trash_path) === expected;
+  }
+
 }
 
 async function pathExists(filePath: string): Promise<boolean> {

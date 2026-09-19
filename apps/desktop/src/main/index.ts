@@ -463,6 +463,8 @@ function registerIpc(): void {
   ipcMain.handle('generation.result.restore.v1', (_event, input: unknown) =>
     generation.restore(generationResultIdInputSchema.parse(input).resultId)
   );
+  ipcMain.handle('generation.trash.summary.v1', () => generation.getTrashSummary());
+  ipcMain.handle('generation.trash.empty.v1', () => generation.emptyTrash());
   ipcMain.handle('generation.result.review.update.v1', (_event, input: unknown) =>
     generation.updateReview(updateGenerationResultReviewInputSchema.parse(input))
   );

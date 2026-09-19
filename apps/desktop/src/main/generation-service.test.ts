@@ -2,6 +2,7 @@ import { createServer, type Server } from 'node:http';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ProviderProfile } from '@photoallisai/contracts';
@@ -187,6 +188,52 @@ describe('managed generation results', () => {
     await expect(service.restore(result.id)).rejects.toThrow('GENERATION_RESULT_RESTORE_CONFLICT');
     expect(service.listTrashed('asset-1')).toHaveLength(1);
     expect(await readFile(originalPath, 'utf8')).toBe('conflicting-file');
+    service.close();
+  });
+
+  it('summarizes and permanently clears only recycled generation files', async () => {
+    const { service, directory, sourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', payload());
+    await service.trash(result.id);
+
+    await expect(service.getTrashSummary()).resolves.toEqual({
+      resultCount: 1,
+      totalBytes: png.byteLength,
+      missingFiles: 0,
+      unsafePaths: 0
+    });
+    await expect(service.emptyTrash()).resolves.toEqual({
+      total: 1,
+      purged: 1,
+      missingFiles: 0,
+      failed: 0,
+      freedBytes: png.byteLength
+    });
+    expect(service.listTrashed('asset-1')).toEqual([]);
+    const trashPath = path.join(directory, 'managed', 'trash', 'generation', result.id, result.fileName);
+    await expect(stat(trashPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(sourcePath, 'utf8')).toBe('untouched-original');
+    service.close();
+  });
+
+  it('cleans missing recycle records but refuses paths outside the managed trash', async () => {
+    const { service, directory, sourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const missing = await service.generate('asset-1', payload());
+    await service.trash(missing.id);
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    const missingPath = (database.prepare('SELECT trash_path FROM generation_results WHERE id = ?').get(missing.id) as { trash_path: string }).trash_path;
+    await rm(missingPath);
+
+    await expect(service.emptyTrash()).resolves.toMatchObject({ total: 1, purged: 1, missingFiles: 1, failed: 0 });
+
+    const unsafe = await service.generate('asset-1', { ...payload(), batchId: '74660466-cbed-4ad2-b21c-1abc569934f8' });
+    await service.trash(unsafe.id);
+    database.prepare('UPDATE generation_results SET trash_path = ? WHERE id = ?').run(sourcePath, unsafe.id);
+    await expect(service.getTrashSummary()).resolves.toMatchObject({ resultCount: 1, unsafePaths: 1 });
+    await expect(service.emptyTrash()).resolves.toMatchObject({ total: 1, purged: 0, failed: 1, freedBytes: 0 });
+    expect(await readFile(sourcePath, 'utf8')).toBe('untouched-original');
+    expect(service.listTrashed('asset-1')).toHaveLength(1);
+    database.close();
     service.close();
   });
 

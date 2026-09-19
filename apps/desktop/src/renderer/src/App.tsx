@@ -17,6 +17,7 @@ import type {
   ProviderProfile,
   ExportPreset,
   ImageCacheStats,
+  GenerationTrashSummary,
   DiagnosticSnapshot,
   SavePromptTemplateInput,
   SaveProviderProfileInput,
@@ -92,6 +93,13 @@ function applyTheme(theme: AppSettings['theme']): void {
     ? window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
     : theme;
   document.documentElement.dataset.theme = resolved;
+}
+
+function formatStorageBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KiB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GiB`;
 }
 
 type CompareMode = 'single' | 'split';
@@ -1509,6 +1517,10 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
   const [libraryBackupBusy, setLibraryBackupBusy] = useState(false);
   const [backupVerifyBusy, setBackupVerifyBusy] = useState(false);
   const [restoreBusy, setRestoreBusy] = useState(false);
+  const [trashSummary, setTrashSummary] = useState<GenerationTrashSummary | null>(null);
+  const [trashMessage, setTrashMessage] = useState('');
+  const [trashBusy, setTrashBusy] = useState(false);
+  const [trashConfirmationOpen, setTrashConfirmationOpen] = useState(false);
 
   useEffect(() => {
     void window.desktopApi.listProviderProfiles().then(setProfiles);
@@ -1517,6 +1529,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
       onExportPresetsChange(items);
     });
     void window.desktopApi.getImageCacheStats().then(setCacheStats);
+    void window.desktopApi.getGenerationTrashSummary().then(setTrashSummary);
     void window.desktopApi.getDiagnosticSnapshot().then(setDiagnostics);
     void window.desktopApi.getAppSettings().then((settings) => {
       setGenerationStorageMode(settings.generationStorageMode);
@@ -1697,6 +1710,23 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
     }
   };
 
+  const emptyGenerationTrash = async () => {
+    setTrashBusy(true);
+    setTrashMessage('');
+    try {
+      const report = await window.desktopApi.emptyGenerationTrash();
+      setTrashSummary(await window.desktopApi.getGenerationTrashSummary());
+      setTrashConfirmationOpen(false);
+      setTrashMessage(report.failed > 0
+        ? `已永久清理 ${report.purged} 个版本，${report.failed} 个因路径或文件异常而保留。`
+        : `已永久清理 ${report.purged} 个版本，释放 ${formatStorageBytes(report.freedBytes)}。`);
+    } catch {
+      setTrashMessage('回收站清理失败，未完成的版本仍保留，可稍后重试。');
+    } finally {
+      setTrashBusy(false);
+    }
+  };
+
   return (
     <div className="settings-page">
       <aside className="settings-nav">
@@ -1774,6 +1804,14 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
           <label className="cache-limit"><span><strong>磁盘上限</strong><small>达到上限后优先清理最久未使用的缩略图和屏幕预览。</small></span><select aria-label="预览缓存磁盘上限" value={cacheMaxBytes} disabled={cacheBusy} onChange={(event) => void saveCacheMaxBytes(Number(event.target.value))}><option value={1024 ** 3}>1 GiB</option><option value={5 * 1024 ** 3}>5 GiB</option><option value={10 * 1024 ** 3}>10 GiB</option><option value={20 * 1024 ** 3}>20 GiB</option><option value={50 * 1024 ** 3}>50 GiB</option></select></label>
           <div className="cache-actions"><button className="secondary-action" type="button" disabled={cacheBusy || !cacheStats || cacheStats.bytes === 0} onClick={async () => { setCacheBusy(true); try { const result = await window.desktopApi.pruneImageCache({ maxBytes: 0 }); setCacheMessage(`已清理 ${result.removedFiles} 个缓存文件。`); setCacheStats(await window.desktopApi.getImageCacheStats()); } catch { setCacheMessage('缓存清理失败，请稍后重试。'); } finally { setCacheBusy(false); } }}>{cacheBusy ? '清理中…' : '清理全部可重建缓存'}</button><span role="status">{cacheMessage}</span></div>
         </section>
+        <section className="settings-section generation-trash-section">
+          <div className="settings-heading"><div><h2>生成版本回收站</h2><p>回收版本仍可在照片的版本页恢复；永久清理不会触碰原图、活动版本或导出文件。</p></div><span><Trash2 size={14} />{trashSummary ? `${trashSummary.resultCount} 个版本 · ${formatStorageBytes(trashSummary.totalBytes)}` : '正在读取'}</span></div>
+          <div className="generation-trash-row">
+            <span><strong>{trashSummary?.resultCount ? '可恢复内容' : '回收站为空'}</strong><small>{trashSummary && (trashSummary.missingFiles > 0 || trashSummary.unsafePaths > 0) ? `${trashSummary.missingFiles} 个文件已缺失 · ${trashSummary.unsafePaths} 个异常路径将被保护性跳过` : '永久清理后无法恢复，版本序号仍不会复用。'}</small></span>
+            <button className="danger-action" type="button" disabled={trashBusy || !trashSummary || trashSummary.resultCount === 0} onClick={() => setTrashConfirmationOpen(true)}>清空回收站</button>
+          </div>
+          <div className="form-feedback" role="status">{trashMessage}</div>
+        </section>
         <section className="settings-section backup-section">
           <div className="settings-heading"><div><h2>图库备份</h2><p>数据库快照适合快速灾备；完整备份还包含集中受管的生成结果和逐文件校验清单，均不包含 API Key。</p></div><span><ShieldCheck size={14} />一致性快照</span></div>
           <div className="cache-actions"><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void backupDatabase()}>{backupBusy ? '备份中…' : '仅备份数据库'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void backupCompleteLibrary()}>{libraryBackupBusy ? '备份中…' : '完整图库备份'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void verifyCompleteLibraryBackup()}>{backupVerifyBusy ? '验证中…' : '验证备份包'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void restoreCompleteLibraryBackup()}>{restoreBusy ? '准备恢复…' : '从完整备份恢复'}</button><span role="status">{backupMessage || '恢复会保留当前图库副本；原图与便携结果不在备份包内。'}</span></div>
@@ -1797,6 +1835,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
           {diagnostics ? <div className="diagnostic-grid"><span>版本<strong>{diagnostics.appVersion}</strong></span><span>图库<strong>{diagnostics.catalog.assets} 张 · 离线 {diagnostics.catalog.offline}</strong></span><span>模型<strong>{diagnostics.providers.enabled}/{diagnostics.providers.total} 已启用</strong></span><span>缓存<strong>{(diagnostics.cache.bytes / 1_073_741_824).toFixed(2)} GiB</strong><small>命中 {diagnostics.cache.performance.hits} · 未命中 {diagnostics.cache.performance.misses}</small></span><span>解码<strong>{diagnostics.cache.performance.decodes} 次</strong><small>累计 {Math.round(diagnostics.cache.performance.decodeMsTotal)} ms</small></span><span>RAW 代理<strong>{diagnostics.cache.raw.imageMagick ? 'ImageMagick' : diagnostics.cache.raw.sips ? 'sips' : '未安装'}</strong><small>原生入口已启用；完整显影仍按发布计划推进</small></span></div> : <small>正在读取诊断摘要…</small>}
         </section>
       </main>
+      {trashConfirmationOpen && trashSummary && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !trashBusy) setTrashConfirmationOpen(false); }}><section className="removal-dialog is-destructive" role="alertdialog" aria-modal="true" aria-labelledby="empty-trash-title" aria-describedby="empty-trash-description"><header><span className="dialog-icon"><Trash2 size={17} /></span><div><h2 id="empty-trash-title">永久清理 {trashSummary.resultCount} 个生成版本？</h2><p id="empty-trash-description">将释放约 {formatStorageBytes(trashSummary.totalBytes)}。这些版本及生成上下文会从当前图库永久移除，操作无法撤销。</p></div></header><div className="removal-impact"><CircleAlert size={15} /><span>只清理应用内部生成版本回收站。原图、活动生成版本、便携目录中的活动文件和已导出副本不会被删除。</span></div><footer><button autoFocus className="quiet-button" type="button" disabled={trashBusy} onClick={() => setTrashConfirmationOpen(false)}>取消</button><button className="danger-action" type="button" disabled={trashBusy} onClick={() => void emptyGenerationTrash()}>{trashBusy ? '正在清理…' : '永久清理'}</button></footer></section></div>}
     </div>
   );
 }
