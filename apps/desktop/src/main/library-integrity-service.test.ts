@@ -28,7 +28,18 @@ async function fixture() {
       storage_mode TEXT NOT NULL,
       trashed_at INTEGER,
       trash_path TEXT
-    )
+    );
+    CREATE TABLE assets (id TEXT PRIMARY KEY, path TEXT NOT NULL, file_name TEXT NOT NULL);
+    CREATE TABLE generation_write_intents (
+      result_id TEXT PRIMARY KEY,
+      asset_id TEXT NOT NULL,
+      batch_id TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      temporary_path TEXT NOT NULL,
+      storage_mode TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
   `);
   return { root, library, generated, trash, portable, databasePath, database };
 }
@@ -39,18 +50,25 @@ describe('library storage integrity diagnostics', () => {
     const managedPath = path.join(context.generated, 'aa', 'active.jpg');
     const portablePath = path.join(context.portable, 'portable.jpg');
     const trashPath = path.join(context.trash, 'trash-id', 'trashed.jpg');
-    await Promise.all([mkdir(path.dirname(managedPath), { recursive: true }), mkdir(path.dirname(trashPath), { recursive: true })]);
-    await Promise.all([writeFile(managedPath, 'managed'), writeFile(portablePath, 'portable'), writeFile(trashPath, 'trashed'), writeFile(path.join(path.dirname(managedPath), 'manifest.json'), '{}')]);
+    const pendingDirectory = path.join(context.generated, 'as', 'asset-pending', 'batch-pending');
+    const pendingPath = path.join(pendingDirectory, 'pending.jpg');
+    const pendingTemporary = `${pendingPath}.123.649b57c3-381b-4658-92e1-5049951ab194.tmp`;
+    await Promise.all([mkdir(path.dirname(managedPath), { recursive: true }), mkdir(path.dirname(trashPath), { recursive: true }), mkdir(pendingDirectory, { recursive: true })]);
+    await Promise.all([writeFile(managedPath, 'managed'), writeFile(portablePath, 'portable'), writeFile(trashPath, 'trashed'), writeFile(pendingPath, 'pending'), writeFile(pendingTemporary, 'temporary'), writeFile(path.join(path.dirname(managedPath), 'manifest.json'), '{}')]);
     const insert = context.database.prepare('INSERT INTO generation_results VALUES (?, ?, ?, ?, ?, ?)');
     insert.run('managed-id', 'active.jpg', managedPath, 'managed', null, null);
     insert.run('portable-id', 'portable.jpg', portablePath, 'portable', null, null);
     insert.run('trash-id', 'trashed.jpg', path.join(context.generated, 'old.jpg'), 'managed', Date.now(), trashPath);
+    context.database.prepare(`
+      INSERT INTO generation_write_intents VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run('pending-id', 'asset-pending', 'batch-pending', 'pending.jpg', pendingPath, pendingTemporary, 'managed', Date.now());
     const service = new LibraryIntegrityService(context.databasePath, context.generated);
 
     const report = await service.scan();
 
     expect(report).toMatchObject({
       status: 'healthy', databaseStatus: 'ok', activeGenerationResults: 2, trashedGenerationResults: 1,
+      pendingGenerationWrites: 1, staleGenerationWriteIntents: 0, unsafeGenerationWriteIntents: 0,
       missingActiveFiles: 0, missingTrashFiles: 0, unsafeManagedPaths: 0, unsafeTrashPaths: 0,
       nonRegularFiles: 0, inaccessibleFiles: 0, unexpectedGeneratedFiles: 0, unexpectedTrashFiles: 0
     });
@@ -72,12 +90,19 @@ describe('library storage integrity diagnostics', () => {
     insert.run('linked-id', 'linked.jpg', linkedPath, 'managed', null, null);
     insert.run('trash-id', 'missing-trash.jpg', path.join(context.generated, 'old.jpg'), 'managed', Date.now(), path.join(context.trash, 'trash-id', 'missing-trash.jpg'));
     insert.run('unsafe-trash-id', 'unsafe.jpg', path.join(context.generated, 'old-2.jpg'), 'managed', Date.now(), outsidePath);
+    context.database.prepare(`
+      INSERT INTO generation_write_intents VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'unsafe-pending', 'asset-pending', 'batch-pending', 'outside.jpg', outsidePath,
+      `${outsidePath}.123.649b57c3-381b-4658-92e1-5049951ab194.tmp`, 'managed', Date.now() - 10 * 60_000
+    );
     const service = new LibraryIntegrityService(context.databasePath, context.generated);
 
     const report = await service.scan();
 
     expect(report).toMatchObject({
       status: 'error', databaseStatus: 'ok', activeGenerationResults: 3, trashedGenerationResults: 2,
+      pendingGenerationWrites: 1, staleGenerationWriteIntents: 1, unsafeGenerationWriteIntents: 1,
       missingActiveFiles: 1, missingTrashFiles: 1, unsafeManagedPaths: 1, unsafeTrashPaths: 1,
       nonRegularFiles: 1, unexpectedGeneratedFiles: 1, unexpectedTrashFiles: 1
     });
