@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -35,5 +35,21 @@ describe('database backup service', () => {
     database.exec('CREATE TABLE records (id INTEGER PRIMARY KEY);');
     database.close();
     await expect(new DatabaseBackupService(databasePath).create(databasePath)).rejects.toThrow('BACKUP_DESTINATION_IS_SOURCE');
+  });
+
+  it('skips fresh automatic backups and removes snapshots beyond retention', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'photoallisai-backup-rotation-'));
+    const databasePath = path.join(root, 'catalog.sqlite');
+    const backupDirectory = path.join(root, 'backups');
+    const database = new DatabaseSync(databasePath);
+    database.exec('CREATE TABLE records (id INTEGER PRIMARY KEY);');
+    database.close();
+    const service = new DatabaseBackupService(databasePath);
+
+    await expect(service.createAutomatic(backupDirectory, { now: 1_000, minimumIntervalMs: 500, retention: 2 })).resolves.not.toBeNull();
+    await expect(service.createAutomatic(backupDirectory, { now: 1_200, minimumIntervalMs: 500, retention: 2 })).resolves.toBeNull();
+    await service.createAutomatic(backupDirectory, { now: 2_000, minimumIntervalMs: 0, retention: 2 });
+    await service.createAutomatic(backupDirectory, { now: 3_000, minimumIntervalMs: 0, retention: 2 });
+    expect((await readdir(backupDirectory)).sort()).toEqual(['catalog-2000.sqlite', 'catalog-3000.sqlite']);
   });
 });

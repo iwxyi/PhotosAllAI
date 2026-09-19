@@ -413,6 +413,7 @@ app.whenReady().then(async () => {
   exportService = new ExportService(databasePath, generation);
   exportPresets = new ExportPresetService(databasePath);
   taskRunner = new TaskRunner(tasks, analysis, generation);
+  void databaseBackup.createAutomatic(join(libraryDirectory, 'backups')).catch(() => undefined);
 
   protocol.handle('photoasset', async (request) => {
     const url = new URL(request.url);
