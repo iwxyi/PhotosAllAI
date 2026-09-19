@@ -32,6 +32,84 @@ async function fixture(fileNames = ['photo.jpg']) {
 }
 
 describe('safe catalog file moves', () => {
+  it('previews RAW, JPEG, and XMP companions but leaves them untouched by default', async () => {
+    const context = await fixture(['capture.NEF', 'capture.jpg', 'capture.xmp']);
+    const raw = context.catalog.listAssets().find((asset) => asset.fileName === 'capture.NEF')!;
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    await expect(service.previewCompanions([raw.id])).resolves.toMatchObject({
+      files: [
+        { fileName: 'capture.jpg', kind: 'jpeg' },
+        { fileName: 'capture.xmp', kind: 'xmp', assetId: null }
+      ]
+    });
+    await service.move({ assetIds: [raw.id], targetFolderId: context.targetFolderId });
+
+    expect((await readdir(context.source)).sort()).toEqual(['capture.jpg', 'capture.xmp']);
+    expect(await readdir(context.target)).toEqual(['capture.NEF']);
+  });
+
+  it('moves an opted-in RAW, JPEG, and XMP group in one recoverable operation', async () => {
+    const context = await fixture(['capture.NEF', 'capture.jpg', 'capture.xmp']);
+    const assets = context.catalog.listAssets();
+    const raw = assets.find((asset) => asset.fileName === 'capture.NEF')!;
+    const ids = new Map(assets.map((asset) => [asset.fileName, asset.id]));
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    const report = await service.move({ assetIds: [raw.id], targetFolderId: context.targetFolderId, includeCompanions: true });
+
+    expect(report).toMatchObject({ status: 'completed', moved: 2, total: 2 });
+    expect((await readdir(context.target)).sort()).toEqual(['capture.NEF', 'capture.jpg', 'capture.xmp']);
+    expect(await readdir(context.source)).toEqual([]);
+    expect(context.catalog.resolveAssetFile(ids.get('capture.NEF')!)?.path).toBe(path.join(context.target, 'capture.NEF'));
+    expect(context.catalog.resolveAssetFile(ids.get('capture.jpg')!)?.path).toBe(path.join(context.target, 'capture.jpg'));
+    expect(service.listHistory()[0]).toMatchObject({ total: 2, succeeded: 2, failed: 0 });
+    expect(service.listHistory()[0]?.fileNames.sort()).toEqual(['capture.NEF', 'capture.jpg']);
+  });
+
+  it('uses one conflict suffix for every file in an associated camera group', async () => {
+    const context = await fixture(['capture.NEF', 'capture.jpg', 'capture.xmp']);
+    await writeFile(path.join(context.target, 'capture.jpg'), 'existing-target');
+    const raw = context.catalog.listAssets().find((asset) => asset.fileName === 'capture.NEF')!;
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    const report = await service.move({ assetIds: [raw.id], targetFolderId: context.targetFolderId, includeCompanions: true });
+
+    expect(report.files.map((file) => file.fileName).sort()).toEqual(['capture (1).NEF', 'capture (1).jpg']);
+    expect((await readdir(context.target)).sort()).toEqual([
+      'capture (1).NEF', 'capture (1).jpg', 'capture (1).xmp', 'capture.jpg'
+    ]);
+    expect(await readFile(path.join(context.target, 'capture.jpg'), 'utf8')).toBe('existing-target');
+  });
+
+  it('rolls back RAW and JPEG files when an associated XMP move fails', async () => {
+    const context = await fixture(['capture.NEF', 'capture.jpg', 'capture.xmp']);
+    const assets = context.catalog.listAssets();
+    const raw = assets.find((asset) => asset.fileName === 'capture.NEF')!;
+    const originalPaths = new Map(assets.map((asset) => [asset.id, path.join(context.source, asset.fileName)]));
+    const service = new FileOperationService(context.databasePath, {
+      copyFile, readdir, realpath, stat, unlink,
+      link: async (source, destination) => {
+        if (String(source).endsWith(`${path.sep}capture.xmp`) && String(destination).startsWith(context.target)) {
+          throw Object.assign(new Error('denied'), { code: 'EACCES' });
+        }
+        await link(source, destination);
+      }
+    });
+    services.push(service);
+
+    const report = await service.move({ assetIds: [raw.id], targetFolderId: context.targetFolderId, includeCompanions: true });
+
+    expect(report).toMatchObject({ status: 'failed', moved: 0, rolledBack: true, errorCode: 'EACCES' });
+    expect((await readdir(context.source)).sort()).toEqual(['capture.NEF', 'capture.jpg', 'capture.xmp']);
+    expect(await readdir(context.target)).toEqual([]);
+    expect(assets.map((asset) => context.catalog.resolveAssetFile(asset.id)?.path).sort())
+      .toEqual([...originalPaths.values()].sort());
+  });
+
   it('rejects a cross-volume move before writing when free space is insufficient', async () => {
     const context = await fixture();
     const asset = context.catalog.listAssets()[0]!;
@@ -238,6 +316,38 @@ describe('safe catalog file moves', () => {
     expect(context.catalog.resolveAssetFile(asset.id)?.path).toBe(sourcePath);
   });
 
+  it('recovers an interrupted non-catalog XMP move from the persisted operation log', async () => {
+    const context = await fixture(['capture.NEF', 'capture.xmp']);
+    const asset = context.catalog.listAssets()[0]!;
+    const bootstrap = new FileOperationService(context.databasePath);
+    bootstrap.close();
+    const sourcePath = path.join(context.source, 'capture.xmp');
+    const destinationPath = path.join(context.target, 'capture.xmp');
+    await rename(sourcePath, destinationPath);
+    const operationId = randomUUID();
+    const database = new DatabaseSync(context.databasePath);
+    database.prepare(`INSERT INTO file_operations (id, kind, status, target_folder_id, created_at) VALUES (?, 'move', 'executing', ?, ?)`)
+      .run(operationId, context.targetFolderId, Date.now());
+    database.prepare(`
+      INSERT INTO file_operation_items (
+        id, operation_id, ordinal, asset_id, source_folder_id, destination_folder_id,
+        source_path, destination_path, temporary_path, original_file_name,
+        destination_file_name, size_bytes, status, catalog_managed
+      ) VALUES (?, ?, 0, ?, ?, ?, ?, ?, ?, 'capture.xmp', 'capture.xmp', ?, 'moved', 0)
+    `).run(
+      randomUUID(), operationId, `sidecar:${randomUUID()}`, asset.folderId, context.targetFolderId,
+      sourcePath, destinationPath, path.join(context.target, '.xmp-recovery.tmp'), Buffer.byteLength('content:capture.xmp')
+    );
+    database.close();
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    expect(await service.recoverInterruptedOperations()).toBe(1);
+    expect(await readFile(sourcePath, 'utf8')).toBe('content:capture.xmp');
+    await expect(stat(destinationPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(context.catalog.resolveAssetFile(asset.id)?.path).toBe(path.join(context.source, 'capture.NEF'));
+  });
+
   it('does not touch managed generation content while moving an original', async () => {
     const context = await fixture();
     const generated = path.join(context.root, 'library-generated', 'result.png');
@@ -254,6 +364,20 @@ describe('safe catalog file moves', () => {
 });
 
 describe('catalog copies and renames', () => {
+  it('copies an opted-in RAW, JPEG, and XMP group while preserving the originals', async () => {
+    const context = await fixture(['capture.NEF', 'capture.jpg', 'capture.xmp']);
+    const raw = context.catalog.listAssets().find((asset) => asset.fileName === 'capture.NEF')!;
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+
+    const report = await service.copy({ assetIds: [raw.id], targetFolderId: context.targetFolderId, includeCompanions: true });
+
+    expect(report).toMatchObject({ status: 'completed', copied: 2, total: 2 });
+    expect((await readdir(context.source)).sort()).toEqual(['capture.NEF', 'capture.jpg', 'capture.xmp']);
+    expect((await readdir(context.target)).sort()).toEqual(['capture.NEF', 'capture.jpg', 'capture.xmp']);
+    expect(context.catalog.listAssets()).toHaveLength(4);
+  });
+
   it('rejects Windows destination paths that exceed the compatibility limit', async () => {
     const context = await fixture();
     const asset = context.catalog.listAssets()[0]!;

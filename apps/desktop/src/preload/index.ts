@@ -43,6 +43,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke('catalog.assets.move.v1', input) as ReturnType<DesktopApi['moveCatalogAssets']>,
   copyCatalogAssets: (input) =>
     ipcRenderer.invoke('catalog.assets.copy.v1', input) as ReturnType<DesktopApi['copyCatalogAssets']>,
+  previewCatalogCompanions: (assetIds) =>
+    ipcRenderer.invoke('catalog.assets.companions.v1', assetIds) as ReturnType<DesktopApi['previewCatalogCompanions']>,
   renameCatalogAsset: (input) =>
     ipcRenderer.invoke('catalog.asset.rename.v1', input) as ReturnType<DesktopApi['renameCatalogAsset']>,
   renameCatalogAssets: (input) =>

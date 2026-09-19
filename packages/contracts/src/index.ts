@@ -202,7 +202,8 @@ export type CatalogSmartCollection = z.infer<typeof catalogSmartCollectionSchema
 
 export const moveCatalogAssetsInputSchema = z.object({
   assetIds: z.array(z.string().min(1)).min(1).max(10_000),
-  targetFolderId: z.string().min(1)
+  targetFolderId: z.string().min(1),
+  includeCompanions: z.boolean().optional()
 });
 
 export type MoveCatalogAssetsInput = z.infer<typeof moveCatalogAssetsInputSchema>;
@@ -241,6 +242,18 @@ export const copyCatalogAssetsReportSchema = z.object({
   errorCode: z.string().min(1).nullable()
 });
 export type CopyCatalogAssetsReport = z.infer<typeof copyCatalogAssetsReportSchema>;
+
+export const catalogCompanionPreviewSchema = z.object({
+  files: z.array(z.object({
+    fileName: z.string().min(1),
+    kind: z.enum(['raw', 'jpeg', 'xmp']),
+    assetId: z.string().min(1).nullable(),
+    bytes: z.number().int().nonnegative()
+  })),
+  totalBytes: z.number().int().nonnegative()
+});
+export type CatalogCompanionPreview = z.infer<typeof catalogCompanionPreviewSchema>;
+export const catalogCompanionPreviewInputSchema = z.array(z.string().min(1)).min(1).max(10_000);
 
 export const renameCatalogAssetInputSchema = z.object({
   assetId: z.string().min(1),
@@ -649,6 +662,7 @@ export interface DesktopApi {
   updateCatalogTags(input: UpdateCatalogTagsInput): Promise<CatalogTag[]>;
   moveCatalogAssets(input: MoveCatalogAssetsInput): Promise<MoveCatalogAssetsReport>;
   copyCatalogAssets(input: CopyCatalogAssetsInput): Promise<CopyCatalogAssetsReport>;
+  previewCatalogCompanions(assetIds: string[]): Promise<CatalogCompanionPreview>;
   renameCatalogAsset(input: RenameCatalogAssetInput): Promise<RenameCatalogAssetReport>;
   renameCatalogAssets(input: RenameCatalogAssetsInput): Promise<RenameCatalogAssetsReport>;
   removeCatalogAssets(input: CatalogAssetRemovalInput): Promise<CatalogAssetRemovalReport>;

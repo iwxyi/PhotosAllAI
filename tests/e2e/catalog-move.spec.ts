@@ -1,4 +1,4 @@
-import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -28,6 +28,7 @@ test.beforeAll(async () => {
     path.resolve('apps/desktop/src/renderer/public/demo/portrait.jpg'),
     path.join(sourceDirectory, 'MOVE_ME.jpg')
   );
+  await writeFile(path.join(sourceDirectory, 'MOVE_ME.xmp'), '<x:xmpmeta>fixture</x:xmpmeta>');
 
   const catalog = new CatalogService(path.join(libraryDirectory, 'catalog.sqlite'));
   await catalog.importFolders([sourceDirectory, targetDirectory]);
@@ -71,12 +72,16 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await expect(dialog).toBeHidden();
   await page.getByRole('button', { name: '移动到文件夹' }).click();
   await expect(dialog).toBeVisible();
+  await expect(dialog.getByText(/同时处理 1 个关联文件/)).toBeVisible();
+  await expect(dialog.getByRole('checkbox')).not.toBeChecked();
   await page.screenshot({ path: 'test-results/catalog-move-dialog.png', animations: 'disabled' });
+  await dialog.getByRole('checkbox').check();
   await dialog.getByText('target', { exact: true }).click();
   await dialog.getByRole('button', { name: '移动', exact: true }).click();
 
   await expect(page.getByRole('status')).toContainText('已移动 1 张照片');
   expect(await readFile(path.join(targetDirectory, 'MOVE_ME.jpg'))).not.toHaveLength(0);
+  expect(await readFile(path.join(targetDirectory, 'MOVE_ME.xmp'), 'utf8')).toContain('fixture');
   await expect(stat(path.join(sourceDirectory, 'MOVE_ME.jpg'))).rejects.toMatchObject({ code: 'ENOENT' });
 
   await page.reload();
@@ -88,11 +93,13 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await page.getByRole('button', { name: '复制到文件夹' }).click();
   const copyDialog = page.getByRole('dialog', { name: '复制 1 张照片' });
   await expect(copyDialog).toBeVisible();
+  await copyDialog.getByRole('checkbox').check();
   await copyDialog.getByText('source', { exact: true }).click();
   await page.screenshot({ path: 'test-results/catalog-copy-dialog.png', animations: 'disabled' });
   await copyDialog.getByRole('button', { name: '复制', exact: true }).click();
   await expect(page.getByRole('status')).toContainText('已复制 1 张照片');
   expect(await readFile(path.join(sourceDirectory, 'MOVE_ME.jpg'))).not.toHaveLength(0);
+  expect(await readFile(path.join(sourceDirectory, 'MOVE_ME.xmp'), 'utf8')).toContain('fixture');
 
   await page.getByRole('button', { name: '重命名照片' }).click();
   const renameDialog = page.getByRole('dialog', { name: '重命名照片' });

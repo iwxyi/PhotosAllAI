@@ -18,6 +18,7 @@ import {
   catalogAssetRemovalReportSchema,
   copyCatalogAssetsInputSchema,
   copyCatalogAssetsReportSchema,
+  catalogCompanionPreviewSchema,
   fileOperationHistoryItemSchema,
   moveCatalogAssetsInputSchema,
   moveCatalogAssetsReportSchema,
@@ -29,6 +30,7 @@ import {
   type CatalogAssetRemovalReport,
   type CopyCatalogAssetsInput,
   type CopyCatalogAssetsReport,
+  type CatalogCompanionPreview,
   type FileOperationHistoryItem,
   type MoveCatalogAssetsInput,
   type MoveCatalogAssetsReport,
@@ -67,6 +69,7 @@ type PlannedItem = {
   status: string;
   resultAssetId: string | null;
   modifiedAt?: number;
+  catalogManaged?: boolean;
 };
 
 type AssetLocationRow = {
@@ -84,6 +87,10 @@ const nodeFileSystem: FileSystemPort = {
     return stats.bavail * stats.bsize;
   }
 };
+
+const RAW_EXTENSIONS = new Set(['.dng', '.cr2', '.cr3', '.nef', '.nrw', '.arw', '.raf', '.rw2', '.orf', '.pef']);
+const JPEG_EXTENSIONS = new Set(['.jpg', '.jpeg']);
+type CompanionFile = { path: string; fileName: string; bytes: number; kind: 'raw' | 'jpeg' | 'xmp'; asset: AssetLocationRow | null; owner: AssetLocationRow };
 
 export class FileOperationService {
   readonly #database: DatabaseSync;
@@ -120,6 +127,14 @@ export class FileOperationService {
     return this.#serialize(() => this.#executeCopy(input));
   }
 
+  async previewCompanions(assetIds: string[]): Promise<CatalogCompanionPreview> {
+    const companions = await this.#findCompanions([...new Set(assetIds)]);
+    return catalogCompanionPreviewSchema.parse({
+      files: companions.map((item) => ({ fileName: item.fileName, kind: item.kind, assetId: item.asset?.id ?? null, bytes: item.bytes })),
+      totalBytes: companions.reduce((total, item) => total + item.bytes, 0)
+    });
+  }
+
   async rename(rawInput: RenameCatalogAssetInput): Promise<RenameCatalogAssetReport> {
     const input = renameCatalogAssetInputSchema.parse(rawInput);
     return this.#serialize(() => this.#executeRename(input));
@@ -152,9 +167,10 @@ export class FileOperationService {
   listHistory(limit = 100): FileOperationHistoryItem[] {
     const rows = this.#database.prepare(`
       SELECT operations.id, operations.kind, operations.status, operations.created_at,
-        operations.completed_at, operations.error_code, COUNT(items.id) AS total,
-        SUM(CASE WHEN items.status IN ('moved', 'copied', 'removed', 'trashed', 'skipped') THEN 1 ELSE 0 END) AS succeeded,
-        SUM(CASE WHEN items.status IN ('failed', 'compensation_failed') THEN 1 ELSE 0 END) AS failed
+        operations.completed_at, operations.error_code,
+        COUNT(CASE WHEN items.catalog_managed = 1 THEN 1 END) AS total,
+        SUM(CASE WHEN items.catalog_managed = 1 AND items.status IN ('moved', 'copied', 'removed', 'trashed', 'skipped') THEN 1 ELSE 0 END) AS succeeded,
+        SUM(CASE WHEN items.catalog_managed = 1 AND items.status IN ('failed', 'compensation_failed') THEN 1 ELSE 0 END) AS failed
       FROM file_operations operations
       LEFT JOIN file_operation_items items ON items.operation_id = operations.id
       GROUP BY operations.id
@@ -167,7 +183,7 @@ export class FileOperationService {
     }>;
     const names = this.#database.prepare(`
       SELECT destination_file_name FROM file_operation_items
-      WHERE operation_id = ? ORDER BY ordinal ASC LIMIT 4
+      WHERE operation_id = ? AND catalog_managed = 1 ORDER BY ordinal ASC LIMIT 4
     `);
     return rows.map((row) => fileOperationHistoryItemSchema.parse({
       id: row.id,
@@ -266,6 +282,10 @@ export class FileOperationService {
       CREATE INDEX IF NOT EXISTS file_operation_items_operation_idx
         ON file_operation_items(operation_id, ordinal);
     `);
+    const columns = this.#database.prepare('PRAGMA table_info(file_operation_items)').all() as { name: string }[];
+    if (!columns.some((column) => column.name === 'catalog_managed')) {
+      this.#database.exec('ALTER TABLE file_operation_items ADD COLUMN catalog_managed INTEGER NOT NULL DEFAULT 1 CHECK(catalog_managed IN (0, 1))');
+    }
   }
 
   #upgradeOperationTables(): void {
@@ -580,14 +600,19 @@ export class FileOperationService {
       WHERE removed_at IS NULL AND id IN (${placeholders})
     `).all(...assetIds) as AssetLocationRow[];
     if (rows.length !== assetIds.length) throw new Error('CATALOG_ASSET_SET_MISMATCH');
-    const byId = new Map(rows.map((row) => [row.id, row]));
+    const companions = input.includeCompanions ? await this.#findCompanions(assetIds) : [];
+    const operationRows = [...rows, ...companions.flatMap((item) => item.asset ? [item.asset] : [])];
+    const uniqueRows = [...new Map(operationRows.map((row) => [row.id, row])).values()];
     const reserved = new Set((await this.#fileSystem.readdir(targetPath)).map(normalizeFileName));
-    const items = assetIds.map((assetId): PlannedItem => {
-      const asset = byId.get(assetId)!;
-      const fileName = reserveFileName(asset.file_name, reserved);
+    const destinationNames = reserveGroupedFileNames([
+      ...uniqueRows.map((asset) => ({ path: asset.path, fileName: asset.file_name })),
+      ...companions.filter((item) => !item.asset).map((item) => ({ path: item.path, fileName: item.fileName }))
+    ], reserved);
+    const items = uniqueRows.map((asset): PlannedItem => {
+      const fileName = destinationNames.get(asset.path)!;
       const itemId = randomUUID();
       return {
-        id: itemId, assetId, sourcePath: asset.path,
+        id: itemId, assetId: asset.id, sourcePath: asset.path,
         destinationPath: path.join(targetPath, fileName),
         temporaryPath: path.join(targetPath, `.photoallisai-${operationId}-${itemId}.tmp`),
         sourceFolderId: asset.folder_id, destinationFolderId: target.id,
@@ -595,6 +620,18 @@ export class FileOperationService {
         skipped: false, status: 'planned', resultAssetId: randomUUID()
       };
     });
+    for (const companion of companions.filter((item) => !item.asset)) {
+      const itemId = randomUUID();
+      const fileName = destinationNames.get(companion.path)!;
+      items.push({
+        id: itemId, assetId: `sidecar:${createHash('sha256').update(companion.path).digest('hex').slice(0, 24)}`,
+        sourcePath: companion.path, destinationPath: path.join(targetPath, fileName),
+        temporaryPath: path.join(targetPath, `.photoallisai-${operationId}-${itemId}.tmp`),
+        sourceFolderId: companion.owner.folder_id, destinationFolderId: target.id,
+        previousFileName: companion.fileName, fileName, sizeBytes: companion.bytes,
+        skipped: false, status: 'planned', resultAssetId: null, catalogManaged: false
+      });
+    }
     this.#assertDestinationPaths(items);
     await this.#assertAvailableSpace(targetPath, items.reduce((total, item) => total + item.sizeBytes, 0));
     this.#persistPlan(operationId, 'copy', target.id, items);
@@ -643,13 +680,13 @@ export class FileOperationService {
         INSERT INTO file_operation_items (
           id, operation_id, ordinal, asset_id, source_folder_id, destination_folder_id,
           source_path, destination_path, temporary_path, original_file_name,
-          destination_file_name, size_bytes, result_asset_id, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned')
+          destination_file_name, size_bytes, result_asset_id, status, catalog_managed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?)
       `);
       items.forEach((item, ordinal) => insertItem.run(
         item.id, operationId, ordinal, item.assetId, item.sourceFolderId,
         item.destinationFolderId, item.sourcePath, item.destinationPath, item.temporaryPath,
-        item.previousFileName, item.fileName, item.sizeBytes, item.resultAssetId
+        item.previousFileName, item.fileName, item.sizeBytes, item.resultAssetId, item.catalogManaged === false ? 0 : 1
       ));
       this.#database.exec('COMMIT');
     } catch (error) {
@@ -674,16 +711,22 @@ export class FileOperationService {
       WHERE removed_at IS NULL AND id IN (${placeholders})
     `).all(...assetIds) as AssetLocationRow[];
     if (rows.length !== assetIds.length) throw new Error('CATALOG_ASSET_SET_MISMATCH');
-    const byId = new Map(rows.map((row) => [row.id, row]));
+    const companions = input.includeCompanions ? await this.#findCompanions(assetIds) : [];
+    const operationRows = [...rows, ...companions.flatMap((item) => item.asset ? [item.asset] : [])];
+    const uniqueRows = [...new Map(operationRows.map((row) => [row.id, row])).values()];
     const reserved = new Set((await this.#fileSystem.readdir(targetPath)).map(normalizeFileName));
-    const items = assetIds.map((assetId): PlannedItem => {
-      const asset = byId.get(assetId)!;
+    const movingSources = [
+      ...uniqueRows.filter((asset) => asset.folder_id !== target.id).map((asset) => ({ path: asset.path, fileName: asset.file_name })),
+      ...companions.filter((item) => !item.asset && item.owner.folder_id !== target.id).map((item) => ({ path: item.path, fileName: item.fileName }))
+    ];
+    const destinationNames = reserveGroupedFileNames(movingSources, reserved);
+    const items = uniqueRows.map((asset): PlannedItem => {
       const skipped = asset.folder_id === target.id;
-      const fileName = skipped ? asset.file_name : reserveFileName(asset.file_name, reserved);
+      const fileName = skipped ? asset.file_name : destinationNames.get(asset.path)!;
       const itemId = randomUUID();
       return {
         id: itemId,
-        assetId,
+        assetId: asset.id,
         sourcePath: asset.path,
         destinationPath: skipped ? asset.path : path.join(targetPath, fileName),
         temporaryPath: path.join(targetPath, `.photoallisai-${operationId}-${itemId}.tmp`),
@@ -697,6 +740,19 @@ export class FileOperationService {
         resultAssetId: null
       };
     });
+    for (const companion of companions.filter((item) => !item.asset)) {
+      const skipped = companion.owner.folder_id === target.id;
+      const fileName = skipped ? companion.fileName : destinationNames.get(companion.path)!;
+      const itemId = randomUUID();
+      items.push({
+        id: itemId, assetId: `sidecar:${createHash('sha256').update(companion.path).digest('hex').slice(0, 24)}`,
+        sourcePath: companion.path, destinationPath: skipped ? companion.path : path.join(targetPath, fileName),
+        temporaryPath: path.join(targetPath, `.photoallisai-${operationId}-${itemId}.tmp`),
+        sourceFolderId: companion.owner.folder_id, destinationFolderId: target.id,
+        previousFileName: companion.fileName, fileName, sizeBytes: companion.bytes,
+        skipped, status: skipped ? 'skipped' : 'planned', resultAssetId: null, catalogManaged: false
+      });
+    }
     this.#assertDestinationPaths(items.filter((item) => !item.skipped));
 
     const crossVolumeBytes = (await Promise.all(items.filter((item) => !item.skipped).map(async (item) => {
@@ -715,14 +771,14 @@ export class FileOperationService {
         INSERT INTO file_operation_items (
           id, operation_id, ordinal, asset_id, source_folder_id, destination_folder_id,
           source_path, destination_path, temporary_path, original_file_name,
-          destination_file_name, size_bytes, result_asset_id, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          destination_file_name, size_bytes, result_asset_id, status, catalog_managed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       items.forEach((item, ordinal) => insertItem.run(
         item.id, operationId, ordinal, item.assetId, item.sourceFolderId,
         item.destinationFolderId, item.sourcePath, item.destinationPath, item.temporaryPath,
         item.previousFileName, item.fileName, item.sizeBytes, item.resultAssetId,
-        item.skipped ? 'skipped' : 'planned'
+        item.skipped ? 'skipped' : 'planned', item.catalogManaged === false ? 0 : 1
       ));
       this.#database.exec('COMMIT');
     } catch (error) {
@@ -738,6 +794,55 @@ export class FileOperationService {
     if (!Number.isFinite(availableBytes) || availableBytes < requiredBytes) {
       throw new Error('INSUFFICIENT_DISK_SPACE');
     }
+  }
+
+  async #findCompanions(assetIds: string[]): Promise<CompanionFile[]> {
+    if (assetIds.length === 0) return [];
+    const placeholders = assetIds.map(() => '?').join(', ');
+    const selected = this.#database.prepare(`
+      SELECT id, folder_id, path, file_name, size_bytes FROM assets
+      WHERE removed_at IS NULL AND id IN (${placeholders})
+    `).all(...assetIds) as AssetLocationRow[];
+    if (selected.length !== assetIds.length) throw new Error('CATALOG_ASSET_SET_MISMATCH');
+    const selectedPaths = new Set(selected.map((item) => item.path));
+    const found = new Map<string, CompanionFile>();
+    const entriesByDirectory = new Map<string, string[]>();
+    const assetByPath = this.#database.prepare(`
+      SELECT id, folder_id, path, file_name, size_bytes FROM assets
+      WHERE removed_at IS NULL AND path = ?
+    `);
+    for (const owner of selected) {
+      const extension = path.extname(owner.file_name).toLocaleLowerCase('en-US');
+      if (!RAW_EXTENSIONS.has(extension) && !JPEG_EXTENSIONS.has(extension)) continue;
+      const directory = path.dirname(owner.path);
+      let entries = entriesByDirectory.get(directory);
+      if (!entries) {
+        entries = await this.#fileSystem.readdir(directory);
+        entriesByDirectory.set(directory, entries);
+      }
+      const stem = path.basename(owner.file_name, path.extname(owner.file_name)).normalize('NFC').toLocaleLowerCase('en-US');
+      for (const entry of entries) {
+        const entryExtension = path.extname(entry).toLocaleLowerCase('en-US');
+        const entryStem = path.basename(entry, path.extname(entry)).normalize('NFC').toLocaleLowerCase('en-US');
+        if (entryStem !== stem) continue;
+        const kind = entryExtension === '.xmp'
+          ? 'xmp'
+          : RAW_EXTENSIONS.has(extension) && JPEG_EXTENSIONS.has(entryExtension)
+            ? 'jpeg'
+            : JPEG_EXTENSIONS.has(extension) && RAW_EXTENSIONS.has(entryExtension)
+              ? 'raw'
+              : null;
+        if (!kind) continue;
+        const candidatePath = path.join(directory, entry);
+        if (selectedPaths.has(candidatePath) || found.has(candidatePath)) continue;
+        const metadata = await this.#fileSystem.stat(candidatePath);
+        if (!metadata.isFile()) continue;
+        const asset = kind === 'xmp' ? null : assetByPath.get(candidatePath) as AssetLocationRow | undefined;
+        if (kind !== 'xmp' && !asset) continue;
+        found.set(candidatePath, { path: candidatePath, fileName: entry, bytes: metadata.size, kind, asset: asset ?? null, owner });
+      }
+    }
+    return [...found.values()].sort((left, right) => left.fileName.localeCompare(right.fileName));
   }
 
   #assertDestinationPaths(items: readonly PlannedItem[]): void {
@@ -843,6 +948,7 @@ export class FileOperationService {
         WHERE id = ? AND path = ? AND removed_at IS NULL
       `);
       for (const item of items) {
+        if (item.catalogManaged === false) continue;
         const result = update.run(
           item.destinationFolderId, item.destinationPath, item.fileName, item.assetId, item.sourcePath
         );
@@ -874,6 +980,7 @@ export class FileOperationService {
         SELECT ?, tag_id, ? FROM asset_tags WHERE asset_id = ?
       `);
       for (const item of items) {
+        if (item.catalogManaged === false) continue;
         if (!item.resultAssetId || item.modifiedAt === undefined) throw new Error('COPY_RESULT_INCOMPLETE');
         const now = Date.now();
         const result = insertAsset.run(
@@ -900,13 +1007,14 @@ export class FileOperationService {
     rolledBack: boolean,
     code: string | null
   ): MoveCatalogAssetsReport {
-    const moved = status === 'completed' ? items.filter((item) => !item.skipped) : [];
+    const catalogItems = items.filter((item) => item.catalogManaged !== false);
+    const moved = status === 'completed' ? catalogItems.filter((item) => !item.skipped) : [];
     return moveCatalogAssetsReportSchema.parse({
       operationId,
       status,
-      total: items.length,
+      total: catalogItems.length,
       moved: moved.length,
-      skipped: items.filter((item) => item.skipped).length,
+      skipped: catalogItems.filter((item) => item.skipped).length,
       rolledBack,
       files: moved.map((item) => ({
         assetId: item.assetId,
@@ -924,11 +1032,12 @@ export class FileOperationService {
     rolledBack: boolean,
     code: string | null
   ): CopyCatalogAssetsReport {
-    const copied = status === 'completed' ? items : [];
+    const catalogItems = items.filter((item) => item.catalogManaged !== false);
+    const copied = status === 'completed' ? catalogItems : [];
     return copyCatalogAssetsReportSchema.parse({
       operationId,
       status,
-      total: items.length,
+      total: catalogItems.length,
       copied: copied.length,
       rolledBack,
       files: copied.map((item) => ({
@@ -943,13 +1052,13 @@ export class FileOperationService {
   #readOperationItems(operationId: string): PlannedItem[] {
     const rows = this.#database.prepare(`
       SELECT id, asset_id, source_path, destination_path, temporary_path, source_folder_id,
-        destination_folder_id, original_file_name, destination_file_name, size_bytes, result_asset_id, status
+        destination_folder_id, original_file_name, destination_file_name, size_bytes, result_asset_id, status, catalog_managed
       FROM file_operation_items WHERE operation_id = ? ORDER BY ordinal ASC
     `).all(operationId) as Array<{
       id: string; asset_id: string; source_path: string; destination_path: string;
       temporary_path: string; source_folder_id: string; destination_folder_id: string;
       original_file_name: string; destination_file_name: string; size_bytes: number;
-      result_asset_id: string | null; status: string;
+      result_asset_id: string | null; status: string; catalog_managed: number;
     }>;
     return rows.map((row) => ({
       id: row.id,
@@ -964,7 +1073,8 @@ export class FileOperationService {
       sizeBytes: row.size_bytes,
       skipped: row.status === 'skipped',
       status: row.status,
-      resultAssetId: row.result_asset_id
+      resultAssetId: row.result_asset_id,
+      catalogManaged: row.catalog_managed === 1
     }));
   }
 
@@ -1086,6 +1196,57 @@ function reserveFileName(original: string, reserved: Set<string>): string {
   }
   reserved.add(normalizeFileName(candidate));
   return candidate;
+}
+
+function reserveGroupedFileNames(
+  files: readonly { path: string; fileName: string }[],
+  reserved: Set<string>
+): Map<string, string> {
+  const groups = new Map<string, Array<{ path: string; fileName: string }>>();
+  for (const file of files) {
+    const extension = path.extname(file.fileName);
+    const stem = path.basename(file.fileName, extension);
+    const key = `${normalizeFileName(path.dirname(file.path))}\0${normalizeFileName(stem)}`;
+    const group = groups.get(key);
+    if (group) group.push(file);
+    else groups.set(key, [file]);
+  }
+
+  const result = new Map<string, string>();
+  const orderedGroups = [...groups.entries()]
+    .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+    .map(([, group]) => group.sort((left, right) => {
+      const leftKey = `${normalizeFileName(left.path)}\0${left.fileName}`;
+      const rightKey = `${normalizeFileName(right.path)}\0${right.fileName}`;
+      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+    }));
+  for (const group of orderedGroups) {
+    if (group.length === 1) {
+      const file = group[0]!;
+      result.set(file.path, reserveFileName(file.fileName, reserved));
+      continue;
+    }
+    const maximumSuffix = reserved.size;
+    for (let suffixIndex = 0; suffixIndex <= maximumSuffix; suffixIndex += 1) {
+      const suffix = suffixIndex === 0 ? '' : ` (${suffixIndex})`;
+      const candidates = group.map((file) => {
+        const extension = path.extname(file.fileName);
+        const stem = path.basename(file.fileName, extension);
+        return { file, fileName: `${stem}${suffix}${extension}` };
+      });
+      const normalized = candidates.map((candidate) => normalizeFileName(candidate.fileName));
+      if (new Set(normalized).size !== normalized.length) throw new Error('DUPLICATE_GROUP_FILE_NAME');
+      if (normalized.some((candidate) => reserved.has(candidate))) continue;
+      for (let index = 0; index < candidates.length; index += 1) {
+        const candidate = candidates[index]!;
+        reserved.add(normalized[index]!);
+        result.set(candidate.file.path, candidate.fileName);
+      }
+      break;
+    }
+  }
+  if (result.size !== files.length) throw new Error('FILE_NAME_RESERVATION_EXHAUSTED');
+  return result;
 }
 
 function normalizeFileName(value: string): string {

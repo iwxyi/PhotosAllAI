@@ -5,6 +5,7 @@ import type {
   CatalogSmartCollection,
   CatalogAssetCursor,
   CatalogFolder,
+  CatalogCompanionPreview,
   CatalogTag,
   AnalysisResult,
   AnalysisRevision,
@@ -878,6 +879,8 @@ function PopulatedLibraryWorkspace({
   const [folderAction, setFolderAction] = useState<'move' | 'copy'>('move');
   const [moveTargetFolderId, setMoveTargetFolderId] = useState('');
   const [moveBusy, setMoveBusy] = useState(false);
+  const [companionPreview, setCompanionPreview] = useState<CatalogCompanionPreview>({ files: [], totalBytes: 0 });
+  const [includeCompanions, setIncludeCompanions] = useState(false);
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameDraft, setRenameDraft] = useState('');
   const [renameBusy, setRenameBusy] = useState(false);
@@ -1141,10 +1144,17 @@ function PopulatedLibraryWorkspace({
     await onRefreshCatalog();
   };
 
-  const openFolderDialog = (action: 'move' | 'copy') => {
+  const openFolderDialog = async (action: 'move' | 'copy') => {
     const firstTarget = catalogFolders.find((folder) => folder.id !== selected.folderId);
+    const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
     setFolderAction(action);
     setMoveTargetFolderId(firstTarget?.id ?? catalogFolders[0]?.id ?? '');
+    setIncludeCompanions(false);
+    try {
+      setCompanionPreview(await window.desktopApi.previewCatalogCompanions(assetIds));
+    } catch {
+      setCompanionPreview({ files: [], totalBytes: 0 });
+    }
     setMoveDialogOpen(true);
   };
 
@@ -1154,8 +1164,8 @@ function PopulatedLibraryWorkspace({
     setMoveBusy(true);
     try {
       const report = folderAction === 'move'
-        ? await window.desktopApi.moveCatalogAssets({ assetIds, targetFolderId: moveTargetFolderId })
-        : await window.desktopApi.copyCatalogAssets({ assetIds, targetFolderId: moveTargetFolderId });
+        ? await window.desktopApi.moveCatalogAssets({ assetIds, targetFolderId: moveTargetFolderId, includeCompanions })
+        : await window.desktopApi.copyCatalogAssets({ assetIds, targetFolderId: moveTargetFolderId, includeCompanions });
       if (report.status === 'completed') {
         if ('moved' in report) {
           const renamed = report.files.filter((item) => item.fileName !== item.previousFileName).length;
@@ -1309,6 +1319,7 @@ function PopulatedLibraryWorkspace({
                 </label>
               ))}
             </div>
+            {companionPreview.files.length > 0 && <label className="companion-choice"><input type="checkbox" checked={includeCompanions} onChange={(event) => setIncludeCompanions(event.target.checked)} /><span><strong>同时处理 {companionPreview.files.length} 个关联文件</strong><small>{companionPreview.files.map((file) => file.fileName).join('、')} · {(companionPreview.totalBytes / 1_048_576).toFixed(1)} MB</small></span></label>}
             <footer><span>重名文件会自动增加编号，不会覆盖已有文件。</span><div><button className="quiet-button" type="button" disabled={moveBusy} onClick={() => setMoveDialogOpen(false)}>取消</button><button className="primary-action compact" type="button" disabled={!moveTargetFolderId || moveBusy} onClick={() => void executeFolderOperation()}>{moveBusy ? `正在${folderAction === 'move' ? '移动' : '复制'}…` : folderAction === 'move' ? '移动' : '复制'}</button></div></footer>
           </section>
         </div>

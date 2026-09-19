@@ -21,6 +21,8 @@ import {
   deleteCatalogTagInputSchema,
   copyCatalogAssetsInputSchema,
   copyCatalogAssetsReportSchema,
+  catalogCompanionPreviewInputSchema,
+  catalogCompanionPreviewSchema,
   enqueueTaskInputSchema,
   exportGenerationResultsInputSchema,
   exportReportSchema,
@@ -269,9 +271,14 @@ function registerIpc(): void {
   ipcMain.handle('catalog.tags.update.v1', (_event, input: unknown) =>
     catalog.updateTags(updateCatalogTagsInputSchema.parse(input))
   );
+  ipcMain.handle('catalog.assets.companions.v1', async (_event, input: unknown) =>
+    catalogCompanionPreviewSchema.parse(await fileOperations.previewCompanions(catalogCompanionPreviewInputSchema.parse(input)))
+  );
   ipcMain.handle('catalog.assets.move.v1', async (_event, input: unknown) => {
     const parsed = moveCatalogAssetsInputSchema.parse(input);
-    const previous = new Map(parsed.assetIds.map((assetId) => [assetId, catalog.resolveAssetFile(assetId)]));
+    const companions = parsed.includeCompanions ? await fileOperations.previewCompanions(parsed.assetIds) : { files: [] };
+    const affectedIds = [...parsed.assetIds, ...companions.files.flatMap((file) => file.assetId ? [file.assetId] : [])];
+    const previous = new Map(affectedIds.map((assetId) => [assetId, catalog.resolveAssetFile(assetId)]));
     const report = moveCatalogAssetsReportSchema.parse(await fileOperations.move(parsed));
     if (report.status === 'completed') {
       await Promise.allSettled(report.files.map((file) => relocatePortableAfterFileOperation(file.assetId, previous.get(file.assetId) ?? null)));
