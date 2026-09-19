@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -166,6 +166,65 @@ describe('generation result export', () => {
       report_json: expect.stringContaining('"succeeded":1')
     });
     database.close();
+    service.close();
+  });
+
+  it('rejects symbolic-link sources without copying their targets', async () => {
+    const { service, source, destination } = await fixture();
+    const outside = path.join(path.dirname(destination), 'outside-secret.txt');
+    await writeFile(outside, 'must-not-be-exported');
+    await unlink(source);
+    await symlink(outside, source);
+
+    const report = await service.exportToDirectory([firstId], destination);
+
+    expect(report).toMatchObject({ succeeded: 0, failed: 1 });
+    expect(report.failures).toEqual([{ resultId: firstId, errorCode: 'EXPORT_SOURCE_NOT_FILE' }]);
+    expect(await readdir(destination)).toEqual([]);
+    service.close();
+  });
+
+  it('does not publish a conversion when its source changes during encoding', async () => {
+    let sourceToChange = '';
+    const encoder: ImageEncoder = {
+      async encode() {
+        await writeFile(sourceToChange, 'changed-generated-content-with-a-different-size');
+        return Buffer.from('stale-conversion');
+      }
+    };
+    const { service, source, destination } = await fixture(encoder);
+    sourceToChange = source;
+    const preset = {
+      id: '72e43f40-36f4-48bd-a4b0-9032f299b0a2', name: 'PNG', format: 'png' as const,
+      quality: 90, maxDimension: 3840, conflictPolicy: 'auto-rename' as const,
+      namingPattern: '{name}', createdAt: 0, updatedAt: 0
+    };
+
+    const report = await service.exportToDirectory([firstId], destination, preset);
+
+    expect(report.failures).toEqual([{ resultId: firstId, errorCode: 'EXPORT_SOURCE_CHANGED' }]);
+    expect(await readdir(destination)).toEqual([]);
+    service.close();
+  });
+
+  it('replaces unexpected failure details with a path-free error code', async () => {
+    const encoder: ImageEncoder = {
+      async encode(sourcePath) {
+        throw new Error(`unable to read ${sourcePath}`);
+      }
+    };
+    const { service, source, destination } = await fixture(encoder);
+    const preset = {
+      id: '72e43f40-36f4-48bd-a4b0-9032f299b0a2', name: 'PNG', format: 'png' as const,
+      quality: 90, maxDimension: 3840, conflictPolicy: 'auto-rename' as const,
+      namingPattern: '{name}', createdAt: 0, updatedAt: 0
+    };
+
+    const report = await service.exportToDirectory([firstId], destination, preset);
+
+    expect(report.failures).toEqual([{ resultId: firstId, errorCode: 'EXPORT_COPY_FAILED' }]);
+    expect(JSON.stringify(report)).not.toContain(source);
+    expect(await readdir(destination)).toEqual([]);
     service.close();
   });
 });

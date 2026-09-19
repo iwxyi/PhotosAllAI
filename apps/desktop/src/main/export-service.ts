@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { copyFile, link, realpath, stat, unlink, writeFile } from 'node:fs/promises';
+import { copyFile, link, lstat, realpath, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { nativeImage } from 'electron';
@@ -88,7 +88,7 @@ export class ExportService {
         if (signal?.aborted) break;
         failures.push({
           resultId,
-          errorCode: error instanceof Error ? error.message.slice(0, 200) : 'EXPORT_COPY_FAILED'
+          errorCode: toExportErrorCode(error)
         });
       }
     }
@@ -111,7 +111,7 @@ export class ExportService {
 
 async function copyWithPreset(sourcePath: string, destinationDirectory: string, imageEncoder: ImageEncoder, preset?: ExportPreset, signal?: AbortSignal): Promise<string> {
   signal?.throwIfAborted();
-  const source = await stat(sourcePath);
+  const source = await lstat(sourcePath);
   if (!source.isFile()) throw new Error('EXPORT_SOURCE_NOT_FILE');
   const parsed = path.parse(sourcePath);
   const temporaryPath = path.join(destinationDirectory, `.photoallisai-export-${randomUUID()}.tmp`);
@@ -129,7 +129,12 @@ async function copyWithPreset(sourcePath: string, destinationDirectory: string, 
       await writeFile(temporaryPath, encoded, { flag: 'wx' });
     }
     signal?.throwIfAborted();
-    const copied = await stat(temporaryPath);
+    const currentSource = await lstat(sourcePath);
+    if (!currentSource.isFile() || !isSameFileSnapshot(source, currentSource)) {
+      throw new Error('EXPORT_SOURCE_CHANGED');
+    }
+    const copied = await lstat(temporaryPath);
+    if (!copied.isFile()) throw new Error('EXPORT_TEMPORARY_FILE_UNSAFE');
     if ((!preset || preset.format === 'original') && copied.size !== source.size) throw new Error('EXPORT_SIZE_MISMATCH');
     if (copied.size === 0) throw new Error('EXPORT_EMPTY_FILE');
     const version = parsed.name.match(/(?:^|[-_])(v\d+)$/i)?.[1] ?? 'original';
@@ -157,4 +162,16 @@ async function copyWithPreset(sourcePath: string, destinationDirectory: string, 
 
 function isAlreadyExists(error: unknown): boolean {
   return error instanceof Error && 'code' in error && error.code === 'EEXIST';
+}
+
+function isSameFileSnapshot(before: Awaited<ReturnType<typeof lstat>>, after: Awaited<ReturnType<typeof lstat>>): boolean {
+  return before.dev === after.dev
+    && before.ino === after.ino
+    && before.size === after.size
+    && before.mtimeMs === after.mtimeMs;
+}
+
+function toExportErrorCode(error: unknown): string {
+  if (error instanceof Error && /^EXPORT_[A-Z0-9_]+$/u.test(error.message)) return error.message;
+  return 'EXPORT_COPY_FAILED';
 }
