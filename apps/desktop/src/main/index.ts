@@ -631,7 +631,7 @@ app.whenReady().then(async () => {
     export: async (rawPayload, signal) => {
       signal?.throwIfAborted();
       const payload = exportTaskPayloadSchema.parse(rawPayload);
-      const report = await exportService.exportToDirectory(payload.resultIds, payload.destinationDirectory, payload.preset);
+      const report = await exportService.exportToDirectory(payload.resultIds, payload.destinationDirectory, payload.preset, signal);
       signal?.throwIfAborted();
       return report;
     }

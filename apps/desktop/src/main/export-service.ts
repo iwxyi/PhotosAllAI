@@ -60,7 +60,8 @@ export class ExportService {
     this.#database.close();
   }
 
-  async exportToDirectory(resultIds: readonly string[], requestedDirectory: string, preset?: ExportPreset): Promise<ExportReport> {
+  async exportToDirectory(resultIds: readonly string[], requestedDirectory: string, preset?: ExportPreset, signal?: AbortSignal): Promise<ExportReport> {
+    signal?.throwIfAborted();
     const destinationDirectory = await realpath(requestedDirectory);
     if (!(await stat(destinationDirectory)).isDirectory()) throw new Error('EXPORT_DESTINATION_NOT_DIRECTORY');
     const uniqueIds = [...new Set(resultIds)];
@@ -74,15 +75,17 @@ export class ExportService {
     const files: ExportReport['files'] = [];
     const failures: ExportReport['failures'] = [];
     for (const resultId of uniqueIds) {
+      if (signal?.aborted) break;
       const sourcePath = this.#results.resolveResultFile(resultId);
       if (!sourcePath) {
         failures.push({ resultId, errorCode: 'EXPORT_RESULT_NOT_FOUND' });
         continue;
       }
       try {
-        const fileName = await copyWithPreset(sourcePath, destinationDirectory, this.#imageEncoder, preset);
+        const fileName = await copyWithPreset(sourcePath, destinationDirectory, this.#imageEncoder, preset, signal);
         files.push({ resultId, fileName });
       } catch (error) {
+        if (signal?.aborted) break;
         failures.push({
           resultId,
           errorCode: error instanceof Error ? error.message.slice(0, 200) : 'EXPORT_COPY_FAILED'
@@ -92,7 +95,7 @@ export class ExportService {
 
     const report = exportReportSchema.parse({
       id,
-      canceled: false,
+      canceled: signal?.aborted ?? false,
       total: uniqueIds.length,
       succeeded: files.length,
       failed: failures.length,
@@ -101,12 +104,13 @@ export class ExportService {
     });
     this.#database.prepare(`
       UPDATE export_runs SET status = ?, report_json = ?, completed_at = ? WHERE id = ?
-    `).run(failures.length === 0 ? 'completed' : 'partial', JSON.stringify(report), Date.now(), id);
+    `).run(report.canceled ? 'canceled' : failures.length === 0 ? 'completed' : 'partial', JSON.stringify(report), Date.now(), id);
     return report;
   }
 }
 
-async function copyWithPreset(sourcePath: string, destinationDirectory: string, imageEncoder: ImageEncoder, preset?: ExportPreset): Promise<string> {
+async function copyWithPreset(sourcePath: string, destinationDirectory: string, imageEncoder: ImageEncoder, preset?: ExportPreset, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   const source = await stat(sourcePath);
   if (!source.isFile()) throw new Error('EXPORT_SOURCE_NOT_FILE');
   const parsed = path.parse(sourcePath);
@@ -120,9 +124,11 @@ async function copyWithPreset(sourcePath: string, destinationDirectory: string, 
         quality: preset.quality,
         maxDimension: preset.maxDimension
       });
+      signal?.throwIfAborted();
       if (encoded.length === 0) throw new Error('EXPORT_ENCODE_FAILED');
       await writeFile(temporaryPath, encoded, { flag: 'wx' });
     }
+    signal?.throwIfAborted();
     const copied = await stat(temporaryPath);
     if ((!preset || preset.format === 'original') && copied.size !== source.size) throw new Error('EXPORT_SIZE_MISMATCH');
     if (copied.size === 0) throw new Error('EXPORT_EMPTY_FILE');
@@ -132,6 +138,7 @@ async function copyWithPreset(sourcePath: string, destinationDirectory: string, 
       ? preset.namingPattern.replaceAll('{name}', parsed.name).replaceAll('{version}', version) + extension
       : parsed.base;
     for (let index = 0; index < 10_000; index += 1) {
+      signal?.throwIfAborted();
       if (index > 0 && preset?.conflictPolicy === 'skip') throw new Error('EXPORT_NAME_EXISTS');
       const fileName = index === 0 ? requestedName : `${path.parse(requestedName).name} (${index})${extension}`;
       try {
