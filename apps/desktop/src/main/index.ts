@@ -113,6 +113,7 @@ let contentHashPassRunning = false;
 let shuttingDown = false;
 let shutdownStarted = false;
 let shutdownFinished = false;
+let mainWindow: BrowserWindow | null = null;
 let startupRecovery = {
   trashPurges: { total: 0, recovered: 0, conflicts: 0, failed: 0 },
   fileOperations: { total: 0, resolved: 0, failed: 0 },
@@ -738,15 +739,32 @@ app.whenReady().then(async () => {
 
   registerIpc();
   taskRunner.start();
-  let mainWindow = createWindow();
+  mainWindow = createWindow();
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
 
   app.on('second-instance', () => {
+    if (shuttingDown) return;
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      mainWindow = BrowserWindow.getAllWindows()[0] ?? createWindow();
+      mainWindow.on('closed', () => {
+        mainWindow = null;
+      });
+    }
+    if (!mainWindow || mainWindow.isDestroyed()) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
+    if (!mainWindow.isDestroyed()) mainWindow.focus();
   });
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) mainWindow = createWindow();
+    if (shuttingDown) return;
+    if (BrowserWindow.getAllWindows().length === 0) {
+      mainWindow = createWindow();
+      mainWindow.on('closed', () => {
+        mainWindow = null;
+      });
+    }
   });
 }).catch((error: unknown) => {
   const failure = createStartupFailureDialog(error);
