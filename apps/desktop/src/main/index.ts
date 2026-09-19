@@ -288,6 +288,14 @@ function registerIpc(): void {
   ipcMain.handle('providers.save.v1', (_event, input: unknown) =>
     providers.save(saveProviderProfileInputSchema.parse(input))
   );
+  ipcMain.handle('providers.delete.v1', async (_event, input: unknown) => {
+    const profileId = String(input);
+    const activeStatuses = new Set(['queued', 'preparing', 'uploading', 'processing', 'downloading', 'saving']);
+    if (tasks.list().some((task) => activeStatuses.has(task.status) && task.payload.providerProfileId === profileId)) {
+      throw new Error('PROVIDER_HAS_ACTIVE_TASKS');
+    }
+    await providers.delete(profileId);
+  });
   ipcMain.handle('providers.test.v1', (_event, input: unknown) =>
     providers.test(saveProviderProfileInputSchema.parse(input))
   );

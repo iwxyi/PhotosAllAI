@@ -43,6 +43,9 @@ describe('provider service', () => {
     expect(saved.baseUrl).toBe('https://example.com/v1');
     expect(saved.hasCredential).toBe(true);
     expect(JSON.stringify(await providers.list())).not.toContain('secret-key');
+    await providers.delete(saved.id);
+    await expect(providers.list()).resolves.toEqual([]);
+    await expect(providers.resolve(saved.id)).rejects.toThrow('PROVIDER_NOT_FOUND');
   });
 
   it('rejects insecure remote URLs but permits localhost development', async () => {

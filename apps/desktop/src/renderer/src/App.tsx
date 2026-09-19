@@ -1333,6 +1333,7 @@ function SettingsPage(): React.JSX.Element {
   const [form, setForm] = useState<SaveProviderProfileInput>(emptyProviderForm);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState<'save' | 'test' | null>(null);
+  const [providerDeleteCandidate, setProviderDeleteCandidate] = useState<string | null>(null);
   const [presets, setPresets] = useState<ExportPreset[]>([]);
   const [presetName, setPresetName] = useState('');
   const [presetMessage, setPresetMessage] = useState('');
@@ -1390,6 +1391,28 @@ function SettingsPage(): React.JSX.Element {
   const patchForm = <Key extends keyof SaveProviderProfileInput>(key: Key, value: SaveProviderProfileInput[Key]) => {
     setForm((current) => ({ ...current, [key]: value }));
     setMessage('');
+    setProviderDeleteCandidate(null);
+  };
+
+  const deleteProvider = async () => {
+    if (!form.id) return;
+    if (providerDeleteCandidate !== form.id) {
+      setProviderDeleteCandidate(form.id);
+      setMessage('再次点击确认删除；有运行中任务时无法删除。');
+      return;
+    }
+    setBusy('save');
+    try {
+      await window.desktopApi.deleteProviderProfile(form.id);
+      setProfiles((current) => current.filter((profile) => profile.id !== form.id));
+      setForm(emptyProviderForm);
+      setProviderDeleteCandidate(null);
+      setMessage('模型配置及其本地凭据已删除。');
+    } catch {
+      setMessage('删除失败，请先取消使用此配置的运行中任务。');
+    } finally {
+      setBusy(null);
+    }
   };
 
   const save = async () => {
@@ -1477,7 +1500,7 @@ function SettingsPage(): React.JSX.Element {
             {profiles.length === 0 ? (
               <div className="provider-empty"><Server size={25} /><strong>尚未配置模型</strong><span>填写右侧表单开始使用 AI 功能</span></div>
             ) : profiles.map((profile) => (
-              <button className="provider-item" key={profile.id} type="button" onClick={() => setForm({
+              <button className="provider-item" key={profile.id} type="button" onClick={() => { setForm({
                 id: profile.id,
                 name: profile.name,
                 kind: profile.kind,
@@ -1485,7 +1508,7 @@ function SettingsPage(): React.JSX.Element {
                 baseUrl: profile.baseUrl,
                 modelId: profile.modelId,
                 enabled: profile.enabled
-              })}>
+              }); setProviderDeleteCandidate(null); }}>
                 <span className="provider-icon">{profile.purpose === 'vision' ? <Bot size={16} /> : <WandSparkles size={16} />}</span>
                 <span><strong>{profile.name}</strong><small>{profile.modelId}</small></span>
                 <i className={profile.enabled ? 'is-online' : ''} />
@@ -1505,7 +1528,7 @@ function SettingsPage(): React.JSX.Element {
             <label><span>API Key</span><div className="secret-input"><KeyRound size={14} /><input type="password" autoComplete="off" placeholder={form.id ? '留空以保留已保存凭据' : '输入服务密钥'} value={form.apiKey ?? ''} onChange={(event) => patchForm('apiKey', event.target.value)} /></div><small>密钥不会写入图库数据库、日志或导出清单。</small></label>
             <label className="enabled-row"><input type="checkbox" checked={form.enabled} onChange={(event) => patchForm('enabled', event.target.checked)} /><span>启用此配置</span></label>
             <div className="form-feedback" role="status">{message}</div>
-            <div className="form-actions"><button className="secondary-action" type="button" disabled={busy !== null} onClick={() => void testConnection()}>{busy === 'test' ? '测试中…' : '测试连接'}</button><button className="primary-action compact" type="submit" disabled={busy !== null}>{busy === 'save' ? '保存中…' : '保存配置'}</button></div>
+            <div className="form-actions">{form.id && <button className="danger-action compact" type="button" disabled={busy !== null} onClick={() => void deleteProvider()}>{providerDeleteCandidate === form.id ? '确认删除' : '删除配置'}</button>}<button className="secondary-action" type="button" disabled={busy !== null} onClick={() => void testConnection()}>{busy === 'test' ? '测试中…' : '测试连接'}</button><button className="primary-action compact" type="submit" disabled={busy !== null}>{busy === 'save' ? '保存中…' : '保存配置'}</button></div>
           </form>
         </section>
         <section className="settings-section export-presets-section">

@@ -602,6 +602,7 @@ export interface DesktopApi {
   revealCatalogAsset(assetId: string): Promise<boolean>;
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;
+  deleteProviderProfile(profileId: string): Promise<void>;
   testProviderConnection(input: SaveProviderProfileInput): Promise<ConnectionTest>;
   listTasks(): Promise<PersistedTask[]>;
   enqueueTask(input: EnqueueTaskInput): Promise<PersistedTask>;

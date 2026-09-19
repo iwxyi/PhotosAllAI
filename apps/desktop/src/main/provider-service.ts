@@ -98,6 +98,13 @@ export class ProviderService {
     return providerProfileSchema.parse({ ...profile, hasCredential: Boolean(storedCredential) });
   }
 
+  async delete(profileId: string): Promise<void> {
+    const id = providerProfileSchema.shape.id.parse(profileId);
+    const profiles = await this.#read();
+    if (!profiles.some((profile) => profile.id === id)) throw new Error('PROVIDER_NOT_FOUND');
+    await this.#write(profiles.filter((profile) => profile.id !== id));
+  }
+
   async test(rawInput: SaveProviderProfileInput): Promise<ConnectionTest> {
     const input = saveProviderProfileInputSchema.parse(rawInput);
     const profiles = await this.#read();
