@@ -18,8 +18,12 @@ mac:
   gatekeeperAssess: false
 win:
   target:
-    - nsis
-    - zip
+    - target: nsis
+      arch:
+        - x64
+    - target: zip
+      arch:
+        - x64
   requestedExecutionLevel: asInvoker
 nsis:
   oneClick: false

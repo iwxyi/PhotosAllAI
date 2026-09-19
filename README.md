@@ -22,6 +22,6 @@ PhotoAllIsAI 是一款面向 macOS 与 Windows 的 AI 原生图片管理和生�
 
 ## 本地打包
 
-`pnpm package:dir` 会构建当前平台的未签名可运行目录。macOS 和 Windows 的安装包分别使用 `pnpm package:mac`、`pnpm package:win`；签名、公证和证书由发布环境注入，仓库不包含任何证书或私钥。
+`pnpm package:dir` 会构建当前平台的未签名可运行目录。macOS 和 Windows x64 的安装包分别使用 `pnpm package:mac`、`pnpm package:win`；签名、公证和证书由发布环境注入，仓库不包含任何证书或私钥。macOS 上的 Windows 交叉构建只验证产物生成，不能替代 Windows x64 真机安装、升级、卸载和硬件兼容性验收。
 
 RAW 预览优先使用 Electron 原生解码；如果系统安装了 ImageMagick（`magick` 命令），应用会在原生解码失败时使用受限的外部适配器生成预览。该适配器使用无 shell 参数调用、30 秒超时和 20 MiB 输出上限，未安装时不会阻止普通图片和图库管理功能。

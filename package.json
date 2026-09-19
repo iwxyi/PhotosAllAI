@@ -17,7 +17,7 @@
     "test:e2e": "pnpm build && playwright test"
     ,"package:dir": "pnpm build && electron-builder --projectDir apps/desktop --config electron-builder.yml --dir"
     ,"package:mac": "pnpm build && electron-builder --projectDir apps/desktop --config electron-builder.yml --mac"
-    ,"package:win": "pnpm build && electron-builder --projectDir apps/desktop --config electron-builder.yml --win"
+    ,"package:win": "pnpm build && electron-builder --projectDir apps/desktop --config electron-builder.yml --win --x64"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
