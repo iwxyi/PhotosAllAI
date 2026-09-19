@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { copyFile, mkdir, readFile, realpath, rename, rm, stat, unlink } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readFile, realpath, rename, rm, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
@@ -90,7 +90,7 @@ export class DatabaseMigrationService {
     await rm(temporary, { force: true });
     await copyFile(backupPath, temporary);
     assertHealthyDatabase(temporary);
-    const failedPath = `${this.#databasePath}.migration-failed-${now}`;
+    const failedPath = await uniquePath(`${this.#databasePath}.migration-failed-${now}`);
     const moved: Array<{ from: string; to: string }> = [];
     try {
       if (await isRegularFile(this.#databasePath)) {
@@ -137,6 +137,18 @@ async function isRegularFile(filePath: string): Promise<boolean> {
   } catch (error) {
     if (isNodeError(error, 'ENOENT')) return false;
     throw error;
+  }
+}
+
+async function uniquePath(basePath: string): Promise<string> {
+  for (let index = 0; ; index += 1) {
+    const candidate = index === 0 ? basePath : `${basePath}-${index}`;
+    try {
+      await lstat(candidate);
+    } catch (error) {
+      if (isNodeError(error, 'ENOENT')) return candidate;
+      throw error;
+    }
   }
 }
 

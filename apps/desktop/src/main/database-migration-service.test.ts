@@ -67,6 +67,21 @@ describe('database migration checkpoints', () => {
     expect(files.some((name) => name.startsWith('catalog.sqlite.migration-failed-400'))).toBe(true);
   });
 
+  it('preserves an existing migration failure artifact when recovery runs again', async () => {
+    const context = await fixture();
+    const service = new DatabaseMigrationService(context.databasePath);
+    await service.prepare(1, 500);
+    await writeFile(`${context.databasePath}.migration-failed-600`, 'existing evidence');
+    const migrated = new DatabaseSync(context.databasePath);
+    migrated.exec("UPDATE records SET value = 'after';");
+    migrated.close();
+
+    await expect(service.recoverPending(600)).resolves.toBe(true);
+
+    expect(await readFile(`${context.databasePath}.migration-failed-600`, 'utf8')).toBe('existing evidence');
+    expect(await readFile(`${context.databasePath}.migration-failed-600-1`, 'utf8')).toContain('SQLite format 3');
+  });
+
   it('rejects a database created by a newer application schema', async () => {
     const context = await fixture();
     const service = new DatabaseMigrationService(context.databasePath);
