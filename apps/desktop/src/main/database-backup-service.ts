@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readdir, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -23,7 +23,7 @@ export class DatabaseBackupService {
     const destination = path.resolve(destinationPath);
     if (destination === this.#databasePath) throw new Error('BACKUP_DESTINATION_IS_SOURCE');
     await mkdir(path.dirname(destination), { recursive: true });
-    const temporary = `${destination}.${process.pid}.tmp`;
+    const temporary = `${destination}.${process.pid}.${randomUUID()}.tmp`;
     await unlink(temporary).catch(() => undefined);
 
     const database = new DatabaseSync(this.#databasePath);

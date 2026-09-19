@@ -54,6 +54,22 @@ describe('database backup service', () => {
     database.close();
   });
 
+  it('isolates concurrent snapshots targeting the same destination', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'photoallisai-backup-concurrent-'));
+    const databasePath = path.join(root, 'catalog.sqlite');
+    const database = new DatabaseSync(databasePath);
+    database.exec('CREATE TABLE marker (value TEXT NOT NULL); INSERT INTO marker VALUES (\'concurrent\');');
+    database.close();
+    const destination = path.join(root, 'backup.sqlite');
+    const service = new DatabaseBackupService(databasePath);
+
+    await expect(Promise.all([service.create(destination), service.create(destination)])).resolves.toHaveLength(2);
+    const restored = new DatabaseSync(destination, { readOnly: true });
+    expect(restored.prepare('SELECT value FROM marker').get()).toEqual({ value: 'concurrent' });
+    restored.close();
+    expect((await readdir(root)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
   it('skips fresh automatic backups and removes snapshots beyond retention', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'photoallisai-backup-rotation-'));
     const databasePath = path.join(root, 'catalog.sqlite');
