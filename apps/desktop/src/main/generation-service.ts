@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lookup } from 'node:dns/promises';
-import { access, copyFile, lstat, mkdir, readFile, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -45,6 +45,14 @@ type ResultRow = {
   created_at: number;
   trashed_at: number | null;
   trash_path: string | null;
+  purge_path: string | null;
+};
+
+export type TrashPurgeRecoveryReport = {
+  total: number;
+  recovered: number;
+  conflicts: number;
+  failed: number;
 };
 
 const MAX_RESULT_BYTES = 50 * 1024 * 1024;
@@ -52,6 +60,7 @@ const MAX_RESULT_BYTES = 50 * 1024 * 1024;
 export class GenerationService {
   readonly #database: DatabaseSync;
   readonly #generatedDirectory: string;
+  readonly #trashDirectory: string;
   readonly #providers: ProviderResolver;
   readonly #images: GenerationImageSource;
   readonly #catalog: CatalogSource;
@@ -64,6 +73,7 @@ export class GenerationService {
     catalog: CatalogSource
   ) {
     this.#generatedDirectory = generatedDirectory;
+    this.#trashDirectory = path.resolve(path.dirname(generatedDirectory), 'trash', 'generation');
     this.#providers = providers;
     this.#images = images;
     this.#catalog = catalog;
@@ -99,6 +109,9 @@ export class GenerationService {
     }
     if (!columns.some((column) => column.name === 'trash_path')) {
       this.#database.exec('ALTER TABLE generation_results ADD COLUMN trash_path TEXT');
+    }
+    if (!columns.some((column) => column.name === 'purge_path')) {
+      this.#database.exec('ALTER TABLE generation_results ADD COLUMN purge_path TEXT');
     }
   }
 
@@ -155,7 +168,12 @@ export class GenerationService {
   async restore(resultId: string): Promise<GenerationResult> {
     const row = this.#findResult(resultId);
     if (row.trashed_at === null || !row.trash_path) throw new Error('GENERATION_RESULT_NOT_TRASHED');
-    if (!await pathExists(row.trash_path)) throw new Error('GENERATION_RESULT_TRASH_FILE_NOT_FOUND');
+    if (row.purge_path || (await this.#findLegacyPurgePaths(row)).length > 0) {
+      throw new Error('GENERATION_RESULT_PURGE_PENDING');
+    }
+    const trashFile = await inspectPurgeFile(row.trash_path, this.#trashDirectory);
+    if (trashFile === null) throw new Error('GENERATION_RESULT_TRASH_FILE_NOT_FOUND');
+    if (trashFile === false) throw new Error('GENERATION_RESULT_TRASH_PATH_UNSAFE');
     if (await pathExists(row.file_path)) throw new Error('GENERATION_RESULT_RESTORE_CONFLICT');
     await mkdir(path.dirname(row.file_path), { recursive: true });
     await moveFileVerified(row.trash_path, row.file_path);
@@ -202,53 +220,117 @@ export class GenerationService {
   }
 
   async emptyTrash(): Promise<EmptyGenerationTrashReport> {
+    const interrupted = await this.recoverInterruptedTrashPurges();
     const rows = this.#database.prepare(`
       SELECT * FROM generation_results WHERE trashed_at IS NOT NULL ORDER BY trashed_at ASC
     `).all() as ResultRow[];
-    let purged = 0;
+    let purged = interrupted.recovered;
     let missingFiles = 0;
-    let failed = 0;
+    let failed = interrupted.failed + interrupted.conflicts;
     let freedBytes = 0;
-    const removeRecord = this.#database.prepare('DELETE FROM generation_results WHERE id = ? AND trashed_at IS NOT NULL');
     for (const row of rows) {
       if (!this.#isSafeTrashPath(row)) {
         failed += 1;
         continue;
       }
       const trashPath = row.trash_path!;
-      let fileSize = 0;
+      if (row.purge_path || (await this.#findLegacyPurgePaths(row)).length > 0) continue;
+      const stagedPath = this.#deterministicPurgePath(row);
       try {
-        const file = await lstat(trashPath);
-        if (!file.isFile()) {
+        const file = await inspectPurgeFile(trashPath, this.#trashDirectory);
+        if (file === null) {
+          missingFiles += 1;
+          if (this.#database.prepare('DELETE FROM generation_results WHERE id = ? AND trashed_at IS NOT NULL AND purge_path IS NULL').run(row.id).changes !== 1) {
+            failed += 1;
+            continue;
+          }
+          purged += 1;
+          await rmdir(path.dirname(trashPath)).catch(() => undefined);
+          continue;
+        }
+        if (file === false) {
           failed += 1;
           continue;
         }
-        fileSize = file.size;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        const intent = this.#database.prepare(`
+          UPDATE generation_results SET purge_path = ?
+          WHERE id = ? AND trashed_at IS NOT NULL AND purge_path IS NULL
+        `).run(stagedPath, row.id);
+        if (intent.changes !== 1) {
           failed += 1;
           continue;
         }
-        missingFiles += 1;
-        if (removeRecord.run(row.id).changes === 1) purged += 1;
-        else failed += 1;
-        continue;
-      }
-
-      const stagedPath = path.join(path.dirname(trashPath), `.${row.file_name}.${randomUUID()}.purge`);
-      try {
         await rename(trashPath, stagedPath);
         await unlink(stagedPath);
-        if (removeRecord.run(row.id).changes !== 1) throw new Error('GENERATION_RESULT_CONCURRENT_CHANGE');
+        if (this.#removePurgedRecord(row.id, stagedPath) !== 1) throw new Error('GENERATION_RESULT_CONCURRENT_CHANGE');
         purged += 1;
-        freedBytes += fileSize;
+        freedBytes += Number(file.size);
         await rmdir(path.dirname(trashPath)).catch(() => undefined);
       } catch {
-        await rename(stagedPath, trashPath).catch(() => undefined);
         failed += 1;
       }
     }
-    return emptyGenerationTrashReportSchema.parse({ total: rows.length, purged, missingFiles, failed, freedBytes });
+    return emptyGenerationTrashReportSchema.parse({ total: rows.length + interrupted.recovered, purged, missingFiles, failed, freedBytes });
+  }
+
+  async recoverInterruptedTrashPurges(): Promise<TrashPurgeRecoveryReport> {
+    const rows = this.#database.prepare(`
+      SELECT * FROM generation_results WHERE trashed_at IS NOT NULL ORDER BY trashed_at ASC
+    `).all() as ResultRow[];
+    let total = 0;
+    let recovered = 0;
+    let conflicts = 0;
+    let failed = 0;
+    for (const row of rows) {
+      if (!this.#isSafeTrashPath(row)) continue;
+      const trashPath = row.trash_path!;
+      let stagedPath = row.purge_path;
+      if (stagedPath && !this.#isSafePurgePath(row, stagedPath)) {
+        total += 1;
+        failed += 1;
+        continue;
+      }
+      if (!stagedPath) {
+        const legacyCandidates = await this.#findLegacyPurgePaths(row);
+        if (legacyCandidates.length > 1) {
+          total += 1;
+          conflicts += 1;
+          continue;
+        }
+        stagedPath = legacyCandidates[0] ?? null;
+      }
+      if (!stagedPath) continue;
+      total += 1;
+      const [trashFile, stagedFile] = await Promise.all([
+        inspectPurgeFile(trashPath, this.#trashDirectory),
+        inspectPurgeFile(stagedPath, this.#trashDirectory)
+      ]);
+      if (trashFile === false || stagedFile === false) {
+        failed += 1;
+        continue;
+      }
+      if (trashFile && stagedFile) {
+        conflicts += 1;
+        continue;
+      }
+      try {
+        if (!row.purge_path) {
+          const claimed = this.#database.prepare(`
+            UPDATE generation_results SET purge_path = ?
+            WHERE id = ? AND trashed_at IS NOT NULL AND purge_path IS NULL
+          `).run(stagedPath, row.id);
+          if (claimed.changes !== 1) throw new Error('GENERATION_RESULT_CONCURRENT_CHANGE');
+        }
+        if (trashFile) await rename(trashPath, stagedPath);
+        if (stagedFile || trashFile) await unlink(stagedPath);
+        if (this.#removePurgedRecord(row.id, stagedPath) !== 1) throw new Error('GENERATION_RESULT_CONCURRENT_CHANGE');
+        recovered += 1;
+        await rmdir(path.dirname(trashPath)).catch(() => undefined);
+      } catch {
+        failed += 1;
+      }
+    }
+    return { total, recovered, conflicts, failed };
   }
 
   async relocatePortableResults(
@@ -447,6 +529,55 @@ export class GenerationService {
     return path.resolve(row.trash_path) === expected;
   }
 
+  #deterministicPurgePath(row: ResultRow): string {
+    return path.join(path.dirname(row.trash_path!), `.${row.file_name}.${row.id}.purge`);
+  }
+
+  #isSafePurgePath(row: ResultRow, purgePath: string): boolean {
+    return path.resolve(purgePath) === path.resolve(this.#deterministicPurgePath(row))
+      || path.dirname(path.resolve(purgePath)) === path.dirname(path.resolve(row.trash_path!))
+        && new RegExp(`^\\.${escapeRegExp(row.file_name)}\\.[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\.purge$`, 'i')
+          .test(path.basename(purgePath));
+  }
+
+  async #findLegacyPurgePaths(row: ResultRow): Promise<string[]> {
+    const directory = path.dirname(row.trash_path!);
+    let names: string[];
+    try {
+      names = await readdir(directory);
+    } catch {
+      return [];
+    }
+    const candidates = names
+      .map((name) => path.join(directory, name))
+      .filter((candidate) => this.#isSafePurgePath(row, candidate));
+    return candidates;
+  }
+
+  #removePurgedRecord(resultId: string, stagedPath: string): number {
+    return Number(this.#database.prepare(`
+      DELETE FROM generation_results
+      WHERE id = ? AND trashed_at IS NOT NULL AND purge_path = ?
+    `).run(resultId, stagedPath).changes);
+  }
+
+}
+
+async function inspectPurgeFile(filePath: string, trashRoot: string): Promise<Awaited<ReturnType<typeof lstat>> | null | false> {
+  try {
+    const entry = await lstat(filePath);
+    if (!entry.isFile()) return false;
+    const [rootEntry, directoryEntry] = await Promise.all([lstat(trashRoot), lstat(path.dirname(filePath))]);
+    if (!rootEntry.isDirectory() || !directoryEntry.isDirectory()) return false;
+    const [resolvedRoot, resolvedDirectory] = await Promise.all([realpath(trashRoot), realpath(path.dirname(filePath))]);
+    return path.dirname(resolvedDirectory) === resolvedRoot ? entry : false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : false;
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 async function pathExists(filePath: string): Promise<boolean> {

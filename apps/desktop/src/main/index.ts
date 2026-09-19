@@ -598,6 +598,7 @@ app.whenReady().then(async () => {
     imageCache,
     catalog
   );
+  await generation.recoverInterruptedTrashPurges();
   libraryIntegrity = new LibraryIntegrityService(databasePath, join(libraryDirectory, 'generated'));
   await fileOperations.recoverInterruptedOperations(async (change) => {
     await generation.relocatePortableResults(

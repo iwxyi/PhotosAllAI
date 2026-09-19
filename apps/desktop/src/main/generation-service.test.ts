@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http';
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -231,6 +231,139 @@ describe('managed generation results', () => {
     database.prepare('UPDATE generation_results SET trash_path = ? WHERE id = ?').run(sourcePath, unsafe.id);
     await expect(service.getTrashSummary()).resolves.toMatchObject({ resultCount: 1, unsafePaths: 1 });
     await expect(service.emptyTrash()).resolves.toMatchObject({ total: 1, purged: 0, failed: 1, freedBytes: 0 });
+    expect(await readFile(sourcePath, 'utf8')).toBe('untouched-original');
+    expect(service.listTrashed('asset-1')).toHaveLength(1);
+    database.close();
+    service.close();
+  });
+
+  it('recovers an interrupted legacy purge and is idempotent', async () => {
+    const { service, directory, sourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', payload());
+    await service.trash(result.id);
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    const trashPath = (database.prepare('SELECT trash_path FROM generation_results WHERE id = ?').get(result.id) as { trash_path: string }).trash_path;
+    const stagedPath = path.join(path.dirname(trashPath), `.${result.fileName}.234c97f1-19b8-4e24-aeda-2e6afebbf681.purge`);
+    await rename(trashPath, stagedPath);
+
+    await expect(service.recoverInterruptedTrashPurges()).resolves.toEqual({ total: 1, recovered: 1, conflicts: 0, failed: 0 });
+    await expect(service.recoverInterruptedTrashPurges()).resolves.toEqual({ total: 0, recovered: 0, conflicts: 0, failed: 0 });
+    expect(service.listTrashed('asset-1')).toEqual([]);
+    await expect(stat(stagedPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readFile(sourcePath, 'utf8')).toBe('untouched-original');
+    database.close();
+    service.close();
+  });
+
+  it('finishes a persisted purge after its staged file was already deleted', async () => {
+    const { service, directory } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', payload());
+    await service.trash(result.id);
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    const trashPath = (database.prepare('SELECT trash_path FROM generation_results WHERE id = ?').get(result.id) as { trash_path: string }).trash_path;
+    const stagedPath = path.join(path.dirname(trashPath), `.${result.fileName}.${result.id}.purge`);
+    database.prepare('UPDATE generation_results SET purge_path = ? WHERE id = ?').run(stagedPath, result.id);
+    await rename(trashPath, stagedPath);
+    await rm(stagedPath);
+
+    await expect(service.emptyTrash()).resolves.toMatchObject({ total: 1, purged: 1, failed: 0 });
+    expect(service.listTrashed('asset-1')).toEqual([]);
+    database.close();
+    service.close();
+  });
+
+  it('preserves both files when an interrupted purge has a conflict', async () => {
+    const { service, directory } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', payload());
+    await service.trash(result.id);
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    const trashPath = (database.prepare('SELECT trash_path FROM generation_results WHERE id = ?').get(result.id) as { trash_path: string }).trash_path;
+    const stagedPath = path.join(path.dirname(trashPath), `.${result.fileName}.${result.id}.purge`);
+    await writeFile(stagedPath, 'unexpected-conflict');
+    database.prepare('UPDATE generation_results SET purge_path = ? WHERE id = ?').run(stagedPath, result.id);
+
+    await expect(service.recoverInterruptedTrashPurges()).resolves.toEqual({ total: 1, recovered: 0, conflicts: 1, failed: 0 });
+    await expect(service.emptyTrash()).resolves.toMatchObject({ total: 1, purged: 0, failed: 1 });
+    expect(await readFile(trashPath)).toEqual(png);
+    expect(await readFile(stagedPath, 'utf8')).toBe('unexpected-conflict');
+    expect(service.listTrashed('asset-1')).toHaveLength(1);
+    database.close();
+    service.close();
+  });
+
+  it('does not follow a recycled result directory replaced by a symbolic link', async () => {
+    const { service, directory, sourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', payload());
+    await service.trash(result.id);
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    const trashPath = (database.prepare('SELECT trash_path FROM generation_results WHERE id = ?').get(result.id) as { trash_path: string }).trash_path;
+    const resultDirectory = path.dirname(trashPath);
+    await rm(resultDirectory, { recursive: true });
+    await symlink(path.dirname(sourcePath), resultDirectory);
+    const outsidePath = path.join(path.dirname(sourcePath), result.fileName);
+    await writeFile(outsidePath, 'outside-managed-trash');
+
+    await expect(service.emptyTrash()).resolves.toMatchObject({ total: 1, purged: 0, failed: 1 });
+    await expect(service.restore(result.id)).rejects.toThrow('GENERATION_RESULT_TRASH_PATH_UNSAFE');
+    expect(await readFile(outsidePath, 'utf8')).toBe('outside-managed-trash');
+    expect(await readFile(sourcePath, 'utf8')).toBe('untouched-original');
+    expect(service.listTrashed('asset-1')).toHaveLength(1);
+    database.close();
+    service.close();
+  });
+
+  it('ignores unknown and symbolic-link files during purge recovery', async () => {
+    const { service, directory, sourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', payload());
+    await service.trash(result.id);
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    const trashPath = (database.prepare('SELECT trash_path FROM generation_results WHERE id = ?').get(result.id) as { trash_path: string }).trash_path;
+    await rm(trashPath);
+    const unknownPath = path.join(path.dirname(trashPath), '.unrelated.purge');
+    const linkedPath = path.join(path.dirname(trashPath), `.${result.fileName}.b61d6955-dd2d-4437-8e71-260759e645b1.purge`);
+    await writeFile(unknownPath, 'keep-me');
+    await symlink(sourcePath, linkedPath);
+
+    await expect(service.recoverInterruptedTrashPurges()).resolves.toEqual({ total: 1, recovered: 0, conflicts: 0, failed: 1 });
+    expect(await readFile(unknownPath, 'utf8')).toBe('keep-me');
+    expect(await readFile(linkedPath, 'utf8')).toBe('untouched-original');
+    expect(service.listTrashed('asset-1')).toHaveLength(1);
+    database.close();
+    service.close();
+  });
+
+  it('reports multiple legacy purge candidates as a conflict and preserves them', async () => {
+    const { service, directory } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', payload());
+    await service.trash(result.id);
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    const trashPath = (database.prepare('SELECT trash_path FROM generation_results WHERE id = ?').get(result.id) as { trash_path: string }).trash_path;
+    await rm(trashPath);
+    const first = path.join(path.dirname(trashPath), `.${result.fileName}.a41a88f1-6a54-4d63-b37f-82e9a19c065e.purge`);
+    const second = path.join(path.dirname(trashPath), `.${result.fileName}.8c688e90-d24b-4721-a6f3-1cbbe8b5a4c3.purge`);
+    await writeFile(first, 'first');
+    await writeFile(second, 'second');
+
+    await expect(service.recoverInterruptedTrashPurges()).resolves.toEqual({ total: 1, recovered: 0, conflicts: 1, failed: 0 });
+    expect(await readFile(first, 'utf8')).toBe('first');
+    expect(await readFile(second, 'utf8')).toBe('second');
+    expect(service.listTrashed('asset-1')).toHaveLength(1);
+    database.close();
+    service.close();
+  });
+
+  it('leaves missing records and unsafe purge paths untouched during startup recovery', async () => {
+    const { service, directory, sourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', payload());
+    await service.trash(result.id);
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    const trashPath = (database.prepare('SELECT trash_path FROM generation_results WHERE id = ?').get(result.id) as { trash_path: string }).trash_path;
+    await rm(trashPath);
+
+    await expect(service.recoverInterruptedTrashPurges()).resolves.toEqual({ total: 0, recovered: 0, conflicts: 0, failed: 0 });
+    expect(service.listTrashed('asset-1')).toHaveLength(1);
+    database.prepare('UPDATE generation_results SET purge_path = ? WHERE id = ?').run(sourcePath, result.id);
+    await expect(service.recoverInterruptedTrashPurges()).resolves.toEqual({ total: 1, recovered: 0, conflicts: 0, failed: 1 });
     expect(await readFile(sourcePath, 'utf8')).toBe('untouched-original');
     expect(service.listTrashed('asset-1')).toHaveLength(1);
     database.close();
