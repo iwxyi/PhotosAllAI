@@ -12,6 +12,7 @@
     "lint": "eslint . --max-warnings=0",
     "test": "vitest run",
     "test:real-data": "PHOTOALLISAI_TEST_DATA=./test_data vitest run apps/desktop/src/main/catalog-real-data.test.ts --reporter=verbose",
+    "test:real-data:preview": "pnpm build && PHOTOALLISAI_TEST_DATA=./test_data playwright test tests/e2e/real-data-preview.spec.ts --reporter=line",
     "test:watch": "vitest",
     "test:e2e": "pnpm build && playwright test"
     ,"package:dir": "pnpm build && electron-builder --projectDir apps/desktop --config electron-builder.yml --dir"
