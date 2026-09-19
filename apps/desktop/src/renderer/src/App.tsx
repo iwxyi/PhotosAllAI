@@ -78,6 +78,7 @@ import {
 } from 'lucide-react';
 
 import { photos, type Photo } from './mock-data';
+import { fileOperationFailureMessage } from './error-messages';
 
 const THEME_CHANGE_EVENT = 'photoallisai-theme-change';
 const DEFAULT_GENERATION_TEMPLATE_BODY = [
@@ -1944,12 +1945,12 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
       const report = await window.desktopApi.undoFileOperation({ operationId: operation.id });
       setMessage(report.status === 'completed'
         ? `已撤销${fileOperationLabels[operation.kind]}，恢复 ${report.undone} 张照片。`
-        : `撤销失败（${report.errorCode ?? 'UNKNOWN'}），${report.rolledBack ? '文件已恢复到撤销前状态。' : '请检查操作历史。'}`);
+        : `撤销失败：${fileOperationFailureMessage(report.errorCode)}，${report.rolledBack ? '文件已恢复到撤销前状态。' : '请检查操作历史。'}`);
       setFileOperations(await window.desktopApi.listFileOperationHistory());
       await onCatalogChanged();
     } catch (error) {
-      const code = error instanceof Error ? error.message : 'UNKNOWN';
-      setMessage(`无法撤销此操作（${code}）。`);
+      const code = error instanceof Error ? error.message : null;
+      setMessage(`无法撤销此操作：${fileOperationFailureMessage(code)}。`);
       setFileOperations(await window.desktopApi.listFileOperationHistory());
     } finally {
       setUndoBusyId(null);
