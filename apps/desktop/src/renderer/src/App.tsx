@@ -1745,6 +1745,7 @@ function TemplatePage(): React.JSX.Element {
   const [templateSearch, setTemplateSearch] = useState('');
   const [templateCategory, setTemplateCategory] = useState('全部分类');
   const [message, setMessage] = useState('');
+  const [archiveCandidate, setArchiveCandidate] = useState<string | null>(null);
 
   useEffect(() => { void window.desktopApi.listPromptTemplates().then(setTemplateItems); }, []);
 
@@ -1760,6 +1761,25 @@ function TemplatePage(): React.JSX.Element {
   const patchTemplate = <Key extends keyof SavePromptTemplateInput>(key: Key, value: SavePromptTemplateInput[Key]) => {
     setForm((current) => ({ ...current, [key]: value }));
     setMessage('');
+    setArchiveCandidate(null);
+  };
+
+  const archiveTemplate = async () => {
+    if (!form.id) return;
+    if (archiveCandidate !== form.id) {
+      setArchiveCandidate(form.id);
+      setMessage('再次点击确认归档。历史任务仍保留模板 ID 和版本。');
+      return;
+    }
+    try {
+      await window.desktopApi.archivePromptTemplate(form.id);
+      setTemplateItems((current) => current.filter((template) => template.id !== form.id));
+      setForm(emptyTemplateForm);
+      setArchiveCandidate(null);
+      setMessage('模板已归档，不再用于新任务。');
+    } catch {
+      setMessage('模板归档失败，请刷新后重试。');
+    }
   };
 
   const save = async () => {
@@ -1820,7 +1840,7 @@ function TemplatePage(): React.JSX.Element {
           <label><span>简短描述</span><input maxLength={2_000} value={form.description} placeholder="说明适用场景和效果" onChange={(event) => patchTemplate('description', event.target.value)} /></label>
           <label className="template-body-field"><span>模板正文</span><textarea required value={form.body} onChange={(event) => patchTemplate('body', event.target.value)} /></label>
           <div className="template-variables"><span>可用变量</span>{['analysis.summary', 'analysis.generative_actions', 'catalog.subjects', 'user_instruction', 'preservation_rules'].map((variable) => <code key={variable}>{`{{${variable}}}`}</code>)}</div>
-          <div className="template-editor-footer"><span role="status">{message}</span><button className="primary-action compact" type="submit">{form.id ? '保存新版本' : '创建模板'}</button></div>
+          <div className="template-editor-footer"><span role="status">{message}</span>{form.id && <button className="danger-action compact" type="button" onClick={() => void archiveTemplate()}>{archiveCandidate === form.id ? '确认归档' : '归档模板'}</button>}<button className="primary-action compact" type="submit">{form.id ? '保存新版本' : '创建模板'}</button></div>
         </form>
       </div>
       {previewTemplate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPreviewTemplate(null); }}><section className="template-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="template-preview-title"><header><div><span className="dialog-icon"><WandSparkles size={16} /></span><div><h2 id="template-preview-title">{previewTemplate.name}</h2><p>{previewTemplate.category} · 版本 {previewTemplate.version}</p></div></div><IconButton label="关闭模板预览" onClick={() => setPreviewTemplate(null)}><X size={15} /></IconButton></header><div className="template-preview-content">{previewTemplate.exampleId === 'none' ? <div className="template-preview-placeholder"><Image size={28} /><span>未设置示例图片</span></div> : <img className="template-preview-hero" src={`./demo/${previewTemplate.exampleId}.jpg`} alt={`${previewTemplate.name} 示例图片`} />}<div className="template-preview-meta"><span className="template-preview-category">{previewTemplate.category}</span><span>版本 {previewTemplate.version}</span></div><p className="template-preview-description">{previewTemplate.description || '暂无描述'}</p><div className="template-preview-body"><strong>模板正文</strong><pre>{previewTemplate.body}</pre></div></div><footer><button className="quiet-button" type="button" onClick={() => setPreviewTemplate(null)}>关闭</button><button className="primary-action compact" type="button" onClick={() => { setForm({ id: previewTemplate.id, name: previewTemplate.name, description: previewTemplate.description, category: previewTemplate.category, body: previewTemplate.body, exampleId: previewTemplate.exampleId }); setPreviewTemplate(null); }}>编辑模板</button></footer></section></div>}

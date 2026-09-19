@@ -38,7 +38,8 @@ export class TemplateService {
       BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS prompt_templates (
         id TEXT PRIMARY KEY,
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        archived_at INTEGER
       );
       CREATE TABLE IF NOT EXISTS prompt_template_versions (
         template_id TEXT NOT NULL REFERENCES prompt_templates(id) ON DELETE CASCADE,
@@ -58,6 +59,10 @@ export class TemplateService {
     if (!columns.some((column) => column.name === 'example_id')) {
       this.#database.exec("ALTER TABLE prompt_template_versions ADD COLUMN example_id TEXT NOT NULL DEFAULT 'none'");
     }
+    const templateColumns = this.#database.prepare('PRAGMA table_info(prompt_templates)').all() as { name: string }[];
+    if (!templateColumns.some((column) => column.name === 'archived_at')) {
+      this.#database.exec('ALTER TABLE prompt_templates ADD COLUMN archived_at INTEGER');
+    }
   }
 
   list(): PromptTemplate[] {
@@ -66,7 +71,7 @@ export class TemplateService {
         t.created_at, v.created_at AS updated_at
       FROM prompt_templates t
       JOIN prompt_template_versions v ON v.template_id = t.id
-      WHERE v.version = (
+      WHERE t.archived_at IS NULL AND v.version = (
         SELECT MAX(latest.version) FROM prompt_template_versions latest
         WHERE latest.template_id = t.id
       )
@@ -80,9 +85,10 @@ export class TemplateService {
     const now = Date.now();
     const id = input.id ?? randomUUID();
     const existing = this.#database
-      .prepare('SELECT created_at FROM prompt_templates WHERE id = ?')
-      .get(id) as { created_at: number } | undefined;
+      .prepare('SELECT created_at, archived_at FROM prompt_templates WHERE id = ?')
+      .get(id) as { created_at: number; archived_at: number | null } | undefined;
     if (input.id && !existing) throw new Error('TEMPLATE_NOT_FOUND');
+    if (existing?.archived_at) throw new Error('TEMPLATE_ARCHIVED');
     const maximum = this.#database
       .prepare('SELECT COALESCE(MAX(version), 0) AS value FROM prompt_template_versions WHERE template_id = ?')
       .get(id) as { value: number };
@@ -115,6 +121,13 @@ export class TemplateService {
       createdAt: existing?.created_at ?? now,
       updatedAt: now
     });
+  }
+
+  archive(templateId: string): void {
+    const result = this.#database.prepare(`
+      UPDATE prompt_templates SET archived_at = ? WHERE id = ? AND archived_at IS NULL
+    `).run(Date.now(), templateId);
+    if (result.changes !== 1) throw new Error('TEMPLATE_NOT_FOUND');
   }
 
   #toTemplate(row: TemplateRow): PromptTemplate {

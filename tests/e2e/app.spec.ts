@@ -119,6 +119,9 @@ test('opens the task drawer and application tabs', async () => {
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.screenshot({ path: 'test-results/prompt-templates.png', animations: 'disabled' });
+  await page.getByRole('button', { name: '归档模板' }).click();
+  await page.getByRole('button', { name: '确认归档' }).click();
+  await expect(page.getByText('尚未创建模板')).toBeVisible();
 
   await page.getByRole('tab', { name: /设置/ }).click();
   await expect(page.getByRole('heading', { name: 'AI 模型' })).toBeVisible();

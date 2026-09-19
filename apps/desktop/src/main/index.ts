@@ -325,6 +325,11 @@ function registerIpc(): void {
   ipcMain.handle('templates.save.v1', (_event, input: unknown) =>
     templates.save(savePromptTemplateInputSchema.parse(input))
   );
+  ipcMain.handle('templates.archive.v1', (_event, input: unknown) => {
+    const templateId = String(input);
+    if (!/^[0-9a-f-]{36}$/iu.test(templateId)) throw new Error('INVALID_TEMPLATE_ID');
+    templates.archive(templateId);
+  });
   ipcMain.handle('analysis.list.v1', (_event, input: unknown) => {
     const { assetId } = listAnalysisInputSchema.parse(input);
     return analysis.list(assetId);

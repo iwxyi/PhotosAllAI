@@ -81,6 +81,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke('templates.list.v1') as ReturnType<DesktopApi['listPromptTemplates']>,
   savePromptTemplate: (input) =>
     ipcRenderer.invoke('templates.save.v1', input) as ReturnType<DesktopApi['savePromptTemplate']>,
+  archivePromptTemplate: (templateId) =>
+    ipcRenderer.invoke('templates.archive.v1', templateId) as ReturnType<DesktopApi['archivePromptTemplate']>,
   listAnalysisRevisions: (assetId) =>
     ipcRenderer.invoke('analysis.list.v1', { assetId }) as ReturnType<DesktopApi['listAnalysisRevisions']>,
   listGenerationResults: (assetId) =>

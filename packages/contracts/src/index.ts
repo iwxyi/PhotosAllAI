@@ -612,6 +612,7 @@ export interface DesktopApi {
   updateQueuedGenerationTask(input: UpdateQueuedGenerationTaskInput): Promise<PersistedTask>;
   listPromptTemplates(): Promise<PromptTemplate[]>;
   savePromptTemplate(input: SavePromptTemplateInput): Promise<PromptTemplate>;
+  archivePromptTemplate(templateId: string): Promise<void>;
   listAnalysisRevisions(assetId: string): Promise<AnalysisRevision[]>;
   listGenerationResults(assetId: string): Promise<GenerationResult[]>;
   updateGenerationResultReview(input: UpdateGenerationResultReviewInput): Promise<GenerationResult>;

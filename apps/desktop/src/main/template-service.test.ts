@@ -26,6 +26,9 @@ describe('prompt template versions', () => {
     expect(first.version).toBe(1);
     expect(second.version).toBe(2);
     expect(templates.list()).toEqual([second]);
+    templates.archive(first.id);
+    expect(templates.list()).toEqual([]);
+    expect(() => templates.save({ id: first.id, name: '恢复', description: '', category: '其他', body: 'Body' })).toThrow('TEMPLATE_ARCHIVED');
     templates.close();
   });
 
@@ -35,4 +38,3 @@ describe('prompt template versions', () => {
     templates.close();
   });
 });
-
