@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ProviderProfile } from '@photoallisai/contracts';
 
-import { GenerationService, isPrivateAddress } from './generation-service';
+import { GenerationService, isPrivateAddress, validateGeneratedImageUrl } from './generation-service';
 
 const temporaryDirectories: string[] = [];
 const servers: Server[] = [];
@@ -535,5 +535,17 @@ describe('generated image URL network policy', () => {
     }
     expect(isPrivateAddress('8.8.8.8')).toBe(false);
     expect(isPrivateAddress('2001:4860:4860::8888')).toBe(false);
+  });
+
+  it('allows localhost results only for localhost providers', () => {
+    expect(validateGeneratedImageUrl('http://127.0.0.1:8080/v1', 'http://localhost:9000/image.png').hostname)
+      .toBe('localhost');
+    expect(() => validateGeneratedImageUrl('https://api.example.com/v1', 'http://127.0.0.1:9000/image.png'))
+      .toThrow('GENERATED_IMAGE_URL_PRIVATE');
+  });
+
+  it('rejects embedded credentials in generated image URLs', () => {
+    expect(() => validateGeneratedImageUrl('https://api.example.com/v1', 'https://user:secret@cdn.example.com/image.png'))
+      .toThrow('GENERATED_IMAGE_URL_UNSAFE');
   });
 });

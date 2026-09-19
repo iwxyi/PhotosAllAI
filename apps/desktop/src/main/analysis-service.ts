@@ -10,6 +10,7 @@ import {
 } from '@photoallisai/contracts';
 
 import type { ImageCacheService } from './image-cache-service';
+import { fetchBounded } from './network-safety';
 import type { ProviderService } from './provider-service';
 import { normalizeSearchText, tokenizeSearchText } from './search-index';
 
@@ -25,6 +26,8 @@ type RevisionRow = {
 };
 
 const SYSTEM_PROMPT = `You are a professional photography analysis engine. Return only JSON matching schema version 1.0. Analyze image content, technical quality, deterministic adjustment suggestions, generative editing actions, and searchable catalog metadata. Never guess a person's identity or an exact location. Coordinates use normalized_box with x, y, width, height in 0..1. All confidence and severity values use 0..1.`;
+const MAX_ANALYSIS_RESPONSE_BYTES = 5_000_000;
+const ANALYSIS_TIMEOUT_MS = 2 * 60 * 1_000;
 
 export class AnalysisService {
   readonly #database: DatabaseSync;
@@ -86,7 +89,7 @@ export class AnalysisService {
     const image = await readFile(previewPath);
     if (image.byteLength > 15 * 1024 * 1024) throw new Error('ANALYSIS_IMAGE_TOO_LARGE');
 
-    const response = await fetch(`${provider.profile.baseUrl}/chat/completions`, {
+    const response = await fetchBounded(`${provider.profile.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${provider.apiKey}`,
@@ -94,7 +97,6 @@ export class AnalysisService {
         Accept: 'application/json'
       },
       redirect: 'error',
-      signal: signal ?? null,
       body: JSON.stringify({
         model: provider.profile.modelId,
         temperature: 0.1,
@@ -110,10 +112,9 @@ export class AnalysisService {
           }
         ]
       })
-    });
+    }, { maxBytes: MAX_ANALYSIS_RESPONSE_BYTES, timeoutMs: ANALYSIS_TIMEOUT_MS, signal });
     if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`);
-    const text = await response.text();
-    if (text.length > 5_000_000) throw new Error('PROVIDER_RESPONSE_TOO_LARGE');
+    const text = response.bytes.toString('utf8');
     const envelope: unknown = JSON.parse(text);
     const content = extractContent(envelope);
     const result = analysisResultSchema.parse(JSON.parse(stripCodeFence(content)) as unknown);

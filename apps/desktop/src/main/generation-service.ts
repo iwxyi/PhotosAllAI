@@ -1,8 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lookup } from 'node:dns/promises';
 import { access, copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
-import { isIP } from 'node:net';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -23,6 +21,7 @@ import {
 
 import type { CatalogService } from './catalog-service';
 import type { ImageCacheService } from './image-cache-service';
+import { downloadPinned, fetchBounded, isPrivateNetworkAddress } from './network-safety';
 import type { ProviderService, ResolvedProvider } from './provider-service';
 
 type ProviderResolver = Pick<ProviderService, 'resolve'>;
@@ -72,6 +71,9 @@ export type GenerationWriteRecoveryReport = {
 };
 
 const MAX_RESULT_BYTES = 50 * 1024 * 1024;
+const MAX_PROVIDER_RESPONSE_BYTES = 75 * 1024 * 1024;
+const GENERATION_TIMEOUT_MS = 5 * 60 * 1_000;
+const DOWNLOAD_TIMEOUT_MS = 60 * 1_000;
 
 export class GenerationService {
   readonly #database: DatabaseSync;
@@ -785,7 +787,7 @@ async function requestGeneratedImage(
   inputImage: Buffer,
   signal?: AbortSignal
 ): Promise<Buffer> {
-  const response = await fetch(`${provider.profile.baseUrl}/images/edits`, {
+  const response = await fetchBounded(`${provider.profile.baseUrl}/images/edits`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${provider.apiKey}`,
@@ -793,18 +795,15 @@ async function requestGeneratedImage(
       Accept: 'application/json'
     },
     redirect: 'error',
-    signal: signal ?? null,
     body: JSON.stringify({
       model: provider.profile.modelId,
       prompt,
       n: 1,
       image: { mime_type: 'image/jpeg', data: inputImage.toString('base64') }
     })
-  });
+  }, { maxBytes: MAX_PROVIDER_RESPONSE_BYTES, timeoutMs: GENERATION_TIMEOUT_MS, signal });
   if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`);
-  const body = await response.text();
-  if (body.length > MAX_RESULT_BYTES * 1.5) throw new Error('PROVIDER_RESPONSE_TOO_LARGE');
-  const payload: unknown = JSON.parse(body);
+  const payload: unknown = JSON.parse(response.bytes.toString('utf8'));
   const candidate = extractImageCandidate(payload);
   if (candidate.base64) {
     const bytes = Buffer.from(candidate.base64, 'base64');
@@ -812,34 +811,33 @@ async function requestGeneratedImage(
     return bytes;
   }
   if (!candidate.url) throw new Error('PROVIDER_IMAGE_MISSING');
-  const url = new URL(candidate.url);
-  const local = ['localhost', '127.0.0.1', '::1'].includes(url.hostname);
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) throw new Error('GENERATED_IMAGE_URL_UNSAFE');
-  if (!local) {
-    const addresses = await lookup(url.hostname, { all: true });
-    if (addresses.some((address) => isPrivateAddress(address.address))) throw new Error('GENERATED_IMAGE_URL_PRIVATE');
-  }
-  const download = await fetch(url, { redirect: 'error', signal: signal ?? null });
-  if (!download.ok) throw new Error(`GENERATED_IMAGE_HTTP_${download.status}`);
-  const length = Number(download.headers.get('content-length') ?? '0');
-  if (length > MAX_RESULT_BYTES) throw new Error('GENERATED_IMAGE_TOO_LARGE');
-  const bytes = Buffer.from(await download.arrayBuffer());
+  const url = validateGeneratedImageUrl(provider.profile.baseUrl, candidate.url);
+  const download = await downloadPinned(
+    url,
+    { maxBytes: MAX_RESULT_BYTES, timeoutMs: DOWNLOAD_TIMEOUT_MS, signal },
+    isPrivateNetworkAddress
+  );
+  const bytes = download.bytes;
   if (bytes.byteLength === 0 || bytes.byteLength > MAX_RESULT_BYTES) throw new Error('GENERATED_IMAGE_INVALID_SIZE');
   return bytes;
 }
 
 export function isPrivateAddress(address: string): boolean {
-  const normalized = address.toLowerCase().replace(/^\[|\]$/g, '').split('%')[0] ?? '';
-  if (normalized === 'localhost') return true;
-  if (isIP(normalized) === 6) {
-    if (normalized.startsWith('::ffff:')) return isPrivateAddress(normalized.slice('::ffff:'.length));
-    return normalized === '::' || normalized === '::1' || normalized.startsWith('fe8') || normalized.startsWith('fe9') || normalized.startsWith('fea') || normalized.startsWith('feb') || normalized.startsWith('fc') || normalized.startsWith('fd') || normalized.startsWith('ff');
-  }
-  if (isIP(normalized) !== 4) return false;
-  const parts = normalized.split('.').map(Number);
-  const first = parts[0] ?? -1;
-  const second = parts[1] ?? -1;
-  return first === 0 || first === 10 || first === 127 || (first === 100 && second >= 64 && second <= 127) || (first === 169 && second === 254) || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 0 && parts[2] === 0) || (first === 192 && second === 168) || (first === 198 && (second === 18 || second === 19)) || first >= 224;
+  return isPrivateNetworkAddress(address);
+}
+
+export function validateGeneratedImageUrl(providerBaseUrl: string, candidateUrl: string): URL {
+  const url = new URL(candidateUrl);
+  const providerUrl = new URL(providerBaseUrl);
+  const local = isLocalHostname(url.hostname);
+  if (url.username || url.password) throw new Error('GENERATED_IMAGE_URL_UNSAFE');
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) throw new Error('GENERATED_IMAGE_URL_UNSAFE');
+  if (local && !isLocalHostname(providerUrl.hostname)) throw new Error('GENERATED_IMAGE_URL_PRIVATE');
+  return url;
+}
+
+function isLocalHostname(hostname: string): boolean {
+  return ['localhost', '127.0.0.1', '::1'].includes(hostname.replace(/^\[|\]$/g, '').toLowerCase());
 }
 
 function extractImageCandidate(value: unknown): { base64?: string; url?: string } {
