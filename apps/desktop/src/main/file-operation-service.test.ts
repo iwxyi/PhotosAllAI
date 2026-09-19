@@ -411,6 +411,10 @@ describe('catalog copies and renames', () => {
     await expect(service.rename({ assetId: asset.id, fileName: 'existing.jpg' })).rejects.toThrow('EEXIST');
     await expect(service.rename({ assetId: asset.id, fileName: 'photo.png' })).rejects.toThrow('FILE_EXTENSION_CHANGE_NOT_ALLOWED');
     await expect(service.rename({ assetId: asset.id, fileName: 'CON.jpg' })).rejects.toThrow('INVALID_FILE_NAME');
+    for (const fileName of ['PRN.jpg', 'AUX.jpg', 'NUL.jpg', 'COM1.jpg', 'LPT9.jpg', 'photo.jpg.', 'photo.jpg ']) {
+      await expect(service.rename({ assetId: asset.id, fileName })).rejects.toThrow('INVALID_FILE_NAME');
+    }
+    await expect(service.rename({ assetId: asset.id, fileName: `${'é'.repeat(130)}.jpg` })).rejects.toThrow('INVALID_FILE_NAME');
     expect(await readFile(path.join(context.source, 'photo.jpg'), 'utf8')).toBe('content:photo.jpg');
   });
 
