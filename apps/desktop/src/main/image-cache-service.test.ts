@@ -97,4 +97,30 @@ describe('image cache governance', () => {
     await expect(writeCacheFileAtomically(destination, Buffer.from('preview'))).rejects.toThrow();
     expect(await readdir(directory)).toEqual(['blocked.jpg']);
   });
+
+  it('replaces an existing cache file without leaving transaction artifacts', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-'));
+    directories.push(directory);
+    const destination = path.join(directory, 'preview.jpg');
+    await writeFile(destination, 'old-preview');
+
+    await expect(writeCacheFileAtomically(destination, Buffer.from('new-preview'))).resolves.toBe(destination);
+
+    expect(await readFile(destination, 'utf8')).toBe('new-preview');
+    expect(await readdir(directory)).toEqual(['preview.jpg']);
+  });
+
+  it('does not replace a symbolic-link cache destination', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-'));
+    directories.push(directory);
+    const outside = path.join(directory, 'outside.jpg');
+    const destination = path.join(directory, 'preview.jpg');
+    await writeFile(outside, 'outside-preview');
+    await symlink(outside, destination);
+
+    await expect(writeCacheFileAtomically(destination, Buffer.from('new-preview')))
+      .rejects.toThrow('DESTINATION_NOT_REGULAR_FILE');
+    expect(await readFile(outside, 'utf8')).toBe('outside-preview');
+    expect(await readdir(directory)).toEqual(['outside.jpg', 'preview.jpg']);
+  });
 });

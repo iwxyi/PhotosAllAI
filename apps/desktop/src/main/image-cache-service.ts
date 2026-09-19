@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, readdir, rename, stat, unlink, utimes, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { execFile as nodeExecFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -7,6 +7,7 @@ import path from 'node:path';
 import { nativeImage } from 'electron';
 
 import type { CatalogService } from './catalog-service';
+import { publishTemporaryFileSafely } from './safe-file-write';
 
 export type ImageVariant = 'thumbnail' | 'preview';
 type DecoderCapabilities = { imageMagick: boolean; sips: boolean };
@@ -294,7 +295,7 @@ export async function writeCacheFileAtomically(destination: string, bytes: Buffe
   const temporaryPath = `${destination}.${process.pid}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporaryPath, bytes, { flag: 'wx' });
-    await rename(temporaryPath, destination);
+    await publishTemporaryFileSafely(destination, temporaryPath);
     return destination;
   } catch (error) {
     if (await isRegularFile(destination)) return destination;
