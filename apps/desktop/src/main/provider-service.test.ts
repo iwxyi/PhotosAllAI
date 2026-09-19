@@ -55,6 +55,14 @@ describe('provider service', () => {
       name: 'Local', kind: 'openai-compatible', purpose: 'vision',
       baseUrl: 'http://127.0.0.1:9999/v1', modelId: 'model', apiKey: 'key', enabled: true
     })).resolves.toMatchObject({ name: 'Local' });
+    await expect(providers.save({
+      name: 'IPv6 Local', kind: 'openai-compatible', purpose: 'vision',
+      baseUrl: 'http://[::1]:9999/v1', modelId: 'model', apiKey: 'key', enabled: true
+    })).resolves.toMatchObject({ name: 'IPv6 Local' });
+    await expect(providers.save({
+      name: 'Embedded Credentials', kind: 'openai-compatible', purpose: 'vision',
+      baseUrl: 'https://user:password@example.com/v1', modelId: 'model', apiKey: 'key', enabled: true
+    })).rejects.toThrow('PROVIDER_URL_CREDENTIALS_FORBIDDEN');
   });
 
   it('tests a compatible endpoint without exposing the credential', async () => {

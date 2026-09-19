@@ -28,7 +28,9 @@ export type ResolvedProvider = {
 
 function normalizeBaseUrl(value: string): string {
   const url = new URL(value);
-  const isLocal = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1';
+  const hostname = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const isLocal = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  if (url.username || url.password) throw new Error('PROVIDER_URL_CREDENTIALS_FORBIDDEN');
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLocal)) {
     throw new Error('PROVIDER_URL_REQUIRES_HTTPS');
   }
