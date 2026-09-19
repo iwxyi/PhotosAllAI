@@ -282,6 +282,7 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 .form-actions { margin-top: auto; padding-top: 4px; display: flex; justify-content: flex-end; gap: 8px; }
 .secondary-action { height: 35px; padding: 0 12px; color: var(--text); background: var(--surface-3); border: 1px solid var(--line-strong); border-radius: var(--radius-md); }
 .secondary-action:hover { background: var(--surface-4); }.secondary-action:disabled, .primary-action:disabled { opacity: .5; }
+.task-prompt-editor { width: min(620px, calc(100vw - 40px)); }.task-prompt-editor textarea { width: 100%; min-height: 210px; resize: vertical; padding: 10px; color: var(--text); background: var(--surface-1); border: 1px solid var(--line-strong); border-radius: var(--radius-sm); font: inherit; line-height: 1.6; }
 
 .task-center-page { min-height: 0; padding: 31px 38px; overflow: auto; background: var(--bg); }
 .task-center-heading { display: flex; align-items: start; justify-content: space-between; }

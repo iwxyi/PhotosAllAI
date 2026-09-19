@@ -34,6 +34,7 @@ import {
   renameCatalogAssetReportSchema,
   relinkCatalogFolderResultSchema,
   reorderTaskIdsSchema,
+  updateQueuedGenerationTaskInputSchema,
   savePromptTemplateInputSchema,
   saveProviderProfileInputSchema,
   taskIdSchema,
@@ -269,6 +270,9 @@ function registerIpc(): void {
   });
   ipcMain.handle('tasks.reorder.v1', (_event, taskIds: unknown) =>
     tasks.reorder(reorderTaskIdsSchema.parse(taskIds))
+  );
+  ipcMain.handle('tasks.generation.update.v1', (_event, input: unknown) =>
+    tasks.updateQueuedGeneration(updateQueuedGenerationTaskInputSchema.parse(input))
   );
   ipcMain.handle('templates.list.v1', () => templates.list());
   ipcMain.handle('templates.save.v1', (_event, input: unknown) =>

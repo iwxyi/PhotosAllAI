@@ -70,6 +70,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke('tasks.retry.v1', taskId) as ReturnType<DesktopApi['retryTask']>,
   reorderTasks: (taskIds) =>
     ipcRenderer.invoke('tasks.reorder.v1', taskIds) as ReturnType<DesktopApi['reorderTasks']>,
+  updateQueuedGenerationTask: (input) =>
+    ipcRenderer.invoke('tasks.generation.update.v1', input) as ReturnType<DesktopApi['updateQueuedGenerationTask']>,
   listPromptTemplates: () =>
     ipcRenderer.invoke('templates.list.v1') as ReturnType<DesktopApi['listPromptTemplates']>,
   savePromptTemplate: (input) =>

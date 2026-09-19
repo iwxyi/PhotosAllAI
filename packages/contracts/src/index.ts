@@ -362,6 +362,11 @@ export const enqueueTaskInputSchema = z.object({
 export type EnqueueTaskInput = z.infer<typeof enqueueTaskInputSchema>;
 export const taskIdSchema = z.string().uuid();
 export const reorderTaskIdsSchema = z.array(taskIdSchema).max(10_000);
+export const updateQueuedGenerationTaskInputSchema = z.object({
+  taskId: taskIdSchema,
+  prompt: z.string().trim().min(1).max(50_000)
+});
+export type UpdateQueuedGenerationTaskInput = z.infer<typeof updateQueuedGenerationTaskInputSchema>;
 
 export const normalizedRegionSchema = z.object({
   kind: z.literal('normalized_box'),
@@ -593,6 +598,7 @@ export interface DesktopApi {
   cancelTask(taskId: string): Promise<PersistedTask>;
   retryTask(taskId: string): Promise<PersistedTask>;
   reorderTasks(taskIds: string[]): Promise<PersistedTask[]>;
+  updateQueuedGenerationTask(input: UpdateQueuedGenerationTaskInput): Promise<PersistedTask>;
   listPromptTemplates(): Promise<PromptTemplate[]>;
   savePromptTemplate(input: SavePromptTemplateInput): Promise<PromptTemplate>;
   listAnalysisRevisions(assetId: string): Promise<AnalysisRevision[]>;

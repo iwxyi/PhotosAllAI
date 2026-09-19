@@ -3,9 +3,12 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   enqueueTaskInputSchema,
+  generationTaskPayloadSchema,
   persistedTaskSchema,
+  updateQueuedGenerationTaskInputSchema,
   type EnqueueTaskInput,
-  type PersistedTask
+  type PersistedTask,
+  type UpdateQueuedGenerationTaskInput
 } from '@photoallisai/contracts';
 import { assertTaskTransition, type TaskStatus } from '@photoallisai/domain';
 
@@ -220,6 +223,31 @@ export class TaskService {
       throw error;
     }
     return this.list();
+  }
+
+  updateQueuedGeneration(rawInput: UpdateQueuedGenerationTaskInput): PersistedTask {
+    const input = updateQueuedGenerationTaskInputSchema.parse(rawInput);
+    const task = this.#get(input.taskId);
+    if (task.kind !== 'generation') throw new Error('TASK_KIND_NOT_EDITABLE');
+    if (task.status !== 'queued') throw new Error('TASK_ALREADY_STARTED');
+    const payload = generationTaskPayloadSchema.parse({ ...task.payload, prompt: input.prompt });
+    const now = Date.now();
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const result = this.#database.prepare(`
+        UPDATE tasks SET payload_json = ?, updated_at = ? WHERE id = ? AND status = 'queued'
+      `).run(JSON.stringify(payload), now, task.id);
+      if (result.changes !== 1) throw new Error('TASK_ALREADY_STARTED');
+      this.#database.prepare(`
+        INSERT INTO task_events (task_id, from_status, to_status, occurred_at, details_json)
+        VALUES (?, 'queued', 'queued', ?, '{"reason":"payload_updated"}')
+      `).run(task.id, now);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    return this.#get(task.id);
   }
 
   #transition(task: PersistedTask, status: TaskStatus, position = task.position): PersistedTask {

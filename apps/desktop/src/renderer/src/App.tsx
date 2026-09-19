@@ -1535,6 +1535,9 @@ function TaskCenterPage(): React.JSX.Element {
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
   const [fileOperations, setFileOperations] = useState<FileOperationHistoryItem[]>([]);
   const [message, setMessage] = useState('');
+  const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
+  const [promptDraft, setPromptDraft] = useState('');
+  const [editBusy, setEditBusy] = useState(false);
 
   const refresh = () => window.desktopApi.listTasks().then(setTaskItems);
   useEffect(() => {
@@ -1577,6 +1580,26 @@ function TaskCenterPage(): React.JSX.Element {
     setMessage(`已重新排队 ${failedIds.length} 个生成任务。`);
     await refresh();
   };
+  const openPromptEditor = (task: PersistedTask) => {
+    const prompt = typeof task.payload.prompt === 'string' ? task.payload.prompt : '';
+    setEditingTaskId(task.id);
+    setPromptDraft(prompt);
+    setMessage('');
+  };
+  const savePrompt = async () => {
+    if (!editingTaskId || !promptDraft.trim()) return;
+    setEditBusy(true);
+    try {
+      await window.desktopApi.updateQueuedGenerationTask({ taskId: editingTaskId, prompt: promptDraft });
+      setEditingTaskId(null);
+      setMessage('等待任务的提示词已更新。');
+      await refresh();
+    } catch {
+      setMessage('任务已开始或内容无效，无法继续修改。');
+    } finally {
+      setEditBusy(false);
+    }
+  };
 
   const waiting = taskItems.filter((task) => task.status === 'queued').length;
   const failed = taskItems.filter((task) => task.status === 'failed').length;
@@ -1606,12 +1629,14 @@ function TaskCenterPage(): React.JSX.Element {
             <span>{new Date(task.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
             <span className="task-row-actions">
               {task.status === 'queued' && <><IconButton label="任务上移" disabled={queuedIds.indexOf(task.id) === 0} onClick={() => void moveQueued(task.id, -1)}><ArrowUp size={13} /></IconButton><IconButton label="任务下移" disabled={queuedIds.indexOf(task.id) === queuedIds.length - 1} onClick={() => void moveQueued(task.id, 1)}><ArrowDown size={13} /></IconButton></>}
+              {task.status === 'queued' && task.kind === 'generation' && <IconButton label="编辑生成提示词" onClick={() => openPromptEditor(task)}><FilePenLine size={13} /></IconButton>}
               {(task.status === 'queued' || task.status === 'preparing' || task.status === 'uploading' || task.status === 'processing' || task.status === 'downloading') && <button type="button" onClick={() => void cancel(task.id)}>取消</button>}
               {(task.status === 'failed' || task.status === 'canceled') && <button type="button" onClick={() => void retry(task.id)}>重试</button>}
             </span>
           </div>
         ))}
       </div>
+      {editingTaskId && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !editBusy) setEditingTaskId(null); }}><form className="rename-dialog task-prompt-editor" role="dialog" aria-modal="true" aria-labelledby="task-prompt-title" onSubmit={(event) => { event.preventDefault(); void savePrompt(); }}><header><div><span className="dialog-icon"><FilePenLine size={16} /></span><div><h2 id="task-prompt-title">编辑等待任务</h2><p>修改只作用于尚未开始的这一项，已运行任务不会改变。</p></div></div><IconButton label="关闭提示词编辑器" disabled={editBusy} onClick={() => setEditingTaskId(null)}><X size={15} /></IconButton></header><label className="rename-field"><span>最终生成提示词</span><textarea autoFocus value={promptDraft} maxLength={50_000} onChange={(event) => setPromptDraft(event.target.value)} /></label><footer><span>{promptDraft.length.toLocaleString()} / 50,000</span><div><button className="quiet-button" type="button" disabled={editBusy} onClick={() => setEditingTaskId(null)}>取消</button><button className="primary-action compact" type="submit" disabled={!promptDraft.trim() || editBusy}>{editBusy ? '保存中…' : '保存修改'}</button></div></footer></form></div>}
       <section className="operation-history">
         <header><div><History size={15} /><span><strong>文件操作</strong><small>最近 {fileOperations.length} 条</small></span></div></header>
         {fileOperations.length === 0 ? <div className="operation-history-empty">暂无文件操作</div> : (
