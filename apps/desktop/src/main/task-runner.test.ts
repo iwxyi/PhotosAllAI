@@ -138,7 +138,8 @@ describe('analysis task runner', () => {
     runner.start();
 
     await vi.waitFor(() => expect(queue.list()[0]?.status).toBe('completed'));
-    expect(exportTask).toHaveBeenCalledWith(expect.objectContaining(payload), expect.any(AbortSignal));
+    expect(exportTask).toHaveBeenCalledWith(expect.objectContaining(payload), expect.any(AbortSignal), expect.any(String));
+    expect(exportTask.mock.calls[0]?.[2]).toBe(queue.list()[0]?.id);
     expect(queue.list()[0]?.result).toMatchObject({ succeeded: 1, failed: 0 });
     runner.stop();
     queue.close();

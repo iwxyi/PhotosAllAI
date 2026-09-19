@@ -25,7 +25,7 @@ interface GenerationProcessor {
 }
 
 interface ExportProcessor {
-  export(payload: unknown, signal?: AbortSignal): Promise<unknown>;
+  export(payload: unknown, signal: AbortSignal, taskId: string): Promise<unknown>;
 }
 
 export class TaskRunner {
@@ -83,7 +83,7 @@ export class TaskRunner {
             await this.#generation.generate(task.assetId!, payload, controller.signal);
           } else {
             const payload = exportTaskPayloadSchema.parse(task.payload);
-            taskResult = exportReportSchema.parse(await this.#export.export(payload, controller.signal));
+            taskResult = exportReportSchema.parse(await this.#export.export(payload, controller.signal, task.id));
           }
           this.#tasks.advance(task.id, 'downloading', 0.85);
           this.#tasks.advance(task.id, 'saving', 0.95);

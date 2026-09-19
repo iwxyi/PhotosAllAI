@@ -628,10 +628,16 @@ app.whenReady().then(async () => {
   exportPresets = new ExportPresetService(databasePath);
   await migration.complete(APPLICATION_SCHEMA_VERSION, migrationCheckpoint);
   taskRunner = new TaskRunner(tasks, analysis, generation, {
-    export: async (rawPayload, signal) => {
+    export: async (rawPayload, signal, taskId) => {
       signal?.throwIfAborted();
       const payload = exportTaskPayloadSchema.parse(rawPayload);
-      const report = await exportService.exportToDirectory(payload.resultIds, payload.destinationDirectory, payload.preset, signal);
+      const report = await exportService.exportToDirectory(
+        payload.resultIds,
+        payload.destinationDirectory,
+        payload.preset,
+        signal,
+        taskId
+      );
       signal?.throwIfAborted();
       return report;
     }

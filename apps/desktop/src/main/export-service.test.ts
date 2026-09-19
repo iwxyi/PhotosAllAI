@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -225,6 +226,164 @@ describe('generation result export', () => {
     expect(report.failures).toEqual([{ resultId: firstId, errorCode: 'EXPORT_COPY_FAILED' }]);
     expect(JSON.stringify(report)).not.toContain(source);
     expect(await readdir(destination)).toEqual([]);
+    service.close();
+  });
+
+  it('reuses verified files and completes interrupted publications without duplicates', async () => {
+    const runId = '40a5083b-52ae-44f0-bb1e-f47b08bdc9c2';
+    const firstFileName = 'PORTRAIT__ai__v0001__A1B2C3D4.png';
+    const secondFileName = 'LANDSCAPE__ai__v0001__D4C3B2A1.png';
+    const firstPayload = 'published-before-crash';
+    const encodedSources: string[] = [];
+    const encoder: ImageEncoder = {
+      async encode(sourcePath) {
+        encodedSources.push(path.basename(sourcePath));
+        return Buffer.from('rebuilt-after-crash');
+      }
+    };
+    const { service, destination, databasePath } = await fixture(encoder);
+    await writeFile(path.join(destination, firstFileName), firstPayload);
+    const staleTemporary = path.join(destination, `.photoallisai-export-${runId}-${secondId}.tmp`);
+    await writeFile(staleTemporary, 'interrupted-temporary-data');
+    const database = new DatabaseSync(databasePath);
+    database.prepare(`
+      INSERT INTO export_runs (id, destination_path, status, report_json, created_at)
+      VALUES (?, ?, 'running', '{}', ?)
+    `).run(runId, await realpath(destination), Date.now());
+    database.prepare(`
+      INSERT INTO export_run_items (run_id, result_id, file_name, sha256, size_bytes, status)
+      VALUES (?, ?, ?, ?, ?, 'publishing'), (?, ?, ?, ?, ?, 'publishing')
+    `).run(
+      runId, firstId, firstFileName, createHash('sha256').update(firstPayload).digest('hex'), Buffer.byteLength(firstPayload),
+      runId, secondId, secondFileName, '0'.repeat(64), 99
+    );
+    database.close();
+    const preset = {
+      id: '72e43f40-36f4-48bd-a4b0-9032f299b0a2', name: 'PNG', format: 'png' as const,
+      quality: 90, maxDimension: 3840, conflictPolicy: 'auto-rename' as const,
+      namingPattern: '{name}', createdAt: 0, updatedAt: 0
+    };
+
+    const report = await service.exportToDirectory(
+      [firstId, secondId], destination, preset, undefined, runId
+    );
+
+    expect(report).toMatchObject({ id: runId, canceled: false, total: 2, succeeded: 2, failed: 0 });
+    expect(report.files).toEqual([
+      { resultId: firstId, fileName: firstFileName },
+      { resultId: secondId, fileName: secondFileName }
+    ]);
+    expect(encodedSources).toEqual(['LANDSCAPE__ai__v0001__D4C3B2A1.jpg']);
+    expect((await readdir(destination)).sort()).toEqual([secondFileName, firstFileName].sort());
+    expect(await readFile(path.join(destination, firstFileName), 'utf8')).toBe(firstPayload);
+    expect(await readFile(path.join(destination, secondFileName), 'utf8')).toBe('rebuilt-after-crash');
+    const verified = new DatabaseSync(databasePath);
+    expect(verified.prepare('SELECT status FROM export_runs WHERE id = ?').get(runId)).toEqual({ status: 'completed' });
+    expect(verified.prepare(`
+      SELECT result_id, status FROM export_run_items WHERE run_id = ? ORDER BY result_id
+    `).all(runId)).toEqual([
+      { result_id: firstId, status: 'completed' },
+      { result_id: secondId, status: 'completed' }
+    ].sort((left, right) => left.result_id.localeCompare(right.result_id)));
+    verified.close();
+    service.close();
+  });
+
+  it('does not duplicate completed files when the same task run is retried', async () => {
+    const runId = '97bdccf5-146c-4d9e-9e80-ce426d923855';
+    let invocations = 0;
+    const encoder: ImageEncoder = {
+      async encode() {
+        invocations += 1;
+        return Buffer.from('stable-export');
+      }
+    };
+    const { service, destination } = await fixture(encoder);
+    const preset = {
+      id: '72e43f40-36f4-48bd-a4b0-9032f299b0a2', name: 'PNG', format: 'png' as const,
+      quality: 90, maxDimension: 3840, conflictPolicy: 'auto-rename' as const,
+      namingPattern: '{name}', createdAt: 0, updatedAt: 0
+    };
+
+    const first = await service.exportToDirectory([firstId], destination, preset, undefined, runId);
+    const retried = await service.exportToDirectory([firstId], destination, preset, undefined, runId);
+
+    expect(retried).toEqual(first);
+    expect(invocations).toBe(1);
+    expect(await readdir(destination)).toEqual(['PORTRAIT__ai__v0001__A1B2C3D4.png']);
+    service.close();
+  });
+
+  it('preserves a modified completed file and republishes a verified replacement', async () => {
+    const runId = '705da125-a9c1-4328-b6f7-f15a6d0a30ee';
+    let invocations = 0;
+    const encoder: ImageEncoder = {
+      async encode() {
+        invocations += 1;
+        return Buffer.from(`verified-export-${invocations}`);
+      }
+    };
+    const { service, destination } = await fixture(encoder);
+    const preset = {
+      id: '72e43f40-36f4-48bd-a4b0-9032f299b0a2', name: 'PNG', format: 'png' as const,
+      quality: 90, maxDimension: 3840, conflictPolicy: 'auto-rename' as const,
+      namingPattern: '{name}', createdAt: 0, updatedAt: 0
+    };
+    const first = await service.exportToDirectory([firstId], destination, preset, undefined, runId);
+    const originalName = first.files[0]!.fileName;
+    await writeFile(path.join(destination, originalName), 'externally-modified');
+
+    const retried = await service.exportToDirectory([firstId], destination, preset, undefined, runId);
+
+    expect(invocations).toBe(2);
+    expect(retried.files).toEqual([{
+      resultId: firstId,
+      fileName: 'PORTRAIT__ai__v0001__A1B2C3D4 (1).png'
+    }]);
+    expect(await readFile(path.join(destination, originalName), 'utf8')).toBe('externally-modified');
+    expect(await readFile(path.join(destination, retried.files[0]!.fileName), 'utf8')).toBe('verified-export-2');
+    service.close();
+  });
+
+  it('rejects reuse of a run id for a different export request', async () => {
+    const runId = 'ce611bf9-cdca-440f-a60f-810514f0cf31';
+    const { service, destination } = await fixture();
+    const preset = {
+      id: '72e43f40-36f4-48bd-a4b0-9032f299b0a2', name: 'Original', format: 'original' as const,
+      quality: 90, maxDimension: null, conflictPolicy: 'auto-rename' as const,
+      namingPattern: '{name}', createdAt: 0, updatedAt: 0
+    };
+    await service.exportToDirectory([firstId], destination, preset, undefined, runId);
+
+    await expect(service.exportToDirectory(
+      [firstId, secondId], destination, preset, undefined, runId
+    )).rejects.toThrow('EXPORT_RUN_REQUEST_CHANGED');
+    expect(await readdir(destination)).toEqual(['PORTRAIT__ai__v0001__A1B2C3D4.jpg']);
+    service.close();
+  });
+
+  it('adds request fingerprints when opening an older export run schema', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-export-migration-'));
+    temporaryDirectories.push(directory);
+    const databasePath = path.join(directory, 'catalog.sqlite');
+    const database = new DatabaseSync(databasePath);
+    database.exec(`
+      CREATE TABLE export_runs (
+        id TEXT PRIMARY KEY,
+        destination_path TEXT NOT NULL,
+        status TEXT NOT NULL,
+        report_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        completed_at INTEGER
+      )
+    `);
+    database.close();
+
+    const service = new ExportService(databasePath, { resolveResultFile: () => null });
+    const migrated = new DatabaseSync(databasePath);
+    const columns = migrated.prepare('PRAGMA table_info(export_runs)').all() as { name: string }[];
+    expect(columns.map((column) => column.name)).toContain('request_hash');
+    migrated.close();
     service.close();
   });
 });
