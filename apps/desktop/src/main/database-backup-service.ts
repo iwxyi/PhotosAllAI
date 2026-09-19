@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readdir, stat, unlink } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -64,6 +64,19 @@ export class DatabaseBackupService {
     directory: string,
     options: { now?: number; minimumIntervalMs?: number; retention?: number }
   ): Promise<DatabaseBackupResult | null> {
+    const lockPath = path.join(path.resolve(directory), '.automatic-backup.lock');
+    await acquireBackupLock(lockPath);
+    try {
+      return await this.#createAutomaticLocked(directory, options);
+    } finally {
+      await rm(lockPath, { recursive: true, force: true });
+    }
+  }
+
+  async #createAutomaticLocked(
+    directory: string,
+    options: { now?: number; minimumIntervalMs?: number; retention?: number }
+  ): Promise<DatabaseBackupResult | null> {
     const now = options.now ?? Date.now();
     const minimumIntervalMs = Math.max(0, options.minimumIntervalMs ?? 24 * 60 * 60 * 1_000);
     const retention = Math.max(1, Math.trunc(options.retention ?? 7));
@@ -82,6 +95,56 @@ export class DatabaseBackupService {
     await Promise.all(expired.map((entry) => unlink(path.join(directory, entry.name)).catch(() => undefined)));
     return result;
   }
+}
+
+async function acquireBackupLock(lockPath: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  await mkdir(path.dirname(lockPath), { recursive: true });
+  while (true) {
+    let created = false;
+    try {
+      await mkdir(lockPath);
+      created = true;
+      await writeFile(
+        path.join(lockPath, 'owner.json'),
+        JSON.stringify({ pid: process.pid, createdAt: Date.now() }),
+        { flag: 'wx' }
+      );
+      return;
+    } catch (error) {
+      if (created) {
+        await rm(lockPath, { recursive: true, force: true });
+        throw error;
+      }
+      if (!isNodeError(error, 'EEXIST')) throw error;
+      if (await isStaleBackupLock(lockPath)) {
+        await rm(lockPath, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) throw new Error('AUTOMATIC_BACKUP_LOCK_TIMEOUT');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+}
+
+async function isStaleBackupLock(lockPath: string): Promise<boolean> {
+  try {
+    const owner = JSON.parse(await readFile(path.join(lockPath, 'owner.json'), 'utf8')) as { pid?: unknown };
+    if (typeof owner.pid !== 'number' || !Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+    try {
+      process.kill(owner.pid, 0);
+      return false;
+    } catch (error) {
+      return isNodeError(error, 'ESRCH');
+    }
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) return false;
+    return false;
+  }
+}
+
+function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error && error.code === code;
 }
 
 function parseAutomaticBackupTimestamp(fileName: string): number | null {

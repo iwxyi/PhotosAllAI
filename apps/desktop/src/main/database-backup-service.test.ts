@@ -103,4 +103,40 @@ describe('database backup service', () => {
     expect(results.filter(Boolean)).toHaveLength(1);
     expect((await readdir(backupDirectory)).filter((name) => name.endsWith('.sqlite'))).toEqual(['catalog-4000.sqlite']);
   });
+
+  it('coordinates automatic backups across service instances', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'photoallisai-backup-auto-process-'));
+    const databasePath = path.join(root, 'catalog.sqlite');
+    const backupDirectory = path.join(root, 'backups');
+    const database = new DatabaseSync(databasePath);
+    database.exec('CREATE TABLE records (id INTEGER PRIMARY KEY);');
+    database.close();
+    const first = new DatabaseBackupService(databasePath);
+    const second = new DatabaseBackupService(databasePath);
+
+    const results = await Promise.all([
+      first.createAutomatic(backupDirectory, { now: 5_000, minimumIntervalMs: 500 }),
+      second.createAutomatic(backupDirectory, { now: 5_000, minimumIntervalMs: 500 })
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect((await readdir(backupDirectory)).filter((name) => name.endsWith('.sqlite'))).toEqual(['catalog-5000.sqlite']);
+  });
+
+  it('recovers an automatic backup lock left by a dead process', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'photoallisai-backup-auto-stale-'));
+    const databasePath = path.join(root, 'catalog.sqlite');
+    const backupDirectory = path.join(root, 'backups');
+    const database = new DatabaseSync(databasePath);
+    database.exec('CREATE TABLE records (id INTEGER PRIMARY KEY);');
+    database.close();
+    await mkdir(path.join(backupDirectory, '.automatic-backup.lock'), { recursive: true });
+    await writeFile(
+      path.join(backupDirectory, '.automatic-backup.lock', 'owner.json'),
+      JSON.stringify({ pid: 2_147_483_647, createdAt: Date.now() })
+    );
+
+    await expect(new DatabaseBackupService(databasePath).createAutomatic(backupDirectory, { now: 6_000 })).resolves.not.toBeNull();
+    expect((await readdir(backupDirectory)).filter((name) => name.includes('automatic-backup.lock'))).toEqual([]);
+    expect((await readdir(backupDirectory)).filter((name) => name.endsWith('.sqlite'))).toEqual(['catalog-6000.sqlite']);
+  });
 });
