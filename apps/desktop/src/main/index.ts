@@ -600,12 +600,13 @@ app.whenReady().then(async () => {
     catalog
   );
   await generation.recoverInterruptedTrashPurges();
-  libraryIntegrity = new LibraryIntegrityService(databasePath, join(libraryDirectory, 'generated'));
   await fileOperations.recoverInterruptedOperations(async (change) => {
     await generation.relocatePortableResults(
       change.assetId, change.previousPath, change.path, change.previousFileName, change.fileName
     );
   });
+  await generation.recoverInterruptedWrites();
+  libraryIntegrity = new LibraryIntegrityService(databasePath, join(libraryDirectory, 'generated'));
   exportService = new ExportService(databasePath, generation);
   exportPresets = new ExportPresetService(databasePath);
   await migration.complete(APPLICATION_SCHEMA_VERSION, migrationCheckpoint);

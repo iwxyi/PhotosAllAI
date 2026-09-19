@@ -23,11 +23,12 @@ afterEach(async () => {
 async function fixture(
   responseBody: (origin: string) => unknown,
   imageDownload?: Buffer
-): Promise<{ service: GenerationService; directory: string; sourcePath: string }> {
+): Promise<{ service: GenerationService; directory: string; sourcePath: string; setSourcePath: (value: string) => void }> {
   const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-generation-'));
   temporaryDirectories.push(directory);
   const previewPath = path.join(directory, 'preview.jpg');
   const sourcePath = path.join(directory, 'IMG_1024.CR3');
+  let currentSourcePath = sourcePath;
   await writeFile(previewPath, 'bounded-preview');
   await writeFile(sourcePath, 'untouched-original');
 
@@ -64,9 +65,14 @@ async function fixture(
     path.join(directory, 'managed', 'generated'),
     { resolve: async () => ({ profile, apiKey: 'secret' }) },
     { getOrCreate: async () => previewPath },
-    { resolveAssetFile: () => ({ path: sourcePath, fileName: 'IMG_1024.CR3', modifiedAt: 1, sizeBytes: 18 }) }
+    { resolveAssetFile: () => ({
+      path: currentSourcePath,
+      fileName: path.basename(currentSourcePath),
+      modifiedAt: 1,
+      sizeBytes: 18
+    }) }
   );
-  return { service, directory, sourcePath };
+  return { service, directory, sourcePath, setSourcePath: (value) => { currentSourcePath = value; } };
 }
 
 function payload(resultIndex = 1) {
@@ -366,6 +372,114 @@ describe('managed generation results', () => {
     await expect(service.recoverInterruptedTrashPurges()).resolves.toEqual({ total: 1, recovered: 0, conflicts: 0, failed: 1 });
     expect(await readFile(sourcePath, 'utf8')).toBe('untouched-original');
     expect(service.listTrashed('asset-1')).toHaveLength(1);
+    database.close();
+    service.close();
+  });
+
+  it('rolls back an interrupted generated-result write and refreshes its manifest', async () => {
+    const { service, directory, sourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', payload());
+    const filePath = service.resolveResultFile(result.id)!;
+    const temporaryPath = `${filePath}.4321.60cae5ec-b718-41a2-8389-b87c4db28edf.tmp`;
+    await writeFile(temporaryPath, 'interrupted-temporary-payload');
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    database.prepare('DELETE FROM generation_results WHERE id = ?').run(result.id);
+    database.prepare(`
+      INSERT INTO generation_write_intents (
+        result_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'managed', ?)
+    `).run(result.id, 'asset-1', batchId, result.fileName, filePath, temporaryPath, Date.now());
+
+    await expect(service.recoverInterruptedWrites()).resolves.toEqual({ total: 1, recovered: 1, failed: 0 });
+    await expect(service.recoverInterruptedWrites()).resolves.toEqual({ total: 0, recovered: 0, failed: 0 });
+    await expect(stat(filePath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(temporaryPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    const manifest = JSON.parse(await readFile(path.join(path.dirname(filePath), 'manifest.json'), 'utf8')) as { results: unknown[] };
+    expect(manifest.results).toEqual([]);
+    expect(await readFile(sourcePath, 'utf8')).toBe('untouched-original');
+    database.close();
+    service.close();
+  });
+
+  it('preserves unsafe and symbolically redirected interrupted writes', async () => {
+    const { service, directory, sourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', payload());
+    const filePath = service.resolveResultFile(result.id)!;
+    const batchDirectory = path.dirname(filePath);
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    database.prepare('DELETE FROM generation_results WHERE id = ?').run(result.id);
+    await rm(batchDirectory, { recursive: true });
+    await symlink(path.dirname(sourcePath), batchDirectory);
+    const redirectedFile = path.join(path.dirname(sourcePath), result.fileName);
+    await writeFile(redirectedFile, 'outside-managed-generation');
+    const temporaryPath = `${filePath}.4321.d2c46ddb-97a7-427c-9520-c6a137c8fadc.tmp`;
+    database.prepare(`
+      INSERT INTO generation_write_intents (
+        result_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'managed', ?)
+    `).run(result.id, 'asset-1', batchId, result.fileName, filePath, temporaryPath, Date.now());
+
+    await expect(service.recoverInterruptedWrites()).resolves.toEqual({ total: 1, recovered: 0, failed: 1 });
+    expect(await readFile(redirectedFile, 'utf8')).toBe('outside-managed-generation');
+    expect(await readFile(sourcePath, 'utf8')).toBe('untouched-original');
+    expect((database.prepare('SELECT COUNT(*) AS value FROM generation_write_intents').get() as { value: number }).value).toBe(1);
+    database.close();
+    service.close();
+  });
+
+  it('relocates an interrupted portable write with its original', async () => {
+    const { service, directory, sourcePath, setSourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', { ...payload(), storageMode: 'portable' });
+    const filePath = service.resolveResultFile(result.id)!;
+    const temporaryPath = `${filePath}.4321.785c8b89-1d25-4d82-af73-37286ce03d10.tmp`;
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    database.prepare('DELETE FROM generation_results WHERE id = ?').run(result.id);
+    database.prepare(`
+      INSERT INTO generation_write_intents (
+        result_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'portable', ?)
+    `).run(result.id, 'asset-1', batchId, result.fileName, filePath, temporaryPath, Date.now());
+    const movedDirectory = path.join(directory, 'moved');
+    const nextSourcePath = path.join(movedDirectory, 'RENAMED.CR3');
+    await mkdir(movedDirectory, { recursive: true });
+    await rename(sourcePath, nextSourcePath);
+    setSourcePath(nextSourcePath);
+
+    await service.relocatePortableResults('asset-1', sourcePath, nextSourcePath, 'IMG_1024.CR3', 'RENAMED.CR3');
+    const intent = database.prepare(`
+      SELECT file_path, temporary_path FROM generation_write_intents WHERE result_id = ?
+    `).get(result.id) as { file_path: string; temporary_path: string };
+    expect(intent.file_path).toContain(path.join('moved', '_PhotoAllIsAI', 'RENAMED__ASSET1'));
+    expect(intent.temporary_path).toBe(`${intent.file_path}.4321.785c8b89-1d25-4d82-af73-37286ce03d10.tmp`);
+    await expect(service.recoverInterruptedWrites()).resolves.toEqual({ total: 1, recovered: 1, failed: 0 });
+    await expect(stat(intent.file_path)).rejects.toMatchObject({ code: 'ENOENT' });
+    database.close();
+    service.close();
+  });
+
+  it('does not redirect a portable write intent when relocation has a directory conflict', async () => {
+    const { service, directory, sourcePath, setSourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', { ...payload(), storageMode: 'portable' });
+    const filePath = service.resolveResultFile(result.id)!;
+    const temporaryPath = `${filePath}.4321.29a81331-b5d0-46b1-846c-3137b4849096.tmp`;
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    database.prepare('DELETE FROM generation_results WHERE id = ?').run(result.id);
+    database.prepare(`
+      INSERT INTO generation_write_intents (
+        result_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'portable', ?)
+    `).run(result.id, 'asset-1', batchId, result.fileName, filePath, temporaryPath, Date.now());
+    const nextSourcePath = path.join(directory, 'moved', 'RENAMED.CR3');
+    const conflictingDirectory = path.join(directory, 'moved', '_PhotoAllIsAI', 'RENAMED__ASSET1');
+    await mkdir(conflictingDirectory, { recursive: true });
+    await writeFile(nextSourcePath, 'moved-original');
+    setSourcePath(nextSourcePath);
+
+    await service.relocatePortableResults('asset-1', sourcePath, nextSourcePath, 'IMG_1024.CR3', 'RENAMED.CR3');
+    const intent = database.prepare('SELECT file_path FROM generation_write_intents WHERE result_id = ?')
+      .get(result.id) as { file_path: string };
+    expect(intent.file_path).toBe(filePath);
+    expect(await readFile(filePath)).toEqual(png);
     database.close();
     service.close();
   });

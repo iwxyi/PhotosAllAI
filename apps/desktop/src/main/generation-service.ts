@@ -48,10 +48,26 @@ type ResultRow = {
   purge_path: string | null;
 };
 
+type GenerationWriteIntentRow = {
+  result_id: string;
+  asset_id: string;
+  batch_id: string;
+  file_name: string;
+  file_path: string;
+  temporary_path: string;
+  storage_mode: 'managed' | 'portable';
+};
+
 export type TrashPurgeRecoveryReport = {
   total: number;
   recovered: number;
   conflicts: number;
+  failed: number;
+};
+
+export type GenerationWriteRecoveryReport = {
+  total: number;
+  recovered: number;
   failed: number;
 };
 
@@ -96,6 +112,16 @@ export class GenerationService {
       );
       CREATE INDEX IF NOT EXISTS generation_asset_idx
         ON generation_results(asset_id, version DESC);
+      CREATE TABLE IF NOT EXISTS generation_write_intents (
+        result_id TEXT PRIMARY KEY,
+        asset_id TEXT NOT NULL,
+        batch_id TEXT NOT NULL,
+        file_name TEXT NOT NULL,
+        file_path TEXT NOT NULL,
+        temporary_path TEXT NOT NULL,
+        storage_mode TEXT NOT NULL CHECK(storage_mode IN ('managed', 'portable')),
+        created_at INTEGER NOT NULL
+      );
     `);
     const columns = this.#database.prepare('PRAGMA table_info(generation_results)').all() as { name: string }[];
     if (!columns.some((column) => column.name === 'review_state')) {
@@ -333,6 +359,44 @@ export class GenerationService {
     return { total, recovered, conflicts, failed };
   }
 
+  async recoverInterruptedWrites(): Promise<GenerationWriteRecoveryReport> {
+    const rows = this.#database.prepare(`
+      SELECT result_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode
+      FROM generation_write_intents ORDER BY created_at ASC
+    `).all() as GenerationWriteIntentRow[];
+    let recovered = 0;
+    let failed = 0;
+    for (const row of rows) {
+      const directory = this.#expectedResultDirectory(row.asset_id, row.batch_id, row.storage_mode);
+      if (!directory || path.basename(row.file_name) !== row.file_name
+        || path.resolve(row.file_path) !== path.resolve(directory, row.file_name)
+        || !isGenerationTemporaryPath(row.temporary_path, row.file_path)
+        || !await this.#isSafeResultDirectory(row.asset_id, row.storage_mode, directory)) {
+        failed += 1;
+        continue;
+      }
+      try {
+        for (const candidate of [row.temporary_path, row.file_path]) {
+          const entry = await inspectOptionalRegularFile(candidate);
+          if (entry === false) throw new Error('GENERATION_WRITE_RECOVERY_PATH_UNSAFE');
+          if (entry) await unlink(candidate);
+        }
+        this.#database.prepare('DELETE FROM generation_results WHERE id = ?').run(row.result_id);
+        if (await pathExists(path.join(directory, 'manifest.json'))) {
+          await this.#refreshManifest(directory, row.asset_id, row.batch_id);
+        }
+        if (this.#database.prepare('DELETE FROM generation_write_intents WHERE result_id = ?').run(row.result_id).changes !== 1) {
+          throw new Error('GENERATION_WRITE_INTENT_CONCURRENT_CHANGE');
+        }
+        recovered += 1;
+        await rmdir(directory).catch(() => undefined);
+      } catch {
+        failed += 1;
+      }
+    }
+    return { total: rows.length, recovered, failed };
+  }
+
   async relocatePortableResults(
     assetId: string,
     previousSourcePath: string,
@@ -344,7 +408,11 @@ export class GenerationService {
       SELECT id, batch_id, file_name, file_path, trashed_at FROM generation_results
       WHERE asset_id = ? AND storage_mode = 'portable'
     `).all(assetId) as Array<{ id: string; batch_id: string; file_name: string; file_path: string; trashed_at: number | null }>;
-    if (rows.length === 0) return;
+    const intents = this.#database.prepare(`
+      SELECT result_id, batch_id, file_name, file_path, temporary_path
+      FROM generation_write_intents WHERE asset_id = ? AND storage_mode = 'portable'
+    `).all(assetId) as Array<Pick<GenerationWriteIntentRow, 'result_id' | 'batch_id' | 'file_name' | 'file_path' | 'temporary_path'>>;
+    if (rows.length === 0 && intents.length === 0) return;
 
     const shortAssetId = assetId.replaceAll('-', '').slice(0, 8).toUpperCase();
     const previousDirectory = path.join(
@@ -355,12 +423,14 @@ export class GenerationService {
       path.dirname(nextSourcePath), '_PhotoAllIsAI',
       `${sanitizeFileStem(path.parse(nextFileName).name)}__${shortAssetId}`
     );
-    if (previousDirectory !== nextDirectory) {
+    let directoryRelocated = previousDirectory === nextDirectory;
+    if (!directoryRelocated) {
       const previousExists = await pathExists(previousDirectory);
       const nextExists = await pathExists(nextDirectory);
       if (previousExists && !nextExists) {
         await mkdir(path.dirname(nextDirectory), { recursive: true });
         await rename(previousDirectory, nextDirectory);
+        directoryRelocated = true;
       }
     }
 
@@ -368,6 +438,16 @@ export class GenerationService {
     for (const row of rows) {
       const candidate = path.join(nextDirectory, row.batch_id, row.file_name);
       if (row.trashed_at !== null || await pathExists(candidate)) update.run(candidate, row.id);
+    }
+    const updateIntent = this.#database.prepare(`
+      UPDATE generation_write_intents SET file_path = ?, temporary_path = ? WHERE result_id = ?
+    `);
+    for (const intent of intents) {
+      const candidate = path.join(nextDirectory, intent.batch_id, intent.file_name);
+      const temporary = path.join(path.dirname(candidate), path.basename(intent.temporary_path));
+      if (directoryRelocated || await pathExists(candidate) || await pathExists(temporary)) {
+        updateIntent.run(candidate, temporary, intent.result_id);
+      }
     }
   }
 
@@ -415,13 +495,17 @@ export class GenerationService {
       ? path.join(path.dirname(source.path), '_PhotoAllIsAI', `${originalStem}__${assetId.replaceAll('-', '').slice(0, 8).toUpperCase()}`, payload.batchId)
       : path.join(this.#generatedDirectory, assetId.slice(0, 2), assetId, payload.batchId);
     const filePath = path.join(batchDirectory, fileName);
-    await mkdir(batchDirectory, { recursive: true });
-    const temporaryPath = `${filePath}.${process.pid}.tmp`;
-    await writeFile(temporaryPath, bytes, { flag: 'wx' });
-    await rename(temporaryPath, filePath);
-
+    const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
     const createdAt = Date.now();
+    this.#database.prepare(`
+      INSERT INTO generation_write_intents (
+        result_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, assetId, payload.batchId, fileName, filePath, temporaryPath, payload.storageMode, createdAt);
     try {
+      await mkdir(batchDirectory, { recursive: true });
+      await writeFile(temporaryPath, bytes, { flag: 'wx' });
+      await rename(temporaryPath, filePath);
       signal?.throwIfAborted();
       this.#database.prepare(`
         INSERT INTO generation_results (
@@ -433,9 +517,21 @@ export class GenerationService {
         payload.providerProfileId, payload.templateId, payload.templateVersion, payload.storageMode, createdAt
       );
       await this.#writeManifest(batchDirectory, assetId, payload.batchId, provider.profile, payload.storageMode);
+      if (this.#database.prepare('DELETE FROM generation_write_intents WHERE result_id = ?').run(id).changes !== 1) {
+        throw new Error('GENERATION_WRITE_INTENT_CONCURRENT_CHANGE');
+      }
     } catch (error) {
       this.#database.prepare('DELETE FROM generation_results WHERE id = ?').run(id);
-      await unlink(filePath).catch(() => undefined);
+      let cleanupFailed = false;
+      for (const candidate of [temporaryPath, filePath]) {
+        await unlink(candidate).catch((cleanupError: NodeJS.ErrnoException) => {
+          if (cleanupError.code !== 'ENOENT') cleanupFailed = true;
+        });
+      }
+      if (await pathExists(path.join(batchDirectory, 'manifest.json'))) {
+        await this.#refreshManifest(batchDirectory, assetId, payload.batchId).catch(() => { cleanupFailed = true; });
+      }
+      if (!cleanupFailed) this.#database.prepare('DELETE FROM generation_write_intents WHERE result_id = ?').run(id);
       throw error;
     }
 
@@ -561,6 +657,56 @@ export class GenerationService {
     `).run(resultId, stagedPath).changes);
   }
 
+  #expectedResultDirectory(assetId: string, batchId: string, storageMode: 'managed' | 'portable'): string | null {
+    if (storageMode === 'managed') return path.join(this.#generatedDirectory, assetId.slice(0, 2), assetId, batchId);
+    const source = this.#catalog.resolveAssetFile(assetId);
+    if (!source) return null;
+    const originalStem = sanitizeFileStem(path.parse(source.fileName).name);
+    return path.join(
+      path.dirname(source.path), '_PhotoAllIsAI',
+      `${originalStem}__${assetId.replaceAll('-', '').slice(0, 8).toUpperCase()}`,
+      batchId
+    );
+  }
+
+  async #isSafeResultDirectory(assetId: string, storageMode: 'managed' | 'portable', directory: string): Promise<boolean> {
+    let root = this.#generatedDirectory;
+    if (storageMode === 'portable') {
+      const source = this.#catalog.resolveAssetFile(assetId);
+      if (!source) return false;
+      root = path.join(path.dirname(source.path), '_PhotoAllIsAI');
+    }
+    try {
+      const entry = await lstat(directory);
+      if (!entry.isDirectory()) return false;
+      const [resolvedRoot, resolvedDirectory] = await Promise.all([realpath(root), realpath(directory)]);
+      return isPathWithin(resolvedRoot, resolvedDirectory);
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'ENOENT';
+    }
+  }
+
+}
+
+async function inspectOptionalRegularFile(filePath: string): Promise<Awaited<ReturnType<typeof lstat>> | null | false> {
+  try {
+    const entry = await lstat(filePath);
+    return entry.isFile() ? entry : false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? null : false;
+  }
+}
+
+function isGenerationTemporaryPath(temporaryPath: string, filePath: string): boolean {
+  if (path.dirname(path.resolve(temporaryPath)) !== path.dirname(path.resolve(filePath))) return false;
+  const suffix = path.basename(temporaryPath).slice(path.basename(filePath).length);
+  return /^\.\d+\.(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.tmp$/iu.test(suffix)
+    || /^\.\d+\.tmp$/u.test(suffix);
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 }
 
 async function inspectPurgeFile(filePath: string, trashRoot: string): Promise<Awaited<ReturnType<typeof lstat>> | null | false> {
