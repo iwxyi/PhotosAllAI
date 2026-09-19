@@ -125,6 +125,29 @@ describe('catalog image discovery', () => {
     catalog.close();
   });
 
+  it('builds the recent collection from real import timestamps', async () => {
+    const root = await createTemporaryDirectory();
+    const photosDirectory = path.join(root, 'photos');
+    const databasePath = path.join(root, 'catalog.sqlite');
+    await mkdir(photosDirectory, { recursive: true });
+    await Promise.all([
+      writeFile(path.join(photosDirectory, 'recent.jpg'), 'recent'),
+      writeFile(path.join(photosDirectory, 'old.jpg'), 'old')
+    ]);
+    const catalog = new CatalogService(databasePath);
+    await catalog.importFolders([photosDirectory]);
+    const database = new DatabaseSync(databasePath);
+    database.prepare('UPDATE assets SET imported_at = ? WHERE file_name = ?')
+      .run(Date.now() - 31 * 24 * 60 * 60 * 1_000, 'old.jpg');
+    database.close();
+
+    expect(catalog.listSmartCollections().find((collection) => collection.id === 'recent')?.assetCount).toBe(1);
+    const page = catalog.listAssetPage({ smartCollection: 'recent', cursor: null, limit: 20 });
+    expect(page.totalCount).toBe(1);
+    expect(page.items[0]?.fileName).toBe('recent.jpg');
+    catalog.close();
+  });
+
   it('marks externally removed files offline and restores them after reappearance', async () => {
     const root = await createTemporaryDirectory();
     const photosDirectory = path.join(root, 'photos');

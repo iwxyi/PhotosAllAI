@@ -48,7 +48,14 @@ test.afterAll(async () => {
 });
 
 test('loads cursor pages at the virtualized filmstrip boundary', async () => {
-  await expect(page.getByText('205 张照片')).toBeVisible();
+  await expect(page.getByText('205 张照片', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: /最近 30 天 0/ })).toBeVisible();
+  await page.getByRole('button', { name: /最近 30 天 0/ }).click();
+  await expect(page.getByText('此集合为空')).toBeVisible();
+  const allPhotos = page.getByRole('button', { name: /所有照片 205/ });
+  await expect(allPhotos).not.toHaveClass(/is-active/);
+  await expect(page.locator('.library-summary')).toContainText('1 个文件夹 · 205 张照片');
+  await allPhotos.click();
   const options = page.getByRole('option');
   expect(await options.count()).toBeLessThan(30);
 

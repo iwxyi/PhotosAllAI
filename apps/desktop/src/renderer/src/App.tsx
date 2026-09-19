@@ -293,6 +293,8 @@ function Sidebar({
     : folders;
   const selectedOfflineFolder = visibleFolders.find((folder) => folder.id === selectedFolderId && folder.offlineCount > 0);
   const selectedFolder = folders.find((folder) => folder.id === selectedFolderId);
+  const libraryAssetCount = isDemo ? 12_408 : folders.length > 0 ? folders.reduce((sum, folder) => sum + folder.assetCount, 0) : totalCount;
+  const recentCount = isDemo ? 248 : smartCollections.find((collection) => collection.id === 'recent')?.assetCount ?? 0;
   const favoriteCount = isDemo ? 86 : smartCollections.find((collection) => collection.id === 'favorites')?.assetCount ?? 0;
   useEffect(() => {
     if (!folderRemovalCandidate) return;
@@ -306,16 +308,16 @@ function Sidebar({
     <aside className="sidebar">
       <div className="sidebar-scroll">
         <nav aria-label="图库导航">
-          <button className={`nav-row${selectedFolderId === null ? ' is-active' : ''}`} type="button" onClick={() => onSelectFolder(null)}>
+          <button className={`nav-row${selectedFolderId === null && selectedAlbumId === null && selectedSmartCollection === null ? ' is-active' : ''}`} type="button" onClick={() => onSelectFolder(null)}>
             <GalleryHorizontalEnd size={15} />
             <span>所有照片</span>
-            <span className="row-count">{isDemo ? '12,408' : totalCount}</span>
+            <span className="row-count">{libraryAssetCount.toLocaleString()}</span>
           </button>
-          <div className="nav-row">
+          <button className={`nav-row${selectedSmartCollection === 'recent' ? ' is-active' : ''}`} type="button" onClick={() => onSelectSmartCollection(selectedSmartCollection === 'recent' ? null : 'recent')}>
             <Clock3 size={15} />
-            <span>最近导入</span>
-            <span className="row-count">248</span>
-          </div>
+            <span>最近 30 天</span>
+            <span className="row-count">{recentCount}</span>
+          </button>
           <button className={`nav-row${selectedSmartCollection === 'favorites' ? ' is-active' : ''}`} type="button" onClick={() => onSelectSmartCollection(selectedSmartCollection === 'favorites' ? null : 'favorites')}>
             <Star size={15} />
             <span>首选</span>
@@ -342,7 +344,7 @@ function Sidebar({
 
         <div className="sidebar-section">
           <div className="section-heading"><span>智能集合</span></div>
-          {(isDemo ? [{ id: 'unanalyzed', assetCount: 43 }, { id: 'favorites', assetCount: 86 }, { id: 'generated', assetCount: 27 }] : smartCollections).map((collection) => { const label = collection.id === 'favorites' ? '首选照片' : collection.id === 'unrated' ? '未评分' : collection.id === 'unanalyzed' ? '等待 AI 分析' : collection.id === 'to-review' ? '待审阅' : '已生成'; const Icon = collection.id === 'favorites' ? Star : collection.id === 'generated' ? FolderHeart : collection.id === 'to-review' ? Check : collection.id === 'unrated' ? CircleAlert : Sparkles; return <button className={`nav-row${selectedSmartCollection === collection.id ? ' is-active' : ''}`} type="button" key={collection.id} onClick={() => onSelectSmartCollection(selectedSmartCollection === collection.id ? null : collection.id as CatalogSmartCollection['id'])}><Icon size={15} /><span>{label}</span><span className="row-count">{collection.assetCount}</span></button>; })}
+          {(isDemo ? [{ id: 'unanalyzed', assetCount: 43 }, { id: 'generated', assetCount: 27 }] : smartCollections.filter((collection) => collection.id !== 'recent' && collection.id !== 'favorites')).map((collection) => { const label = collection.id === 'unrated' ? '未评分' : collection.id === 'unanalyzed' ? '等待 AI 分析' : collection.id === 'to-review' ? '待审阅' : '已生成'; const Icon = collection.id === 'generated' ? FolderHeart : collection.id === 'to-review' ? Check : collection.id === 'unrated' ? CircleAlert : Sparkles; return <button className={`nav-row${selectedSmartCollection === collection.id ? ' is-active' : ''}`} type="button" key={collection.id} onClick={() => onSelectSmartCollection(selectedSmartCollection === collection.id ? null : collection.id as CatalogSmartCollection['id'])}><Icon size={15} /><span>{label}</span><span className="row-count">{collection.assetCount}</span></button>; })}
         </div>
 
         <div className="sidebar-section">
@@ -352,9 +354,9 @@ function Sidebar({
           </div>
         </div>
       </div>
-      <div className="storage-meter">
-        <div><span>图库存储</span><span>184 GB / 500 GB</span></div>
-        <div className="meter"><i /></div>
+      <div className="library-summary">
+        <span>本地图库</span>
+        <strong>{isDemo ? demoFolders.length : folders.length} 个文件夹 · {libraryAssetCount.toLocaleString()} 张照片</strong>
       </div>
       {albumManagerOpen && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !albumBusy) setAlbumManagerOpen(false); }}><form className="album-dialog" role="dialog" aria-modal="true" aria-labelledby="album-dialog-title" onSubmit={async (event) => { event.preventDefault(); if (!albumName.trim() || albumBusy) return; setAlbumBusy(true); try { await window.desktopApi.saveCatalogAlbum({ id: editingAlbumId ?? undefined, name: albumName }); await onRefreshAlbums(); setAlbumName(''); setEditingAlbumId(null); } finally { setAlbumBusy(false); } }}><header><div><span className="dialog-icon"><FolderHeart size={16} /></span><div><h2 id="album-dialog-title">管理相册</h2><p>相册只管理图库关系，不会移动原文件。</p></div></div><IconButton label="关闭相册管理" onClick={() => setAlbumManagerOpen(false)}><X size={15} /></IconButton></header><div className="album-list">{albums.map((album) => <div className={`album-row${editingAlbumId === album.id ? ' is-selected' : ''}`} key={album.id}><button type="button" onClick={() => { setEditingAlbumId(album.id); setAlbumName(album.name); }}><FolderHeart size={14} /><span>{album.name}</span><small>{album.assetCount} 张</small></button><button type="button" aria-label={`删除相册 ${album.name}`} onClick={async () => { if (albumBusy) return; setAlbumBusy(true); try { await window.desktopApi.deleteCatalogAlbum(album.id); if (selectedAlbumId === album.id) onSelectAlbum(null); await onRefreshAlbums(); } finally { setAlbumBusy(false); } }}><Trash2 size={13} /></button></div>)}</div><label className="album-field"><span>{editingAlbumId ? '重命名相册' : '新建相册'}</span><input autoFocus value={albumName} maxLength={120} placeholder="例如：客户交付" onChange={(event) => setAlbumName(event.target.value)} /></label><footer><button className="quiet-button" type="button" onClick={() => setAlbumManagerOpen(false)}>关闭</button><button className="primary-action compact" type="submit" disabled={!albumName.trim() || albumBusy}>{editingAlbumId ? '保存名称' : '创建相册'}</button></footer></form></div>}
       {tagManagerOpen && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !tagBusy) setTagManagerOpen(false); }}><section className="album-dialog tag-dialog" role="dialog" aria-modal="true" aria-labelledby="tag-dialog-title"><header><div><span className="dialog-icon"><Tags size={16} /></span><div><h2 id="tag-dialog-title">管理标签</h2><p>删除标签只会移除标签关系，不会删除照片或文件。</p></div></div><IconButton label="关闭标签管理" disabled={tagBusy} onClick={() => setTagManagerOpen(false)}><X size={15} /></IconButton></header><div className="tag-list">{tags.length === 0 ? <div className="operation-history-empty">暂无可管理标签</div> : tags.map((tag) => <div className={`tag-manager-row${tagDeleteCandidate === tag.id ? ' is-pending' : ''}`} key={tag.id}><span><strong>{tag.name}</strong><small>{tag.assetCount} 张照片</small></span>{tagDeleteCandidate === tag.id ? <div><button className="quiet-button" type="button" disabled={tagBusy} onClick={() => setTagDeleteCandidate(null)}>取消</button><button className="danger-action compact" type="button" disabled={tagBusy} onClick={async () => { setTagBusy(true); try { await window.desktopApi.deleteCatalogTag(tag.id); if (selectedTagId === tag.id) onSelectTag(null); await onRefreshAlbums(); setTagDeleteCandidate(null); } finally { setTagBusy(false); } }}>确认删除</button></div> : <button type="button" aria-label={`删除标签 ${tag.name}`} onClick={() => setTagDeleteCandidate(tag.id)}><Trash2 size={13} /></button>}</div>)}</div><footer><button className="quiet-button" type="button" disabled={tagBusy} onClick={() => setTagManagerOpen(false)}>关闭</button></footer></section></div>}
@@ -919,7 +921,9 @@ function PopulatedLibraryWorkspace({
     ? catalogFolders.find((folder) => folder.id === selectedFolderId)?.name ?? '文件夹'
     : selectedAlbumId
       ? catalogAlbums.find((album) => album.id === selectedAlbumId)?.name ?? '相册'
-      : isDemo ? '2026 人像作品' : searchQuery ? `搜索：${searchQuery}` : '所有照片';
+      : selectedSmartCollection
+        ? selectedSmartCollection === 'recent' ? '最近 30 天' : selectedSmartCollection === 'favorites' ? '首选照片' : selectedSmartCollection === 'unrated' ? '未评分' : selectedSmartCollection === 'unanalyzed' ? '等待 AI 分析' : selectedSmartCollection === 'to-review' ? '待审阅' : '已生成'
+        : isDemo ? '2026 人像作品' : searchQuery ? `搜索：${searchQuery}` : '所有照片';
 
   useEffect(() => {
     if (selectedAssetId !== selectedId) onSelectedAssetChange(selectedId);

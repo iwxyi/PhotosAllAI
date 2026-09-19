@@ -129,10 +129,9 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 .disclosure { color: var(--dim); }
 .tag-cloud { display: flex; gap: 5px; flex-wrap: wrap; padding: 4px 7px; }
 .tag-cloud span, .tag-cloud button { min-height: 24px; padding: 4px 7px; color: #aeb5a9; background: var(--surface-3); border: 1px solid var(--line); border-radius: 3px; }.tag-cloud button { display: flex; align-items: center; gap: 5px; }.tag-cloud button.is-active { color: var(--accent); border-color: var(--accent); }.tag-cloud em { color: var(--dim); font-size: 8px; font-style: normal; }.tag-cloud small { padding: 4px 7px; color: var(--dim); }
-.storage-meter { padding: 12px 14px 13px; border-top: 1px solid var(--line); }
-.storage-meter > div:first-child { display: flex; justify-content: space-between; color: var(--dim); font-size: 10px; }
-.meter { height: 3px; margin-top: 8px; background: var(--surface-4); border-radius: 2px; overflow: hidden; }
-.meter i { display: block; width: 37%; height: 100%; background: var(--accent); }
+.library-summary { min-width: 0; padding: 10px 14px 12px; display: grid; gap: 4px; border-top: 1px solid var(--line); }
+.library-summary span { color: var(--dim); font-size: 9px; }
+.library-summary strong { overflow: hidden; color: var(--muted); font-size: 10px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 
 .library-main { min-width: 0; min-height: 0; display: grid; grid-template-rows: 160px minmax(0, 1fr); background: var(--bg); }
 .empty-library-main { min-width: 0; min-height: 0; display: grid; place-content: center; justify-items: center; color: var(--dim); text-align: center; background: var(--bg); }.empty-library-main h2 { margin: 13px 0 5px; color: var(--text); font-size: 14px; }.empty-library-main p { margin: 0; }

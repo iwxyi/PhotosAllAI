@@ -42,6 +42,7 @@ const SUPPORTED_EXTENSIONS = new Set([
 ]);
 
 const IGNORED_DIRECTORIES = new Set(['_PhotoAllIsAI', '.git', 'node_modules']);
+const RECENT_IMPORT_WINDOW_MS = 30 * 24 * 60 * 60 * 1_000;
 
 type AssetRow = {
   id: string;
@@ -291,6 +292,10 @@ export class CatalogService {
     if (input.albumId) {
       baseConditions.push('id IN (SELECT asset_id FROM album_assets WHERE album_id = ?)');
       baseValues.push(input.albumId);
+    }
+    if (input.smartCollection === 'recent') {
+      baseConditions.push('imported_at >= ?');
+      baseValues.push(Date.now() - RECENT_IMPORT_WINDOW_MS);
     }
     if (input.smartCollection === 'favorites') baseConditions.push('favorite = 1');
     if (input.smartCollection === 'unrated') baseConditions.push('rating = 0');
@@ -590,15 +595,16 @@ export class CatalogService {
   }
 
   listSmartCollections(): CatalogSmartCollection[] {
-    const count = (condition: string): number => {
+    const count = (condition: string, ...values: Array<string | number>): number => {
       const row = this.#database.prepare(`
         SELECT COUNT(*) AS value FROM assets WHERE removed_at IS NULL AND (${condition})
-      `).get() as { value: number };
+      `).get(...values) as { value: number };
       return row.value;
     };
     const hasAnalysis = this.#tableExists('analysis_revisions');
     const hasGeneration = this.#tableExists('generation_results');
     return [
+      catalogSmartCollectionSchema.parse({ id: 'recent', assetCount: count('imported_at >= ?', Date.now() - RECENT_IMPORT_WINDOW_MS) }),
       catalogSmartCollectionSchema.parse({ id: 'favorites', assetCount: count('favorite = 1') }),
       catalogSmartCollectionSchema.parse({ id: 'unrated', assetCount: count('rating = 0') }),
       catalogSmartCollectionSchema.parse({
