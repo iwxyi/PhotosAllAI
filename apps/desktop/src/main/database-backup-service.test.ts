@@ -86,4 +86,21 @@ describe('database backup service', () => {
     await service.createAutomatic(backupDirectory, { now: 3_000, minimumIntervalMs: 0, retention: 2 });
     expect((await readdir(backupDirectory)).sort()).toEqual(['catalog-2000.sqlite', 'catalog-3000.sqlite']);
   });
+
+  it('serializes concurrent automatic backup decisions', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'photoallisai-backup-auto-concurrent-'));
+    const databasePath = path.join(root, 'catalog.sqlite');
+    const backupDirectory = path.join(root, 'backups');
+    const database = new DatabaseSync(databasePath);
+    database.exec('CREATE TABLE records (id INTEGER PRIMARY KEY);');
+    database.close();
+    const service = new DatabaseBackupService(databasePath);
+
+    const results = await Promise.all([
+      service.createAutomatic(backupDirectory, { now: 4_000, minimumIntervalMs: 500 }),
+      service.createAutomatic(backupDirectory, { now: 4_000, minimumIntervalMs: 500 })
+    ]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect((await readdir(backupDirectory)).filter((name) => name.endsWith('.sqlite'))).toEqual(['catalog-4000.sqlite']);
+  });
 });

@@ -14,6 +14,7 @@ export type DatabaseBackupResult = {
 /** Creates a consistent SQLite snapshot without copying live WAL files. */
 export class DatabaseBackupService {
   readonly #databasePath: string;
+  #automaticBackupTail: Promise<void> = Promise.resolve();
 
   constructor(databasePath: string) {
     this.#databasePath = path.resolve(databasePath);
@@ -47,6 +48,21 @@ export class DatabaseBackupService {
   async createAutomatic(
     directory: string,
     options: { now?: number; minimumIntervalMs?: number; retention?: number } = {}
+  ): Promise<DatabaseBackupResult | null> {
+    const previous = this.#automaticBackupTail;
+    let release!: () => void;
+    this.#automaticBackupTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await this.#createAutomatic(directory, options);
+    } finally {
+      release();
+    }
+  }
+
+  async #createAutomatic(
+    directory: string,
+    options: { now?: number; minimumIntervalMs?: number; retention?: number }
   ): Promise<DatabaseBackupResult | null> {
     const now = options.now ?? Date.now();
     const minimumIntervalMs = Math.max(0, options.minimumIntervalMs ?? 24 * 60 * 60 * 1_000);
