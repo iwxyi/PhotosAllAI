@@ -152,6 +152,12 @@ test('opens the task drawer and application tabs', async () => {
   await expect(page.getByRole('heading', { name: '图库与存储' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '生成结果存储' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '预览缓存' })).toBeVisible();
+  await page.getByLabel('预览缓存磁盘上限').selectOption(String(1024 ** 3));
+  await expect(page.locator('.cache-section').getByRole('status')).toContainText('缓存上限已保存');
+  expect(JSON.parse(await readFile(path.join(userDataDirectory, 'settings', 'app.json'), 'utf8'))).toMatchObject({
+    cacheMaxBytes: 1024 ** 3
+  });
+  await page.screenshot({ path: 'test-results/settings-storage.png', animations: 'disabled' });
   await expect(page.getByRole('heading', { name: '图库备份' })).toBeVisible();
   await electronApp.evaluate(({ dialog }, directory) => {
     const state = globalThis as typeof globalThis & { photoAllIsAiOriginalShowOpenDialog?: typeof dialog.showOpenDialog };

@@ -33,5 +33,8 @@ describe('image cache governance', () => {
     expect(await service.getStats()).toEqual({ files: 2, bytes: 30 });
     expect(await service.prune(20)).toEqual({ removedFiles: 1, removedBytes: 10 });
     expect(await service.getStats()).toEqual({ files: 1, bytes: 20 });
+    await writeFile(path.join(nested, 'later.jpg'), Buffer.alloc(15));
+    expect(await service.setMaxBytes(20)).toEqual({ removedFiles: 1, removedBytes: 20 });
+    expect(await service.getStats()).toEqual({ files: 1, bytes: 15 });
   });
 });

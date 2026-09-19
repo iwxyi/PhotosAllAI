@@ -1381,6 +1381,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [generationStorageMode, setGenerationStorageMode] = useState<AppSettings['generationStorageMode']>('managed');
   const [theme, setTheme] = useState<AppSettings['theme']>('system');
+  const [cacheMaxBytes, setCacheMaxBytes] = useState(5 * 1024 ** 3);
   const [storageMessage, setStorageMessage] = useState('');
   const [storageBusy, setStorageBusy] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
@@ -1400,6 +1401,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
     void window.desktopApi.getAppSettings().then((settings) => {
       setGenerationStorageMode(settings.generationStorageMode);
       setTheme(settings.theme);
+      setCacheMaxBytes(settings.cacheMaxBytes);
     });
   }, [onExportPresetsChange]);
 
@@ -1408,7 +1410,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
     setStorageBusy(true);
     setStorageMessage('');
     try {
-      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode: value, theme });
+      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode: value, theme, cacheMaxBytes });
       setGenerationStorageMode(saved.generationStorageMode);
       setStorageMessage('存储策略已保存，新加入队列的任务将使用该策略。');
     } catch {
@@ -1421,12 +1423,28 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
   const saveTheme = async (value: AppSettings['theme']) => {
     setTheme(value);
     try {
-      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode, theme: value });
+      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode, theme: value, cacheMaxBytes });
       setTheme(saved.theme);
       applyTheme(saved.theme);
       window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT, { detail: saved.theme }));
     } catch {
       setMessage('主题设置保存失败，请检查应用权限。');
+    }
+  };
+
+  const saveCacheMaxBytes = async (value: number) => {
+    setCacheMaxBytes(value);
+    setCacheBusy(true);
+    setCacheMessage('');
+    try {
+      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode, theme, cacheMaxBytes: value });
+      setCacheMaxBytes(saved.cacheMaxBytes);
+      setCacheStats(await window.desktopApi.getImageCacheStats());
+      setCacheMessage('缓存上限已保存，超出部分已按最近使用时间清理。');
+    } catch {
+      setCacheMessage('缓存上限保存失败，请检查应用权限。');
+    } finally {
+      setCacheBusy(false);
     }
   };
 
@@ -1633,6 +1651,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
         </section>
         <section className="settings-section cache-section">
           <div className="settings-heading"><div><h2>预览缓存</h2><p>缓存可安全重建，不会删除原图、生成结果或分析数据。</p></div><span>{cacheStats ? `${cacheStats.files} 个文件 · ${(cacheStats.bytes / 1_073_741_824).toFixed(2)} GiB` : '正在读取'}</span></div>
+          <label className="cache-limit"><span><strong>磁盘上限</strong><small>达到上限后优先清理最久未使用的缩略图和屏幕预览。</small></span><select aria-label="预览缓存磁盘上限" value={cacheMaxBytes} disabled={cacheBusy} onChange={(event) => void saveCacheMaxBytes(Number(event.target.value))}><option value={1024 ** 3}>1 GiB</option><option value={5 * 1024 ** 3}>5 GiB</option><option value={10 * 1024 ** 3}>10 GiB</option><option value={20 * 1024 ** 3}>20 GiB</option><option value={50 * 1024 ** 3}>50 GiB</option></select></label>
           <div className="cache-actions"><button className="secondary-action" type="button" disabled={cacheBusy || !cacheStats || cacheStats.bytes === 0} onClick={async () => { setCacheBusy(true); try { const result = await window.desktopApi.pruneImageCache({ maxBytes: 0 }); setCacheMessage(`已清理 ${result.removedFiles} 个缓存文件。`); setCacheStats(await window.desktopApi.getImageCacheStats()); } catch { setCacheMessage('缓存清理失败，请稍后重试。'); } finally { setCacheBusy(false); } }}>{cacheBusy ? '清理中…' : '清理全部可重建缓存'}</button><span role="status">{cacheMessage}</span></div>
         </section>
         <section className="settings-section backup-section">

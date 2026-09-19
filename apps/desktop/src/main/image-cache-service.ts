@@ -1,4 +1,4 @@
-import { access, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, readdir, rename, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { execFile as nodeExecFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
@@ -23,15 +23,25 @@ export class ImageCacheService {
   readonly #catalog: CatalogService;
   readonly #decoderProbe: DecoderProbe;
   #decoderAvailability: Promise<DecoderCapabilities> | null = null;
+  #maxBytes: number;
+  #pruneQueue: Promise<void> = Promise.resolve();
+  #pruneTimer: ReturnType<typeof setTimeout> | null = null;
+  readonly #lastTouches = new Map<string, number>();
   #hits = 0;
   #misses = 0;
   #decodes = 0;
   #decodeMsTotal = 0;
 
-  constructor(cacheDirectory: string, catalog: CatalogService, decoderProbe: DecoderProbe = defaultDecoderProbe) {
+  constructor(
+    cacheDirectory: string,
+    catalog: CatalogService,
+    decoderProbe: DecoderProbe = defaultDecoderProbe,
+    maxBytes = 5 * 1024 ** 3
+  ) {
     this.#cacheDirectory = cacheDirectory;
     this.#catalog = catalog;
     this.#decoderProbe = decoderProbe;
+    this.#maxBytes = normalizeMaxBytes(maxBytes);
   }
 
   async getStats(): Promise<{ files: number; bytes: number }> {
@@ -56,7 +66,17 @@ export class ImageCacheService {
   }
 
   async prune(maxBytes: number): Promise<{ removedFiles: number; removedBytes: number }> {
-    const target = Math.max(0, Math.trunc(maxBytes));
+    const operation = this.#pruneQueue.then(() => this.#prune(normalizeMaxBytes(maxBytes)));
+    this.#pruneQueue = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  async setMaxBytes(maxBytes: number): Promise<{ removedFiles: number; removedBytes: number }> {
+    this.#maxBytes = normalizeMaxBytes(maxBytes);
+    return this.prune(this.#maxBytes);
+  }
+
+  async #prune(target: number): Promise<{ removedFiles: number; removedBytes: number }> {
     const files = await this.#listFiles();
     let total = files.reduce((sum, file) => sum + file.size, 0);
     let removedFiles = 0;
@@ -64,10 +84,15 @@ export class ImageCacheService {
     files.sort((left, right) => left.modifiedAt - right.modifiedAt);
     for (const file of files) {
       if (total <= target) break;
-      await unlink(file.path).catch(() => undefined);
-      total -= file.size;
-      removedFiles += 1;
-      removedBytes += file.size;
+      try {
+        await unlink(file.path);
+        total -= file.size;
+        removedFiles += 1;
+        removedBytes += file.size;
+        this.#lastTouches.delete(file.path);
+      } catch (error) {
+        if (isNodeError(error, 'ENOENT')) total -= file.size;
+      }
     }
     return { removedFiles, removedBytes };
   }
@@ -102,6 +127,7 @@ export class ImageCacheService {
     try {
       await access(destination);
       this.#hits += 1;
+      await this.#touch(destination);
       return destination;
     } catch {
       // Cache miss.
@@ -113,7 +139,10 @@ export class ImageCacheService {
 
     const startedAt = performance.now();
     const operation = this.#create(source.path, destination, specification)
-      .then((result) => result)
+      .then((result) => {
+        this.#schedulePrune();
+        return result;
+      })
       .finally(() => {
         this.#decodes += 1;
         this.#decodeMsTotal += performance.now() - startedAt;
@@ -121,6 +150,24 @@ export class ImageCacheService {
       });
     this.#inFlight.set(cacheKey, operation);
     return operation;
+  }
+
+  async #touch(filePath: string): Promise<void> {
+    const now = Date.now();
+    const lastTouch = this.#lastTouches.get(filePath) ?? 0;
+    if (now - lastTouch < 5 * 60_000) return;
+    const timestamp = new Date(now);
+    await utimes(filePath, timestamp, timestamp).catch(() => undefined);
+    this.#lastTouches.set(filePath, now);
+  }
+
+  #schedulePrune(): void {
+    if (this.#pruneTimer) return;
+    this.#pruneTimer = setTimeout(() => {
+      this.#pruneTimer = null;
+      void this.prune(this.#maxBytes);
+    }, 30_000);
+    this.#pruneTimer.unref();
   }
 
   async #create(
@@ -218,4 +265,12 @@ async function defaultDecoderProbe(): Promise<DecoderCapabilities> {
   };
   const [imageMagick, sips] = await Promise.all([probe('magick'), process.platform === 'darwin' ? probe('sips') : Promise.resolve(false)]);
   return { imageMagick, sips };
+}
+
+function normalizeMaxBytes(value: number): number {
+  return Math.max(0, Math.trunc(value));
+}
+
+function isNodeError(error: unknown, code: string): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error && error.code === code;
 }

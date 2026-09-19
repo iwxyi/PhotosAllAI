@@ -143,9 +143,13 @@ function registerIpc(): void {
     })
   );
   ipcMain.handle('app.settings.get.v1', () => appSettings.get());
-  ipcMain.handle('app.settings.save.v1', (_event, input: unknown) =>
-    appSettings.save(appSettingsSchema.parse(input))
-  );
+  ipcMain.handle('app.settings.save.v1', async (_event, input: unknown) => {
+    const parsed = appSettingsSchema.parse(input);
+    const previous = await appSettings.get();
+    const saved = await appSettings.save(parsed);
+    if (saved.cacheMaxBytes !== previous.cacheMaxBytes) await imageCache.setMaxBytes(saved.cacheMaxBytes);
+    return saved;
+  });
   ipcMain.handle('app.diagnostics.v1', createDiagnosticSnapshot);
   ipcMain.handle('app.diagnostics.export.v1', async () => {
     const selection = await dialog.showSaveDialog({
@@ -528,6 +532,7 @@ app.whenReady().then(async () => {
   const migrationCheckpoint = await migration.prepare(APPLICATION_SCHEMA_VERSION);
   workspace = new WorkspaceService(databasePath);
   appSettings = new AppSettingsService(join(app.getPath('userData'), 'settings', 'app.json'));
+  const initialAppSettings = await appSettings.get();
   databaseBackup = new DatabaseBackupService(databasePath);
   catalog = new CatalogService(databasePath);
   await catalog.reconcileImportedFolders();
@@ -539,8 +544,10 @@ app.whenReady().then(async () => {
   await fileOperations.recoverInterruptedOperations();
   tasks = new TaskService(databasePath);
   templates = new TemplateService(databasePath);
-  imageCache = new ImageCacheService(join(app.getPath('userData'), 'cache', 'images'), catalog);
-  void imageCache.prune(5 * 1024 * 1024 * 1024);
+  imageCache = new ImageCacheService(
+    join(app.getPath('userData'), 'cache', 'images'), catalog, undefined, initialAppSettings.cacheMaxBytes
+  );
+  void imageCache.prune(initialAppSettings.cacheMaxBytes);
   providers = new ProviderService(join(app.getPath('userData'), 'settings', 'providers.json'), {
     available: () => safeStorage.isEncryptionAvailable(),
     encrypt: (value) => safeStorage.encryptString(value).toString('base64'),

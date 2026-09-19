@@ -69,7 +69,8 @@ export type LibraryRestoreResult = z.infer<typeof libraryRestoreResultSchema>;
 
 export const appSettingsSchema = z.object({
   generationStorageMode: z.enum(['managed', 'portable']).default('managed'),
-  theme: z.enum(['system', 'dark', 'light']).default('system')
+  theme: z.enum(['system', 'dark', 'light']).default('system'),
+  cacheMaxBytes: z.number().int().min(1024 ** 3).max(50 * 1024 ** 3).default(5 * 1024 ** 3)
 });
 export type AppSettings = z.infer<typeof appSettingsSchema>;
 
