@@ -1172,11 +1172,10 @@ function PopulatedLibraryWorkspace({
 
   const exportResults = async (resultIds: string[], presetId = selectedExportPresetId): Promise<string> => {
     try {
-      const report = await window.desktopApi.exportGenerationResults({ resultIds, presetId });
-      if (report.canceled) return '已取消导出';
-      return report.failed > 0
-        ? `已导出 ${report.succeeded} 个文件，${report.failed} 个失败`
-        : `已导出 ${report.succeeded} 个文件`;
+      const task = await window.desktopApi.exportGenerationResults({ resultIds, presetId });
+      if (!task) return '已取消导出';
+      setTasksOpen(true);
+      return `已将 ${resultIds.length} 个文件加入导出队列`;
     } catch {
       return '导出失败，请检查目录权限和可用空间。';
     }

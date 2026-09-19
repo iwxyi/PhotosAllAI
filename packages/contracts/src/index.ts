@@ -829,7 +829,7 @@ export interface DesktopApi {
   emptyGenerationTrash(): Promise<EmptyGenerationTrashReport>;
   updateGenerationResultReview(input: UpdateGenerationResultReviewInput): Promise<GenerationResult>;
   revealGenerationResult(resultId: string): Promise<boolean>;
-  exportGenerationResults(input: ExportGenerationResultsInput): Promise<ExportReport>;
+  exportGenerationResults(input: ExportGenerationResultsInput): Promise<PersistedTask | null>;
   listExportPresets(): Promise<ExportPreset[]>;
   saveExportPreset(input: SaveExportPresetInput): Promise<ExportPreset>;
   deleteExportPreset(presetId: string): Promise<void>;

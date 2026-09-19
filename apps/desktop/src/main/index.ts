@@ -26,7 +26,6 @@ import {
   exportGenerationResultsInputSchema,
   exportTaskPayloadSchema,
   generationResultIdInputSchema,
-  exportReportSchema,
   saveExportPresetInputSchema,
   exportPresetSchema,
   imageCacheStatsSchema,
@@ -72,6 +71,7 @@ import { ProviderService } from './provider-service';
 import { replaceRegularFileSafely } from './safe-file-write';
 import { TaskService } from './task-service';
 import { TaskRunner } from './task-runner';
+import { toRendererTask } from './task-sanitizer';
 import { TemplateService } from './template-service';
 import { WorkspaceService } from './workspace-service';
 import { AppSettingsService } from './app-settings-service';
@@ -405,24 +405,26 @@ function registerIpc(): void {
   ipcMain.handle('providers.test.v1', (_event, input: unknown) =>
     providers.test(saveProviderProfileInputSchema.parse(input))
   );
-  ipcMain.handle('tasks.list.v1', () => tasks.list());
+  ipcMain.handle('tasks.list.v1', () => tasks.list().map(toRendererTask));
   ipcMain.handle('tasks.enqueue.v1', (_event, input: unknown) => {
-    const task = tasks.enqueue(enqueueTaskInputSchema.parse(input));
+    const parsed = enqueueTaskInputSchema.parse(input);
+    if (parsed.kind === 'export') throw new Error('EXPORT_TASK_REQUIRES_DIRECTORY_SELECTION');
+    const task = tasks.enqueue(parsed);
     taskRunner.wake();
-    return task;
+    return toRendererTask(task);
   });
   ipcMain.handle('tasks.cancel.v1', (_event, taskId: unknown) => {
     const id = taskIdSchema.parse(taskId);
     taskRunner.cancel(id);
-    return tasks.cancel(id);
+    return toRendererTask(tasks.cancel(id));
   });
   ipcMain.handle('tasks.retry.v1', (_event, taskId: unknown) => {
     const task = tasks.retry(taskIdSchema.parse(taskId));
     taskRunner.wake();
-    return task;
+    return toRendererTask(task);
   });
   ipcMain.handle('tasks.reorder.v1', (_event, taskIds: unknown) =>
-    tasks.reorder(reorderTaskIdsSchema.parse(taskIds))
+    tasks.reorder(reorderTaskIdsSchema.parse(taskIds)).map(toRendererTask)
   );
   ipcMain.handle('tasks.generation.update.v1', (_event, input: unknown) =>
     tasks.updateQueuedGeneration(updateQueuedGenerationTaskInputSchema.parse(input))
@@ -490,14 +492,21 @@ function registerIpc(): void {
       properties: ['openDirectory', 'createDirectory']
     });
     if (selection.canceled || !selection.filePaths[0]) {
-      return exportReportSchema.parse({
-        id: null, canceled: true, total: resultIds.length,
-        succeeded: 0, failed: 0, files: [], failures: []
-      });
+      return null;
     }
     const preset = presetId ? exportPresets.list().find((item) => item.id === presetId) : undefined;
     if (presetId && !preset) throw new Error('EXPORT_PRESET_NOT_FOUND');
-    return exportService.exportToDirectory(resultIds, selection.filePaths[0], preset);
+    const task = tasks.enqueue({
+      kind: 'export',
+      assetId: null,
+      payload: exportTaskPayloadSchema.parse({
+        resultIds,
+        destinationDirectory: selection.filePaths[0],
+        preset
+      })
+    });
+    taskRunner.wake();
+    return toRendererTask(task);
   });
   ipcMain.handle('export.presets.list.v1', () => exportPresets.list());
   ipcMain.handle('export.presets.save.v1', (_event, input: unknown) =>
