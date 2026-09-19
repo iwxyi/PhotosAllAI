@@ -165,6 +165,16 @@ export const catalogFolderSchema = z.object({
 
 export type CatalogFolder = z.infer<typeof catalogFolderSchema>;
 
+export const unregisterCatalogFolderInputSchema = z.object({
+  folderId: z.string().regex(/^[a-f0-9]{32}$/u)
+});
+export type UnregisterCatalogFolderInput = z.infer<typeof unregisterCatalogFolderInputSchema>;
+export const unregisterCatalogFolderReportSchema = z.object({
+  folderId: z.string().regex(/^[a-f0-9]{32}$/u),
+  assetCount: z.number().int().nonnegative()
+});
+export type UnregisterCatalogFolderReport = z.infer<typeof unregisterCatalogFolderReportSchema>;
+
 export const relinkCatalogFolderResultSchema = z.object({
   folder: catalogFolderSchema,
   matched: z.number().int().nonnegative(),
@@ -690,6 +700,7 @@ export interface DesktopApi {
   undoFileOperation(input: UndoFileOperationInput): Promise<UndoFileOperationReport>;
   importFolders(): Promise<CatalogSnapshot | null>;
   relinkCatalogFolder(folderId: string): Promise<RelinkCatalogFolderResult | null>;
+  unregisterCatalogFolder(input: UnregisterCatalogFolderInput): Promise<UnregisterCatalogFolderReport>;
   revealCatalogAsset(assetId: string): Promise<boolean>;
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;

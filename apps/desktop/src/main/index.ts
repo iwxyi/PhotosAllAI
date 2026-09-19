@@ -50,6 +50,8 @@ import {
   taskIdSchema,
   updateCatalogMetadataInputSchema,
   updateCatalogTagsInputSchema,
+  unregisterCatalogFolderInputSchema,
+  unregisterCatalogFolderReportSchema,
   undoFileOperationInputSchema,
   undoFileOperationReportSchema,
   saveCatalogAlbumInputSchema,
@@ -77,7 +79,7 @@ import { DatabaseMigrationService } from './database-migration-service';
 import { LibraryRestoreService } from './library-restore-service';
 
 const APP_ORIGIN = 'app://photoallisai';
-const APPLICATION_SCHEMA_VERSION = 2;
+const APPLICATION_SCHEMA_VERSION = 3;
 let catalog: CatalogService;
 let catalogWatcher: CatalogWatcher;
 let imageCache: ImageCacheService;
@@ -366,6 +368,11 @@ function registerIpc(): void {
     )));
     catalogWatcher.watchFolders(catalog.listFolderPaths());
     return relinkCatalogFolderResultSchema.parse(report);
+  });
+  ipcMain.handle('catalog.folder.unregister.v1', (_event, input: unknown) => {
+    const report = catalog.unregisterFolder(unregisterCatalogFolderInputSchema.parse(input).folderId);
+    catalogWatcher.watchFolders(catalog.listFolderPaths());
+    return unregisterCatalogFolderReportSchema.parse(report);
   });
   ipcMain.handle('catalog.asset.reveal.v1', (_event, input: unknown) => {
     const assetId = String(input);

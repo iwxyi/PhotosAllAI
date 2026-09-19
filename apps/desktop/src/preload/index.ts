@@ -63,6 +63,8 @@ const api: DesktopApi = {
     >,
   relinkCatalogFolder: (folderId) =>
     ipcRenderer.invoke('catalog.folder.relink.v1', folderId) as ReturnType<DesktopApi['relinkCatalogFolder']>,
+  unregisterCatalogFolder: (input) =>
+    ipcRenderer.invoke('catalog.folder.unregister.v1', input) as ReturnType<DesktopApi['unregisterCatalogFolder']>,
   revealCatalogAsset: (assetId) =>
     ipcRenderer.invoke('catalog.asset.reveal.v1', assetId) as ReturnType<DesktopApi['revealCatalogAsset']>,
   listProviderProfiles: () =>

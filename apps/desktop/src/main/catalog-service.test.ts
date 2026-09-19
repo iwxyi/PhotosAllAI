@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, realpath, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -156,6 +156,136 @@ describe('catalog image discovery', () => {
     await expect(catalog.reconcileImportedFolders()).resolves.toMatchObject({ discovered: 0, offline: 1 });
     expect(catalog.listAssets().find((asset) => asset.fileName === 'first.jpg')?.offline).toBe(true);
     expect(catalog.listAssets().find((asset) => asset.fileName === 'second.jpg')?.offline).toBe(false);
+    catalog.close();
+  });
+
+  it('unregisters and restores a source folder without changing files or catalog metadata', async () => {
+    const root = await createTemporaryDirectory();
+    const photosDirectory = path.join(root, 'photos');
+    const photoPath = path.join(photosDirectory, 'kept.jpg');
+    const databasePath = path.join(root, 'catalog.sqlite');
+    await mkdir(photosDirectory, { recursive: true });
+    await writeFile(photoPath, 'original-photo-bytes');
+    const catalog = new CatalogService(databasePath);
+    await catalog.importFolders([photosDirectory]);
+    const original = catalog.listAssets()[0]!;
+    catalog.updateMetadata({ assetIds: [original.id], rating: 5, favorite: true });
+    const tag = catalog.updateTags({ assetIds: [original.id], addTags: ['客户精选'], removeTagIds: [] })[0]!;
+    const album = catalog.saveAlbum({ name: '交付候选' });
+    catalog.updateAlbumAssets({ albumId: album.id, assetIds: [original.id], mode: 'add' });
+    const database = new DatabaseSync(databasePath);
+    database.exec(`
+      CREATE TABLE analysis_revisions (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL);
+      CREATE TABLE generation_results (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, review_state TEXT NOT NULL);
+    `);
+    database.prepare('INSERT INTO analysis_revisions (id, asset_id) VALUES (?, ?)').run('analysis-kept', original.id);
+    database.prepare("INSERT INTO generation_results (id, asset_id, review_state) VALUES (?, ?, 'undecided')")
+      .run('generation-kept', original.id);
+    database.close();
+
+    expect(catalog.unregisterFolder(original.folderId)).toEqual({ folderId: original.folderId, assetCount: 1 });
+    expect(catalog.listFolders()).toEqual([]);
+    expect(catalog.listFolderPaths()).toEqual([]);
+    expect(catalog.listAssets()).toEqual([]);
+    expect(catalog.listTags()).toEqual([]);
+    expect(catalog.listAlbums()[0]?.assetCount).toBe(0);
+    expect(catalog.listSmartCollections().find((item) => item.id === 'favorites')?.assetCount).toBe(0);
+    await expect(readFile(photoPath, 'utf8')).resolves.toBe('original-photo-bytes');
+    expect(() => catalog.unregisterFolder(original.folderId)).toThrow('CATALOG_FOLDER_NOT_FOUND');
+
+    await catalog.importFolders([photosDirectory]);
+    const restored = catalog.listAssets()[0]!;
+    expect(restored).toMatchObject({ id: original.id, folderId: original.folderId, rating: 5, favorite: true });
+    expect(restored.tags).toContainEqual({ id: tag.id, name: tag.name });
+    expect(catalog.listFolders()[0]).toMatchObject({ id: original.folderId, assetCount: 1 });
+    expect(catalog.listFolderPaths()).toEqual([await realpath(photosDirectory)]);
+    expect(catalog.listAlbums()[0]?.assetCount).toBe(1);
+    expect(catalog.listTags()[0]).toMatchObject({ id: tag.id, assetCount: 1 });
+    expect(catalog.listSmartCollections().find((item) => item.id === 'favorites')?.assetCount).toBe(1);
+    const restoredDatabase = new DatabaseSync(databasePath);
+    expect(restoredDatabase.prepare('SELECT COUNT(*) AS value FROM analysis_revisions WHERE asset_id = ?').get(original.id))
+      .toEqual({ value: 1 });
+    expect(restoredDatabase.prepare('SELECT COUNT(*) AS value FROM generation_results WHERE asset_id = ?').get(original.id))
+      .toEqual({ value: 1 });
+    restoredDatabase.close();
+    catalog.close();
+  });
+
+  it('rejects unregistering a folder referenced by an active AI task', async () => {
+    const root = await createTemporaryDirectory();
+    const photosDirectory = path.join(root, 'photos');
+    const databasePath = path.join(root, 'catalog.sqlite');
+    await mkdir(photosDirectory, { recursive: true });
+    await writeFile(path.join(photosDirectory, 'busy.jpg'), 'busy');
+    const catalog = new CatalogService(databasePath);
+    await catalog.importFolders([photosDirectory]);
+    const asset = catalog.listAssets()[0]!;
+    const database = new DatabaseSync(databasePath);
+    database.exec('CREATE TABLE tasks (asset_id TEXT, status TEXT NOT NULL)');
+    database.prepare("INSERT INTO tasks (asset_id, status) VALUES (?, 'processing')").run(asset.id);
+    database.close();
+
+    expect(() => catalog.unregisterFolder(asset.folderId)).toThrow('FOLDER_HAS_ACTIVE_TASKS');
+    expect(catalog.listFolders()).toHaveLength(1);
+    expect(catalog.listAssets()).toHaveLength(1);
+    catalog.close();
+  });
+
+  it('rejects unregistering a folder referenced by an active file transaction', async () => {
+    const root = await createTemporaryDirectory();
+    const photosDirectory = path.join(root, 'photos');
+    const databasePath = path.join(root, 'catalog.sqlite');
+    await mkdir(photosDirectory, { recursive: true });
+    await writeFile(path.join(photosDirectory, 'moving.jpg'), 'moving');
+    const catalog = new CatalogService(databasePath);
+    await catalog.importFolders([photosDirectory]);
+    const asset = catalog.listAssets()[0]!;
+    const database = new DatabaseSync(databasePath);
+    database.exec(`
+      CREATE TABLE file_operations (id TEXT PRIMARY KEY, status TEXT NOT NULL);
+      CREATE TABLE file_operation_items (
+        operation_id TEXT NOT NULL,
+        source_folder_id TEXT NOT NULL,
+        destination_folder_id TEXT NOT NULL
+      );
+    `);
+    database.prepare("INSERT INTO file_operations (id, status) VALUES ('operation-1', 'executing')").run();
+    database.prepare(`
+      INSERT INTO file_operation_items (operation_id, source_folder_id, destination_folder_id)
+      VALUES ('operation-1', ?, 'another-folder')
+    `).run(asset.folderId);
+    database.close();
+
+    expect(() => catalog.unregisterFolder(asset.folderId)).toThrow('FOLDER_HAS_ACTIVE_FILE_OPERATIONS');
+    expect(catalog.listFolders()).toHaveLength(1);
+    expect(catalog.listAssets()).toHaveLength(1);
+    catalog.close();
+  });
+
+  it('unregisters large folders without expanding asset ids into SQL parameters', async () => {
+    const root = await createTemporaryDirectory();
+    const photosDirectory = path.join(root, 'photos');
+    const databasePath = path.join(root, 'catalog.sqlite');
+    await mkdir(photosDirectory, { recursive: true });
+    await writeFile(path.join(photosDirectory, 'seed.jpg'), 'seed');
+    const catalog = new CatalogService(databasePath);
+    await catalog.importFolders([photosDirectory]);
+    const folderId = catalog.listAssets()[0]!.folderId;
+    const database = new DatabaseSync(databasePath);
+    const insert = database.prepare(`
+      INSERT INTO assets (id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at)
+      VALUES (?, ?, ?, ?, '.jpg', 1, 1, 1)
+    `);
+    database.exec('BEGIN IMMEDIATE');
+    for (let index = 0; index < 1_100; index += 1) {
+      const fileName = `virtual-${index}.jpg`;
+      insert.run(`virtual-${index}`, folderId, path.join(photosDirectory, fileName), fileName);
+    }
+    database.exec('COMMIT');
+    database.close();
+
+    expect(catalog.unregisterFolder(folderId)).toEqual({ folderId, assetCount: 1_101 });
+    expect(catalog.listAssets()).toEqual([]);
     catalog.close();
   });
 

@@ -21,6 +21,8 @@ import {
   type CatalogAssetPage,
   type CatalogFolder,
   type RelinkCatalogFolderResult,
+  type UnregisterCatalogFolderReport,
+  unregisterCatalogFolderReportSchema,
   type CatalogSmartCollection,
   type CatalogTag,
   type ListCatalogAssetsInput,
@@ -236,6 +238,16 @@ export class CatalogService {
         COMMIT;
       `);
     }
+    const folderRemovalVersion = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (folderRemovalVersion.user_version < 9) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE folders ADD COLUMN removed_at INTEGER;
+        CREATE INDEX folders_active_idx ON folders(removed_at, name);
+        PRAGMA user_version = 9;
+        COMMIT;
+      `);
+    }
   }
 
   close(): void {
@@ -370,6 +382,7 @@ export class CatalogService {
         SUM(CASE WHEN assets.offline_at IS NOT NULL THEN 1 ELSE 0 END) AS offline_count
       FROM folders
       LEFT JOIN assets ON assets.folder_id = folders.id AND assets.removed_at IS NULL
+      WHERE folders.removed_at IS NULL
       GROUP BY folders.id, folders.name
       ORDER BY folders.name COLLATE NOCASE ASC, folders.id ASC
     `).all() as { id: string; name: string; asset_count: number; offline_count: number | null }[];
@@ -381,8 +394,54 @@ export class CatalogService {
     }));
   }
 
+  unregisterFolder(folderId: string): UnregisterCatalogFolderReport {
+    const folder = this.#database.prepare(`
+      SELECT id FROM folders WHERE id = ? AND removed_at IS NULL
+    `).get(folderId) as { id: string } | undefined;
+    if (!folder) throw new Error('CATALOG_FOLDER_NOT_FOUND');
+    const assetCount = (this.#database.prepare(`
+      SELECT COUNT(*) AS value FROM assets WHERE folder_id = ? AND removed_at IS NULL
+    `).get(folderId) as { value: number }).value;
+    if (assetCount > 0 && this.#tableExists('tasks')) {
+      const activeTask = this.#database.prepare(`
+        SELECT 1 FROM tasks
+        JOIN assets ON assets.id = tasks.asset_id
+        WHERE assets.folder_id = ? AND assets.removed_at IS NULL
+          AND tasks.status IN ('draft', 'queued', 'preparing', 'uploading', 'processing', 'downloading', 'saving')
+        LIMIT 1
+      `).get(folderId);
+      if (activeTask) throw new Error('FOLDER_HAS_ACTIVE_TASKS');
+    }
+    if (this.#tableExists('file_operations') && this.#tableExists('file_operation_items')) {
+      const activeOperation = this.#database.prepare(`
+        SELECT 1 FROM file_operation_items items
+        JOIN file_operations operations ON operations.id = items.operation_id
+        WHERE (items.source_folder_id = ? OR items.destination_folder_id = ?)
+          AND operations.status IN ('planned', 'executing', 'compensating', 'undoing')
+        LIMIT 1
+      `).get(folderId, folderId);
+      if (activeOperation) throw new Error('FOLDER_HAS_ACTIVE_FILE_OPERATIONS');
+    }
+    const now = Date.now();
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      this.#database.prepare(`
+        UPDATE assets SET removed_at = ?, trashed_at = NULL WHERE folder_id = ? AND removed_at IS NULL
+      `).run(now, folderId);
+      const result = this.#database.prepare(`
+        UPDATE folders SET removed_at = ? WHERE id = ? AND removed_at IS NULL
+      `).run(now, folderId);
+      if (result.changes !== 1) throw new Error('CATALOG_CONCURRENT_CHANGE');
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    return unregisterCatalogFolderReportSchema.parse({ folderId, assetCount });
+  }
+
   async relinkFolder(folderId: string, requestedPath: string): Promise<RelinkCatalogFolderOperationResult> {
-    const folder = this.#database.prepare('SELECT id, path FROM folders WHERE id = ?')
+    const folder = this.#database.prepare('SELECT id, path FROM folders WHERE id = ? AND removed_at IS NULL')
       .get(folderId) as { id: string; path: string } | undefined;
     if (!folder) throw new Error('CATALOG_FOLDER_NOT_FOUND');
     const nextRoot = await realpath(requestedPath);
@@ -506,7 +565,7 @@ export class CatalogService {
   }
 
   listFolderPaths(): string[] {
-    return (this.#database.prepare('SELECT path FROM folders ORDER BY path').all() as { path: string }[]).map((row) => row.path);
+    return (this.#database.prepare('SELECT path FROM folders WHERE removed_at IS NULL ORDER BY path').all() as { path: string }[]).map((row) => row.path);
   }
 
   listAlbums(): CatalogAlbum[] {
@@ -732,7 +791,7 @@ export class CatalogService {
         .prepare(`
           INSERT INTO folders (id, path, name, imported_at)
           VALUES (?, ?, ?, ?)
-          ON CONFLICT(path) DO UPDATE SET name = excluded.name
+          ON CONFLICT(path) DO UPDATE SET name = excluded.name, removed_at = NULL
         `)
         .run(folderId, folderPath, path.basename(folderPath), now);
 
@@ -820,7 +879,7 @@ export class CatalogService {
   }
 
   async reconcileImportedFolders(): Promise<{ discovered: number; offline: number }> {
-    const folders = this.#database.prepare('SELECT id, path FROM folders').all() as { id: string; path: string }[];
+    const folders = this.#database.prepare('SELECT id, path FROM folders WHERE removed_at IS NULL').all() as { id: string; path: string }[];
     const before = new Set<string>();
     for (const folder of folders) {
       const rows = this.#database.prepare('SELECT path FROM assets WHERE folder_id = ? AND removed_at IS NULL').all(folder.id) as { path: string }[];

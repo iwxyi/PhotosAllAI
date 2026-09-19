@@ -42,6 +42,7 @@ import {
   Folder,
   FolderHeart,
   FolderInput,
+  FolderMinus,
   FolderOpen,
   GalleryHorizontalEnd,
   Grid2X2,
@@ -254,6 +255,7 @@ function Sidebar({
   onRefreshAlbums,
   onImportFolders,
   onRelinkFolder,
+  onUnregisterFolder,
   onSelectTag,
   isDemo
 }: {
@@ -272,6 +274,7 @@ function Sidebar({
   onRefreshAlbums: () => Promise<void>;
   onImportFolders: () => Promise<void>;
   onRelinkFolder: (folderId: string) => Promise<void>;
+  onUnregisterFolder: (folderId: string) => Promise<void>;
   onSelectTag: (tagId: string | null) => void;
   isDemo: boolean;
 }): React.JSX.Element {
@@ -282,11 +285,23 @@ function Sidebar({
   const [tagManagerOpen, setTagManagerOpen] = useState(false);
   const [tagDeleteCandidate, setTagDeleteCandidate] = useState<string | null>(null);
   const [tagBusy, setTagBusy] = useState(false);
+  const [folderRemovalCandidate, setFolderRemovalCandidate] = useState<CatalogFolder | null>(null);
+  const [folderRemovalBusy, setFolderRemovalBusy] = useState(false);
+  const [folderRemovalError, setFolderRemovalError] = useState('');
   const visibleFolders = isDemo
     ? demoFolders.map((folder, index) => ({ id: `demo-${index}`, name: folder.name, assetCount: folder.count, offlineCount: 0 }))
     : folders;
   const selectedOfflineFolder = visibleFolders.find((folder) => folder.id === selectedFolderId && folder.offlineCount > 0);
+  const selectedFolder = folders.find((folder) => folder.id === selectedFolderId);
   const favoriteCount = isDemo ? 86 : smartCollections.find((collection) => collection.id === 'favorites')?.assetCount ?? 0;
+  useEffect(() => {
+    if (!folderRemovalCandidate) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !folderRemovalBusy) setFolderRemovalCandidate(null);
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [folderRemovalBusy, folderRemovalCandidate]);
   return (
     <aside className="sidebar">
       <div className="sidebar-scroll">
@@ -311,7 +326,7 @@ function Sidebar({
         <div className="sidebar-section">
           <div className="section-heading">
             <span>文件夹</span>
-            <span>{selectedOfflineFolder && <button type="button" aria-label={`重新定位 ${selectedOfflineFolder.name}`} title="重新定位离线文件夹" onClick={() => void onRelinkFolder(selectedOfflineFolder.id)}><RotateCcw size={13} /></button>}<button type="button" aria-label="添加文件夹" onClick={() => void onImportFolders()}><Plus size={13} /></button></span>
+            <span>{selectedOfflineFolder && <button type="button" aria-label={`重新定位 ${selectedOfflineFolder.name}`} title="重新定位离线文件夹" onClick={() => void onRelinkFolder(selectedOfflineFolder.id)}><RotateCcw size={13} /></button>}{selectedFolder && <button type="button" aria-label={`从图库移除文件夹 ${selectedFolder.name}`} title="从图库移除文件夹" onClick={() => { setFolderRemovalError(''); setFolderRemovalCandidate(selectedFolder); }}><FolderMinus size={13} /></button>}<button type="button" aria-label="添加文件夹" onClick={() => void onImportFolders()}><Plus size={13} /></button></span>
           </div>
           {visibleFolders.map((folder) => (
             <button className={`nav-row folder-row${selectedFolderId === folder.id ? ' is-selected' : ''}`} type="button" key={folder.id} onClick={() => onSelectFolder(folder.id)}>
@@ -343,6 +358,7 @@ function Sidebar({
       </div>
       {albumManagerOpen && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !albumBusy) setAlbumManagerOpen(false); }}><form className="album-dialog" role="dialog" aria-modal="true" aria-labelledby="album-dialog-title" onSubmit={async (event) => { event.preventDefault(); if (!albumName.trim() || albumBusy) return; setAlbumBusy(true); try { await window.desktopApi.saveCatalogAlbum({ id: editingAlbumId ?? undefined, name: albumName }); await onRefreshAlbums(); setAlbumName(''); setEditingAlbumId(null); } finally { setAlbumBusy(false); } }}><header><div><span className="dialog-icon"><FolderHeart size={16} /></span><div><h2 id="album-dialog-title">管理相册</h2><p>相册只管理图库关系，不会移动原文件。</p></div></div><IconButton label="关闭相册管理" onClick={() => setAlbumManagerOpen(false)}><X size={15} /></IconButton></header><div className="album-list">{albums.map((album) => <div className={`album-row${editingAlbumId === album.id ? ' is-selected' : ''}`} key={album.id}><button type="button" onClick={() => { setEditingAlbumId(album.id); setAlbumName(album.name); }}><FolderHeart size={14} /><span>{album.name}</span><small>{album.assetCount} 张</small></button><button type="button" aria-label={`删除相册 ${album.name}`} onClick={async () => { if (albumBusy) return; setAlbumBusy(true); try { await window.desktopApi.deleteCatalogAlbum(album.id); if (selectedAlbumId === album.id) onSelectAlbum(null); await onRefreshAlbums(); } finally { setAlbumBusy(false); } }}><Trash2 size={13} /></button></div>)}</div><label className="album-field"><span>{editingAlbumId ? '重命名相册' : '新建相册'}</span><input autoFocus value={albumName} maxLength={120} placeholder="例如：客户交付" onChange={(event) => setAlbumName(event.target.value)} /></label><footer><button className="quiet-button" type="button" onClick={() => setAlbumManagerOpen(false)}>关闭</button><button className="primary-action compact" type="submit" disabled={!albumName.trim() || albumBusy}>{editingAlbumId ? '保存名称' : '创建相册'}</button></footer></form></div>}
       {tagManagerOpen && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !tagBusy) setTagManagerOpen(false); }}><section className="album-dialog tag-dialog" role="dialog" aria-modal="true" aria-labelledby="tag-dialog-title"><header><div><span className="dialog-icon"><Tags size={16} /></span><div><h2 id="tag-dialog-title">管理标签</h2><p>删除标签只会移除标签关系，不会删除照片或文件。</p></div></div><IconButton label="关闭标签管理" disabled={tagBusy} onClick={() => setTagManagerOpen(false)}><X size={15} /></IconButton></header><div className="tag-list">{tags.length === 0 ? <div className="operation-history-empty">暂无可管理标签</div> : tags.map((tag) => <div className={`tag-manager-row${tagDeleteCandidate === tag.id ? ' is-pending' : ''}`} key={tag.id}><span><strong>{tag.name}</strong><small>{tag.assetCount} 张照片</small></span>{tagDeleteCandidate === tag.id ? <div><button className="quiet-button" type="button" disabled={tagBusy} onClick={() => setTagDeleteCandidate(null)}>取消</button><button className="danger-action compact" type="button" disabled={tagBusy} onClick={async () => { setTagBusy(true); try { await window.desktopApi.deleteCatalogTag(tag.id); if (selectedTagId === tag.id) onSelectTag(null); await onRefreshAlbums(); setTagDeleteCandidate(null); } finally { setTagBusy(false); } }}>确认删除</button></div> : <button type="button" aria-label={`删除标签 ${tag.name}`} onClick={() => setTagDeleteCandidate(tag.id)}><Trash2 size={13} /></button>}</div>)}</div><footer><button className="quiet-button" type="button" disabled={tagBusy} onClick={() => setTagManagerOpen(false)}>关闭</button></footer></section></div>}
+      {folderRemovalCandidate && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !folderRemovalBusy) setFolderRemovalCandidate(null); }}><section className="removal-dialog" role="alertdialog" aria-modal="true" aria-labelledby="folder-removal-title" aria-describedby="folder-removal-description"><header><span className="dialog-icon"><FolderMinus size={17} /></span><div><h2 id="folder-removal-title">从图库移除文件夹「{folderRemovalCandidate.name}」？</h2><p id="folder-removal-description">只会取消此图库对文件夹的管理，不会删除、移动或修改磁盘上的任何文件。</p></div></header><div className="removal-impact"><Info size={15} /><span>其中 {folderRemovalCandidate.assetCount} 张照片会从图库和搜索结果中隐藏。AI 分析、生成版本、评分、标签和相册关系都会保留，重新导入同一路径后自动恢复。</span></div>{folderRemovalError && <div className="folder-removal-error" role="alert"><CircleAlert size={14} /><span>{folderRemovalError}</span></div>}<footer><button autoFocus className="quiet-button" type="button" disabled={folderRemovalBusy} onClick={() => setFolderRemovalCandidate(null)}>取消</button><button className="primary-action compact" type="button" disabled={folderRemovalBusy} onClick={async () => { setFolderRemovalBusy(true); setFolderRemovalError(''); try { await onUnregisterFolder(folderRemovalCandidate.id); setFolderRemovalCandidate(null); } catch (error) { const message = error instanceof Error ? error.message : String(error); setFolderRemovalError(message.includes('FOLDER_HAS_ACTIVE_TASKS') ? '此文件夹仍有正在运行或等待中的 AI 任务，请先取消或完成任务。' : message.includes('FOLDER_HAS_ACTIVE_FILE_OPERATIONS') ? '此文件夹仍有未完成的文件操作，请等待操作完成或恢复后重试。' : '无法移除此文件夹。请刷新图库后重试。'); } finally { setFolderRemovalBusy(false); } }}>{folderRemovalBusy ? '正在移除…' : '仅从图库移除'}</button></footer></section></div>}
     </aside>
   );
 }
@@ -784,6 +800,7 @@ type LibraryWorkspaceProps = {
   onRefreshAlbums: () => Promise<void>;
   onImportFolders: () => Promise<void>;
   onRelinkFolder: (folderId: string) => Promise<void>;
+  onUnregisterFolder: (folderId: string) => Promise<void>;
   onSelectTag: (tagId: string | null) => void;
   onLoadMore: () => void;
   searchQuery: string;
@@ -796,12 +813,17 @@ type LibraryWorkspaceProps = {
 
 function LibraryWorkspace(props: LibraryWorkspaceProps): React.JSX.Element {
   const [operationNotice, setOperationNotice] = useState('');
+  const unregisterFolder = async (folderId: string) => {
+    const folder = props.catalogFolders.find((item) => item.id === folderId);
+    await props.onUnregisterFolder(folderId);
+    setOperationNotice(`已从图库移除「${folder?.name ?? '文件夹'}」，磁盘文件和已有元数据保持不变。`);
+  };
   if (props.availablePhotos.length > 0) {
-    return <PopulatedLibraryWorkspace {...props} operationNotice={operationNotice} setOperationNotice={setOperationNotice} />;
+    return <PopulatedLibraryWorkspace {...props} onUnregisterFolder={unregisterFolder} operationNotice={operationNotice} setOperationNotice={setOperationNotice} />;
   }
   return (
     <div className="workspace">
-      <Sidebar folders={props.catalogFolders} albums={props.catalogAlbums} smartCollections={props.catalogSmartCollections} totalCount={props.totalCount} selectedFolderId={props.selectedFolderId} selectedAlbumId={props.selectedAlbumId} selectedSmartCollection={props.selectedSmartCollection} tags={props.catalogTags} selectedTagId={props.selectedTagId} onSelectFolder={props.onSelectFolder} onSelectAlbum={props.onSelectAlbum} onSelectSmartCollection={props.onSelectSmartCollection} onRefreshAlbums={props.onRefreshAlbums} onImportFolders={props.onImportFolders} onRelinkFolder={props.onRelinkFolder} onSelectTag={props.onSelectTag} isDemo={props.isDemo} />
+      <Sidebar folders={props.catalogFolders} albums={props.catalogAlbums} smartCollections={props.catalogSmartCollections} totalCount={props.totalCount} selectedFolderId={props.selectedFolderId} selectedAlbumId={props.selectedAlbumId} selectedSmartCollection={props.selectedSmartCollection} tags={props.catalogTags} selectedTagId={props.selectedTagId} onSelectFolder={props.onSelectFolder} onSelectAlbum={props.onSelectAlbum} onSelectSmartCollection={props.onSelectSmartCollection} onRefreshAlbums={props.onRefreshAlbums} onImportFolders={props.onImportFolders} onRelinkFolder={props.onRelinkFolder} onUnregisterFolder={unregisterFolder} onSelectTag={props.onSelectTag} isDemo={props.isDemo} />
       <main className="empty-library-main">
         <Search size={30} />
         <h2>{props.searchQuery ? '没有匹配的照片' : '此集合为空'}</h2>
@@ -844,6 +866,7 @@ function PopulatedLibraryWorkspace({
   onRefreshAlbums,
   onImportFolders,
   onRelinkFolder,
+  onUnregisterFolder,
   onSelectTag,
   onLoadMore,
   searchQuery,
@@ -1284,7 +1307,7 @@ function PopulatedLibraryWorkspace({
 
   return (
     <div className="workspace">
-      <Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={totalCount} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={onSelectFolder} onSelectAlbum={onSelectAlbum} onSelectSmartCollection={onSelectSmartCollection} onRefreshAlbums={onRefreshAlbums} onImportFolders={onImportFolders} onRelinkFolder={onRelinkFolder} onSelectTag={onSelectTag} isDemo={isDemo} />
+      <Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={totalCount} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={onSelectFolder} onSelectAlbum={onSelectAlbum} onSelectSmartCollection={onSelectSmartCollection} onRefreshAlbums={onRefreshAlbums} onImportFolders={onImportFolders} onRelinkFolder={onRelinkFolder} onUnregisterFolder={onUnregisterFolder} onSelectTag={onSelectTag} isDemo={isDemo} />
       <main className="library-main">
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
         <Viewer photo={selected} results={generationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} onReview={reviewResult} onRevealOriginal={() => void window.desktopApi.revealCatalogAsset(selected.id)} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} />
@@ -2118,12 +2141,12 @@ export function App(): React.JSX.Element {
     return () => window.clearTimeout(timeout);
   }, [activeTab, openTabs, searchDraft, selectedAssetId, selectedFolderId, selectedTagId, sessionReady]);
 
-  const refreshCatalog = useCallback(async () => {
+  const refreshCatalog = useCallback(async (folderId: string | null = selectedFolderId) => {
     const request = ++catalogRequest.current;
     setLoadingMore(true);
     try {
       const [page, folders, tags, albums, smartCollections] = await Promise.all([
-        window.desktopApi.listCatalogAssetPage({ folderId: selectedFolderId, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: selectedSmartCollection, favoriteOnly, sortBy, query: searchQuery, cursor: null, limit: 200 }),
+        window.desktopApi.listCatalogAssetPage({ folderId, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: selectedSmartCollection, favoriteOnly, sortBy, query: searchQuery, cursor: null, limit: 200 }),
         window.desktopApi.listCatalogFolders(),
         window.desktopApi.listCatalogTags(),
         window.desktopApi.listCatalogAlbums(),
@@ -2164,6 +2187,13 @@ export function App(): React.JSX.Element {
   const relinkFolder = async (folderId: string) => {
     const result = await window.desktopApi.relinkCatalogFolder(folderId);
     if (result) await refreshCatalog();
+  };
+
+  const unregisterFolder = async (folderId: string) => {
+    await window.desktopApi.unregisterCatalogFolder({ folderId });
+    setSelectedFolderId(null);
+    setSelectedAssetId(null);
+    await refreshCatalog(null);
   };
 
   const openWorkspaceTab = useCallback((tab: WorkspaceTab) => {
@@ -2230,7 +2260,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
-      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} exportPresets={exportPresets} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={setFavoriteOnly} sortBy={sortBy} onSortByChange={setSortBy} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onRelinkFolder={relinkFolder} onOpenTaskCenter={() => openWorkspaceTab('tasks')} onOpenTemplates={() => openWorkspaceTab('templates')} /> : activeTab === 'settings' ? <SettingsPage onExportPresetsChange={setExportPresets} /> : activeTab === 'tasks' ? <TaskCenterPage onCatalogChanged={refreshCatalog} /> : <TemplatePage />}
+      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} exportPresets={exportPresets} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={setFavoriteOnly} sortBy={sortBy} onSortByChange={setSortBy} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onRelinkFolder={relinkFolder} onUnregisterFolder={unregisterFolder} onOpenTaskCenter={() => openWorkspaceTab('tasks')} onOpenTemplates={() => openWorkspaceTab('templates')} /> : activeTab === 'settings' ? <SettingsPage onExportPresetsChange={setExportPresets} /> : activeTab === 'tasks' ? <TaskCenterPage onCatalogChanged={refreshCatalog} /> : <TemplatePage />}
     </div>
   );
 }

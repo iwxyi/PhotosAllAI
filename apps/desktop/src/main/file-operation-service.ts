@@ -821,7 +821,7 @@ export class FileOperationService {
   async #planCopy(operationId: string, input: CopyCatalogAssetsInput): Promise<PlannedItem[]> {
     const assetIds = [...new Set(input.assetIds)];
     if (assetIds.length !== input.assetIds.length) throw new Error('DUPLICATE_ASSET_ID');
-    const target = this.#database.prepare('SELECT id, path FROM folders WHERE id = ?')
+    const target = this.#database.prepare('SELECT id, path FROM folders WHERE id = ? AND removed_at IS NULL')
       .get(input.targetFolderId) as { id: string; path: string } | undefined;
     if (!target) throw new Error('TARGET_FOLDER_NOT_FOUND');
     const targetPath = await this.#fileSystem.realpath(target.path);
@@ -930,7 +930,7 @@ export class FileOperationService {
   async #plan(operationId: string, input: MoveCatalogAssetsInput): Promise<PlannedItem[]> {
     const assetIds = [...new Set(input.assetIds)];
     if (assetIds.length !== input.assetIds.length) throw new Error('DUPLICATE_ASSET_ID');
-    const target = this.#database.prepare('SELECT id, path FROM folders WHERE id = ?')
+    const target = this.#database.prepare('SELECT id, path FROM folders WHERE id = ? AND removed_at IS NULL')
       .get(input.targetFolderId) as { id: string; path: string } | undefined;
     if (!target) throw new Error('TARGET_FOLDER_NOT_FOUND');
     const targetPath = await this.#fileSystem.realpath(target.path);
