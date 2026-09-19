@@ -10,13 +10,14 @@ import { TaskService } from '../../apps/desktop/src/main/task-service';
 let electronApp: ElectronApplication;
 let page: Page;
 let testRoot: string;
+let databasePath: string;
 
 test.beforeAll(async () => {
   testRoot = await mkdtemp(path.join(tmpdir(), 'photoallisai-task-controls-'));
   const userData = path.join(testRoot, 'user-data');
   const libraryDirectory = path.join(userData, 'library');
   await mkdir(libraryDirectory, { recursive: true });
-  const databasePath = path.join(libraryDirectory, 'catalog.sqlite');
+  databasePath = path.join(libraryDirectory, 'catalog.sqlite');
   const tasks = new TaskService(databasePath);
   tasks.enqueue({ kind: 'export', assetId: 'asset-A', payload: {} });
   tasks.enqueue({ kind: 'export', assetId: 'asset-B', payload: {} });
@@ -40,6 +41,14 @@ test.afterAll(async () => {
 });
 
 test('reorders queued work and batch-retries failed generation tasks', async () => {
+  const provider = await page.evaluate(() => window.desktopApi.saveProviderProfile({
+    name: 'Queue Generation', kind: 'nanobanana-compatible', purpose: 'generation',
+    baseUrl: 'http://127.0.0.1:9/v1', modelId: 'queue-test', apiKey: 'queue-key', enabled: true
+  }));
+  const template = await page.evaluate(() => window.desktopApi.savePromptTemplate({
+    name: '队列模板', description: '队列编辑测试', category: '人像', exampleId: 'none',
+    body: '模板分析：{{analysis.summary}}\n用户要求：{{user_instruction}}'
+  }));
   await page.getByRole('tab', { name: /任务中心/ }).click();
   const rows = page.locator('.task-table-row');
   await expect(rows).toHaveCount(3);
@@ -53,4 +62,43 @@ test('reorders queued work and batch-retries failed generation tasks', async () 
   await page.getByRole('button', { name: '重试失败生成 (1)' }).click();
   await expect(page.getByText('已重新排队 1 个生成任务。')).toBeVisible();
   await expect.poll(async () => rows.filter({ hasText: 'asset-failed' }).getByText('失败').count()).toBe(1);
+
+  const batchId = 'd1c701d8-3458-4686-8437-6e978b20a999';
+  const analysisRevisionId = 'b70f8f56-6678-4b8e-9208-0e6ad7cbe277';
+  const database = new DatabaseSync(databasePath);
+  database.prepare(`INSERT INTO analysis_revisions (id, asset_id, provider_profile_id, schema_version, result_json, created_at) VALUES (?, ?, ?, '1.0', ?, ?)`)
+    .run(analysisRevisionId, 'asset-edit', provider.id, JSON.stringify({
+      schemaVersion: '1.0', summary: '队列测试分析', report: '测试报告',
+      quality: { overallScore: 80, issues: [] }, adjustments: { global: [], local: [] }, generativeActions: [],
+      catalog: { shortDescription: '测试', longDescription: '测试', scenes: [], subjects: [], objects: [], mood: [], colors: [], keywords: [], ocrText: '' },
+      generationRecommendation: { recommended: true, templateId: null, reason: '测试' }
+    }), Date.now());
+  database.close();
+  const tasks = new TaskService(databasePath);
+  const basePayload = {
+    providerProfileId: provider.id, batchId, prompt: 'old prompt', templateId: null,
+    templateVersion: null, resultIndex: 1, storageMode: 'managed', analysisRevisionId,
+    disabledActionIds: [], userInstruction: '保留真实质感'
+  };
+  tasks.enqueue({ kind: 'generation', assetId: 'asset-edit', payload: basePayload });
+  tasks.enqueue({ kind: 'generation', assetId: 'asset-edit', payload: { ...basePayload, resultIndex: 2 } });
+  tasks.close();
+  const editRow = rows.filter({ hasText: 'asset-edit' }).first();
+  await expect(editRow).toBeVisible();
+  await editRow.getByRole('button', { name: '编辑生成提示词' }).click();
+  await page.getByLabel('任务生成数量').fill('3');
+  await page.getByLabel('任务提示词模板').selectOption(template.id);
+  await expect(page.getByLabel('最终生成提示词')).toHaveValue(/队列测试分析/);
+  await expect(page.getByLabel('最终生成提示词')).toHaveValue(/保留真实质感/);
+  await page.screenshot({ path: 'test-results/task-generation-editor.png', animations: 'disabled' });
+  await page.getByRole('button', { name: '保存修改' }).click();
+  await expect(page.getByText('等待任务的模型、模板、提示词和生成数量已更新。')).toBeVisible();
+  const verificationDatabase = new DatabaseSync(databasePath);
+  const payloads = (verificationDatabase.prepare(`SELECT payload_json FROM tasks WHERE asset_id = 'asset-edit'`).all() as { payload_json: string }[])
+    .map((row) => JSON.parse(row.payload_json) as { prompt: string; providerProfileId: string; resultIndex: number; templateId: string; templateVersion: number });
+  verificationDatabase.close();
+  expect(payloads).toHaveLength(3);
+  expect(payloads.every((payload) => payload.prompt.includes('队列测试分析') && payload.prompt.includes('保留真实质感'))).toBe(true);
+  expect(payloads.every((payload) => payload.providerProfileId === provider.id && payload.templateId === template.id && payload.templateVersion === template.version)).toBe(true);
+  expect(payloads.map((payload) => payload.resultIndex).sort()).toEqual([1, 2, 3]);
 });

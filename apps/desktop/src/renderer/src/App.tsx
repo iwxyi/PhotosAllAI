@@ -6,6 +6,7 @@ import type {
   CatalogAssetCursor,
   CatalogFolder,
   CatalogTag,
+  AnalysisResult,
   AnalysisRevision,
   GenerationResult,
   FileOperationHistoryItem,
@@ -74,6 +75,13 @@ import {
 import { photos, type Photo } from './mock-data';
 
 const THEME_CHANGE_EVENT = 'photoallisai-theme-change';
+const DEFAULT_GENERATION_TEMPLATE_BODY = [
+  '请基于原图进行专业且写实的修图。',
+  '画面分析：{{analysis.summary}}',
+  '编辑动作：\n{{analysis.generative_actions}}',
+  '补充要求：{{user_instruction}}',
+  '必须保留：\n{{preservation_rules}}'
+].join('\n');
 
 function applyTheme(theme: AppSettings['theme']): void {
   const resolved = theme === 'system'
@@ -1033,13 +1041,7 @@ function PopulatedLibraryWorkspace({
         }))
       };
       const prompt = composeGenerationPrompt({
-        templateBody: template?.body ?? [
-          '请基于原图进行专业且写实的修图。',
-          '画面分析：{{analysis.summary}}',
-          '编辑动作：\n{{analysis.generative_actions}}',
-          '补充要求：{{user_instruction}}',
-          '必须保留：\n{{preservation_rules}}'
-        ].join('\n'),
+        templateBody: template?.body ?? DEFAULT_GENERATION_TEMPLATE_BODY,
         analysis,
         userInstruction: instruction
       });
@@ -1054,7 +1056,12 @@ function PopulatedLibraryWorkspace({
             templateId: template?.id ?? null,
             templateVersion: template?.version ?? null,
             resultIndex,
-            storageMode: generationStorageMode
+            storageMode: generationStorageMode,
+            analysisRevisionId: revision.id,
+            disabledActionIds: revision.result.generativeActions
+              .filter((action) => action.enabled && !analysis.generativeActions.find((item) => item.id === action.id)?.enabled)
+              .map((action) => action.id),
+            userInstruction: instruction
           }
         });
         queued += 1;
@@ -1627,6 +1634,11 @@ function TaskCenterPage(): React.JSX.Element {
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [promptDraft, setPromptDraft] = useState('');
   const [editBusy, setEditBusy] = useState(false);
+  const [generationProfiles, setGenerationProfiles] = useState<ProviderProfile[]>([]);
+  const [templates, setTemplates] = useState<PromptTemplate[]>([]);
+  const [providerDraft, setProviderDraft] = useState('');
+  const [templateDraft, setTemplateDraft] = useState('');
+  const [countDraft, setCountDraft] = useState(1);
 
   const refresh = () => window.desktopApi.listTasks().then(setTaskItems);
   useEffect(() => {
@@ -1643,6 +1655,12 @@ function TaskCenterPage(): React.JSX.Element {
     poll();
     const interval = window.setInterval(poll, 1_000);
     return () => { active = false; window.clearInterval(interval); };
+  }, []);
+  useEffect(() => {
+    void Promise.all([window.desktopApi.listProviderProfiles(), window.desktopApi.listPromptTemplates()]).then(([profiles, items]) => {
+      setGenerationProfiles(profiles.filter((profile) => profile.purpose === 'generation' && profile.enabled));
+      setTemplates(items);
+    });
   }, []);
 
   const cancel = async (taskId: string) => {
@@ -1673,15 +1691,72 @@ function TaskCenterPage(): React.JSX.Element {
     const prompt = typeof task.payload.prompt === 'string' ? task.payload.prompt : '';
     setEditingTaskId(task.id);
     setPromptDraft(prompt);
+    setProviderDraft(typeof task.payload.providerProfileId === 'string' ? task.payload.providerProfileId : '');
+    setTemplateDraft(typeof task.payload.templateId === 'string' ? task.payload.templateId : '');
+    const batchId = task.payload.batchId;
+    setCountDraft(taskItems.filter((item) => item.kind === 'generation' && item.assetId === task.assetId && item.payload.batchId === batchId && item.status !== 'canceled').length || 1);
     setMessage('');
+  };
+  const previewTaskTemplate = async (templateId: string) => {
+    setTemplateDraft(templateId);
+    const task = taskItems.find((item) => item.id === editingTaskId);
+    if (!task?.assetId || typeof task.payload.analysisRevisionId !== 'string') return;
+    const template = templates.find((item) => item.id === templateId);
+    if (templateId && !template) return;
+    const revision = (await window.desktopApi.listAnalysisRevisions(task.assetId)).find((item) => item.id === task.payload.analysisRevisionId);
+    if (!revision) return;
+    const disabledActionIds = new Set(Array.isArray(task.payload.disabledActionIds) ? task.payload.disabledActionIds : []);
+    setPromptDraft(composeGenerationPrompt({
+      templateBody: template?.body ?? DEFAULT_GENERATION_TEMPLATE_BODY,
+      analysis: {
+        ...revision.result,
+        generativeActions: revision.result.generativeActions.map((action) => ({
+          ...action, enabled: action.enabled && !disabledActionIds.has(action.id)
+        }))
+      },
+      userInstruction: typeof task.payload.userInstruction === 'string' ? task.payload.userInstruction : ''
+    }));
   };
   const savePrompt = async () => {
     if (!editingTaskId || !promptDraft.trim()) return;
     setEditBusy(true);
     try {
-      await window.desktopApi.updateQueuedGenerationTask({ taskId: editingTaskId, prompt: promptDraft });
+      const task = taskItems.find((item) => item.id === editingTaskId);
+      if (!task || typeof task.payload.batchId !== 'string' || !task.assetId) throw new Error('TASK_NOT_FOUND');
+      let prompt = promptDraft;
+      let templateId: string | null = typeof task.payload.templateId === 'string' ? task.payload.templateId : null;
+      let templateVersion: number | null = typeof task.payload.templateVersion === 'number' ? task.payload.templateVersion : null;
+      if (templateDraft !== (templateId ?? '')) {
+        const template = templates.find((item) => item.id === templateDraft);
+        const revisionId = task.payload.analysisRevisionId;
+        if ((!templateDraft ? false : !template) || typeof revisionId !== 'string') throw new Error('TASK_TEMPLATE_CONTEXT_MISSING');
+        const revision = (await window.desktopApi.listAnalysisRevisions(task.assetId)).find((item) => item.id === revisionId);
+        if (!revision) throw new Error('TASK_TEMPLATE_CONTEXT_MISSING');
+        const disabledActionIds = new Set(Array.isArray(task.payload.disabledActionIds) ? task.payload.disabledActionIds : []);
+        const analysis: AnalysisResult = {
+          ...revision.result,
+          generativeActions: revision.result.generativeActions.map((action) => ({
+            ...action,
+            enabled: action.enabled && !disabledActionIds.has(action.id)
+          }))
+        };
+        prompt = composeGenerationPrompt({
+          templateBody: template?.body ?? DEFAULT_GENERATION_TEMPLATE_BODY,
+          analysis,
+          userInstruction: typeof task.payload.userInstruction === 'string' ? task.payload.userInstruction : ''
+        });
+        templateId = template?.id ?? null;
+        templateVersion = template?.version ?? null;
+      }
+      const batchTaskIds = taskItems.filter((item) =>
+        item.kind === 'generation' && item.status === 'queued' && item.assetId === task.assetId && item.payload.batchId === task.payload.batchId
+      ).map((item) => item.id);
+      await window.desktopApi.updateQueuedGenerationTasks({
+        taskIds: batchTaskIds, providerProfileId: providerDraft, prompt, templateId, templateVersion,
+        resize: { batchId: task.payload.batchId, assetId: task.assetId, count: countDraft }
+      });
       setEditingTaskId(null);
-      setMessage('等待任务的提示词已更新。');
+      setMessage('等待任务的模型、模板、提示词和生成数量已更新。');
       await refresh();
     } catch {
       setMessage('任务已开始或内容无效，无法继续修改。');
@@ -1725,7 +1800,7 @@ function TaskCenterPage(): React.JSX.Element {
           </div>
         ))}
       </div>
-      {editingTaskId && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !editBusy) setEditingTaskId(null); }}><form className="rename-dialog task-prompt-editor" role="dialog" aria-modal="true" aria-labelledby="task-prompt-title" onSubmit={(event) => { event.preventDefault(); void savePrompt(); }}><header><div><span className="dialog-icon"><FilePenLine size={16} /></span><div><h2 id="task-prompt-title">编辑等待任务</h2><p>修改只作用于尚未开始的这一项，已运行任务不会改变。</p></div></div><IconButton label="关闭提示词编辑器" disabled={editBusy} onClick={() => setEditingTaskId(null)}><X size={15} /></IconButton></header><label className="rename-field"><span>最终生成提示词</span><textarea autoFocus value={promptDraft} maxLength={50_000} onChange={(event) => setPromptDraft(event.target.value)} /></label><footer><span>{promptDraft.length.toLocaleString()} / 50,000</span><div><button className="quiet-button" type="button" disabled={editBusy} onClick={() => setEditingTaskId(null)}>取消</button><button className="primary-action compact" type="submit" disabled={!promptDraft.trim() || editBusy}>{editBusy ? '保存中…' : '保存修改'}</button></div></footer></form></div>}
+      {editingTaskId && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !editBusy) setEditingTaskId(null); }}><form className="rename-dialog task-prompt-editor" role="dialog" aria-modal="true" aria-labelledby="task-prompt-title" onSubmit={(event) => { event.preventDefault(); void savePrompt(); }}><header><div><span className="dialog-icon"><FilePenLine size={16} /></span><div><h2 id="task-prompt-title">编辑等待任务</h2><p>修改只作用于尚未开始的任务；同批生成数量会安全增减队尾任务。</p></div></div><IconButton label="关闭提示词编辑器" disabled={editBusy} onClick={() => setEditingTaskId(null)}><X size={15} /></IconButton></header><div className="form-grid two-columns"><label className="rename-field"><span>生成模型</span><select aria-label="任务生成模型" value={providerDraft} onChange={(event) => setProviderDraft(event.target.value)}>{generationProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label><label className="rename-field"><span>生成数量</span><input aria-label="任务生成数量" type="number" min="1" max="20" value={countDraft} onChange={(event) => setCountDraft(Number(event.target.value))} /></label></div><label className="rename-field"><span>提示词模板</span><select aria-label="任务提示词模板" value={templateDraft} disabled={!taskItems.find((item) => item.id === editingTaskId)?.payload.analysisRevisionId} onChange={(event) => void previewTaskTemplate(event.target.value)}><option value="">保留当前通用方案</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name} · V{template.version}</option>)}</select></label><label className="rename-field"><span>最终生成提示词</span><textarea autoFocus value={promptDraft} maxLength={50_000} onChange={(event) => setPromptDraft(event.target.value)} /></label><footer><span>{promptDraft.length.toLocaleString()} / 50,000</span><div><button className="quiet-button" type="button" disabled={editBusy} onClick={() => setEditingTaskId(null)}>取消</button><button className="primary-action compact" type="submit" disabled={!providerDraft || !promptDraft.trim() || countDraft < 1 || countDraft > 20 || editBusy}>{editBusy ? '保存中…' : '保存修改'}</button></div></footer></form></div>}
       <section className="operation-history">
         <header><div><History size={15} /><span><strong>文件操作</strong><small>最近 {fileOperations.length} 条</small></span></div></header>
         {fileOperations.length === 0 ? <div className="operation-history-empty">暂无文件操作</div> : (

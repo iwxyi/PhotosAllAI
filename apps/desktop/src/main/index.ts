@@ -37,7 +37,9 @@ import {
   renameCatalogAssetReportSchema,
   relinkCatalogFolderResultSchema,
   reorderTaskIdsSchema,
+  resizeQueuedGenerationBatchInputSchema,
   updateQueuedGenerationTaskInputSchema,
+  updateQueuedGenerationTasksInputSchema,
   savePromptTemplateInputSchema,
   saveProviderProfileInputSchema,
   taskIdSchema,
@@ -321,6 +323,21 @@ function registerIpc(): void {
   ipcMain.handle('tasks.generation.update.v1', (_event, input: unknown) =>
     tasks.updateQueuedGeneration(updateQueuedGenerationTaskInputSchema.parse(input))
   );
+  ipcMain.handle('tasks.generation.update-many.v1', async (_event, input: unknown) => {
+    const parsed = updateQueuedGenerationTasksInputSchema.parse(input);
+    if (parsed.providerProfileId) {
+      const profile = (await providers.list()).find((item) => item.id === parsed.providerProfileId);
+      if (!profile || profile.purpose !== 'generation' || !profile.enabled) throw new Error('GENERATION_PROVIDER_NOT_AVAILABLE');
+    }
+    const result = tasks.updateQueuedGenerations(parsed);
+    if (parsed.resize) taskRunner.wake();
+    return result;
+  });
+  ipcMain.handle('tasks.generation.resize.v1', (_event, input: unknown) => {
+    const result = tasks.resizeQueuedGenerationBatch(resizeQueuedGenerationBatchInputSchema.parse(input));
+    taskRunner.wake();
+    return result;
+  });
   ipcMain.handle('templates.list.v1', () => templates.list());
   ipcMain.handle('templates.save.v1', (_event, input: unknown) =>
     templates.save(savePromptTemplateInputSchema.parse(input))

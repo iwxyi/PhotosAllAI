@@ -76,4 +76,44 @@ describe('persistent task service', () => {
     expect(() => tasks.updateQueuedGeneration({ taskId: task.id, prompt: 'too late' })).toThrow('TASK_ALREADY_STARTED');
     tasks.close();
   });
+
+  it('atomically updates selected queued generation snapshots', async () => {
+    const tasks = new TaskService(await databasePath());
+    const basePayload = {
+      providerProfileId: '08f00b2a-c2ef-43c8-aea7-6ebec183bd17',
+      batchId: '19d42fac-a42a-405a-8a82-b67154f259a3', prompt: 'old',
+      templateId: null, templateVersion: null, resultIndex: 1, storageMode: 'managed'
+    };
+    const first = tasks.enqueue({ kind: 'generation', assetId: 'asset-1', payload: basePayload });
+    const second = tasks.enqueue({ kind: 'generation', assetId: 'asset-2', payload: { ...basePayload, resultIndex: 2 } });
+    const updated = tasks.updateQueuedGenerations({
+      taskIds: [first.id, second.id],
+      providerProfileId: 'f221f0c9-1452-4291-97ff-8b0fe98c8738',
+      prompt: 'new prompt', templateId: null, templateVersion: null
+    });
+    expect(updated.every((task) => task.payload.providerProfileId === 'f221f0c9-1452-4291-97ff-8b0fe98c8738')).toBe(true);
+    expect(updated.every((task) => task.payload.prompt === 'new prompt')).toBe(true);
+    tasks.claimNext(['generation']);
+    expect(() => tasks.updateQueuedGenerations({ taskIds: [first.id, second.id], prompt: 'late' })).toThrow('TASK_ALREADY_STARTED');
+    expect(tasks.list().find((task) => task.id === second.id)?.payload.prompt).toBe('new prompt');
+    tasks.close();
+  });
+
+  it('grows and shrinks a queued generation batch without reusing result indexes', async () => {
+    const tasks = new TaskService(await databasePath());
+    const payload = {
+      providerProfileId: '08f00b2a-c2ef-43c8-aea7-6ebec183bd17',
+      batchId: '19d42fac-a42a-405a-8a82-b67154f259a3', prompt: 'generate',
+      templateId: null, templateVersion: null, resultIndex: 1, storageMode: 'managed'
+    };
+    tasks.enqueue({ kind: 'generation', assetId: 'asset-1', payload });
+    const grown = tasks.resizeQueuedGenerationBatch({ batchId: payload.batchId, assetId: 'asset-1', count: 3 });
+    expect(grown.filter((task) => task.status === 'queued').map((task) => task.payload.resultIndex).sort()).toEqual([1, 2, 3]);
+    const shrunk = tasks.resizeQueuedGenerationBatch({ batchId: payload.batchId, assetId: 'asset-1', count: 1 });
+    expect(shrunk.filter((task) => task.status === 'queued')).toHaveLength(1);
+    expect(shrunk.filter((task) => task.status === 'canceled')).toHaveLength(2);
+    const regrown = tasks.resizeQueuedGenerationBatch({ batchId: payload.batchId, assetId: 'asset-1', count: 2 });
+    expect(regrown.filter((task) => task.status === 'queued').map((task) => task.payload.resultIndex).sort()).toEqual([1, 4]);
+    tasks.close();
+  });
 });

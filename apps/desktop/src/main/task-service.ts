@@ -5,10 +5,14 @@ import {
   enqueueTaskInputSchema,
   generationTaskPayloadSchema,
   persistedTaskSchema,
+  resizeQueuedGenerationBatchInputSchema,
   updateQueuedGenerationTaskInputSchema,
+  updateQueuedGenerationTasksInputSchema,
   type EnqueueTaskInput,
   type PersistedTask,
-  type UpdateQueuedGenerationTaskInput
+  type ResizeQueuedGenerationBatchInput,
+  type UpdateQueuedGenerationTaskInput,
+  type UpdateQueuedGenerationTasksInput
 } from '@photoallisai/contracts';
 import { assertTaskTransition, type TaskStatus } from '@photoallisai/domain';
 
@@ -248,6 +252,120 @@ export class TaskService {
       throw error;
     }
     return this.#get(task.id);
+  }
+
+  updateQueuedGenerations(rawInput: UpdateQueuedGenerationTasksInput): PersistedTask[] {
+    const input = updateQueuedGenerationTasksInputSchema.parse(rawInput);
+    const ids = [...new Set(input.taskIds)];
+    if (ids.length !== input.taskIds.length) throw new Error('DUPLICATE_TASK_ID');
+    const tasks = ids.map((id) => this.#get(id));
+    const payloads = tasks.map((task) => {
+      if (task.kind !== 'generation') throw new Error('TASK_KIND_NOT_EDITABLE');
+      if (task.status !== 'queued') throw new Error('TASK_ALREADY_STARTED');
+      return generationTaskPayloadSchema.parse({
+        ...task.payload,
+        ...(input.providerProfileId === undefined ? {} : { providerProfileId: input.providerProfileId }),
+        ...(input.prompt === undefined ? {} : { prompt: input.prompt }),
+        ...(input.templateId === undefined ? {} : { templateId: input.templateId, templateVersion: input.templateVersion })
+      });
+    });
+    const resizeGroup = input.resize
+      ? this.list().filter((task) => task.kind === 'generation' && task.assetId === input.resize!.assetId && task.payload.batchId === input.resize!.batchId)
+      : [];
+    if (input.resize && resizeGroup.length === 0) throw new Error('GENERATION_BATCH_NOT_FOUND');
+    const immutable = resizeGroup.filter((task) => task.status !== 'queued' && task.status !== 'canceled');
+    if (input.resize && input.resize.count < immutable.length) throw new Error('GENERATION_COUNT_BELOW_STARTED');
+    const resizeQueued = resizeGroup.filter((task) => task.status === 'queued').sort((left, right) => Number(left.payload.resultIndex) - Number(right.payload.resultIndex));
+    if (input.resize && resizeQueued.some((task) => !ids.includes(task.id))) throw new Error('GENERATION_BATCH_UPDATE_SET_MISMATCH');
+    const now = Date.now();
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const update = this.#database.prepare(`UPDATE tasks SET payload_json = ?, updated_at = ? WHERE id = ? AND status = 'queued'`);
+      const event = this.#database.prepare(`
+        INSERT INTO task_events (task_id, from_status, to_status, occurred_at, details_json)
+        VALUES (?, 'queued', 'queued', ?, ?)
+      `);
+      ids.forEach((id, index) => {
+        if (update.run(JSON.stringify(payloads[index]), now, id).changes !== 1) throw new Error('TASK_ALREADY_STARTED');
+        event.run(id, now, JSON.stringify({
+          reason: 'payload_updated',
+          fields: [input.providerProfileId === undefined ? null : 'provider', input.prompt === undefined ? null : 'prompt', input.templateId === undefined ? null : 'template'].filter(Boolean)
+        }));
+      });
+      if (input.resize) {
+        const activeCount = immutable.length + resizeQueued.length;
+        if (input.resize.count < activeCount) {
+          const cancel = this.#database.prepare(`UPDATE tasks SET status = 'canceled', updated_at = ? WHERE id = ? AND status = 'queued'`);
+          const cancelEvent = this.#database.prepare(`INSERT INTO task_events (task_id, from_status, to_status, occurred_at, details_json) VALUES (?, 'queued', 'canceled', ?, '{"reason":"batch_resized"}')`);
+          for (const task of resizeQueued.slice(input.resize.count - immutable.length).reverse()) {
+            if (cancel.run(now, task.id).changes !== 1) throw new Error('TASK_ALREADY_STARTED');
+            cancelEvent.run(task.id, now);
+          }
+        } else if (input.resize.count > activeCount) {
+          const sourceIndex = resizeQueued.length > 0 ? ids.indexOf(resizeQueued.at(-1)!.id) : -1;
+          const sourcePayload = sourceIndex >= 0 ? payloads[sourceIndex]! : generationTaskPayloadSchema.parse(immutable.at(-1)?.payload);
+          let resultIndex = Math.max(...resizeGroup.map((task) => Number(task.payload.resultIndex) || 0));
+          const maximum = this.#database.prepare(`SELECT COALESCE(MAX(position), -1) AS value FROM tasks WHERE status = 'queued'`).get() as { value: number };
+          const insert = this.#database.prepare(`INSERT INTO tasks (id, kind, asset_id, status, position, progress, attempt, payload_json, error_code, created_at, updated_at) VALUES (?, 'generation', ?, 'queued', ?, 0, 0, ?, NULL, ?, ?)`);
+          const enqueueEvent = this.#database.prepare(`INSERT INTO task_events (task_id, from_status, to_status, occurred_at, details_json) VALUES (?, 'draft', 'queued', ?, '{"reason":"batch_resized"}')`);
+          for (let offset = 1; offset <= input.resize.count - activeCount; offset += 1) {
+            const id = randomUUID();
+            resultIndex += 1;
+            insert.run(id, input.resize.assetId, maximum.value + offset, JSON.stringify({ ...sourcePayload, resultIndex }), now, now);
+            enqueueEvent.run(id, now);
+          }
+        }
+      }
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    return input.resize
+      ? this.list().filter((task) => task.kind === 'generation' && task.assetId === input.resize!.assetId && task.payload.batchId === input.resize!.batchId)
+      : ids.map((id) => this.#get(id));
+  }
+
+  resizeQueuedGenerationBatch(rawInput: ResizeQueuedGenerationBatchInput): PersistedTask[] {
+    const input = resizeQueuedGenerationBatchInputSchema.parse(rawInput);
+    const group = this.list().filter((task) => task.kind === 'generation' && task.assetId === input.assetId && task.payload.batchId === input.batchId);
+    if (group.length === 0) throw new Error('GENERATION_BATCH_NOT_FOUND');
+    const immutable = group.filter((task) => task.status !== 'queued' && task.status !== 'canceled');
+    if (input.count < immutable.length) throw new Error('GENERATION_COUNT_BELOW_STARTED');
+    const queued = group.filter((task) => task.status === 'queued').sort((left, right) => Number(left.payload.resultIndex) - Number(right.payload.resultIndex));
+    const activeCount = immutable.length + queued.length;
+    if (activeCount === input.count) return group;
+    const now = Date.now();
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      if (input.count < activeCount) {
+        const cancel = this.#database.prepare(`UPDATE tasks SET status = 'canceled', updated_at = ? WHERE id = ? AND status = 'queued'`);
+        const event = this.#database.prepare(`INSERT INTO task_events (task_id, from_status, to_status, occurred_at, details_json) VALUES (?, 'queued', 'canceled', ?, '{"reason":"batch_resized"}')`);
+        for (const task of queued.slice(input.count - immutable.length).reverse()) {
+          if (cancel.run(now, task.id).changes !== 1) throw new Error('TASK_ALREADY_STARTED');
+          event.run(task.id, now);
+        }
+      } else {
+        const source = queued.at(-1) ?? immutable.at(-1);
+        if (!source) throw new Error('GENERATION_BATCH_NOT_FOUND');
+        const payload = generationTaskPayloadSchema.parse(source.payload);
+        let resultIndex = Math.max(...group.map((task) => Number(task.payload.resultIndex) || 0));
+        const maximum = this.#database.prepare(`SELECT COALESCE(MAX(position), -1) AS value FROM tasks WHERE status = 'queued'`).get() as { value: number };
+        const insert = this.#database.prepare(`INSERT INTO tasks (id, kind, asset_id, status, position, progress, attempt, payload_json, error_code, created_at, updated_at) VALUES (?, 'generation', ?, 'queued', ?, 0, 0, ?, NULL, ?, ?)`);
+        const event = this.#database.prepare(`INSERT INTO task_events (task_id, from_status, to_status, occurred_at, details_json) VALUES (?, 'draft', 'queued', ?, '{"reason":"batch_resized"}')`);
+        for (let offset = 1; offset <= input.count - activeCount; offset += 1) {
+          const id = randomUUID();
+          resultIndex += 1;
+          insert.run(id, input.assetId, maximum.value + offset, JSON.stringify({ ...payload, resultIndex }), now, now);
+          event.run(id, now);
+        }
+      }
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    return this.list().filter((task) => task.kind === 'generation' && task.assetId === input.assetId && task.payload.batchId === input.batchId);
   }
 
   #transition(task: PersistedTask, status: TaskStatus, position = task.position): PersistedTask {

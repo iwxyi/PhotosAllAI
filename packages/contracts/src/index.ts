@@ -375,6 +375,29 @@ export const updateQueuedGenerationTaskInputSchema = z.object({
   prompt: z.string().trim().min(1).max(50_000)
 });
 export type UpdateQueuedGenerationTaskInput = z.infer<typeof updateQueuedGenerationTaskInputSchema>;
+export const updateQueuedGenerationTasksInputSchema = z.object({
+  taskIds: z.array(taskIdSchema).min(1).max(10_000),
+  providerProfileId: z.string().uuid().optional(),
+  prompt: z.string().trim().min(1).max(50_000).optional(),
+  templateId: z.string().uuid().nullable().optional(),
+  templateVersion: z.number().int().positive().nullable().optional(),
+  resize: z.object({
+    batchId: z.string().uuid(),
+    assetId: z.string().min(1),
+    count: z.number().int().min(1).max(20)
+  }).optional()
+}).refine((input) => input.providerProfileId !== undefined || input.prompt !== undefined, {
+  message: 'GENERATION_TASK_PATCH_EMPTY'
+}).refine((input) => (input.templateId === undefined) === (input.templateVersion === undefined), {
+  message: 'GENERATION_TEMPLATE_SNAPSHOT_INCOMPLETE'
+});
+export type UpdateQueuedGenerationTasksInput = z.infer<typeof updateQueuedGenerationTasksInputSchema>;
+export const resizeQueuedGenerationBatchInputSchema = z.object({
+  batchId: z.string().uuid(),
+  assetId: z.string().min(1),
+  count: z.number().int().min(1).max(20)
+});
+export type ResizeQueuedGenerationBatchInput = z.infer<typeof resizeQueuedGenerationBatchInputSchema>;
 
 export const normalizedRegionSchema = z.object({
   kind: z.literal('normalized_box'),
@@ -500,7 +523,10 @@ export const generationTaskPayloadSchema = z.object({
   templateId: z.string().uuid().nullable().default(null),
   templateVersion: z.number().int().positive().nullable().default(null),
   resultIndex: z.number().int().positive(),
-  storageMode: z.enum(['managed', 'portable']).default('managed')
+  storageMode: z.enum(['managed', 'portable']).default('managed'),
+  analysisRevisionId: z.string().uuid().optional(),
+  disabledActionIds: z.array(z.string().min(1).max(200)).max(1_000).optional().default([]),
+  userInstruction: z.string().max(20_000).optional().default('')
 });
 
 export const generationResultSchema = z.object({
@@ -614,6 +640,8 @@ export interface DesktopApi {
   retryTask(taskId: string): Promise<PersistedTask>;
   reorderTasks(taskIds: string[]): Promise<PersistedTask[]>;
   updateQueuedGenerationTask(input: UpdateQueuedGenerationTaskInput): Promise<PersistedTask>;
+  updateQueuedGenerationTasks(input: UpdateQueuedGenerationTasksInput): Promise<PersistedTask[]>;
+  resizeQueuedGenerationBatch(input: ResizeQueuedGenerationBatchInput): Promise<PersistedTask[]>;
   listPromptTemplates(): Promise<PromptTemplate[]>;
   savePromptTemplate(input: SavePromptTemplateInput): Promise<PromptTemplate>;
   archivePromptTemplate(templateId: string): Promise<void>;
