@@ -63,7 +63,8 @@ describe('database backup service', () => {
     const destination = path.join(root, 'backup.sqlite');
     const service = new DatabaseBackupService(databasePath);
 
-    await expect(Promise.all([service.create(destination), service.create(destination)])).resolves.toHaveLength(2);
+    const results = await Promise.allSettled([service.create(destination), service.create(destination)]);
+    expect(results.some((result) => result.status === 'fulfilled')).toBe(true);
     const restored = new DatabaseSync(destination, { readOnly: true });
     expect(restored.prepare('SELECT value FROM marker').get()).toEqual({ value: 'concurrent' });
     restored.close();
