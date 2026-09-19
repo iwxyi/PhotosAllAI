@@ -39,6 +39,20 @@ describe('persistent task service', () => {
     tasks.close();
   });
 
+  it('assigns retried tasks after the current queue tail', async () => {
+    const tasks = new TaskService(await databasePath());
+    const queued = tasks.enqueue({ kind: 'analysis', assetId: 'asset-queued', payload: {} });
+    const failed = tasks.enqueue({ kind: 'generation', assetId: 'asset-failed', payload: {} });
+    tasks.claimNext(['generation']);
+    tasks.advance(failed.id, 'processing', 0.1);
+    tasks.advance(failed.id, 'failed', 0.1, 'TEST_FAILURE');
+
+    const retried = tasks.retry(failed.id);
+    expect(retried.position).toBe(1);
+    expect(tasks.list().filter((task) => task.status === 'queued').map((task) => task.id)).toEqual([queued.id, failed.id]);
+    tasks.close();
+  });
+
   it('recovers interrupted work after application restart', async () => {
     const file = await databasePath();
     const tasks = new TaskService(file);

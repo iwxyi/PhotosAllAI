@@ -118,12 +118,12 @@ export class TaskService {
     const input = enqueueTaskInputSchema.parse(rawInput);
     const now = Date.now();
     const id = randomUUID();
-    const maximum = this.#database.prepare(`
-      SELECT COALESCE(MAX(position), -1) AS value FROM tasks WHERE status = 'queued'
-    `).get() as { value: number };
-    const position = maximum.value + 1;
     this.#database.exec('BEGIN IMMEDIATE');
     try {
+      const maximum = this.#database.prepare(`
+        SELECT COALESCE(MAX(position), -1) AS value FROM tasks WHERE status = 'queued'
+      `).get() as { value: number };
+      const position = maximum.value + 1;
       this.#database.prepare(`
         INSERT INTO tasks (
           id, kind, asset_id, status, position, progress, attempt,
@@ -204,10 +204,28 @@ export class TaskService {
   retry(taskId: string): PersistedTask {
     const task = this.#get(taskId);
     if (task.status !== 'failed' && task.status !== 'canceled') throw new Error('TASK_NOT_RETRYABLE');
-    const maximum = this.#database.prepare(`
-      SELECT COALESCE(MAX(position), -1) AS value FROM tasks WHERE status = 'queued'
-    `).get() as { value: number };
-    return this.#transition(task, 'queued', maximum.value + 1);
+    assertTaskTransition(task.status, 'queued');
+    const now = Date.now();
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const maximum = this.#database.prepare(`
+        SELECT COALESCE(MAX(position), -1) AS value FROM tasks WHERE status = 'queued'
+      `).get() as { value: number };
+      const position = maximum.value + 1;
+      this.#database.prepare(`
+        UPDATE tasks SET status = 'queued', position = ?, progress = 0,
+          attempt = attempt + 1, error_code = NULL, updated_at = ? WHERE id = ?
+      `).run(position, now, task.id);
+      this.#database.prepare(`
+        INSERT INTO task_events (task_id, from_status, to_status, occurred_at, details_json)
+        VALUES (?, ?, 'queued', ?, ?)
+      `).run(task.id, task.status, now, JSON.stringify({ reason: 'retry' }));
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    return this.#get(task.id);
   }
 
   reorder(taskIds: readonly string[]): PersistedTask[] {
