@@ -13,6 +13,7 @@ import {
   databaseBackupResultSchema,
   libraryBackupResultSchema,
   libraryBackupVerificationResultSchema,
+  libraryRestoreResultSchema,
   catalogAssetRemovalInputSchema,
   catalogAssetRemovalReportSchema,
   catalogSnapshotSchema,
@@ -69,6 +70,7 @@ import { AppSettingsService } from './app-settings-service';
 import { DatabaseBackupService } from './database-backup-service';
 import { LibraryBackupService } from './library-backup-service';
 import { DatabaseMigrationService } from './database-migration-service';
+import { LibraryRestoreService } from './library-restore-service';
 
 const APP_ORIGIN = 'app://photoallisai';
 const APPLICATION_SCHEMA_VERSION = 2;
@@ -88,6 +90,7 @@ let workspace: WorkspaceService;
 let appSettings: AppSettingsService;
 let databaseBackup: DatabaseBackupService;
 let libraryBackup: LibraryBackupService;
+let libraryRestore: LibraryRestoreService;
 let contentHashTimer: NodeJS.Timeout | undefined;
 let contentHashPassRunning = false;
 let shuttingDown = false;
@@ -204,6 +207,35 @@ function registerIpc(): void {
     }
     const result = await libraryBackup.verify(selection.filePaths[0]);
     return libraryBackupVerificationResultSchema.parse({ canceled: false, ...result });
+  });
+  ipcMain.handle('app.library.restore.v1', async () => {
+    const selection = await dialog.showOpenDialog({
+      title: '选择要恢复的完整图库备份包',
+      buttonLabel: '选择此备份',
+      properties: ['openDirectory']
+    });
+    if (selection.canceled || !selection.filePaths[0]) {
+      return libraryRestoreResultSchema.parse({ canceled: true, createdAt: null, databaseBytes: 0, generatedFiles: 0, generatedBytes: 0 });
+    }
+    const confirmation = await dialog.showMessageBox({
+      type: 'warning',
+      title: '恢复图库备份',
+      message: '恢复后应用将立即重启',
+      detail: '当前图库会完整保留为恢复前副本。备份包不包含原图，恢复后仍可能需要重新定位原图文件夹。',
+      buttons: ['取消', '验证并恢复'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true
+    });
+    if (confirmation.response !== 1) {
+      return libraryRestoreResultSchema.parse({ canceled: true, createdAt: null, databaseBytes: 0, generatedFiles: 0, generatedBytes: 0 });
+    }
+    const result = await libraryRestore.stage(selection.filePaths[0]);
+    setTimeout(() => {
+      app.relaunch();
+      app.quit();
+    }, 500).unref();
+    return libraryRestoreResultSchema.parse({ canceled: false, ...result });
   });
   ipcMain.handle('workspace.session.get.v1', () => workspace.get());
   ipcMain.handle('workspace.session.save.v1', (_event, input: unknown) =>
@@ -474,14 +506,22 @@ if (customUserData) app.setPath('userData', customUserData);
 
 app.whenReady().then(async () => {
   const libraryDirectory = join(app.getPath('userData'), 'library');
+  const prospectiveDatabasePath = join(libraryDirectory, 'catalog.sqlite');
+  libraryBackup = new LibraryBackupService(prospectiveDatabasePath, join(libraryDirectory, 'generated'));
+  libraryRestore = new LibraryRestoreService(libraryDirectory, libraryBackup);
+  try {
+    await libraryRestore.applyPending();
+  } catch (error) {
+    if (!existsSync(libraryDirectory)) throw error;
+    await libraryRestore.quarantinePending();
+  }
   mkdirSync(libraryDirectory, { recursive: true });
-  const databasePath = join(libraryDirectory, 'catalog.sqlite');
+  const databasePath = prospectiveDatabasePath;
   const migration = new DatabaseMigrationService(databasePath);
   const migrationCheckpoint = await migration.prepare(APPLICATION_SCHEMA_VERSION);
   workspace = new WorkspaceService(databasePath);
   appSettings = new AppSettingsService(join(app.getPath('userData'), 'settings', 'app.json'));
   databaseBackup = new DatabaseBackupService(databasePath);
-  libraryBackup = new LibraryBackupService(databasePath, join(libraryDirectory, 'generated'));
   catalog = new CatalogService(databasePath);
   await catalog.reconcileImportedFolders();
   catalogWatcher = new CatalogWatcher(catalog);

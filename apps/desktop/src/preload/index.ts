@@ -10,6 +10,7 @@ const api: DesktopApi = {
   backupDatabase: () => ipcRenderer.invoke('app.database.backup.v1') as ReturnType<DesktopApi['backupDatabase']>,
   backupLibrary: () => ipcRenderer.invoke('app.library.backup.v1') as ReturnType<DesktopApi['backupLibrary']>,
   verifyLibraryBackup: () => ipcRenderer.invoke('app.library.backup.verify.v1') as ReturnType<DesktopApi['verifyLibraryBackup']>,
+  restoreLibraryBackup: () => ipcRenderer.invoke('app.library.restore.v1') as ReturnType<DesktopApi['restoreLibraryBackup']>,
   getWorkspaceSession: () =>
     ipcRenderer.invoke('workspace.session.get.v1') as ReturnType<DesktopApi['getWorkspaceSession']>,
   saveWorkspaceSession: (session) =>

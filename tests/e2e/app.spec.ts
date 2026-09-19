@@ -194,6 +194,31 @@ test('opens the task drawer and application tabs', async () => {
       }
     });
   }
+  await electronApp.evaluate(({ dialog }, directory) => {
+    const state = globalThis as typeof globalThis & {
+      photoAllIsAiOriginalShowOpenDialog?: typeof dialog.showOpenDialog;
+      photoAllIsAiOriginalShowMessageBox?: typeof dialog.showMessageBox;
+    };
+    state.photoAllIsAiOriginalShowOpenDialog = dialog.showOpenDialog;
+    state.photoAllIsAiOriginalShowMessageBox = dialog.showMessageBox;
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory], bookmarks: [] });
+    dialog.showMessageBox = async () => ({ response: 0, checkboxChecked: false });
+  }, backupPath);
+  try {
+    await page.getByRole('button', { name: '从完整备份恢复' }).click();
+    await expect(page.locator('.backup-section').getByRole('status')).toContainText('已取消图库恢复');
+  } finally {
+    await electronApp.evaluate(({ dialog }) => {
+      const state = globalThis as typeof globalThis & {
+        photoAllIsAiOriginalShowOpenDialog?: typeof dialog.showOpenDialog;
+        photoAllIsAiOriginalShowMessageBox?: typeof dialog.showMessageBox;
+      };
+      if (state.photoAllIsAiOriginalShowOpenDialog) dialog.showOpenDialog = state.photoAllIsAiOriginalShowOpenDialog;
+      if (state.photoAllIsAiOriginalShowMessageBox) dialog.showMessageBox = state.photoAllIsAiOriginalShowMessageBox;
+      delete state.photoAllIsAiOriginalShowOpenDialog;
+      delete state.photoAllIsAiOriginalShowMessageBox;
+    });
+  }
   await page.getByRole('button', { name: '任务与重试' }).click();
   await expect(page.getByRole('heading', { name: '队列执行' })).toBeVisible();
   await page.getByRole('button', { name: '快捷键' }).click();

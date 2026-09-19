@@ -22,6 +22,13 @@ export type LibraryBackupVerificationResult = {
   generatedBytes: number;
 };
 
+export type InspectedLibraryBackup = LibraryBackupVerificationResult & {
+  rootPath: string;
+  manifestPath: string;
+  catalogPath: string;
+  files: Array<{ resultId: string; relativePath: string; bytes: number; sha256: string; sourcePath: string }>;
+};
+
 const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
 const libraryBackupManifestSchema = z.object({
   schemaVersion: z.literal(1),
@@ -119,6 +126,16 @@ export class LibraryBackupService {
   }
 
   async verify(requestedBackup: string): Promise<LibraryBackupVerificationResult> {
+    const inspected = await this.inspect(requestedBackup);
+    return {
+      createdAt: inspected.createdAt,
+      databaseBytes: inspected.databaseBytes,
+      generatedFiles: inspected.generatedFiles,
+      generatedBytes: inspected.generatedBytes
+    };
+  }
+
+  async inspect(requestedBackup: string): Promise<InspectedLibraryBackup> {
     const backup = await realpath(requestedBackup);
     if (!(await stat(backup)).isDirectory()) throw new Error('BACKUP_PACKAGE_NOT_DIRECTORY');
     const manifestPath = await verifiedRegularFile(backup, 'manifest.json');
@@ -162,16 +179,22 @@ export class LibraryBackupService {
     }
 
     let generatedBytes = 0;
+    const files: InspectedLibraryBackup['files'] = [];
     for (const file of manifest.generated) {
       const filePath = await verifiedRegularFile(backup, path.posix.join('generated', file.relativePath));
       await verifyFile(filePath, file.bytes, file.sha256, 'BACKUP_GENERATED_CHECKSUM_MISMATCH');
       generatedBytes += file.bytes;
+      files.push({ ...file, sourcePath: filePath });
     }
     return {
+      rootPath: backup,
+      manifestPath,
+      catalogPath,
       createdAt: manifest.createdAt,
       databaseBytes: manifest.catalog.bytes,
       generatedFiles: manifest.generated.length,
-      generatedBytes
+      generatedBytes,
+      files
     };
   }
 }

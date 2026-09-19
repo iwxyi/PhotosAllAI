@@ -58,6 +58,14 @@ export const libraryBackupVerificationResultSchema = z.object({
   generatedBytes: z.number().int().nonnegative()
 });
 export type LibraryBackupVerificationResult = z.infer<typeof libraryBackupVerificationResultSchema>;
+export const libraryRestoreResultSchema = z.object({
+  canceled: z.boolean(),
+  createdAt: z.string().datetime().nullable(),
+  databaseBytes: z.number().int().nonnegative(),
+  generatedFiles: z.number().int().nonnegative(),
+  generatedBytes: z.number().int().nonnegative()
+});
+export type LibraryRestoreResult = z.infer<typeof libraryRestoreResultSchema>;
 
 export const appSettingsSchema = z.object({
   generationStorageMode: z.enum(['managed', 'portable']).default('managed'),
@@ -624,6 +632,7 @@ export interface DesktopApi {
   backupDatabase(): Promise<DatabaseBackupResult>;
   backupLibrary(): Promise<LibraryBackupResult>;
   verifyLibraryBackup(): Promise<LibraryBackupVerificationResult>;
+  restoreLibraryBackup(): Promise<LibraryRestoreResult>;
   getWorkspaceSession(): Promise<WorkspaceSession>;
   saveWorkspaceSession(session: WorkspaceSession): Promise<WorkspaceSession>;
   listCatalogAssets(): Promise<CatalogAsset[]>;
