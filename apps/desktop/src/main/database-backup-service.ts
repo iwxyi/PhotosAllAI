@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -65,11 +65,11 @@ export class DatabaseBackupService {
     options: { now?: number; minimumIntervalMs?: number; retention?: number }
   ): Promise<DatabaseBackupResult | null> {
     const lockPath = path.join(path.resolve(directory), '.automatic-backup.lock');
-    await acquireBackupLock(lockPath);
+    const releaseLock = await acquireBackupLock(lockPath);
     try {
       return await this.#createAutomaticLocked(directory, options);
     } finally {
-      await rm(lockPath, { recursive: true, force: true });
+      await releaseLock();
     }
   }
 
@@ -97,33 +97,54 @@ export class DatabaseBackupService {
   }
 }
 
-async function acquireBackupLock(lockPath: string): Promise<void> {
+async function acquireBackupLock(lockPath: string): Promise<() => Promise<void>> {
   const deadline = Date.now() + 30_000;
   await mkdir(path.dirname(lockPath), { recursive: true });
   while (true) {
     let created = false;
+    const token = randomUUID();
     try {
       await mkdir(lockPath);
       created = true;
       await writeFile(
         path.join(lockPath, 'owner.json'),
-        JSON.stringify({ pid: process.pid, createdAt: Date.now() }),
+        JSON.stringify({ pid: process.pid, createdAt: Date.now(), token }),
         { flag: 'wx' }
       );
-      return;
+      return async () => {
+        try {
+          const owner = JSON.parse(await readFile(path.join(lockPath, 'owner.json'), 'utf8')) as { token?: unknown };
+          if (owner.token === token) await rm(lockPath, { recursive: true, force: true });
+        } catch (error) {
+          if (!isNodeError(error, 'ENOENT')) throw error;
+        }
+      };
     } catch (error) {
       if (created) {
         await rm(lockPath, { recursive: true, force: true });
         throw error;
       }
       if (!isNodeError(error, 'EEXIST')) throw error;
-      if (await isStaleBackupLock(lockPath)) {
-        await rm(lockPath, { recursive: true, force: true });
+      if (await reclaimStaleBackupLock(lockPath)) {
         continue;
       }
       if (Date.now() >= deadline) throw new Error('AUTOMATIC_BACKUP_LOCK_TIMEOUT');
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
+  }
+}
+
+async function reclaimStaleBackupLock(lockPath: string): Promise<boolean> {
+  if (!(await isStaleBackupLock(lockPath))) return false;
+  const quarantinePath = `${lockPath}.${process.pid}.${randomUUID()}.stale`;
+  try {
+    await rename(lockPath, quarantinePath);
+    await rm(quarantinePath, { recursive: true, force: true });
+    return true;
+  } catch (error) {
+    await rm(quarantinePath, { recursive: true, force: true }).catch(() => undefined);
+    if (isNodeError(error, 'ENOENT')) return true;
+    return false;
   }
 }
 
@@ -137,8 +158,7 @@ async function isStaleBackupLock(lockPath: string): Promise<boolean> {
     } catch (error) {
       return isNodeError(error, 'ESRCH');
     }
-  } catch (error) {
-    if (isNodeError(error, 'ENOENT')) return false;
+  } catch {
     return false;
   }
 }
