@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   CatalogAsset,
   CatalogAlbum,
@@ -17,6 +17,7 @@ import type {
   PromptTemplate,
   ProviderProfile,
   ExportPreset,
+  ExportReport,
   ImageCacheStats,
   GenerationTrashSummary,
   DiagnosticSnapshot,
@@ -1933,6 +1934,23 @@ function taskSubtitle(task: PersistedTask): string {
   return `成功 ${succeeded} · 失败 ${failed}`;
 }
 
+function exportFailureMessage(errorCode: string): string {
+  switch (errorCode) {
+    case 'EXPORT_RESULT_NOT_FOUND': return '生成版本不存在';
+    case 'EXPORT_NAME_EXISTS': return '目标存在同名文件';
+    case 'EXPORT_DECODE_FAILED': return '图片无法解码';
+    case 'EXPORT_ENCODE_FAILED': return '图片编码失败';
+    case 'EXPORT_SOURCE_CHANGED': return '源文件在导出时发生变化';
+    case 'EXPORT_SOURCE_NOT_FILE': return '生成版本不是普通文件';
+    default: return '文件写入失败';
+  }
+}
+
+function exportTaskReport(task: PersistedTask): ExportReport | null {
+  // Export results are validated and stripped of private fields at the main-process IPC boundary.
+  return task.kind === 'export' && task.result ? task.result as ExportReport : null;
+}
+
 const fileOperationLabels: Record<FileOperationHistoryItem['kind'], string> = {
   move: '移动原图', copy: '复制原图', rename: '重命名', remove: '从图库移除', trash: '移到系统回收站'
 };
@@ -1960,6 +1978,7 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
   const [templateDraft, setTemplateDraft] = useState('');
   const [countDraft, setCountDraft] = useState(1);
   const [undoBusyId, setUndoBusyId] = useState<string | null>(null);
+  const [expandedExportTaskId, setExpandedExportTaskId] = useState<string | null>(null);
 
   const applyTaskPage = (page: Awaited<ReturnType<typeof window.desktopApi.listTaskPage>>, append = false) => {
     setTaskItems((current) => append
@@ -2152,8 +2171,11 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
         <div className="task-table-head"><span>任务</span><span>状态</span><span>进度</span><span>尝试</span><span>更新时间</span><span /></div>
         {taskItems.length === 0 ? (
           <div className="task-empty"><Clock3 size={30} /><h2>暂无任务</h2><p>从图库选择照片并执行 AI 分析或生成后，任务会出现在这里。</p></div>
-        ) : taskItems.map((task) => (
-          <div className="task-table-row" key={task.id}>
+        ) : taskItems.map((task) => {
+          const report = exportTaskReport(task);
+          const reportOpen = expandedExportTaskId === task.id;
+          return <Fragment key={task.id}>
+          <div className="task-table-row">
             <span className="task-kind"><i><TaskKindIcon kind={task.kind} /></i><span><strong>{taskLabels[task.kind]}</strong><small>{taskSubtitle(task)}</small></span></span>
             <span className={`task-state state-${task.status}`}>{statusLabels[task.status]}</span>
             <span className="table-progress"><i style={{ width: `${Math.round(task.progress * 100)}%` }} /><em>{Math.round(task.progress * 100)}%</em></span>
@@ -2164,9 +2186,20 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
               {task.status === 'queued' && task.kind === 'generation' && <IconButton label="编辑生成提示词" onClick={() => openPromptEditor(task)}><FilePenLine size={13} /></IconButton>}
               {(task.status === 'queued' || task.status === 'preparing' || task.status === 'uploading' || task.status === 'processing' || task.status === 'downloading') && <button type="button" onClick={() => void cancel(task.id)}>取消</button>}
               {(task.status === 'failed' || task.status === 'canceled') && <button type="button" onClick={() => void retry(task.id)}>重试</button>}
+              {report && <IconButton label={reportOpen ? '收起导出报告' : '查看导出报告'} active={reportOpen} pressed={reportOpen} onClick={() => setExpandedExportTaskId(reportOpen ? null : task.id)}>{reportOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</IconButton>}
             </span>
           </div>
-        ))}
+          {reportOpen && report && <section className="export-task-report" aria-label="导出报告">
+            <header><span><strong>导出报告</strong><small>{report.canceled ? '已取消' : report.failed > 0 ? '部分项目未导出' : '所有文件均已导出'}</small></span><button className="secondary-action compact" type="button" onClick={async () => { if (!await window.desktopApi.revealExportDestination(task.id)) setMessage('导出目录已移动或暂时无法打开。'); }}><FolderOpen size={13} />打开导出目录</button></header>
+            <div className="export-report-summary"><span>总计 <strong>{report.total}</strong></span><span>成功 <strong>{report.succeeded}</strong></span><span className={report.failed > 0 ? 'has-failures' : ''}>失败 <strong>{report.failed}</strong></span></div>
+            <div className="export-report-files">
+              {report.files.map((file) => <div key={file.resultId}><Check size={12} /><span>{file.fileName}</span><em>已导出</em></div>)}
+              {report.failures.map((failure) => <div className="is-failed" key={failure.resultId}><CircleAlert size={12} /><span>{exportFailureMessage(failure.errorCode)}</span><em>{failure.errorCode}</em></div>)}
+              {report.files.length === 0 && report.failures.length === 0 && <div className="is-empty">任务取消前没有发布文件</div>}
+            </div>
+          </section>}
+          </Fragment>;
+        })}
         {nextTaskCursor && <div className="task-load-more"><button className="secondary-action compact" type="button" disabled={loadingMoreTasks} onClick={() => void loadMoreTasks()}>{loadingMoreTasks ? '加载中…' : '加载更多任务'}</button></div>}
       </div>
       {editingTaskId && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !editBusy) setEditingTaskId(null); }}><form className="rename-dialog task-prompt-editor" role="dialog" aria-modal="true" aria-labelledby="task-prompt-title" onSubmit={(event) => { event.preventDefault(); void savePrompt(); }}><header><div><span className="dialog-icon"><FilePenLine size={16} /></span><div><h2 id="task-prompt-title">编辑等待任务</h2><p>修改只作用于尚未开始的任务；同批生成数量会安全增减队尾任务。</p></div></div><IconButton label="关闭提示词编辑器" disabled={editBusy} onClick={() => setEditingTaskId(null)}><X size={15} /></IconButton></header><div className="form-grid two-columns"><label className="rename-field"><span>生成模型</span><select aria-label="任务生成模型" value={providerDraft} onChange={(event) => setProviderDraft(event.target.value)}>{generationProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label><label className="rename-field"><span>生成数量</span><input aria-label="任务生成数量" type="number" min="1" max="20" value={countDraft} onChange={(event) => setCountDraft(Number(event.target.value))} /></label></div><label className="rename-field"><span>提示词模板</span><select aria-label="任务提示词模板" value={templateDraft} disabled={!taskItems.find((item) => item.id === editingTaskId)?.payload.analysisRevisionId} onChange={(event) => void previewTaskTemplate(event.target.value)}><option value="">保留当前通用方案</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name} · V{template.version}</option>)}</select></label><label className="rename-field"><span>最终生成提示词</span><textarea autoFocus value={promptDraft} maxLength={50_000} onChange={(event) => setPromptDraft(event.target.value)} /></label><footer><span>{promptDraft.length.toLocaleString()} / 50,000</span><div><button className="quiet-button" type="button" disabled={editBusy} onClick={() => setEditingTaskId(null)}>取消</button><button className="primary-action compact" type="submit" disabled={!providerDraft || !promptDraft.trim() || countDraft < 1 || countDraft > 20 || editBusy}>{editBusy ? '保存中…' : '保存修改'}</button></div></footer></form></div>}

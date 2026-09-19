@@ -81,6 +81,7 @@ test.afterAll(async () => {
 });
 
 test('analyzes, generates, compares, and persists managed and portable results', async () => {
+  test.setTimeout(60_000);
   const address = mockServer.address();
   if (!address || typeof address === 'string') throw new Error('Mock server unavailable');
   const baseUrl = `http://127.0.0.1:${address.port}/v1`;
@@ -180,6 +181,23 @@ test('analyzes, generates, compares, and persists managed and portable results',
   expect(exportedSize).toEqual({ width: 1638, height: 2048 });
   expect(await readFile(sourcePath)).toEqual(originalBytes);
 
+  await electronApp.evaluate(({ shell }) => {
+    shell.openPath = async (target) => {
+      (globalThis as typeof globalThis & { openedExportDirectory?: string }).openedExportDirectory = target;
+      return '';
+    };
+  });
+  await page.getByRole('tab', { name: /任务中心/ }).click();
+  const exportTask = page.locator('.task-table-row').filter({ hasText: '导出' }).first();
+  await exportTask.getByRole('button', { name: '查看导出报告' }).click();
+  const exportReport = page.getByRole('region', { name: '导出报告' });
+  await expect(exportReport).toContainText(exportedFiles[0]!);
+  await expect(exportReport).toContainText('成功 1');
+  await exportReport.getByRole('button', { name: '打开导出目录' }).click();
+  expect(await electronApp.evaluate(() => (globalThis as typeof globalThis & { openedExportDirectory?: string }).openedExportDirectory)).toBe(exportDirectory);
+  await page.getByRole('tab', { name: '图库' }).click();
+
+  await page.getByRole('button', { name: '版本', exact: true }).click();
   await page.getByRole('button', { name: '回收版本 V1' }).click();
   await page.getByRole('button', { name: '确认', exact: true }).click();
   await expect(page.getByText('版本回收站')).toBeVisible();

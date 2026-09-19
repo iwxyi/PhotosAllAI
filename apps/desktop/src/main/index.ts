@@ -518,6 +518,13 @@ function registerIpc(): void {
     taskRunner.wake();
     return toRendererTask(task);
   });
+  ipcMain.handle('export.destination.reveal.v1', async (_event, taskId: unknown) => {
+    const task = tasks.find(taskIdSchema.parse(taskId));
+    if (task?.kind !== 'export') return false;
+    const payload = exportTaskPayloadSchema.safeParse(task.payload);
+    if (!payload.success || !existsSync(payload.data.destinationDirectory)) return false;
+    return await shell.openPath(payload.data.destinationDirectory) === '';
+  });
   ipcMain.handle('export.presets.list.v1', () => exportPresets.list());
   ipcMain.handle('export.presets.save.v1', (_event, input: unknown) =>
     exportPresetSchema.parse(exportPresets.save(saveExportPresetInputSchema.parse(input)))

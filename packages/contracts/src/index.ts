@@ -874,6 +874,7 @@ export interface DesktopApi {
   updateGenerationResultReview(input: UpdateGenerationResultReviewInput): Promise<GenerationResult>;
   revealGenerationResult(resultId: string): Promise<boolean>;
   exportGenerationResults(input: ExportGenerationResultsInput): Promise<PersistedTask | null>;
+  revealExportDestination(taskId: string): Promise<boolean>;
   listExportPresets(): Promise<ExportPreset[]>;
   saveExportPreset(input: SaveExportPresetInput): Promise<ExportPreset>;
   deleteExportPreset(presetId: string): Promise<void>;
