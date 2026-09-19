@@ -48,6 +48,7 @@ test.afterAll(async () => {
 
 test('moves, copies, and renames originals through safe file dialogs', async () => {
   await expect(page.getByText('MOVE_ME.jpg', { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('button', { name: '在文件管理器中显示原图' })).toBeVisible();
   await page.getByRole('button', { name: '管理相册' }).click();
   const albumDialog = page.getByRole('dialog', { name: '管理相册' });
   await expect(albumDialog).toBeVisible();

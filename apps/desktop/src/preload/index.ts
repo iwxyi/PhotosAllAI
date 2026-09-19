@@ -55,6 +55,8 @@ const api: DesktopApi = {
     >,
   relinkCatalogFolder: (folderId) =>
     ipcRenderer.invoke('catalog.folder.relink.v1', folderId) as ReturnType<DesktopApi['relinkCatalogFolder']>,
+  revealCatalogAsset: (assetId) =>
+    ipcRenderer.invoke('catalog.asset.reveal.v1', assetId) as ReturnType<DesktopApi['revealCatalogAsset']>,
   listProviderProfiles: () =>
     ipcRenderer.invoke('providers.list.v1') as ReturnType<DesktopApi['listProviderProfiles']>,
   saveProviderProfile: (input) =>
@@ -82,6 +84,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke('generation.results.list.v1', { assetId }) as ReturnType<DesktopApi['listGenerationResults']>,
   updateGenerationResultReview: (input) =>
     ipcRenderer.invoke('generation.result.review.update.v1', input) as ReturnType<DesktopApi['updateGenerationResultReview']>,
+  revealGenerationResult: (resultId) =>
+    ipcRenderer.invoke('generation.result.reveal.v1', resultId) as ReturnType<DesktopApi['revealGenerationResult']>,
   exportGenerationResults: (input) =>
     ipcRenderer.invoke('generation.results.export.v1', input) as ReturnType<DesktopApi['exportGenerationResults']>,
   listExportPresets: () => ipcRenderer.invoke('export.presets.list.v1') as ReturnType<DesktopApi['listExportPresets']>,

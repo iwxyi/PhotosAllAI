@@ -1,4 +1,4 @@
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -244,6 +244,14 @@ function registerIpc(): void {
     catalogWatcher.watchFolders(catalog.listFolderPaths());
     return relinkCatalogFolderResultSchema.parse(report);
   });
+  ipcMain.handle('catalog.asset.reveal.v1', (_event, input: unknown) => {
+    const assetId = String(input);
+    if (!/^[0-9a-f-]{20,40}$/iu.test(assetId)) throw new Error('INVALID_ASSET_ID');
+    const source = catalog.resolveAssetFile(assetId);
+    if (!source || !existsSync(source.path)) return false;
+    shell.showItemInFolder(source.path);
+    return true;
+  });
 
   ipcMain.handle('providers.list.v1', () => providers.list());
   ipcMain.handle('providers.save.v1', (_event, input: unknown) =>
@@ -289,6 +297,14 @@ function registerIpc(): void {
   ipcMain.handle('generation.result.review.update.v1', (_event, input: unknown) =>
     generation.updateReview(updateGenerationResultReviewInputSchema.parse(input))
   );
+  ipcMain.handle('generation.result.reveal.v1', (_event, input: unknown) => {
+    const resultId = String(input);
+    if (!/^[0-9a-f-]{36}$/iu.test(resultId)) throw new Error('INVALID_RESULT_ID');
+    const filePath = generation.resolveResultFile(resultId);
+    if (!filePath || !existsSync(filePath)) return false;
+    shell.showItemInFolder(filePath);
+    return true;
+  });
   ipcMain.handle('generation.results.export.v1', async (_event, input: unknown) => {
     const { resultIds, presetId } = exportGenerationResultsInputSchema.parse(input);
     const selection = await dialog.showOpenDialog({

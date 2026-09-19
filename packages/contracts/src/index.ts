@@ -590,6 +590,7 @@ export interface DesktopApi {
   listFileOperationHistory(): Promise<FileOperationHistoryItem[]>;
   importFolders(): Promise<CatalogSnapshot | null>;
   relinkCatalogFolder(folderId: string): Promise<RelinkCatalogFolderResult | null>;
+  revealCatalogAsset(assetId: string): Promise<boolean>;
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;
   testProviderConnection(input: SaveProviderProfileInput): Promise<ConnectionTest>;
@@ -604,6 +605,7 @@ export interface DesktopApi {
   listAnalysisRevisions(assetId: string): Promise<AnalysisRevision[]>;
   listGenerationResults(assetId: string): Promise<GenerationResult[]>;
   updateGenerationResultReview(input: UpdateGenerationResultReviewInput): Promise<GenerationResult>;
+  revealGenerationResult(resultId: string): Promise<boolean>;
   exportGenerationResults(input: ExportGenerationResultsInput): Promise<ExportReport>;
   listExportPresets(): Promise<ExportPreset[]>;
   saveExportPreset(input: SaveExportPresetInput): Promise<ExportPreset>;

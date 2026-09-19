@@ -135,6 +135,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await page.getByRole('tab', { name: '图库' }).click();
   await page.getByRole('button', { name: /加入生成队列/ }).click();
   await expect(page.getByText('V2', { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByRole('button', { name: '在文件管理器中显示生成版本' })).toBeEnabled();
 
   const exportDirectory = path.join(testRoot, 'exported');
   await mkdir(exportDirectory, { recursive: true });
