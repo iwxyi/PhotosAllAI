@@ -407,6 +407,10 @@ function registerIpc(): void {
     const page = tasks.listPage(listTaskPageInputSchema.parse(input));
     return { ...page, items: page.items.map(toRendererTask) };
   });
+  ipcMain.handle('tasks.get.v1', (_event, taskId: unknown) => {
+    const task = tasks.find(taskIdSchema.parse(taskId));
+    return task ? toRendererTask(task) : null;
+  });
   ipcMain.handle('tasks.enqueue.v1', (_event, input: unknown) => {
     const parsed = enqueueTaskInputSchema.parse(input);
     if (parsed.kind === 'export') throw new Error('EXPORT_TASK_REQUIRES_DIRECTORY_SELECTION');

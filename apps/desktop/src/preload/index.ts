@@ -77,6 +77,7 @@ const api: DesktopApi = {
   testProviderConnection: (input) =>
     ipcRenderer.invoke('providers.test.v1', input) as ReturnType<DesktopApi['testProviderConnection']>,
   listTaskPage: (input) => ipcRenderer.invoke('tasks.page.v1', input) as ReturnType<DesktopApi['listTaskPage']>,
+  getTask: (taskId) => ipcRenderer.invoke('tasks.get.v1', taskId) as ReturnType<DesktopApi['getTask']>,
   enqueueTask: (input) =>
     ipcRenderer.invoke('tasks.enqueue.v1', input) as ReturnType<DesktopApi['enqueueTask']>,
   cancelTask: (taskId) =>

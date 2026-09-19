@@ -11,6 +11,7 @@ let electronApp: ElectronApplication;
 let page: Page;
 let testRoot: string;
 let databasePath: string;
+let queuedExportTaskId: string;
 
 test.beforeAll(async () => {
   testRoot = await mkdtemp(path.join(tmpdir(), 'photoallisai-task-controls-'));
@@ -32,7 +33,11 @@ test.beforeAll(async () => {
   page = await electronApp.firstWindow();
   await page.waitForLoadState('domcontentloaded');
   const queued = new TaskService(databasePath);
-  queued.enqueue({ kind: 'export', assetId: 'asset-A', payload: {} });
+  queuedExportTaskId = queued.enqueue({
+    kind: 'export',
+    assetId: 'asset-A',
+    payload: { destinationDirectory: '/private/export-target', resultIds: [] }
+  }).id;
   queued.enqueue({ kind: 'export', assetId: 'asset-B', payload: {} });
   queued.close();
 });
@@ -43,6 +48,9 @@ test.afterAll(async () => {
 });
 
 test('reorders queued work and batch-retries failed generation tasks', async () => {
+  const rendererExportTask = await page.evaluate((taskId) => window.desktopApi.getTask(taskId), queuedExportTaskId);
+  expect(rendererExportTask?.payload).not.toHaveProperty('destinationDirectory');
+  expect(rendererExportTask?.id).toBe(queuedExportTaskId);
   const provider = await page.evaluate(() => window.desktopApi.saveProviderProfile({
     name: 'Queue Generation', kind: 'nanobanana-compatible', purpose: 'generation',
     baseUrl: 'http://127.0.0.1:9/v1', modelId: 'queue-test', apiKey: 'queue-key', enabled: true

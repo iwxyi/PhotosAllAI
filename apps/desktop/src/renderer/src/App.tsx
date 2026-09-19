@@ -485,6 +485,7 @@ function Viewer({
   isDemo,
   exportPresets,
   selectedExportPresetId,
+  trackedExportNotice,
   onExportPresetChange,
   onExport,
   onRate,
@@ -505,6 +506,7 @@ function Viewer({
   isDemo: boolean;
   exportPresets: ExportPreset[];
   selectedExportPresetId: string | null;
+  trackedExportNotice: string;
   onExportPresetChange: (presetId: string | null) => void;
   onExport: (resultIds: string[], presetId?: string | null) => Promise<string>;
   onRate: (rating: number) => void;
@@ -632,7 +634,7 @@ function Viewer({
             void onExport([selectedResult.id], selectedExportPresetId).then(setExportNotice);
           }}><Download size={13} /></button>
           <button type="button" title="在文件管理器中显示生成版本" aria-label="在文件管理器中显示生成版本" disabled={!selectedResult || isDemo} onClick={() => { if (selectedResult) onRevealResult(selectedResult.id); }}><FolderOpen size={13} /></button>
-          {exportNotice && <em className="viewer-notice" role="status">{exportNotice}</em>}
+          {(trackedExportNotice || exportNotice) && <em className="viewer-notice" role="status">{trackedExportNotice || exportNotice}</em>}
         </div>
         <div className="file-meta"><span>{photo.format}</span><span>{photo.dimensions}</span></div>
       </div>
@@ -968,6 +970,9 @@ function PopulatedLibraryWorkspace({
   const [removalBusy, setRemovalBusy] = useState(false);
   const [albumTargetId, setAlbumTargetId] = useState('');
   const [selectedExportPresetId, setSelectedExportPresetId] = useState<string | null>(exportPresets[0]?.id ?? null);
+  const [trackedExport, setTrackedExport] = useState<{ taskId: string; notice: string; surface: 'viewer' | 'operation' } | null>(null);
+  const trackedExportTaskId = trackedExport?.taskId ?? null;
+  const trackedExportSurface = trackedExport?.surface ?? null;
   const selected = availablePhotos.find((photo) => photo.id === selectedId) ?? availablePhotos[0]!;
   const orderedIds = useMemo(() => availablePhotos.map((photo) => photo.id), [availablePhotos]);
   const collectionName = selectedFolderId
@@ -1024,6 +1029,49 @@ function PopulatedLibraryWorkspace({
       setGenerationStorageMode(settings.generationStorageMode);
     });
   }, [isDemo]);
+
+  useEffect(() => {
+    if (isDemo || !trackedExportTaskId || !trackedExportSurface) return;
+    let active = true;
+    let timer: number | undefined;
+    const refresh = async () => {
+      try {
+        const task = await window.desktopApi.getTask(trackedExportTaskId);
+        if (!active) return;
+        if (!task) {
+          setTrackedExport((current) => current?.taskId === trackedExportTaskId
+            ? { ...current, notice: '无法读取导出任务状态。' }
+            : current);
+          return;
+        }
+        let notice: string | null = null;
+        const succeeded = typeof task.result?.succeeded === 'number' ? task.result.succeeded : 0;
+        const failed = typeof task.result?.failed === 'number' ? task.result.failed : 0;
+        if (task.status === 'completed') {
+          notice = failed > 0 ? `已导出 ${succeeded} 个文件，${failed} 个失败` : `已导出 ${succeeded} 个文件`;
+        } else if (task.status === 'failed') {
+          notice = succeeded > 0
+            ? `导出部分完成：成功 ${succeeded} 个，失败 ${failed} 个`
+            : '导出失败，请检查目录权限和可用空间。';
+        } else if (task.status === 'canceled') {
+          notice = '导出已取消';
+        }
+        if (notice) {
+          setTrackedExport((current) => current?.taskId === task.id ? { ...current, notice } : current);
+          if (trackedExportSurface === 'operation') setOperationNotice(notice);
+          return;
+        }
+        timer = window.setTimeout(refresh, 500);
+      } catch {
+        if (active) timer = window.setTimeout(refresh, 1_000);
+      }
+    };
+    void refresh();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [isDemo, setOperationNotice, trackedExportSurface, trackedExportTaskId]);
 
   useEffect(() => {
     if (isDemo) return;
@@ -1175,12 +1223,18 @@ function PopulatedLibraryWorkspace({
       : `已加入 ${queued} 个生成任务。`;
   };
 
-  const exportResults = async (resultIds: string[], presetId = selectedExportPresetId): Promise<string> => {
+  const exportResults = async (
+    resultIds: string[],
+    presetId = selectedExportPresetId,
+    surface: 'viewer' | 'operation' = 'viewer'
+  ): Promise<string> => {
     try {
       const task = await window.desktopApi.exportGenerationResults({ resultIds, presetId });
       if (!task) return '已取消导出';
       setTasksOpen(true);
-      return `已将 ${resultIds.length} 个文件加入导出队列`;
+      const notice = `已将 ${resultIds.length} 个文件加入导出队列`;
+      setTrackedExport({ taskId: task.id, notice, surface });
+      return notice;
     } catch {
       return '导出失败，请检查目录权限和可用空间。';
     }
@@ -1196,7 +1250,7 @@ function PopulatedLibraryWorkspace({
       setOperationNotice('所选照片还没有可导出的生成版本。');
       return;
     }
-    setOperationNotice(await exportResults(resultIds));
+    setOperationNotice(await exportResults(resultIds, selectedExportPresetId, 'operation'));
   };
 
   const regenerate = async (result: GenerationResult): Promise<string> => {
@@ -1418,7 +1472,7 @@ function PopulatedLibraryWorkspace({
       <Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={totalCount} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={onSelectFolder} onSelectAlbum={onSelectAlbum} onSelectSmartCollection={onSelectSmartCollection} onRefreshAlbums={onRefreshAlbums} onImportFolders={onImportFolders} onRelinkFolder={onRelinkFolder} onUnregisterFolder={onUnregisterFolder} onSelectTag={onSelectTag} isDemo={isDemo} />
       <main className="library-main">
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
-        <Viewer photo={selected} results={generationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onFavorite={(favorite) => void favoriteSelection(favorite)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} onReview={reviewResult} onRevealOriginal={() => void window.desktopApi.revealCatalogAsset(selected.id)} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} />
+        <Viewer photo={selected} results={generationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onFavorite={(favorite) => void favoriteSelection(favorite)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} onReview={reviewResult} onRevealOriginal={() => void window.desktopApi.revealCatalogAsset(selected.id)} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} />
       </main>
       <AiPanel photo={selected} results={generationResults} trashedResults={trashedGenerationResults} revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onOpenTemplates={onOpenTemplates} onGenerate={generateSelection} onTrashResult={trashGenerationResult} onRestoreResult={restoreGenerationResult} />
       {selection.selectedIds.size > 1 && (

@@ -852,6 +852,7 @@ export interface DesktopApi {
   deleteProviderProfile(profileId: string): Promise<void>;
   testProviderConnection(input: SaveProviderProfileInput): Promise<ConnectionTest>;
   listTaskPage(input: ListTaskPageInput): Promise<TaskPage>;
+  getTask(taskId: string): Promise<PersistedTask | null>;
   enqueueTask(input: EnqueueTaskInput): Promise<PersistedTask>;
   cancelTask(taskId: string): Promise<PersistedTask>;
   retryTask(taskId: string): Promise<PersistedTask>;
