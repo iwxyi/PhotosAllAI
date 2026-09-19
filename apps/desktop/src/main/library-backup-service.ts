@@ -72,8 +72,15 @@ export class LibraryBackupService {
       const snapshot = new DatabaseSync(snapshotPath);
       let rows: Array<{ id: string; file_path: string }> = [];
       try {
+        const intentTable = snapshot.prepare("SELECT 1 AS value FROM sqlite_master WHERE type = 'table' AND name = 'generation_write_intents'").get();
         const table = snapshot.prepare("SELECT 1 AS value FROM sqlite_master WHERE type = 'table' AND name = 'generation_results'").get();
         if (table) {
+          if (intentTable) {
+            snapshot.prepare(`
+              DELETE FROM generation_results
+              WHERE id IN (SELECT result_id FROM generation_write_intents)
+            `).run();
+          }
           const hasTrashState = (snapshot.prepare('PRAGMA table_info(generation_results)').all() as { name: string }[])
             .some((column) => column.name === 'trashed_at');
           if (hasTrashState) snapshot.prepare('DELETE FROM generation_results WHERE trashed_at IS NOT NULL').run();
@@ -82,6 +89,7 @@ export class LibraryBackupService {
             WHERE storage_mode = 'managed' ORDER BY id
           `).all() as Array<{ id: string; file_path: string }>;
         }
+        if (intentTable) snapshot.prepare('DELETE FROM generation_write_intents').run();
       } finally {
         snapshot.close();
       }

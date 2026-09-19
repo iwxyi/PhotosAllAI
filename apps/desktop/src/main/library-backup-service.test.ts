@@ -98,6 +98,35 @@ describe('complete library backup', () => {
     context.database.close();
   });
 
+  it('excludes interrupted generation writes and their provisional result records', async () => {
+    const context = await fixture();
+    context.database.exec(`
+      CREATE TABLE generation_write_intents (
+        result_id TEXT PRIMARY KEY,
+        file_path TEXT NOT NULL
+      )
+    `);
+    const stableId = randomUUID();
+    const pendingId = randomUUID();
+    const stablePath = path.join(context.generated, stableId, 'stable.jpg');
+    const pendingPath = path.join(context.generated, pendingId, 'pending.jpg');
+    await Promise.all([mkdir(path.dirname(stablePath)), mkdir(path.dirname(pendingPath))]);
+    await Promise.all([writeFile(stablePath, 'stable'), writeFile(pendingPath, 'pending')]);
+    const insert = context.database.prepare('INSERT INTO generation_results VALUES (?, ?, ?)');
+    insert.run(stableId, stablePath, 'managed');
+    insert.run(pendingId, pendingPath, 'managed');
+    context.database.prepare('INSERT INTO generation_write_intents VALUES (?, ?)').run(pendingId, pendingPath);
+
+    const result = await new LibraryBackupService(context.databasePath, context.generated).create(context.destination, 48);
+
+    expect(result.generatedFiles).toBe(1);
+    const snapshot = new DatabaseSync(path.join(result.destinationPath, 'catalog.sqlite'), { readOnly: true });
+    expect(snapshot.prepare('SELECT id FROM generation_results').all()).toEqual([{ id: stableId }]);
+    expect(snapshot.prepare('SELECT COUNT(*) AS value FROM generation_write_intents').get()).toEqual({ value: 0 });
+    snapshot.close();
+    context.database.close();
+  });
+
   it('rejects traversal paths before reading generated files', async () => {
     const context = await fixture();
     const resultId = randomUUID();

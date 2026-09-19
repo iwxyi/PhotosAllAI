@@ -87,8 +87,15 @@ export class LibraryIntegrityService {
       const expectedFile = expectedDirectory && path.basename(intent.file_name) === intent.file_name
         ? path.resolve(expectedDirectory, intent.file_name)
         : null;
-      if (!expectedFile || path.resolve(intent.file_path) !== expectedFile
+      if (!expectedDirectory || !expectedFile || path.resolve(intent.file_path) !== expectedFile
         || !isGenerationTemporaryPath(intent.temporary_path, intent.file_path)) {
+        unsafeGenerationWriteIntents += 1;
+        continue;
+      }
+      const requiredRoot = intent.storage_mode === 'managed'
+        ? this.#generatedDirectory
+        : intent.source_path ? path.join(path.dirname(intent.source_path), '_PhotoAllIsAI') : null;
+      if (!requiredRoot || !await isSafePlannedDirectory(expectedDirectory, requiredRoot)) {
         unsafeGenerationWriteIntents += 1;
         continue;
       }
@@ -154,6 +161,33 @@ export class LibraryIntegrityService {
       unexpectedTrashFiles,
       checkedAt: Date.now()
     });
+  }
+}
+
+async function isSafePlannedDirectory(directory: string, requiredRoot: string): Promise<boolean> {
+  const root = path.resolve(requiredRoot);
+  const target = path.resolve(directory);
+  if (!isWithin(root, target)) return false;
+  try {
+    const rootEntry = await lstat(root);
+    if (!rootEntry.isDirectory()) return false;
+    const resolvedRoot = await realpath(root);
+    const relative = path.relative(root, target);
+    let candidate = root;
+    for (const segment of relative.split(path.sep).filter(Boolean)) {
+      candidate = path.join(candidate, segment);
+      try {
+        const entry = await lstat(candidate);
+        if (!entry.isDirectory()) return false;
+        if (!isWithin(resolvedRoot, await realpath(candidate))) return false;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+        return false;
+      }
+    }
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT';
   }
 }
 

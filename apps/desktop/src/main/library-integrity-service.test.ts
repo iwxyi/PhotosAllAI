@@ -109,6 +109,49 @@ describe('library storage integrity diagnostics', () => {
     context.database.close();
   });
 
+  it('rejects a pending managed write whose directory crosses a symbolic link', async () => {
+    const context = await fixture();
+    const outside = path.join(context.root, 'outside');
+    const linkedPrefix = path.join(context.generated, 'as');
+    await mkdir(outside);
+    await symlink(outside, linkedPrefix, process.platform === 'win32' ? 'junction' : 'dir');
+    const pendingPath = path.join(linkedPrefix, 'asset-pending', 'batch-pending', 'pending.jpg');
+    context.database.prepare(`
+      INSERT INTO generation_write_intents VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'pending-id', 'asset-pending', 'batch-pending', 'pending.jpg', pendingPath,
+      `${pendingPath}.123.649b57c3-381b-4658-92e1-5049951ab194.tmp`, 'managed', Date.now()
+    );
+
+    const report = await new LibraryIntegrityService(context.databasePath, context.generated).scan();
+
+    expect(report).toMatchObject({ status: 'error', pendingGenerationWrites: 1, unsafeGenerationWriteIntents: 1 });
+    context.database.close();
+  });
+
+  it('accepts a portable write intent recorded before its output directory is created', async () => {
+    const context = await fixture();
+    const sourceDirectory = path.join(context.root, 'portable-source');
+    const sourcePath = path.join(sourceDirectory, 'capture.jpg');
+    const assetId = 'asset-portable';
+    const batchId = 'batch-portable';
+    await mkdir(sourceDirectory);
+    await writeFile(sourcePath, 'source');
+    context.database.prepare('INSERT INTO assets VALUES (?, ?, ?)').run(assetId, sourcePath, 'capture.jpg');
+    const pendingPath = path.join(sourceDirectory, '_PhotoAllIsAI', 'capture__ASSETPOR', batchId, 'pending.jpg');
+    context.database.prepare(`
+      INSERT INTO generation_write_intents VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'pending-id', assetId, batchId, 'pending.jpg', pendingPath,
+      `${pendingPath}.123.649b57c3-381b-4658-92e1-5049951ab194.tmp`, 'portable', Date.now()
+    );
+
+    const report = await new LibraryIntegrityService(context.databasePath, context.generated).scan();
+
+    expect(report).toMatchObject({ status: 'healthy', pendingGenerationWrites: 1, unsafeGenerationWriteIntents: 0 });
+    context.database.close();
+  });
+
   it('reports an unreadable catalog without creating it', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'photoallisai-integrity-missing-'));
     roots.push(root);
