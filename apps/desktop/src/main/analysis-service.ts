@@ -112,7 +112,12 @@ export class AnalysisService {
           }
         ]
       })
-    }, { maxBytes: MAX_ANALYSIS_RESPONSE_BYTES, timeoutMs: ANALYSIS_TIMEOUT_MS, signal });
+    }, {
+      maxBytes: MAX_ANALYSIS_RESPONSE_BYTES,
+      timeoutMs: provider.profile.requestTimeoutMs ?? ANALYSIS_TIMEOUT_MS,
+      retryCount: provider.profile.retryCount,
+      signal
+    });
     if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`);
     const text = response.bytes.toString('utf8');
     const envelope: unknown = JSON.parse(text);

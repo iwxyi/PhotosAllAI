@@ -13,6 +13,8 @@ export type BoundedFetchResult = {
 type RequestLimits = {
   maxBytes: number;
   timeoutMs: number;
+  retryCount?: number;
+  retryBaseDelayMs?: number;
   signal?: AbortSignal | undefined;
 };
 
@@ -24,22 +26,63 @@ export async function fetchBounded(
   init: RequestInit,
   limits: RequestLimits
 ): Promise<BoundedFetchResult> {
-  const request = timedSignal(limits.signal, limits.timeoutMs);
-  try {
-    const response = await fetch(input, { ...init, signal: request.signal });
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      return { ok: false, status: response.status, headers: response.headers, bytes: Buffer.alloc(0) };
+  const retryCount = Math.max(0, Math.min(5, limits.retryCount ?? 0));
+  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    limits.signal?.throwIfAborted();
+    const request = timedSignal(limits.signal, limits.timeoutMs);
+    try {
+      const response = await fetch(input, { ...init, signal: request.signal });
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        if (attempt < retryCount && isRetryableStatus(response.status)) {
+          await waitForRetry(retryDelayMs(response.headers, attempt, limits.retryBaseDelayMs ?? 1_000), limits.signal);
+          continue;
+        }
+        return { ok: false, status: response.status, headers: response.headers, bytes: Buffer.alloc(0) };
+      }
+      return {
+        ok: true,
+        status: response.status,
+        headers: response.headers,
+        bytes: await readBoundedBody(response, limits.maxBytes)
+      };
+    } finally {
+      request.dispose();
     }
-    return {
-      ok: true,
-      status: response.status,
-      headers: response.headers,
-      bytes: await readBoundedBody(response, limits.maxBytes)
-    };
-  } finally {
-    request.dispose();
   }
+  throw new Error('PROVIDER_RETRY_EXHAUSTED');
+}
+
+const RETRYABLE_PROVIDER_STATUSES = new Set([408, 429, 502, 503, 504]);
+
+function isRetryableStatus(status: number): boolean {
+  return RETRYABLE_PROVIDER_STATUSES.has(status);
+}
+
+function retryDelayMs(headers: Headers, attempt: number, baseDelayMs: number): number {
+  const retryAfter = headers.get('retry-after');
+  if (retryAfter !== null) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(30_000, seconds * 1_000);
+    const date = Date.parse(retryAfter);
+    if (Number.isFinite(date)) return Math.min(30_000, Math.max(0, date - Date.now()));
+  }
+  return Math.min(30_000, Math.max(0, baseDelayMs) * (2 ** attempt));
+}
+
+async function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
+  await new Promise<void>((resolve, reject) => {
+    const finish = (error?: unknown) => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      if (error) reject(error);
+      else resolve();
+    };
+    const abort = () => finish(signal?.reason ?? new Error('ABORT_ERR'));
+    const timer = setTimeout(finish, delayMs);
+    signal?.addEventListener('abort', abort, { once: true });
+  });
 }
 
 export async function downloadPinned(

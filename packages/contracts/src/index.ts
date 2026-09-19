@@ -450,6 +450,8 @@ export const providerProfileSchema = z.object({
   purpose: providerPurposeSchema,
   baseUrl: z.string().url(),
   modelId: z.string().min(1).max(200),
+  requestTimeoutMs: z.number().int().min(10_000).max(600_000).default(300_000),
+  retryCount: z.number().int().min(0).max(5).default(2),
   hasCredential: z.boolean(),
   enabled: z.boolean(),
   updatedAt: z.number().nonnegative()
@@ -464,7 +466,7 @@ export const saveProviderProfileInputSchema = providerProfileSchema
     apiKey: z.string().max(10_000).optional()
   });
 
-export type SaveProviderProfileInput = z.infer<typeof saveProviderProfileInputSchema>;
+export type SaveProviderProfileInput = z.input<typeof saveProviderProfileInputSchema>;
 
 export const connectionTestSchema = z.object({
   ok: z.boolean(),

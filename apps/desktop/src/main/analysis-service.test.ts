@@ -44,7 +44,8 @@ describe('OpenAI-compatible visual analysis', () => {
     const profile: ProviderProfile = {
       id: 'aa2888b2-4f07-4598-a876-710d702d14da', name: 'Vision',
       kind: 'openai-compatible', purpose: 'vision', baseUrl: `http://127.0.0.1:${address.port}/v1`,
-      modelId: 'vision-model', hasCredential: true, enabled: true, updatedAt: Date.now()
+      modelId: 'vision-model', requestTimeoutMs: 300_000, retryCount: 2,
+      hasCredential: true, enabled: true, updatedAt: Date.now()
     };
     const analysis = new AnalysisService(
       path.join(directory, 'catalog.sqlite'),
@@ -64,7 +65,8 @@ describe('OpenAI-compatible visual analysis', () => {
     const profile: ProviderProfile = {
       id: 'aa2888b2-4f07-4598-a876-710d702d14da', name: 'Generator',
       kind: 'nanobanana-compatible', purpose: 'generation', baseUrl: 'https://example.com/v1',
-      modelId: 'image-model', hasCredential: true, enabled: true, updatedAt: Date.now()
+      modelId: 'image-model', requestTimeoutMs: 300_000, retryCount: 2,
+      hasCredential: true, enabled: true, updatedAt: Date.now()
     };
     const analysis = new AnalysisService(
       path.join(directory, 'catalog.sqlite'),
@@ -74,5 +76,42 @@ describe('OpenAI-compatible visual analysis', () => {
     await expect(analysis.analyze('asset-1', profile.id)).rejects.toThrow('PROVIDER_DOES_NOT_SUPPORT_VISION');
     analysis.close();
   });
-});
 
+  it('uses the provider retry policy for transient analysis failures', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-analysis-retry-'));
+    temporaryDirectories.push(directory);
+    const previewPath = path.join(directory, 'preview.jpg');
+    await writeFile(previewPath, 'bounded-image-fixture');
+    let attempts = 0;
+    const server = createServer((_request, response) => {
+      attempts += 1;
+      if (attempts === 1) {
+        response.writeHead(429, { 'retry-after': '0' });
+        response.end();
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(result) } }] }));
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server unavailable');
+
+    const profile: ProviderProfile = {
+      id: 'e0668a39-803b-483e-91c4-8a36f95fbf44', name: 'Retry Vision',
+      kind: 'openai-compatible', purpose: 'vision', baseUrl: `http://127.0.0.1:${address.port}/v1`,
+      modelId: 'vision-model', requestTimeoutMs: 10_000, retryCount: 1,
+      hasCredential: true, enabled: true, updatedAt: Date.now()
+    };
+    const analysis = new AnalysisService(
+      path.join(directory, 'catalog.sqlite'),
+      { resolve: async () => ({ profile, apiKey: 'test-key' }) },
+      { getOrCreate: async () => previewPath }
+    );
+
+    await expect(analysis.analyze('asset-retry', profile.id)).resolves.toMatchObject({ assetId: 'asset-retry' });
+    expect(attempts).toBe(2);
+    analysis.close();
+  });
+});

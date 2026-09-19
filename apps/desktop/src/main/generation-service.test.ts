@@ -59,6 +59,8 @@ async function fixture(
     purpose: 'generation',
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     modelId: 'image-model',
+    requestTimeoutMs: 300_000,
+    retryCount: 2,
     hasCredential: true,
     enabled: true,
     updatedAt: Date.now()

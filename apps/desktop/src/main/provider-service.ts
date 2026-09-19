@@ -87,6 +87,8 @@ export class ProviderService {
       purpose: input.purpose,
       baseUrl: normalizeBaseUrl(input.baseUrl),
       modelId: input.modelId.trim(),
+      requestTimeoutMs: input.requestTimeoutMs,
+      retryCount: input.retryCount,
       enabled: input.enabled,
       updatedAt: Date.now(),
       ...(encryptedCredential ? { encryptedCredential } : {})

@@ -66,6 +66,19 @@ describe('provider service', () => {
     ]);
   });
 
+  it('loads legacy profiles with bounded request defaults', async () => {
+    const { providers, settingsPath } = await serviceWithPath();
+    await writeFile(settingsPath, JSON.stringify([{
+      id: '7b70df33-5011-4e1c-a4b4-6f73b9d8820e', name: 'Legacy',
+      kind: 'openai-compatible', purpose: 'vision', baseUrl: 'https://example.com/v1',
+      modelId: 'vision-model', enabled: true, updatedAt: 1
+    }]));
+
+    await expect(providers.list()).resolves.toEqual([
+      expect.objectContaining({ requestTimeoutMs: 300_000, retryCount: 2 })
+    ]);
+  });
+
   it('rejects insecure remote URLs but permits localhost development', async () => {
     const providers = await service();
     await expect(providers.save({

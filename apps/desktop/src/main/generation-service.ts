@@ -837,7 +837,12 @@ async function requestGeneratedImage(
       n: 1,
       image: { mime_type: 'image/jpeg', data: inputImage.toString('base64') }
     })
-  }, { maxBytes: MAX_PROVIDER_RESPONSE_BYTES, timeoutMs: GENERATION_TIMEOUT_MS, signal });
+  }, {
+    maxBytes: MAX_PROVIDER_RESPONSE_BYTES,
+    timeoutMs: provider.profile.requestTimeoutMs ?? GENERATION_TIMEOUT_MS,
+    retryCount: provider.profile.retryCount,
+    signal
+  });
   if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`);
   const payload: unknown = JSON.parse(response.bytes.toString('utf8'));
   const candidate = extractImageCandidate(payload);

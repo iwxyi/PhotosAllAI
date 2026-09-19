@@ -40,6 +40,66 @@ describe('bounded provider responses', () => {
     await expect(fetchBounded(origin, {}, { maxBytes: 10, timeoutMs: 20 }))
       .rejects.toThrow('PROVIDER_REQUEST_TIMEOUT');
   });
+
+  it('retries transient provider responses and respects Retry-After', async () => {
+    let requests = 0;
+    const { origin } = await serve((_request, response) => {
+      requests += 1;
+      if (requests === 1) {
+        response.writeHead(429, { 'retry-after': '0' });
+        response.end();
+        return;
+      }
+      response.end('recovered');
+    });
+
+    const result = await fetchBounded(origin, {}, {
+      maxBytes: 100,
+      timeoutMs: 1_000,
+      retryCount: 2,
+      retryBaseDelayMs: 1
+    });
+
+    expect(result.bytes.toString('utf8')).toBe('recovered');
+    expect(requests).toBe(2);
+  });
+
+  it('does not retry permanent provider errors', async () => {
+    let requests = 0;
+    const { origin } = await serve((_request, response) => {
+      requests += 1;
+      response.writeHead(400);
+      response.end();
+    });
+
+    const result = await fetchBounded(origin, {}, {
+      maxBytes: 100,
+      timeoutMs: 1_000,
+      retryCount: 5,
+      retryBaseDelayMs: 1
+    });
+
+    expect(result.status).toBe(400);
+    expect(requests).toBe(1);
+  });
+
+  it('cancels immediately while waiting to retry', async () => {
+    const { origin } = await serve((_request, response) => {
+      response.writeHead(503);
+      response.end();
+    });
+    const controller = new AbortController();
+    const pending = fetchBounded(origin, {}, {
+      maxBytes: 100,
+      timeoutMs: 1_000,
+      retryCount: 2,
+      retryBaseDelayMs: 10_000,
+      signal: controller.signal
+    });
+    setTimeout(() => controller.abort(new Error('USER_CANCELED')), 20);
+
+    await expect(pending).rejects.toThrow('USER_CANCELED');
+  });
 });
 
 describe('pinned generated image downloads', () => {

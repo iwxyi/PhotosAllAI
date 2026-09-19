@@ -1577,6 +1577,8 @@ const emptyProviderForm: SaveProviderProfileInput = {
   purpose: 'vision',
   baseUrl: '',
   modelId: '',
+  requestTimeoutMs: 300_000,
+  retryCount: 2,
   apiKey: '',
   enabled: true
 };
@@ -1867,6 +1869,8 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
                 purpose: profile.purpose,
                 baseUrl: profile.baseUrl,
                 modelId: profile.modelId,
+                requestTimeoutMs: profile.requestTimeoutMs,
+                retryCount: profile.retryCount,
                 enabled: profile.enabled
               }); setProviderDeleteCandidate(null); }}>
                 <span className="provider-icon">{profile.purpose === 'vision' ? <Bot size={16} /> : <WandSparkles size={16} />}</span>
@@ -1885,6 +1889,10 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
             <label><span>配置名称</span><input required maxLength={80} placeholder="例如：视觉分析 · 主服务" value={form.name} onChange={(event) => patchForm('name', event.target.value)} /></label>
             <label><span>Base URL</span><input required type="url" placeholder="https://api.example.com/v1" value={form.baseUrl} onChange={(event) => patchForm('baseUrl', event.target.value)} /><small>远程地址必须使用 HTTPS；本地开发服务可使用 localhost HTTP。</small></label>
             <label><span>Model ID</span><input required placeholder="模型标识" value={form.modelId} onChange={(event) => patchForm('modelId', event.target.value)} /></label>
+            <div className="form-grid two-columns">
+              <label><span>请求超时</span><select aria-label="模型请求超时" value={form.requestTimeoutMs} onChange={(event) => patchForm('requestTimeoutMs', Number(event.target.value))}><option value={30_000}>30 秒</option><option value={60_000}>60 秒</option><option value={120_000}>2 分钟</option><option value={300_000}>5 分钟</option><option value={600_000}>10 分钟</option></select></label>
+              <label><span>自动重试</span><select aria-label="模型自动重试次数" value={form.retryCount} onChange={(event) => patchForm('retryCount', Number(event.target.value))}><option value={0}>不重试</option><option value={1}>1 次</option><option value={2}>2 次</option><option value={3}>3 次</option><option value={5}>5 次</option></select><small>仅针对限流、网关和服务暂不可用；取消任务会中断等待。</small></label>
+            </div>
             <label><span>API Key</span><div className="secret-input"><KeyRound size={14} /><input type="password" autoComplete="off" placeholder={form.id ? '留空以保留已保存凭据' : '输入服务密钥'} value={form.apiKey ?? ''} onChange={(event) => patchForm('apiKey', event.target.value)} /></div><small>密钥不会写入图库数据库、日志或导出清单。</small></label>
             <label className="enabled-row"><input type="checkbox" checked={form.enabled} onChange={(event) => patchForm('enabled', event.target.checked)} /><span>启用此配置</span></label>
             <div className="form-feedback" role="status">{message}</div>
