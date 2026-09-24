@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { opendir, realpath, stat } from 'node:fs/promises';
+import { opendir, realpath, rename, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -21,6 +21,8 @@ import {
   type CatalogAssetPage,
   type CatalogFolder,
   type RelinkCatalogFolderResult,
+  type RenameCatalogFolderInput,
+  type RenameCatalogFolderResult,
   type UnregisterCatalogFolderReport,
   unregisterCatalogFolderReportSchema,
   type CatalogSmartCollection,
@@ -634,6 +636,46 @@ export class CatalogService {
       ...relinkCatalogFolderResultSchema.parse({ folder: relinked, matched, discovered, offline: relinked.offlineCount }),
       relocations
     };
+  }
+
+  async renameFolder(input: RenameCatalogFolderInput): Promise<RenameCatalogFolderResult> {
+    const directory = this.#resolveDirectory(input.folderId);
+    if (!directory) throw new Error('CATALOG_FOLDER_NOT_FOUND');
+    const oldPath = path.join(directory.rootPath, directory.relativePath);
+    const nextPath = path.join(path.dirname(oldPath), input.name);
+    if (oldPath === nextPath) {
+      const folder = this.listFolders().find((item) => item.id === input.folderId);
+      if (!folder) throw new Error('CATALOG_FOLDER_NOT_FOUND');
+      return { folder };
+    }
+    try {
+      await stat(nextPath);
+      throw new Error('FOLDER_NAME_ALREADY_EXISTS');
+    } catch (error) {
+      if (error instanceof Error && error.message === 'FOLDER_NAME_ALREADY_EXISTS') throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    await rename(oldPath, nextPath);
+    const prefix = `${oldPath}${path.sep}`;
+    const nextPrefix = `${nextPath}${path.sep}`;
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const assets = this.#database.prepare('SELECT id, path FROM assets WHERE folder_id = ? AND removed_at IS NULL').all(directory.rootId) as Array<{ id: string; path: string }>;
+      const updateAsset = this.#database.prepare('UPDATE assets SET path = ?, offline_at = NULL WHERE id = ?');
+      for (const asset of assets) {
+        if (asset.path === oldPath) updateAsset.run(nextPath, asset.id);
+        else if (asset.path.startsWith(prefix)) updateAsset.run(`${nextPrefix}${asset.path.slice(prefix.length)}`, asset.id);
+      }
+      if (directory.relativePath === '') this.#database.prepare('UPDATE folders SET path = ?, name = ? WHERE id = ?').run(nextPath, input.name, directory.rootId);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      try { await rename(nextPath, oldPath); } catch { /* preserve the database error */ }
+      throw error;
+    }
+    const folder = this.listFolders().find((item) => item.id === input.folderId);
+    if (!folder) throw new Error('CATALOG_FOLDER_NOT_FOUND');
+    return { folder };
   }
 
   listFolderPaths(): string[] {

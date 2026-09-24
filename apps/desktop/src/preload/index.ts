@@ -64,6 +64,8 @@ const api: DesktopApi = {
     >,
   relinkCatalogFolder: (folderId) =>
     ipcRenderer.invoke('catalog.folder.relink.v1', folderId) as ReturnType<DesktopApi['relinkCatalogFolder']>,
+  renameCatalogFolder: (input) =>
+    ipcRenderer.invoke('catalog.folder.rename.v1', input) as ReturnType<DesktopApi['renameCatalogFolder']>,
   synchronizeCatalogFolder: (folderId) =>
     ipcRenderer.invoke('catalog.folder.synchronize.v1', folderId) as ReturnType<DesktopApi['synchronizeCatalogFolder']>,
   revealCatalogFolder: (folderId) =>

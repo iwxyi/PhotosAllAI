@@ -44,6 +44,8 @@ import {
   renameCatalogAssetsReportSchema,
   renameCatalogAssetReportSchema,
   relinkCatalogFolderResultSchema,
+  renameCatalogFolderInputSchema,
+  renameCatalogFolderResultSchema,
   resizeQueuedGenerationBatchInputSchema,
   retryFailedGenerationTasksInputSchema,
   updateQueuedGenerationTaskInputSchema,
@@ -396,6 +398,9 @@ function registerIpc(): void {
     shell.showItemInFolder(folderPath);
     return true;
   });
+  ipcMain.handle('catalog.folder.rename.v1', async (_event, input: unknown) =>
+    renameCatalogFolderResultSchema.parse(await catalog.renameFolder(renameCatalogFolderInputSchema.parse(input)))
+  );
   ipcMain.handle('catalog.folder.unregister.v1', (_event, input: unknown) => {
     const report = catalog.unregisterFolder(unregisterCatalogFolderInputSchema.parse(input).folderId);
     catalogWatcher.watchFolders(catalog.listFolderPaths());

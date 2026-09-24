@@ -238,6 +238,14 @@ export const catalogFolderSchema = z.object({
 
 export type CatalogFolder = z.infer<typeof catalogFolderSchema>;
 
+export const renameCatalogFolderInputSchema = z.object({
+  folderId: z.string().regex(/^[a-f0-9]{32}$/u),
+  name: z.string().trim().min(1).max(255).refine((value) => !/[\\/]/u.test(value), 'Folder name must not contain path separators')
+});
+export type RenameCatalogFolderInput = z.infer<typeof renameCatalogFolderInputSchema>;
+export const renameCatalogFolderResultSchema = z.object({ folder: catalogFolderSchema });
+export type RenameCatalogFolderResult = z.infer<typeof renameCatalogFolderResultSchema>;
+
 export const catalogFolderSyncReportSchema = z.object({
   discovered: z.number().int().nonnegative(),
   offline: z.number().int().nonnegative()
@@ -884,6 +892,7 @@ export interface DesktopApi {
   undoFileOperation(input: UndoFileOperationInput): Promise<UndoFileOperationReport>;
   importFolders(): Promise<CatalogSnapshot | null>;
   relinkCatalogFolder(folderId: string): Promise<RelinkCatalogFolderResult | null>;
+  renameCatalogFolder(input: RenameCatalogFolderInput): Promise<RenameCatalogFolderResult>;
   synchronizeCatalogFolder(folderId: string): Promise<CatalogFolderSyncReport>;
   revealCatalogFolder(folderId: string): Promise<boolean>;
   unregisterCatalogFolder(input: UnregisterCatalogFolderInput): Promise<UnregisterCatalogFolderReport>;
