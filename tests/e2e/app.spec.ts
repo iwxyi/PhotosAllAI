@@ -95,8 +95,10 @@ test('honors the reduced motion preference', async () => {
 });
 
 test('switches photos and comparison modes', async () => {
+  const originalSource = await page.locator('.base-image').getAttribute('src');
   await page.locator('.filmstrip [role="option"]').nth(1).click();
   await expect(page.getByText('DSC_4837.NEF', { exact: true }).last()).toBeVisible();
+  await expect(page.locator('.base-image')).not.toHaveAttribute('src', originalSource!);
 
   await page.getByRole('button', { name: /对比/ }).click();
   await expect(page.getByLabel('调整原图和生成图分割线')).toBeVisible();
@@ -109,6 +111,35 @@ test('switches photos and comparison modes', async () => {
     .toBeGreaterThan(fittedCanvas!.width * 1.2);
   await page.getByRole('button', { name: '适应窗口' }).click();
   await expect(page.locator('.zoom-value')).toHaveText('100%');
+});
+
+test('resizes and restores Lightroom-style viewer panes', async () => {
+  const leftSplitter = page.getByRole('separator', { name: '调整左侧目录栏宽度' });
+  const rightSplitter = page.getByRole('separator', { name: '调整右侧 AI 面板宽度' });
+  const filmstripSplitter = page.getByRole('separator', { name: '调整大图和胶片带高度' });
+  await expect(leftSplitter).toHaveAttribute('aria-valuenow', '224');
+  await expect(rightSplitter).toHaveAttribute('aria-valuenow', '300');
+  await expect(filmstripSplitter).toHaveAttribute('aria-valuenow', '160');
+  await leftSplitter.press('ArrowRight');
+  await rightSplitter.press('ArrowLeft');
+  await filmstripSplitter.press('ArrowUp');
+  await expect(leftSplitter).toHaveAttribute('aria-valuenow', '236');
+  await expect(rightSplitter).toHaveAttribute('aria-valuenow', '312');
+  await expect(filmstripSplitter).toHaveAttribute('aria-valuenow', '172');
+
+  const viewer = await page.locator('.viewer').boundingBox();
+  const filmstrip = await page.locator('.filmstrip-region').boundingBox();
+  expect(viewer!.y).toBeLessThan(filmstrip!.y);
+
+  await page.reload();
+  if (await page.getByRole('tab', { name: '看图' }).count() === 0) {
+    await page.locator('.catalog-card').first().dblclick();
+  } else {
+    await page.getByRole('tab', { name: '看图' }).click();
+  }
+  await expect(page.getByRole('separator', { name: '调整左侧目录栏宽度' })).toHaveAttribute('aria-valuenow', '236');
+  await expect(page.getByRole('separator', { name: '调整右侧 AI 面板宽度' })).toHaveAttribute('aria-valuenow', '312');
+  await expect(page.getByRole('separator', { name: '调整大图和胶片带高度' })).toHaveAttribute('aria-valuenow', '172');
 });
 
 test('supports additive, range, and select-all interactions', async () => {

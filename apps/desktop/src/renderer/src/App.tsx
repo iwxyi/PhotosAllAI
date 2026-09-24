@@ -106,6 +106,112 @@ function formatStorageBytes(bytes: number): string {
   return `${(bytes / 1024 ** 3).toFixed(2)} GiB`;
 }
 
+type ViewerLayout = { leftWidth: number; rightWidth: number; filmstripHeight: number };
+const VIEWER_LAYOUT_KEY = 'photoallisai.viewer-layout.v1';
+const DEFAULT_VIEWER_LAYOUT: ViewerLayout = { leftWidth: 224, rightWidth: 300, filmstripHeight: 160 };
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function loadViewerLayout(): ViewerLayout {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(VIEWER_LAYOUT_KEY) ?? '') as Partial<ViewerLayout>;
+    return {
+      leftWidth: clamp(Number(saved.leftWidth) || DEFAULT_VIEWER_LAYOUT.leftWidth, 160, 420),
+      rightWidth: clamp(Number(saved.rightWidth) || DEFAULT_VIEWER_LAYOUT.rightWidth, 240, 520),
+      filmstripHeight: clamp(Number(saved.filmstripHeight) || DEFAULT_VIEWER_LAYOUT.filmstripHeight, 110, 320)
+    };
+  } catch {
+    return DEFAULT_VIEWER_LAYOUT;
+  }
+}
+
+function useViewerLayout(): [ViewerLayout, (key: keyof ViewerLayout, value: number) => void] {
+  const [layout, setLayout] = useState<ViewerLayout>(loadViewerLayout);
+  const update = useCallback((key: keyof ViewerLayout, value: number) => {
+    const limits = key === 'leftWidth' ? [160, 420] : key === 'rightWidth' ? [240, 520] : [110, 320];
+    setLayout((current) => ({ ...current, [key]: clamp(Math.round(value), limits[0]!, limits[1]!) }));
+  }, []);
+  useEffect(() => {
+    window.localStorage.setItem(VIEWER_LAYOUT_KEY, JSON.stringify(layout));
+  }, [layout]);
+  return [layout, update];
+}
+
+function PaneSplitter({ orientation, value, minimum, maximum, label, onChange, invert = false }: {
+  orientation: 'vertical' | 'horizontal';
+  value: number;
+  minimum: number;
+  maximum: number;
+  label: string;
+  onChange: (value: number) => void;
+  invert?: boolean;
+}): React.JSX.Element {
+  const startDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const origin = orientation === 'vertical' ? event.clientX : event.clientY;
+    const initial = value;
+    document.documentElement.classList.add(orientation === 'vertical' ? 'is-resizing-columns' : 'is-resizing-rows');
+    const move = (moveEvent: PointerEvent) => {
+      const position = orientation === 'vertical' ? moveEvent.clientX : moveEvent.clientY;
+      const delta = (position - origin) * (invert ? -1 : 1);
+      onChange(initial + delta);
+    };
+    const finish = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      document.documentElement.classList.remove('is-resizing-columns', 'is-resizing-rows');
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish, { once: true });
+    window.addEventListener('pointercancel', finish, { once: true });
+  };
+  return <div className={`pane-splitter is-${orientation}`} role="separator" tabIndex={0} aria-label={label} aria-orientation={orientation} aria-valuemin={minimum} aria-valuemax={maximum} aria-valuenow={value} onPointerDown={startDrag} onKeyDown={(event) => {
+    const previous = orientation === 'vertical' ? 'ArrowLeft' : 'ArrowUp';
+    const next = orientation === 'vertical' ? 'ArrowRight' : 'ArrowDown';
+    if (event.key !== previous && event.key !== next) return;
+    event.preventDefault();
+    const direction = event.key === next ? 1 : -1;
+    onChange(value + direction * (invert ? -12 : 12));
+  }}><span /></div>;
+}
+
+function BufferedPreviewImage({ src, alt, className, onReady }: { src: string; alt: string; className: string; onReady?: (image: HTMLImageElement) => void }): React.JSX.Element {
+  const [displayed, setDisplayed] = useState({ src, alt });
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    if (!src || src === displayed.src || src === failedSrc) return;
+    let active = true;
+    setLoading(true);
+    const image = new window.Image();
+    image.onload = async () => {
+      try {
+        await image.decode();
+      } catch {
+        // onload already proved the image is usable; decode can reject for cached images.
+      }
+      if (!active) return;
+      setDisplayed({ src, alt });
+      setFailedSrc(null);
+      setLoading(false);
+      onReady?.(image);
+    };
+    image.onerror = () => {
+      if (!active) return;
+      setDisplayed({ src: '', alt });
+      setFailedSrc(src);
+      setLoading(false);
+    };
+    image.src = src;
+    return () => { active = false; };
+  }, [alt, displayed.src, failedSrc, onReady, src]);
+  return <>{displayed.src ? <img className={className} src={displayed.src} alt={displayed.alt} onLoad={(event) => onReady?.(event.currentTarget)} /> : null}{loading && <span className="preview-loading" aria-label="正在载入下一张照片"><span className="working-pulse" /></span>}</>;
+}
+
 type CompareMode = 'single' | 'split';
 type CatalogSort = 'modifiedAt' | 'fileName' | 'rating';
 
@@ -541,7 +647,6 @@ function Viewer({
   useEffect(() => {
     setSelectedResultId(latestResultId);
     setZoom(1);
-    setImageAspectRatio(3 / 2);
   }, [photo.id, latestResultId]);
 
   useEffect(() => {
@@ -576,11 +681,11 @@ function Viewer({
   const adjustZoom = (factor: number) => {
     setZoom((current) => Math.min(4, Math.max(0.25, Math.round(current * factor * 100) / 100)));
   };
-  const captureAspectRatio = (image: HTMLImageElement) => {
+  const captureAspectRatio = useCallback((image: HTMLImageElement) => {
     if (image.naturalWidth > 0 && image.naturalHeight > 0) {
       setImageAspectRatio(image.naturalWidth / image.naturalHeight);
     }
-  };
+  }, []);
 
   return (
     <section className="viewer">
@@ -620,7 +725,7 @@ function Viewer({
           onDoubleClick={() => setZoom((current) => current === 1 ? 2 : 1)}
         >
           <div className="preview-unavailable"><Image size={36} /><strong>预览暂不可用</strong><span>图像服务将在后台生成屏幕预览</span></div>
-          {photo.src ? <img className="base-image" src={photo.src} alt={photo.fileName} onLoad={(event) => captureAspectRatio(event.currentTarget)} onError={(event) => { event.currentTarget.style.display = 'none'; }} /> : null}
+          {photo.src ? <BufferedPreviewImage className="base-image" src={photo.src} alt={photo.fileName} onReady={captureAspectRatio} /> : null}
           {generatedSource && !showOriginal && (
             <div
               className="generated-layer"
@@ -1093,6 +1198,7 @@ function PopulatedLibraryWorkspace({
   operationNotice,
   setOperationNotice
 }: PopulatedLibraryWorkspaceProps): React.JSX.Element {
+  const [viewerLayout, setViewerLayout] = useViewerLayout();
   const initialSelectedId = availablePhotos.some((photo) => photo.id === selectedAssetId)
     ? selectedAssetId!
     : availablePhotos[0]!.id;
@@ -1108,8 +1214,10 @@ function PopulatedLibraryWorkspace({
   const [generationStorageMode, setGenerationStorageMode] = useState<AppSettings['generationStorageMode']>('managed');
   const [templateItems, setTemplateItems] = useState<PromptTemplate[]>([]);
   const [analysisRevision, setAnalysisRevision] = useState<AnalysisRevision>();
+  const [analysisAssetId, setAnalysisAssetId] = useState<string | null>(null);
   const [generationResults, setGenerationResults] = useState<GenerationResult[]>([]);
   const [trashedGenerationResults, setTrashedGenerationResults] = useState<TrashedGenerationResult[]>([]);
+  const [generationAssetId, setGenerationAssetId] = useState<string | null>(null);
   const [analysisNotice, setAnalysisNotice] = useState('');
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
   const [tagEditorOpen, setTagEditorOpen] = useState(false);
@@ -1134,6 +1242,9 @@ function PopulatedLibraryWorkspace({
   const trackedExportTaskId = trackedExport?.taskId ?? null;
   const trackedExportSurface = trackedExport?.surface ?? null;
   const selected = availablePhotos.find((photo) => photo.id === selectedId) ?? availablePhotos[0]!;
+  const currentAnalysisRevision = analysisAssetId === selected.id ? analysisRevision : undefined;
+  const currentGenerationResults = generationAssetId === selected.id ? generationResults : [];
+  const currentTrashedGenerationResults = generationAssetId === selected.id ? trashedGenerationResults : [];
   const orderedIds = useMemo(() => availablePhotos.map((photo) => photo.id), [availablePhotos]);
   const collectionName = selectedFolderId
     ? catalogFolders.find((folder) => folder.id === selectedFolderId)?.name ?? '文件夹'
@@ -1238,10 +1349,12 @@ function PopulatedLibraryWorkspace({
     let active = true;
     const refresh = () => {
       void window.desktopApi.listAnalysisRevisions(selected.id).then((items) => {
-        if (active) setAnalysisRevision(items[0]);
+        if (active) {
+          setAnalysisRevision(items[0]);
+          setAnalysisAssetId(selected.id);
+        }
       });
     };
-    setAnalysisRevision(undefined);
     refresh();
     const interval = window.setInterval(refresh, 2_000);
     return () => { active = false; window.clearInterval(interval); };
@@ -1258,11 +1371,10 @@ function PopulatedLibraryWorkspace({
         if (active) {
           setGenerationResults(items);
           setTrashedGenerationResults(trashedItems);
+          setGenerationAssetId(selected.id);
         }
       });
     };
-    setGenerationResults([]);
-    setTrashedGenerationResults([]);
     refresh();
     const interval = window.setInterval(refresh, 1_000);
     return () => { active = false; window.clearInterval(interval); };
@@ -1335,8 +1447,8 @@ function PopulatedLibraryWorkspace({
     let queued = 0;
     let skipped = 0;
     for (const assetId of targetIds) {
-      const revisions = assetId === selected.id && analysisRevision
-        ? [analysisRevision]
+      const revisions = assetId === selected.id && currentAnalysisRevision
+        ? [currentAnalysisRevision]
         : await window.desktopApi.listAnalysisRevisions(assetId);
       const revision = revisions[0];
       if (!revision) {
@@ -1403,7 +1515,7 @@ function PopulatedLibraryWorkspace({
   const exportLatestSelection = async () => {
     const targetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
     const lists = await Promise.all(targetIds.map((assetId) =>
-      assetId === selected.id ? Promise.resolve(generationResults) : window.desktopApi.listGenerationResults(assetId)
+      assetId === selected.id ? Promise.resolve(currentGenerationResults) : window.desktopApi.listGenerationResults(assetId)
     ));
     const resultIds = lists.flatMap((items) => pickExportResults(items, exportSelectionMode).map((result) => result.id));
     if (resultIds.length === 0) {
@@ -1628,13 +1740,16 @@ function PopulatedLibraryWorkspace({
   }, [moveBusy, moveDialogOpen, removalBusy, removalMode, renameBusy, renameDialogOpen]);
 
   return (
-    <div className="workspace">
+    <div className="workspace viewer-workspace" style={{ gridTemplateColumns: `${viewerLayout.leftWidth}px 5px minmax(0, 1fr) 5px ${viewerLayout.rightWidth}px` }}>
       <Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={totalCount} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={onSelectFolder} onSelectAlbum={onSelectAlbum} onSelectSmartCollection={onSelectSmartCollection} onRefreshAlbums={onRefreshAlbums} onImportFolders={onImportFolders} onRelinkFolder={onRelinkFolder} onUnregisterFolder={onUnregisterFolder} onSelectTag={onSelectTag} isDemo={isDemo} />
-      <main className="library-main">
+      <PaneSplitter orientation="vertical" value={viewerLayout.leftWidth} minimum={160} maximum={420} label="调整左侧目录栏宽度" onChange={(value) => setViewerLayout('leftWidth', value)} />
+      <main className="library-main" style={{ gridTemplateRows: `minmax(0, 1fr) 5px ${viewerLayout.filmstripHeight}px` }}>
+        <Viewer photo={selected} results={currentGenerationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onFavorite={(favorite) => void favoriteSelection(favorite)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} onReview={reviewResult} onRevealOriginal={() => void window.desktopApi.revealCatalogAsset(selected.id)} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} />
+        <PaneSplitter orientation="horizontal" value={viewerLayout.filmstripHeight} minimum={110} maximum={320} label="调整大图和胶片带高度" invert onChange={(value) => setViewerLayout('filmstripHeight', value)} />
         <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
-        <Viewer photo={selected} results={generationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onFavorite={(favorite) => void favoriteSelection(favorite)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} onReview={reviewResult} onRevealOriginal={() => void window.desktopApi.revealCatalogAsset(selected.id)} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} />
       </main>
-      <AiPanel photo={selected} results={generationResults} trashedResults={trashedGenerationResults} revision={analysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onOpenTemplates={onOpenTemplates} onGenerate={generateSelection} onTrashResult={trashGenerationResult} onRestoreResult={restoreGenerationResult} />
+      <PaneSplitter orientation="vertical" value={viewerLayout.rightWidth} minimum={240} maximum={520} label="调整右侧 AI 面板宽度" invert onChange={(value) => setViewerLayout('rightWidth', value)} />
+      <AiPanel photo={selected} results={currentGenerationResults} trashedResults={currentTrashedGenerationResults} revision={currentAnalysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onOpenTemplates={onOpenTemplates} onGenerate={generateSelection} onTrashResult={trashGenerationResult} onRestoreResult={restoreGenerationResult} />
       {selection.selectedIds.size > 1 && (
         <div className="batch-actionbar">
           <strong>已选择 {selection.selectedIds.size} 张</strong>
