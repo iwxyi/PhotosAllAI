@@ -198,6 +198,7 @@ function BufferedPreviewImage({ src, alt, className, onReady }: { src: string; a
   const [displayed, setDisplayed] = useState({ src, alt });
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [ready, setReady] = useState(false);
   useEffect(() => {
     if (!src || src === displayed.src || src === failedSrc) return;
     let active = true;
@@ -213,6 +214,7 @@ function BufferedPreviewImage({ src, alt, className, onReady }: { src: string; a
       setDisplayed({ src, alt });
       setFailedSrc(null);
       setLoading(false);
+      setReady(true);
       onReady?.(image);
     };
     image.onerror = () => {
@@ -220,11 +222,17 @@ function BufferedPreviewImage({ src, alt, className, onReady }: { src: string; a
       setDisplayed({ src: '', alt });
       setFailedSrc(src);
       setLoading(false);
+      setReady(false);
     };
     image.src = src;
     return () => { active = false; };
   }, [alt, displayed.src, failedSrc, onReady, src]);
-  return <>{displayed.src ? <img className={className} src={displayed.src} alt={displayed.alt} onLoad={(event) => onReady?.(event.currentTarget)} /> : null}{loading && <span className="preview-loading" aria-label="正在载入下一张照片"><span className="working-pulse" /></span>}</>;
+  return <>{displayed.src ? <img className={`${className} buffered-image${ready ? ' is-ready' : ''}`} src={displayed.src} alt={displayed.alt} onLoad={(event) => { setReady(true); onReady?.(event.currentTarget); }} /> : null}{loading && <span className="preview-loading" aria-label="正在载入下一张照片"><span className="working-pulse" /></span>}</>;
+}
+
+function CatalogImage({ src, alt = '' }: { src: string; alt?: string }): React.JSX.Element {
+  const [readySrc, setReadySrc] = useState<string | null>(null);
+  return <img className={readySrc === src ? 'is-ready' : ''} src={src} alt={alt} onLoad={() => setReadySrc(src)} onError={(event) => { event.currentTarget.style.display = 'none'; }} />;
 }
 
 type CompareMode = 'single' | 'split';
@@ -630,7 +638,7 @@ function Filmstrip({
             type="button"
           >
             <span className="raw-placeholder"><Image size={22} /><small>{photo.format}</small></span>
-            {photo.thumbnailSrc || photo.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" onError={(event) => { event.currentTarget.style.display = 'none'; }} /> : null}
+            {photo.thumbnailSrc || photo.src ? <CatalogImage src={photo.thumbnailSrc ?? photo.src} /> : null}
             <span className="thumb-index">{index + 1}</span>
             {photo.status && <i className={`status-dot status-${photo.status}`} />}
             {photo.offline && <i className="offline-badge">离线</i>}
@@ -820,7 +828,7 @@ function Viewer({
               className="generated-layer"
               style={compareMode === 'split' ? { clipPath: `inset(0 ${100 - split}% 0 0)` } : undefined}
             >
-              <img src={generatedSource} alt="AI 生成版本" onLoad={(event) => { if (!photo.src) captureAspectRatio(event.currentTarget); }} onError={(event) => { event.currentTarget.style.display = 'none'; }} />
+              <BufferedPreviewImage className="generated-image" src={generatedSource} alt="AI 生成版本" onReady={(image) => { if (!photo.src) captureAspectRatio(image); }} />
             </div>
           )}
           {compareMode === 'split' && (
@@ -1286,7 +1294,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
             moveGridFocus(event);
           }}>
             {props.availablePhotos.map((photo) => <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} draggable={selection.selectedIds.has(photo.id)} key={photo.id} onDragStart={(event) => { if (!selection.selectedIds.has(photo.id)) { event.preventDefault(); return; } event.dataTransfer.effectAllowed = 'copyMove'; event.dataTransfer.setData('application/x-photoallisai-assets', JSON.stringify([...selection.selectedIds])); event.dataTransfer.setData('text/plain', `${selection.selectedIds.size} 张照片`); setNotice(`正在拖拽 ${selection.selectedIds.size} 张照片。`); }} onDragEnd={() => setNotice('')} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => props.onOpenViewer(photo.id)}>
-              <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{photo.thumbnailSrc || photo.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
+              <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{photo.thumbnailSrc || photo.src ? <CatalogImage src={photo.thumbnailSrc ?? photo.src} /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
               <span className="catalog-card-meta"><strong>{photo.fileName}</strong><small>{photo.format} · {photo.dimensions}</small>{photo.rating > 0 && <span aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}</span>
             </button>)}
             {props.hasMore && <button className="catalog-load-more" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? '加载中…' : '加载更多'}</button>}

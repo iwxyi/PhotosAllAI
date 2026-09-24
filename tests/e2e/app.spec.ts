@@ -150,10 +150,12 @@ test('supports folder appearance and professional catalog selection', async () =
 });
 
 test('switches photos and comparison modes', async () => {
+  await expect(page.locator('.base-image')).toHaveClass(/is-ready/);
   const originalSource = await page.locator('.base-image').getAttribute('src');
   await page.locator('.filmstrip [role="option"]').nth(1).click();
   await expect(page.getByText('DSC_4837.NEF', { exact: true }).last()).toBeVisible();
   await expect(page.locator('.base-image')).not.toHaveAttribute('src', originalSource!);
+  await expect(page.locator('.base-image')).toHaveClass(/is-ready/);
 
   await page.getByRole('button', { name: /对比/ }).click();
   await expect(page.getByLabel('调整原图和生成图分割线')).toBeVisible();
@@ -175,12 +177,14 @@ test('resizes and restores Lightroom-style viewer panes', async () => {
   await expect(leftSplitter).toHaveAttribute('aria-valuenow', '224');
   await expect(rightSplitter).toHaveAttribute('aria-valuenow', '300');
   await expect(filmstripSplitter).toHaveAttribute('aria-valuenow', '160');
+  const thumbHeightBefore = (await page.locator('.filmstrip .thumb').first().boundingBox())!.height;
   await leftSplitter.press('ArrowRight');
   await rightSplitter.press('ArrowLeft');
   await filmstripSplitter.press('ArrowUp');
   await expect(leftSplitter).toHaveAttribute('aria-valuenow', '236');
   await expect(rightSplitter).toHaveAttribute('aria-valuenow', '312');
   await expect(filmstripSplitter).toHaveAttribute('aria-valuenow', '172');
+  await expect.poll(async () => (await page.locator('.filmstrip .thumb').first().boundingBox())?.height ?? 0).toBeGreaterThan(thumbHeightBefore + 8);
 
   const viewer = await page.locator('.viewer').boundingBox();
   const filmstrip = await page.locator('.filmstrip-region').boundingBox();

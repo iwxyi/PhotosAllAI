@@ -53,6 +53,8 @@ test('expands nested folders and keeps icon colors independent', async () => {
   await child.locator('.folder-row').click();
   await expect(page.locator('.catalog-card')).toHaveCount(1);
   await expect(page.locator('.catalog-card')).toContainText('child.jpg');
+  await expect(page.locator('.catalog-card-image > img')).toHaveClass(/is-ready/);
+  await expect(page.locator('.catalog-card-image > img')).toHaveCSS('opacity', '1');
   await page.keyboard.press('Escape');
   await expect(page.getByRole('menu', { name: '文件夹菜单' })).toHaveCount(0);
 });
