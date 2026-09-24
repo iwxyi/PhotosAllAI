@@ -92,6 +92,20 @@ const DEFAULT_GENERATION_TEMPLATE_BODY = [
   '必须保留：\n{{preservation_rules}}'
 ].join('\n');
 
+const FOLDER_APPEARANCE_KEY = 'photoallisai.folder-appearance.v1';
+const FOLDER_COLORS = ['none', 'red', 'orange', 'yellow', 'green', 'blue', 'purple'] as const;
+type FolderColor = typeof FOLDER_COLORS[number];
+type FolderAppearance = { collapsed: boolean; colors: Record<string, FolderColor> };
+
+function loadFolderAppearance(): FolderAppearance {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(FOLDER_APPEARANCE_KEY) ?? '') as Partial<FolderAppearance>;
+    return { collapsed: Boolean(saved.collapsed), colors: saved.colors ?? {} };
+  } catch {
+    return { collapsed: false, colors: {} };
+  }
+}
+
 function applyTheme(theme: AppSettings['theme']): void {
   const resolved = theme === 'system'
     ? window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
@@ -413,6 +427,8 @@ function Sidebar({
   const [folderRemovalCandidate, setFolderRemovalCandidate] = useState<CatalogFolder | null>(null);
   const [folderRemovalBusy, setFolderRemovalBusy] = useState(false);
   const [folderRemovalError, setFolderRemovalError] = useState('');
+  const [folderAppearance, setFolderAppearance] = useState<FolderAppearance>(loadFolderAppearance);
+  const [folderColorMenuId, setFolderColorMenuId] = useState<string | null>(null);
   const visibleFolders = isDemo
     ? demoFolders.map((folder, index) => ({ id: `demo-${index}`, name: folder.name, assetCount: folder.count, offlineCount: 0 }))
     : folders;
@@ -421,6 +437,9 @@ function Sidebar({
   const libraryAssetCount = isDemo ? 12_408 : folders.length > 0 ? folders.reduce((sum, folder) => sum + folder.assetCount, 0) : totalCount;
   const recentCount = isDemo ? 248 : smartCollections.find((collection) => collection.id === 'recent')?.assetCount ?? 0;
   const favoriteCount = isDemo ? 86 : smartCollections.find((collection) => collection.id === 'favorites')?.assetCount ?? 0;
+  useEffect(() => {
+    window.localStorage.setItem(FOLDER_APPEARANCE_KEY, JSON.stringify(folderAppearance));
+  }, [folderAppearance]);
   useEffect(() => {
     if (!folderRemovalCandidate) return;
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -452,17 +471,23 @@ function Sidebar({
 
         <div className="sidebar-section">
           <div className="section-heading">
-            <span>文件夹</span>
+            <button className="section-disclosure" type="button" aria-label={folderAppearance.collapsed ? '展开文件夹' : '收起文件夹'} aria-expanded={!folderAppearance.collapsed} onClick={() => setFolderAppearance((current) => ({ ...current, collapsed: !current.collapsed }))}><ChevronRight size={12} /><span>文件夹</span></button>
             <span>{selectedOfflineFolder && <button type="button" aria-label={`重新定位 ${selectedOfflineFolder.name}`} title="重新定位离线文件夹" onClick={() => void onRelinkFolder(selectedOfflineFolder.id)}><RotateCcw size={13} /></button>}{selectedFolder && <button type="button" aria-label={`从图库移除文件夹 ${selectedFolder.name}`} title="从图库移除文件夹" onClick={() => { setFolderRemovalError(''); setFolderRemovalCandidate(selectedFolder); }}><FolderMinus size={13} /></button>}<button type="button" aria-label="添加文件夹" onClick={() => void onImportFolders()}><Plus size={13} /></button></span>
           </div>
-          {visibleFolders.map((folder) => (
-            <button className={`nav-row folder-row${selectedFolderId === folder.id ? ' is-selected' : ''}`} type="button" key={folder.id} onClick={() => onSelectFolder(folder.id)}>
-              <ChevronRight className="disclosure" size={12} />
-              <Folder size={15} />
-              <span>{folder.name}</span>
-              <span className="row-count">{folder.offlineCount > 0 ? `离线 ${folder.offlineCount}` : folder.assetCount}</span>
-            </button>
-          ))}
+          {!folderAppearance.collapsed && visibleFolders.map((folder) => {
+            const color = folderAppearance.colors[folder.id] ?? 'none';
+            return <div className={`folder-entry color-${color}`} key={folder.id}>
+              <button className={`nav-row folder-row${selectedFolderId === folder.id ? ' is-selected' : ''}`} type="button" onClick={() => onSelectFolder(folder.id)}>
+                <Folder size={15} />
+                <span>{folder.name}</span>
+                <span className="row-count">{folder.offlineCount > 0 ? `离线 ${folder.offlineCount}` : folder.assetCount}</span>
+              </button>
+              <button className={`folder-color-trigger color-${color}`} type="button" aria-label={`设置文件夹 ${folder.name} 的颜色`} aria-expanded={folderColorMenuId === folder.id} onClick={() => setFolderColorMenuId((current) => current === folder.id ? null : folder.id)}><span /></button>
+              {folderColorMenuId === folder.id && <div className="folder-color-menu" role="menu" aria-label={`${folder.name} 颜色`}>
+                {FOLDER_COLORS.map((option) => <button className={`color-${option}${color === option ? ' is-active' : ''}`} type="button" role="menuitem" aria-label={option === 'none' ? '无颜色' : `${option} 色`} key={option} onClick={() => { setFolderAppearance((current) => ({ ...current, colors: { ...current.colors, [folder.id]: option } })); setFolderColorMenuId(null); }}><span />{color === option && <Check size={11} />}</button>)}
+              </div>}
+            </div>;
+          })}
         </div>
 
         {!isDemo && <div className="sidebar-section"><div className="section-heading"><span>相册</span><button type="button" aria-label="管理相册" onClick={() => { setAlbumManagerOpen(true); setEditingAlbumId(null); setAlbumName(''); }}><Plus size={13} /></button></div>{albums.length === 0 ? <small className="sidebar-empty">暂无相册</small> : albums.map((album) => <button className={`nav-row folder-row${selectedAlbumId === album.id ? ' is-selected' : ''}`} type="button" key={album.id} onClick={() => onSelectAlbum(selectedAlbumId === album.id ? null : album.id)}><FolderHeart size={15} /><span>{album.name}</span><span className="row-count">{album.assetCount}</span></button>)}</div>}
@@ -637,6 +662,8 @@ function Viewer({
   const [selectedResultId, setSelectedResultId] = useState<string | null>(results[0]?.id ?? null);
   const [exportNotice, setExportNotice] = useState('');
   const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const panOriginRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const [imageAspectRatio, setImageAspectRatio] = useState(3 / 2);
   const [fittedSize, setFittedSize] = useState({ width: 0, height: 0 });
   const canvasWrapRef = useRef<HTMLDivElement>(null);
@@ -647,6 +674,7 @@ function Viewer({
   useEffect(() => {
     setSelectedResultId(latestResultId);
     setZoom(1);
+    setPan({ x: 0, y: 0 });
   }, [photo.id, latestResultId]);
 
   useEffect(() => {
@@ -679,7 +707,11 @@ function Viewer({
   }, []);
 
   const adjustZoom = (factor: number) => {
-    setZoom((current) => Math.min(4, Math.max(0.25, Math.round(current * factor * 100) / 100)));
+    setZoom((current) => {
+      const next = Math.min(4, Math.max(0.25, Math.round(current * factor * 100) / 100));
+      if (next <= 1) setPan({ x: 0, y: 0 });
+      return next;
+    });
   };
   const captureAspectRatio = useCallback((image: HTMLImageElement) => {
     if (image.naturalWidth > 0 && image.naturalHeight > 0) {
@@ -714,15 +746,39 @@ function Viewer({
           <IconButton label="缩小" disabled={zoom <= 0.25} onClick={() => adjustZoom(0.8)}><ZoomOut size={15} /></IconButton>
           <span className="zoom-value" aria-live="polite">{Math.round(zoom * 100)}%</span>
           <IconButton label="放大" disabled={zoom >= 4} onClick={() => adjustZoom(1.25)}><ZoomIn size={15} /></IconButton>
-          <IconButton label="适应窗口" active={zoom === 1} pressed={zoom === 1} onClick={() => setZoom(1)}><Maximize2 size={15} /></IconButton>
+          <IconButton label="适应窗口" active={zoom === 1} pressed={zoom === 1} onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}><Maximize2 size={15} /></IconButton>
           {selectedResult && !isDemo && <span className="review-actions"><button type="button" aria-label="接受当前版本" className={selectedResult.reviewState === 'accepted' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'accepted')}>接受</button><button type="button" aria-label="标记为首选" className={selectedResult.reviewState === 'preferred' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'preferred')}><Star size={12} />首选</button><button type="button" aria-label="拒绝当前版本" className={selectedResult.reviewState === 'rejected' ? 'is-review-rejected' : ''} onClick={() => void onReview(selectedResult.id, 'rejected')}>拒绝</button></span>}
         </div>
       </div>
-      <div className="canvas-wrap" ref={canvasWrapRef}>
+      <div className={`canvas-wrap${zoom > 1 ? ' is-zoomed' : ''}`} ref={canvasWrapRef} onWheel={(event) => {
+        if (event.ctrlKey || event.metaKey || event.deltaMode !== WheelEvent.DOM_DELTA_PIXEL) {
+          event.preventDefault();
+          adjustZoom(event.deltaY < 0 ? 1.12 : 0.89);
+        } else if (zoom > 1) {
+          event.preventDefault();
+          setPan((current) => ({ x: current.x - event.deltaX, y: current.y - event.deltaY }));
+        }
+      }} onPointerDown={(event) => {
+        if (zoom <= 1 || event.button !== 0) return;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        panOriginRef.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y };
+        event.currentTarget.classList.add('is-panning');
+      }} onPointerMove={(event) => {
+        const origin = panOriginRef.current;
+        if (!origin) return;
+        setPan({ x: origin.panX + event.clientX - origin.x, y: origin.panY + event.clientY - origin.y });
+      }} onPointerUp={(event) => {
+        panOriginRef.current = null;
+        event.currentTarget.classList.remove('is-panning');
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+      }} onPointerCancel={(event) => {
+        panOriginRef.current = null;
+        event.currentTarget.classList.remove('is-panning');
+      }}>
         <div
           className={`photo-canvas${compareMode === 'split' ? ' is-comparing' : ''}`}
-          style={{ width: fittedSize.width, height: fittedSize.height, transform: `scale(${zoom})` }}
-          onDoubleClick={() => setZoom((current) => current === 1 ? 2 : 1)}
+          style={{ width: fittedSize.width, height: fittedSize.height, transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})` }}
+          onDoubleClick={() => { setPan({ x: 0, y: 0 }); setZoom((current) => current === 1 ? 2 : 1); }}
         >
           <div className="preview-unavailable"><Image size={36} /><strong>预览暂不可用</strong><span>图像服务将在后台生成屏幕预览</span></div>
           {photo.src ? <BufferedPreviewImage className="base-image" src={photo.src} alt={photo.fileName} onReady={captureAspectRatio} /> : null}
@@ -1061,6 +1117,9 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
   const [tagDraft, setTagDraft] = useState('');
   const [albumTargetId, setAlbumTargetId] = useState('');
   const [notice, setNotice] = useState('');
+  const gridRef = useRef<HTMLElement>(null);
+  const marqueeOriginRef = useRef<{ x: number; y: number; additive: boolean; initialIds: Set<string> } | null>(null);
+  const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const orderedIds = useMemo(() => props.availablePhotos.map((photo) => photo.id), [props.availablePhotos]);
   const selectedPhoto = props.availablePhotos.find((photo) => selection.focusId === photo.id) ?? null;
 
@@ -1076,6 +1135,32 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
     const next = updateSelection(selection, orderedIds, photo.id, intent);
     setSelection(next);
     props.onSelectedAssetChange(photo.id);
+  };
+  const moveGridFocus = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) || orderedIds.length === 0) return;
+    event.preventDefault();
+    const cards = [...event.currentTarget.querySelectorAll<HTMLElement>('.catalog-card')];
+    const currentIndex = Math.max(0, orderedIds.indexOf(selection.focusId ?? orderedIds[0]!));
+    const firstTop = cards[0]?.offsetTop;
+    const columns = Math.max(1, cards.filter((card) => card.offsetTop === firstTop).length);
+    const delta = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : event.key === 'ArrowUp' ? -columns : columns;
+    const targetIndex = clamp(currentIndex + delta, 0, orderedIds.length - 1);
+    const targetId = orderedIds[targetIndex]!;
+    let next: SelectionState;
+    if (event.shiftKey) {
+      const range = updateSelection(selection, orderedIds, targetId, 'range');
+      next = event.metaKey || event.ctrlKey
+        ? { ...range, selectedIds: new Set([...selection.selectedIds, ...range.selectedIds]) }
+        : range;
+    } else if (event.metaKey || event.ctrlKey) {
+      next = { ...selection, focusId: targetId };
+    } else {
+      next = updateSelection(selection, orderedIds, targetId, 'replace');
+    }
+    setSelection(next);
+    props.onSelectedAssetChange(targetId);
+    cards[targetIndex]?.focus({ preventScroll: true });
+    cards[targetIndex]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   };
   const updateRating = async (rating: number) => {
     if (selection.selectedIds.size === 0) return;
@@ -1132,18 +1217,47 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
             {props.catalogFolders.length === 0 && <button className="primary-action compact" type="button" onClick={() => void props.onImportFolders()}><Plus size={14} />选择文件夹</button>}
           </section>
         ) : (
-          <section className="catalog-grid" role="listbox" aria-label="图库照片" onKeyDown={(event) => {
+          <section className="catalog-grid" role="listbox" aria-label="图库照片" ref={gridRef} tabIndex={0} onPointerDown={(event) => {
+            if (event.button !== 0 || event.target !== event.currentTarget) return;
+            event.currentTarget.setPointerCapture(event.pointerId);
+            marqueeOriginRef.current = { x: event.clientX, y: event.clientY, additive: event.metaKey || event.ctrlKey || event.shiftKey, initialIds: new Set(selection.selectedIds) };
+            setMarquee({ left: event.clientX, top: event.clientY, width: 0, height: 0 });
+            if (!(event.metaKey || event.ctrlKey || event.shiftKey)) setSelection({ selectedIds: new Set(), anchorId: null, focusId: null });
+          }} onPointerMove={(event) => {
+            const origin = marqueeOriginRef.current;
+            if (!origin) return;
+            const left = Math.min(origin.x, event.clientX);
+            const top = Math.min(origin.y, event.clientY);
+            const right = Math.max(origin.x, event.clientX);
+            const bottom = Math.max(origin.y, event.clientY);
+            const hitIds = [...event.currentTarget.querySelectorAll<HTMLElement>('.catalog-card')].filter((card) => {
+              const rect = card.getBoundingClientRect();
+              return rect.left < right && rect.right > left && rect.top < bottom && rect.bottom > top;
+            }).map((card) => card.dataset.assetId!).filter(Boolean);
+            const selectedIds = new Set(origin.additive ? origin.initialIds : []);
+            hitIds.forEach((id) => selectedIds.add(id));
+            const focusId = hitIds.at(-1) ?? (origin.additive ? selection.focusId : null);
+            setSelection({ selectedIds, anchorId: hitIds[0] ?? (origin.additive ? selection.anchorId : null), focusId });
+            if (focusId) props.onSelectedAssetChange(focusId);
+            setMarquee({ left, top, width: right - left, height: bottom - top });
+          }} onPointerUp={(event) => {
+            marqueeOriginRef.current = null;
+            setMarquee(null);
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+          }} onPointerCancel={() => { marqueeOriginRef.current = null; setMarquee(null); }} onKeyDown={(event) => {
             if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
               event.preventDefault();
               setSelection(selectAll(orderedIds));
             }
             if (event.key === 'Enter' && selectedPhoto) props.onOpenViewer(selectedPhoto.id);
+            moveGridFocus(event);
           }}>
-            {props.availablePhotos.map((photo) => <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${photo.offline ? ' is-offline' : ''}`} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} key={photo.id} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => props.onOpenViewer(photo.id)}>
+            {props.availablePhotos.map((photo) => <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} draggable={selection.selectedIds.has(photo.id)} key={photo.id} onDragStart={(event) => { if (!selection.selectedIds.has(photo.id)) { event.preventDefault(); return; } event.dataTransfer.effectAllowed = 'copyMove'; event.dataTransfer.setData('application/x-photoallisai-assets', JSON.stringify([...selection.selectedIds])); event.dataTransfer.setData('text/plain', `${selection.selectedIds.size} 张照片`); setNotice(`正在拖拽 ${selection.selectedIds.size} 张照片。`); }} onDragEnd={() => setNotice('')} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => props.onOpenViewer(photo.id)}>
               <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{photo.thumbnailSrc || photo.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
-              <span className="catalog-card-meta"><strong>{photo.fileName}</strong><small>{photo.format} · {photo.dimensions}</small><span>{[1, 2, 3, 4, 5].map((value) => <Star key={value} size={10} fill={value <= photo.rating ? 'currentColor' : 'none'} />)}</span></span>
+              <span className="catalog-card-meta"><strong>{photo.fileName}</strong><small>{photo.format} · {photo.dimensions}</small>{photo.rating > 0 && <span aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}</span>
             </button>)}
             {props.hasMore && <button className="catalog-load-more" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? '加载中…' : '加载更多'}</button>}
+            {marquee && <span className="selection-marquee" style={marquee} aria-hidden="true" />}
           </section>
         )}
       </main>

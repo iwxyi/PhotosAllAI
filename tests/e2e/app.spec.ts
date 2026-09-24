@@ -94,6 +94,61 @@ test('honors the reduced motion preference', async () => {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
 });
 
+test('supports mouse and trackpad navigation in the viewer', async () => {
+  const canvasWrap = page.locator('.canvas-wrap');
+  await canvasWrap.dispatchEvent('wheel', { deltaY: -120, ctrlKey: true, deltaMode: 0 });
+  await expect(page.locator('.zoom-value')).not.toHaveText('100%');
+  const beforePan = await page.locator('.photo-canvas').getAttribute('style');
+  await canvasWrap.dispatchEvent('wheel', { deltaX: 32, deltaY: 24, deltaMode: 0 });
+  await expect.poll(() => page.locator('.photo-canvas').getAttribute('style')).not.toBe(beforePan);
+  const wrap = (await canvasWrap.boundingBox())!;
+  const beforeDrag = await page.locator('.photo-canvas').getAttribute('style');
+  await page.mouse.move(wrap.x + wrap.width / 2, wrap.y + wrap.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(wrap.x + wrap.width / 2 + 36, wrap.y + wrap.height / 2 + 20, { steps: 3 });
+  await page.mouse.up();
+  await expect.poll(() => page.locator('.photo-canvas').getAttribute('style')).not.toBe(beforeDrag);
+  await page.getByRole('button', { name: '适应窗口' }).click();
+  await expect(page.locator('.zoom-value')).toHaveText('100%');
+});
+
+test('supports folder appearance and professional catalog selection', async () => {
+  await page.getByRole('tab', { name: '图库' }).click();
+  const folderDisclosure = page.getByRole('button', { name: '收起文件夹' });
+  await folderDisclosure.click();
+  await expect(page.getByRole('button', { name: '展开文件夹' })).toBeVisible();
+  await page.getByRole('button', { name: '展开文件夹' }).click();
+  const colorButton = page.getByRole('button', { name: /设置文件夹 .* 的颜色/ }).first();
+  await colorButton.click();
+  await page.getByRole('menuitem', { name: 'red 色' }).click();
+  await expect(colorButton).toHaveClass(/color-red/);
+
+  const cards = page.locator('.catalog-card');
+  await expect(cards.nth(0).locator('.catalog-card-meta svg')).toHaveCount(5);
+  await expect(cards.nth(1).locator('.catalog-card-meta svg')).toHaveCount(4);
+  await cards.nth(0).click();
+  await page.keyboard.press('ArrowRight');
+  await expect(cards.nth(1)).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('Shift+ArrowRight');
+  await expect(cards.nth(1)).toHaveAttribute('aria-selected', 'true');
+  await expect(cards.nth(2)).toHaveAttribute('aria-selected', 'true');
+  await page.keyboard.press('Meta+Shift+ArrowRight');
+  await expect(cards.nth(3)).toHaveAttribute('aria-selected', 'true');
+  await expect(cards.nth(1)).toHaveAttribute('draggable', 'true');
+
+  const grid = (await page.locator('.catalog-grid').boundingBox())!;
+  const second = (await cards.nth(1).boundingBox())!;
+  await page.mouse.move(grid.x + 3, grid.y + 3);
+  await page.mouse.down();
+  await page.mouse.move(second.x + second.width - 2, second.y + second.height - 2, { steps: 5 });
+  await page.mouse.up();
+  await expect(cards.nth(0)).toHaveAttribute('aria-selected', 'true');
+  await expect(cards.nth(1)).toHaveAttribute('aria-selected', 'true');
+  await expect(cards.nth(2)).toHaveAttribute('aria-selected', 'false');
+  await cards.nth(0).click();
+  await page.getByRole('tab', { name: /看图/ }).click();
+});
+
 test('switches photos and comparison modes', async () => {
   const originalSource = await page.locator('.base-image').getAttribute('src');
   await page.locator('.filmstrip [role="option"]').nth(1).click();
