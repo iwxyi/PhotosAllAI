@@ -25,6 +25,11 @@ describe('workspace session service', () => {
     const service = new WorkspaceService(file);
     expect(service.get()).toEqual(defaultWorkspaceSession);
     expect(defaultWorkspaceSession.openTabs).toEqual(['library']);
+    expect(() => service.save({
+      ...defaultWorkspaceSession,
+      openTabs: ['library', 'viewer'],
+      activeTab: 'viewer'
+    })).not.toThrow();
     service.save({
       version: 2,
       openTabs: ['library', 'tasks'],

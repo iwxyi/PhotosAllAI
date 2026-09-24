@@ -23,8 +23,8 @@ test.afterAll(async () => {
   await rm(userDataDirectory, { recursive: true, force: true });
 });
 
-test('starts with an empty viewer workspace and no production demo records', async () => {
-  await expect(page.getByRole('tab', { name: '看图' })).toHaveAttribute('aria-selected', 'true');
+test('starts with an empty library workspace and no production demo records', async () => {
+  await expect(page.getByRole('tab', { name: '图库' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('tab')).toHaveCount(1);
   await expect(page.getByRole('heading', { name: '添加照片文件夹' })).toBeVisible();
   await expect(page.getByRole('button', { name: '选择文件夹' })).toBeVisible();

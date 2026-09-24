@@ -40,9 +40,11 @@ test.afterAll(async () => {
 
 test('starts with the secure library workspace', async () => {
   await expect(page.getByText('PhotoAllIsAI')).toBeVisible();
-  await expect(page.getByRole('tab', { name: '看图' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: '图库' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByText('2026 人像作品', { exact: true }).first()).toBeVisible();
   await expect(page.getByLabel('添加文件夹')).toBeVisible();
+  await page.locator('.catalog-card').first().dblclick();
+  await expect(page.getByRole('tab', { name: '看图' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('button', { name: /加入生成队列/ })).toBeVisible();
   await page.getByRole('button', { name: '浏览模板' }).click();
   await expect(page.getByRole('heading', { name: '提示词模板' })).toBeVisible();

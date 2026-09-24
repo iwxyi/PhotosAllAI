@@ -42,6 +42,7 @@ test.afterAll(async () => {
 });
 
 test('serves bounded cached images without exposing file paths', async () => {
+  await page.locator('.catalog-card').first().dblclick();
   await expect(page.getByText('IMPORTED_PORTRAIT.jpg', { exact: true }).first()).toBeVisible();
 
   const thumbnail = page.locator('.thumb', { hasText: 'IMPORTED_PORTRAIT.jpg' }).locator('img');
@@ -62,6 +63,7 @@ test('serves bounded cached images without exposing file paths', async () => {
   await page.getByRole('button', { name: '设置评分 4' }).click();
   await expect(page.getByRole('button', { name: '设置评分 4' }).locator('svg')).toHaveAttribute('fill', 'currentColor');
   await page.reload();
+  await page.locator('.catalog-card').first().dblclick();
   await expect(page.getByText('IMPORTED_PORTRAIT.jpg', { exact: true }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: '设置评分 4' }).locator('svg')).toHaveAttribute('fill', 'currentColor');
   await page.getByRole('button', { name: '添加标签' }).click();

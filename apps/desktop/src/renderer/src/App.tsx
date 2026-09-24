@@ -110,7 +110,8 @@ type CompareMode = 'single' | 'split';
 type CatalogSort = 'modifiedAt' | 'fileName' | 'rating';
 
 const tabs: { id: WorkspaceTab; label: string; icon: typeof Image }[] = [
-  { id: 'library', label: '看图', icon: Image },
+  { id: 'library', label: '图库', icon: LibraryBig },
+  { id: 'viewer', label: '看图', icon: Image },
   { id: 'templates', label: '提示词模板', icon: WandSparkles },
   { id: 'tasks', label: '任务中心', icon: Clock3 },
   { id: 'settings', label: '设置', icon: Settings }
@@ -925,6 +926,126 @@ function LibraryWorkspace(props: LibraryWorkspaceProps): React.JSX.Element {
       </main>
       <aside className="empty-library-inspector"><Info size={18} /><span>选择照片后显示分析和版本信息</span></aside>
       {operationNotice && <div className="operation-toast" role="status">{operationNotice}<button type="button" aria-label="关闭提示" onClick={() => setOperationNotice('')}><X size={13} /></button></div>}
+      <TaskBar open={false} onToggle={() => undefined} onOpenTaskCenter={props.onOpenTaskCenter} tasks={[]} />
+    </div>
+  );
+}
+
+function collectionTitle(props: Pick<LibraryWorkspaceProps, 'catalogFolders' | 'catalogAlbums' | 'selectedFolderId' | 'selectedAlbumId' | 'selectedSmartCollection' | 'searchQuery'>): string {
+  if (props.selectedFolderId) return props.catalogFolders.find((folder) => folder.id === props.selectedFolderId)?.name ?? '文件夹';
+  if (props.selectedAlbumId) return props.catalogAlbums.find((album) => album.id === props.selectedAlbumId)?.name ?? '相册';
+  if (props.selectedSmartCollection) {
+    return props.selectedSmartCollection === 'recent' ? '最近 30 天'
+      : props.selectedSmartCollection === 'favorites' ? '首选照片'
+        : props.selectedSmartCollection === 'unrated' ? '未评分'
+          : props.selectedSmartCollection === 'unanalyzed' ? '等待 AI 分析'
+            : props.selectedSmartCollection === 'to-review' ? '待审阅' : '已生成';
+  }
+  return props.searchQuery ? `搜索：${props.searchQuery}` : '所有照片';
+}
+
+function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetId: string) => void }): React.JSX.Element {
+  const initialId = props.availablePhotos.some((photo) => photo.id === props.selectedAssetId)
+    ? props.selectedAssetId
+    : props.availablePhotos[0]?.id ?? null;
+  const [selection, setSelection] = useState<SelectionState>({
+    selectedIds: new Set(initialId ? [initialId] : []),
+    anchorId: initialId,
+    focusId: initialId
+  });
+  const [tagDraft, setTagDraft] = useState('');
+  const [albumTargetId, setAlbumTargetId] = useState('');
+  const [notice, setNotice] = useState('');
+  const orderedIds = useMemo(() => props.availablePhotos.map((photo) => photo.id), [props.availablePhotos]);
+  const selectedPhoto = props.availablePhotos.find((photo) => selection.focusId === photo.id) ?? null;
+
+  useEffect(() => {
+    const visible = new Set(orderedIds);
+    const retained = [...selection.selectedIds].filter((id) => visible.has(id));
+    if (retained.length === selection.selectedIds.size) return;
+    const fallback = orderedIds[0] ?? null;
+    setSelection({ selectedIds: new Set(retained.length > 0 ? retained : fallback ? [fallback] : []), anchorId: retained[0] ?? fallback, focusId: retained.at(-1) ?? fallback });
+  }, [orderedIds, selection.selectedIds]);
+
+  const selectPhoto = (photo: Photo, intent: SelectionIntent) => {
+    const next = updateSelection(selection, orderedIds, photo.id, intent);
+    setSelection(next);
+    props.onSelectedAssetChange(photo.id);
+  };
+  const updateRating = async (rating: number) => {
+    if (selection.selectedIds.size === 0) return;
+    await window.desktopApi.updateCatalogMetadata({ assetIds: [...selection.selectedIds], rating });
+    await props.onRefreshCatalog();
+  };
+  const updateFavorite = async () => {
+    if (selection.selectedIds.size === 0) return;
+    const allFavorite = [...selection.selectedIds].every((id) => props.availablePhotos.find((photo) => photo.id === id)?.favorite);
+    await window.desktopApi.updateCatalogMetadata({ assetIds: [...selection.selectedIds], favorite: !allFavorite });
+    await props.onRefreshCatalog();
+  };
+  const addTags = async () => {
+    const names = tagDraft.split(',').map((name) => name.trim()).filter(Boolean);
+    if (selection.selectedIds.size === 0 || names.length === 0) return;
+    await window.desktopApi.updateCatalogTags({ assetIds: [...selection.selectedIds], addTags: names, removeTagIds: [] });
+    setTagDraft('');
+    setNotice(`已为 ${selection.selectedIds.size} 张照片添加标签。`);
+    await props.onRefreshCatalog();
+  };
+  const addToAlbum = async () => {
+    if (selection.selectedIds.size === 0 || !albumTargetId) return;
+    const album = await window.desktopApi.updateCatalogAlbumAssets({ albumId: albumTargetId, assetIds: [...selection.selectedIds], mode: 'add' });
+    setNotice(`已加入相册「${album.name}」。`);
+    await props.onRefreshCatalog();
+  };
+  const analyzeSelection = async () => {
+    const profile = (await window.desktopApi.listProviderProfiles()).find((item) => item.purpose === 'vision' && item.enabled);
+    if (!profile) {
+      setNotice('请先在设置中添加并启用视觉分析模型。');
+      return;
+    }
+    await Promise.all([...selection.selectedIds].map((assetId) => window.desktopApi.enqueueTask({ kind: 'analysis', assetId, payload: { providerProfileId: profile.id, mode: 'full' } })));
+    setNotice(`已将 ${selection.selectedIds.size} 张照片加入分析队列。`);
+  };
+
+  return (
+    <div className="catalog-workspace">
+      <Sidebar folders={props.catalogFolders} albums={props.catalogAlbums} smartCollections={props.catalogSmartCollections} totalCount={props.totalCount} selectedFolderId={props.selectedFolderId} selectedAlbumId={props.selectedAlbumId} selectedSmartCollection={props.selectedSmartCollection} tags={props.catalogTags} selectedTagId={props.selectedTagId} onSelectFolder={props.onSelectFolder} onSelectAlbum={props.onSelectAlbum} onSelectSmartCollection={props.onSelectSmartCollection} onRefreshAlbums={props.onRefreshAlbums} onImportFolders={props.onImportFolders} onRelinkFolder={props.onRelinkFolder} onUnregisterFolder={props.onUnregisterFolder} onSelectTag={props.onSelectTag} isDemo={props.isDemo} />
+      <main className="catalog-main">
+        <header className="catalog-toolbar">
+          <div className="result-summary"><strong>{collectionTitle(props)}</strong><span>{props.totalCount} 张照片</span></div>
+          <div className="catalog-toolbar-actions">
+            <label className="sort-control"><select aria-label="图库排序" value={props.sortBy} onChange={(event) => props.onSortByChange(event.target.value as CatalogSort)}><option value="modifiedAt">拍摄时间</option><option value="fileName">文件名</option><option value="rating">评分</option></select><ChevronDown size={12} /></label>
+            <button className={`quiet-button${props.favoriteOnly ? ' is-active' : ''}`} type="button" onClick={() => props.onFavoriteOnlyChange(!props.favoriteOnly)}><Star size={13} />仅首选</button>
+            <button className="primary-action compact" type="button" disabled={!selectedPhoto} onClick={() => { if (selectedPhoto) props.onOpenViewer(selectedPhoto.id); }}><Image size={14} />打开看图</button>
+          </div>
+        </header>
+        {props.availablePhotos.length === 0 ? (
+          <section className="catalog-empty">
+            {props.catalogFolders.length === 0 ? <FolderOpen size={34} /> : <Search size={34} />}
+            <h2>{props.catalogFolders.length === 0 ? '添加照片文件夹' : props.searchQuery ? '没有匹配的照片' : '此集合为空'}</h2>
+            <p>{props.catalogFolders.length === 0 ? '不会复制或修改原图，只建立本地索引。' : '请选择其他目录或调整筛选条件。'}</p>
+            {props.catalogFolders.length === 0 && <button className="primary-action compact" type="button" onClick={() => void props.onImportFolders()}><Plus size={14} />选择文件夹</button>}
+          </section>
+        ) : (
+          <section className="catalog-grid" role="listbox" aria-label="图库照片" onKeyDown={(event) => {
+            if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
+              event.preventDefault();
+              setSelection(selectAll(orderedIds));
+            }
+            if (event.key === 'Enter' && selectedPhoto) props.onOpenViewer(selectedPhoto.id);
+          }}>
+            {props.availablePhotos.map((photo) => <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${photo.offline ? ' is-offline' : ''}`} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} key={photo.id} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => props.onOpenViewer(photo.id)}>
+              <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{photo.thumbnailSrc || photo.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
+              <span className="catalog-card-meta"><strong>{photo.fileName}</strong><small>{photo.format} · {photo.dimensions}</small><span>{[1, 2, 3, 4, 5].map((value) => <Star key={value} size={10} fill={value <= photo.rating ? 'currentColor' : 'none'} />)}</span></span>
+            </button>)}
+            {props.hasMore && <button className="catalog-load-more" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? '加载中…' : '加载更多'}</button>}
+          </section>
+        )}
+      </main>
+      <aside className="catalog-selection-panel">
+        <div><span>当前选择</span><strong>{selection.selectedIds.size} 张照片</strong></div>
+        {selectedPhoto ? <><div className="catalog-selection-preview"><img src={selectedPhoto.thumbnailSrc ?? selectedPhoto.src} alt="" /></div><strong className="catalog-selection-name">{selectedPhoto.fileName}</strong><small>{selectedPhoto.format} · {selectedPhoto.dimensions}</small><button className="primary-action" type="button" onClick={() => props.onOpenViewer(selectedPhoto.id)}><Image size={15} />在看图中打开</button><div className="catalog-quick-actions"><span>批量评分</span><div>{[0, 1, 2, 3, 4, 5].map((rating) => <button type="button" key={rating} onClick={() => void updateRating(rating)}>{rating === 0 ? '清除' : rating}</button>)}</div><button className="quiet-button" type="button" onClick={() => void updateFavorite()}><Heart size={13} />切换首选</button><button className="quiet-button" type="button" onClick={() => void analyzeSelection()}><Sparkles size={13} />AI 分析所选</button><form className="catalog-inline-form" onSubmit={(event) => { event.preventDefault(); void addTags(); }}><input aria-label="为所选照片添加标签" value={tagDraft} placeholder="标签，以逗号分隔" onChange={(event) => setTagDraft(event.target.value)} /><button type="submit" disabled={!tagDraft.trim()}>添加</button></form>{props.catalogAlbums.length > 0 && <div className="catalog-inline-form"><select aria-label="将所选照片加入相册" value={albumTargetId} onChange={(event) => setAlbumTargetId(event.target.value)}><option value="">选择相册</option>{props.catalogAlbums.map((album) => <option key={album.id} value={album.id}>{album.name}</option>)}</select><button type="button" disabled={!albumTargetId} onClick={() => void addToAlbum()}>加入</button></div>}</div>{notice && <p className="catalog-notice" role="status">{notice}</p>}</> : <p>选择照片后可批量管理，双击可进入看图。</p>}
+      </aside>
       <TaskBar open={false} onToggle={() => undefined} onOpenTaskCenter={props.onOpenTaskCenter} tasks={[]} />
     </div>
   );
@@ -2414,7 +2535,7 @@ function TemplatePage(): React.JSX.Element {
 
 export function App(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('library');
-  const [openTabs, setOpenTabs] = useState<WorkspaceTab[]>(['library', 'templates', 'tasks', 'settings']);
+  const [openTabs, setOpenTabs] = useState<WorkspaceTab[]>(['library']);
   const [sessionReady, setSessionReady] = useState(false);
   const [catalogPhotos, setCatalogPhotos] = useState<Photo[]>([]);
   const [catalogFolders, setCatalogFolders] = useState<CatalogFolder[]>([]);
@@ -2610,11 +2731,55 @@ export function App(): React.JSX.Element {
   const isDemo = E2E_DEMO_MODE && catalogReady && catalogTotal === 0 && catalogFolders.length === 0;
   const availablePhotos = !catalogReady || isDemo ? photos : catalogPhotos;
   const displayTotal = isDemo ? 128 : catalogTotal;
+  const workspaceProps: LibraryWorkspaceProps = {
+    availablePhotos,
+    catalogFolders,
+    catalogAlbums,
+    catalogSmartCollections,
+    catalogTags,
+    exportPresets,
+    isDemo,
+    selectedFolderId,
+    selectedAlbumId,
+    selectedSmartCollection,
+    selectedTagId,
+    selectedAssetId,
+    totalCount: displayTotal,
+    favoriteOnly,
+    sortBy,
+    hasMore: nextCursor !== null,
+    loadingMore,
+    searchQuery,
+    onSelectedAssetChange: setSelectedAssetId,
+    onFavoriteOnlyChange: setFavoriteOnly,
+    onSortByChange: setSortBy,
+    onSelectFolder: (id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); },
+    onSelectAlbum: (id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); },
+    onSelectSmartCollection: (id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); },
+    onSelectTag: setSelectedTagId,
+    onLoadMore: () => void loadMoreCatalog(),
+    onRefreshCatalog: refreshCatalog,
+    onRefreshAlbums: refreshCatalog,
+    onImportFolders: importFolders,
+    onRelinkFolder: relinkFolder,
+    onUnregisterFolder: unregisterFolder,
+    onOpenTaskCenter: () => openWorkspaceTab('tasks'),
+    onOpenTemplates: () => openWorkspaceTab('templates')
+  };
+  const openViewer = (assetId: string) => {
+    setSelectedAssetId(assetId);
+    openWorkspaceTab('viewer');
+  };
 
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
-      {!sessionReady || !catalogReady ? <main className="workspace-loading"><span className="working-pulse" /><span>{sessionReady ? '正在读取图库' : '正在恢复工作区'}</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} exportPresets={exportPresets} isDemo={isDemo} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={setFavoriteOnly} sortBy={sortBy} onSortByChange={setSortBy} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onRelinkFolder={relinkFolder} onUnregisterFolder={unregisterFolder} onOpenTaskCenter={() => openWorkspaceTab('tasks')} onOpenTemplates={() => openWorkspaceTab('templates')} /> : activeTab === 'settings' ? <SettingsPage onExportPresetsChange={setExportPresets} /> : activeTab === 'tasks' ? <TaskCenterPage onCatalogChanged={refreshCatalog} /> : <TemplatePage />}
+      {!sessionReady || !catalogReady ? <main className="workspace-loading"><span className="working-pulse" /><span>{sessionReady ? '正在读取图库' : '正在恢复工作区'}</span></main>
+        : activeTab === 'library' ? <CatalogWorkspace {...workspaceProps} onOpenViewer={openViewer} />
+          : activeTab === 'viewer' ? <LibraryWorkspace {...workspaceProps} />
+            : activeTab === 'settings' ? <SettingsPage onExportPresetsChange={setExportPresets} />
+              : activeTab === 'tasks' ? <TaskCenterPage onCatalogChanged={refreshCatalog} />
+                : <TemplatePage />}
     </div>
   );
 }

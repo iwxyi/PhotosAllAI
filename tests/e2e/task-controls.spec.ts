@@ -59,7 +59,8 @@ test('reorders queued work and batch-retries failed generation tasks', async () 
     name: '队列模板', description: '队列编辑测试', category: '人像', exampleId: 'none',
     body: '模板分析：{{analysis.summary}}\n用户要求：{{user_instruction}}'
   }));
-  await page.getByRole('tab', { name: /任务中心/ }).click();
+  await page.getByRole('button', { name: '打开工作区' }).click();
+  await page.getByRole('menuitem', { name: '任务中心' }).click();
   const rows = page.locator('.task-table-row');
   await expect(rows).toHaveCount(3);
   await expect(rows.nth(0)).toContainText('asset-A');

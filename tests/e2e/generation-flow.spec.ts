@@ -131,7 +131,8 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await page.getByRole('button', { name: '保存预设' }).click();
   await expect(page.getByText('预设已保存', { exact: true })).toBeVisible();
 
-  await page.getByRole('tab', { name: '看图' }).click();
+  await page.getByRole('tab', { name: '图库' }).click();
+  await page.locator('.catalog-card').first().dblclick();
   await page.getByRole('button', { name: '开始分析' }).click();
   await expect(page.getByText('可清理背景的人像')).toBeVisible({ timeout: 10_000 });
   await page.getByLabel('搜索图库').fill('自然光');

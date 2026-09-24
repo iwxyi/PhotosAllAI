@@ -53,6 +53,7 @@ test.afterAll(async () => {
 });
 
 test('unregisters a source folder without touching files and restores its catalog identity', async () => {
+  await page.locator('.catalog-card').first().dblclick();
   await page.getByRole('button', { name: /source 1/ }).click();
   const unfavorite = page.getByRole('button', { name: '取消收藏照片' });
   await expect(unfavorite).toHaveAttribute('aria-pressed', 'true');

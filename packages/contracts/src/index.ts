@@ -122,12 +122,12 @@ export const appSettingsSchema = z.object({
 });
 export type AppSettings = z.infer<typeof appSettingsSchema>;
 
-export const workspaceTabSchema = z.enum(['library', 'templates', 'tasks', 'settings']);
+export const workspaceTabSchema = z.enum(['library', 'viewer', 'templates', 'tasks', 'settings']);
 export type WorkspaceTab = z.infer<typeof workspaceTabSchema>;
 
 export const workspaceSessionV1Schema = z.object({
   version: z.literal(1),
-  openTabs: z.array(workspaceTabSchema).min(1).max(4)
+  openTabs: z.array(workspaceTabSchema).min(1).max(5)
     .refine((items) => new Set(items).size === items.length, 'Workspace tabs must be unique')
     .refine((items) => items.includes('library'), 'Library tab must remain open'),
   activeTab: workspaceTabSchema,
@@ -144,7 +144,7 @@ export type WorkspaceSessionV1 = z.infer<typeof workspaceSessionV1Schema>;
 
 export const workspaceSessionSchema = z.object({
   version: z.literal(2),
-  openTabs: z.array(workspaceTabSchema).min(1).max(4)
+  openTabs: z.array(workspaceTabSchema).min(1).max(5)
     .refine((items) => new Set(items).size === items.length, 'Workspace tabs must be unique')
     .refine((items) => items.includes('library'), 'Library tab must remain open'),
   activeTab: workspaceTabSchema,

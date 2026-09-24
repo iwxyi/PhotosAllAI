@@ -48,6 +48,7 @@ test.afterAll(async () => {
 });
 
 test('loads cursor pages at the virtualized filmstrip boundary', async () => {
+  await page.locator('.catalog-card').first().dblclick();
   await expect(page.getByText('205 张照片', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: /最近 30 天 0/ })).toBeVisible();
   await page.getByRole('button', { name: /最近 30 天 0/ }).click();

@@ -48,6 +48,7 @@ test.afterAll(async () => {
 });
 
 test('moves, copies, and renames originals through safe file dialogs', async () => {
+  await page.locator('.catalog-card').first().dblclick();
   await expect(page.getByText('MOVE_ME.jpg', { exact: true }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: '在文件管理器中显示原图' })).toBeVisible();
   await page.getByRole('button', { name: '管理相册' }).click();
@@ -135,7 +136,8 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await expect(trashDialog).toBeHidden();
   expect(await readFile(path.join(targetDirectory, 'RENAMED.jpg'))).not.toHaveLength(0);
 
-  await page.getByRole('tab', { name: /任务中心/ }).click();
+  await page.getByRole('button', { name: '打开工作区' }).click();
+  await page.getByRole('menuitem', { name: '任务中心' }).click();
   await expect(page.getByText('文件操作', { exact: true })).toBeVisible();
   await expect(page.getByText('从图库移除', { exact: true })).toBeVisible();
   await page.getByLabel('撤销重命名').click();
