@@ -8,7 +8,7 @@ import {
 
 export const defaultWorkspaceSession: WorkspaceSession = {
   version: 2,
-  openTabs: ['library', 'templates', 'tasks', 'settings'],
+  openTabs: ['library'],
   activeTab: 'library',
   library: {
     selectedFolderId: null,

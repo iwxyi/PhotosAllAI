@@ -9,12 +9,22 @@ let page: Page;
 let userDataDirectory: string;
 let backupDirectory: string;
 
+async function openWorkspaceTab(label: string): Promise<void> {
+  const tab = page.getByRole('tab', { name: label });
+  if (await tab.count() === 0) {
+    await page.getByRole('button', { name: '打开工作区' }).click();
+    await page.getByRole('menuitem', { name: label }).click();
+    return;
+  }
+  await tab.click();
+}
+
 test.beforeAll(async () => {
   userDataDirectory = await mkdtemp(path.join(tmpdir(), 'photoallisai-e2e-'));
   backupDirectory = await mkdtemp(path.join(tmpdir(), 'photoallisai-e2e-backup-'));
   electronApp = await electron.launch({
     args: [path.resolve('apps/desktop/out/main/index.js')],
-    env: { ...process.env, PHOTOALLISAI_USER_DATA: userDataDirectory }
+    env: { ...process.env, PHOTOALLISAI_USER_DATA: userDataDirectory, PHOTOALLISAI_E2E_DEMO: '1' }
   });
   page = await electronApp.firstWindow();
   await page.waitForLoadState('domcontentloaded');
@@ -30,13 +40,13 @@ test.afterAll(async () => {
 
 test('starts with the secure library workspace', async () => {
   await expect(page.getByText('PhotoAllIsAI')).toBeVisible();
-  await expect(page.getByRole('tab', { name: '图库' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: '看图' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByText('2026 人像作品', { exact: true }).first()).toBeVisible();
   await expect(page.getByLabel('添加文件夹')).toBeVisible();
   await expect(page.getByRole('button', { name: /加入生成队列/ })).toBeVisible();
   await page.getByRole('button', { name: '浏览模板' }).click();
   await expect(page.getByRole('heading', { name: '提示词模板' })).toBeVisible();
-  await page.getByRole('tab', { name: /图库/ }).click();
+  await page.getByRole('tab', { name: /看图/ }).click();
   await page.getByRole('button', { name: '信息', exact: true }).click();
   await expect(page.getByText('文件信息')).toBeVisible();
   await page.getByRole('button', { name: '版本', exact: true }).click();
@@ -128,7 +138,7 @@ test('opens the task drawer and application tabs', async () => {
   await expect(page.getByRole('heading', { name: '任务中心' })).toBeVisible();
   await expect(page.getByText('暂无任务')).toBeVisible();
 
-  await page.getByRole('tab', { name: /提示词模板/ }).click();
+  await openWorkspaceTab('提示词模板');
   await expect(page.getByRole('heading', { name: '提示词模板' })).toBeVisible();
   await expect(page.getByText('尚未创建模板')).toBeVisible();
   await expect(page.getByText('{{analysis.generative_actions}}', { exact: true })).toBeVisible();
@@ -153,7 +163,7 @@ test('opens the task drawer and application tabs', async () => {
   await page.getByRole('button', { name: '确认归档' }).click();
   await expect(page.getByText('尚未创建模板')).toBeVisible();
 
-  await page.getByRole('tab', { name: /设置/ }).click();
+  await openWorkspaceTab('设置');
   await expect(page.getByRole('heading', { name: 'AI 模型' })).toBeVisible();
   await expect(page.getByLabel('Base URL')).toBeVisible();
   await expect(page.getByLabel('API Key')).toHaveAttribute('type', 'password');
@@ -257,7 +267,7 @@ test('opens the task drawer and application tabs', async () => {
   await page.getByRole('button', { name: '隐私与安全' }).click();
   await expect(page.getByRole('heading', { name: '数据边界' })).toBeVisible();
   await page.screenshot({ path: 'test-results/settings-models.png', animations: 'disabled' });
-  await page.getByRole('tab', { name: /图库/ }).click();
+  await page.getByRole('tab', { name: /看图/ }).click();
 });
 
 test('restores open tabs, active workspace, and selected photo', async () => {
@@ -274,7 +284,7 @@ test('restores open tabs, active workspace, and selected photo', async () => {
   await page.reload();
   await expect(page.getByRole('tab', { name: /任务中心/ })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('tab', { name: '设置' })).toHaveCount(0);
-  await page.getByRole('tab', { name: /图库/ }).click();
+  await page.getByRole('tab', { name: /看图/ }).click();
   await expect(page.getByRole('button', { name: /最近 30 天/ })).toHaveClass(/is-active/);
   await expect(page.getByRole('button', { name: '筛选 · 首选' })).toBeVisible();
   await expect(page.getByLabel('图库排序')).toHaveValue('rating');
@@ -287,7 +297,7 @@ test('restores open tabs, active workspace, and selected photo', async () => {
   await page.getByRole('menuitem', { name: '设置' }).click();
   await expect(page.getByRole('heading', { name: 'AI 模型' })).toBeVisible();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
-  await page.getByRole('tab', { name: /图库/ }).click();
+  await page.getByRole('tab', { name: /看图/ }).click();
 });
 
 test('captures the primary workspace for visual inspection', async () => {

@@ -24,6 +24,7 @@ describe('workspace session service', () => {
     const file = await databasePath();
     const service = new WorkspaceService(file);
     expect(service.get()).toEqual(defaultWorkspaceSession);
+    expect(defaultWorkspaceSession.openTabs).toEqual(['library']);
     service.save({
       version: 2,
       openTabs: ['library', 'tasks'],

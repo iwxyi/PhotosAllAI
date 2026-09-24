@@ -83,6 +83,7 @@ import { photos, type Photo } from './mock-data';
 import { fileOperationFailureMessage } from './error-messages';
 
 const THEME_CHANGE_EVENT = 'photoallisai-theme-change';
+const E2E_DEMO_MODE = new URLSearchParams(window.location.search).get('e2e-demo') === '1';
 const DEFAULT_GENERATION_TEMPLATE_BODY = [
   '请基于原图进行专业且写实的修图。',
   '画面分析：{{analysis.summary}}',
@@ -109,7 +110,7 @@ type CompareMode = 'single' | 'split';
 type CatalogSort = 'modifiedAt' | 'fileName' | 'rating';
 
 const tabs: { id: WorkspaceTab; label: string; icon: typeof Image }[] = [
-  { id: 'library', label: '图库', icon: Image },
+  { id: 'library', label: '看图', icon: Image },
   { id: 'templates', label: '提示词模板', icon: WandSparkles },
   { id: 'tasks', label: '任务中心', icon: Clock3 },
   { id: 'settings', label: '设置', icon: Settings }
@@ -917,9 +918,10 @@ function LibraryWorkspace(props: LibraryWorkspaceProps): React.JSX.Element {
     <div className="workspace">
       <Sidebar folders={props.catalogFolders} albums={props.catalogAlbums} smartCollections={props.catalogSmartCollections} totalCount={props.totalCount} selectedFolderId={props.selectedFolderId} selectedAlbumId={props.selectedAlbumId} selectedSmartCollection={props.selectedSmartCollection} tags={props.catalogTags} selectedTagId={props.selectedTagId} onSelectFolder={props.onSelectFolder} onSelectAlbum={props.onSelectAlbum} onSelectSmartCollection={props.onSelectSmartCollection} onRefreshAlbums={props.onRefreshAlbums} onImportFolders={props.onImportFolders} onRelinkFolder={props.onRelinkFolder} onUnregisterFolder={unregisterFolder} onSelectTag={props.onSelectTag} isDemo={props.isDemo} />
       <main className="empty-library-main">
-        <Search size={30} />
-        <h2>{props.searchQuery ? '没有匹配的照片' : '此集合为空'}</h2>
-        <p>{props.searchQuery ? '尝试其他文件名、场景、主体或 AI 关键词。' : '从其他目录选择照片，或导入新的照片文件夹。'}</p>
+        {props.catalogFolders.length === 0 ? <FolderOpen size={30} /> : <Search size={30} />}
+        <h2>{props.catalogFolders.length === 0 ? '添加照片文件夹' : props.searchQuery ? '没有匹配的照片' : '此集合为空'}</h2>
+        <p>{props.catalogFolders.length === 0 ? '照片仍保留在原位置，PhotoAllIsAI 只建立本地图库索引。' : props.searchQuery ? '尝试其他文件名、场景、主体或 AI 关键词。' : '从其他目录选择照片，或导入新的照片文件夹。'}</p>
+        {props.catalogFolders.length === 0 && <button className="primary-action compact" type="button" onClick={() => void props.onImportFolders()}><Plus size={14} />选择文件夹</button>}
       </main>
       <aside className="empty-library-inspector"><Info size={18} /><span>选择照片后显示分析和版本信息</span></aside>
       {operationNotice && <div className="operation-toast" role="status">{operationNotice}<button type="button" aria-label="关闭提示" onClick={() => setOperationNotice('')}><X size={13} /></button></div>}
@@ -2605,14 +2607,14 @@ export function App(): React.JSX.Element {
     }
   };
 
-  const isDemo = catalogReady && catalogTotal === 0 && catalogFolders.length === 0;
+  const isDemo = E2E_DEMO_MODE && catalogReady && catalogTotal === 0 && catalogFolders.length === 0;
   const availablePhotos = !catalogReady || isDemo ? photos : catalogPhotos;
-  const displayTotal = isDemo || !catalogReady ? 128 : catalogTotal;
+  const displayTotal = isDemo ? 128 : catalogTotal;
 
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
-      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} exportPresets={exportPresets} isDemo={isDemo || !catalogReady} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={setFavoriteOnly} sortBy={sortBy} onSortByChange={setSortBy} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onRelinkFolder={relinkFolder} onUnregisterFolder={unregisterFolder} onOpenTaskCenter={() => openWorkspaceTab('tasks')} onOpenTemplates={() => openWorkspaceTab('templates')} /> : activeTab === 'settings' ? <SettingsPage onExportPresetsChange={setExportPresets} /> : activeTab === 'tasks' ? <TaskCenterPage onCatalogChanged={refreshCatalog} /> : <TemplatePage />}
+      {!sessionReady || !catalogReady ? <main className="workspace-loading"><span className="working-pulse" /><span>{sessionReady ? '正在读取图库' : '正在恢复工作区'}</span></main> : activeTab === 'library' ? <LibraryWorkspace availablePhotos={availablePhotos} catalogFolders={catalogFolders} catalogAlbums={catalogAlbums} catalogSmartCollections={catalogSmartCollections} catalogTags={catalogTags} exportPresets={exportPresets} isDemo={isDemo} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} selectedTagId={selectedTagId} selectedAssetId={selectedAssetId} onSelectedAssetChange={setSelectedAssetId} totalCount={displayTotal} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={setFavoriteOnly} sortBy={sortBy} onSortByChange={setSortBy} hasMore={nextCursor !== null} loadingMore={loadingMore} onSelectFolder={(id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); }} onSelectAlbum={(id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); }} onSelectSmartCollection={(id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); }} onSelectTag={setSelectedTagId} onLoadMore={() => void loadMoreCatalog()} searchQuery={searchQuery} onRefreshCatalog={refreshCatalog} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onRelinkFolder={relinkFolder} onUnregisterFolder={unregisterFolder} onOpenTaskCenter={() => openWorkspaceTab('tasks')} onOpenTemplates={() => openWorkspaceTab('templates')} /> : activeTab === 'settings' ? <SettingsPage onExportPresetsChange={setExportPresets} /> : activeTab === 'tasks' ? <TaskCenterPage onCatalogChanged={refreshCatalog} /> : <TemplatePage />}
     </div>
   );
 }

@@ -584,9 +584,13 @@ function createWindow(): BrowserWindow {
   });
 
   if (process.env.ELECTRON_RENDERER_URL) {
-    void window.loadURL(process.env.ELECTRON_RENDERER_URL);
+    const rendererUrl = new URL(process.env.ELECTRON_RENDERER_URL);
+    if (process.env.PHOTOALLISAI_E2E_DEMO === '1') rendererUrl.searchParams.set('e2e-demo', '1');
+    void window.loadURL(rendererUrl.toString());
   } else {
-    void window.loadFile(join(__dirname, '../renderer/index.html'));
+    void window.loadFile(join(__dirname, '../renderer/index.html'), process.env.PHOTOALLISAI_E2E_DEMO === '1'
+      ? { query: { 'e2e-demo': '1' } }
+      : undefined);
   }
 
   return window;

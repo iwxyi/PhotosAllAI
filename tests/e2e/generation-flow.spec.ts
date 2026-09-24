@@ -15,6 +15,16 @@ let testRoot: string;
 let sourcePath: string;
 let originalBytes: Buffer;
 
+async function openWorkspaceTab(label: string): Promise<void> {
+  const tab = page.getByRole('tab', { name: label });
+  if (await tab.count() === 0) {
+    await page.getByRole('button', { name: '打开工作区' }).click();
+    await page.getByRole('menuitem', { name: label }).click();
+    return;
+  }
+  await tab.click();
+}
+
 const analysis: AnalysisResult = {
   schemaVersion: '1.0',
   summary: '可清理背景的人像',
@@ -86,7 +96,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
   if (!address || typeof address === 'string') throw new Error('Mock server unavailable');
   const baseUrl = `http://127.0.0.1:${address.port}/v1`;
 
-  await page.getByRole('tab', { name: /设置/ }).click();
+  await openWorkspaceTab('设置');
   await page.getByLabel('配置名称').fill('Vision Mock');
   await page.getByLabel('Base URL').fill(baseUrl);
   await page.getByLabel('Model ID').fill('vision-test');
@@ -121,7 +131,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await page.getByRole('button', { name: '保存预设' }).click();
   await expect(page.getByText('预设已保存', { exact: true })).toBeVisible();
 
-  await page.getByRole('tab', { name: '图库' }).click();
+  await page.getByRole('tab', { name: '看图' }).click();
   await page.getByRole('button', { name: '开始分析' }).click();
   await expect(page.getByText('可清理背景的人像')).toBeVisible({ timeout: 10_000 });
   await page.getByLabel('搜索图库').fill('自然光');
@@ -153,7 +163,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
   const storageSection = page.locator('.storage-section');
   await storageSection.getByRole('radio', { name: /原图旁便携目录/ }).check();
   await expect(storageSection.getByRole('status')).toContainText('存储策略已保存');
-  await page.getByRole('tab', { name: '图库' }).click();
+  await page.getByRole('tab', { name: '看图' }).click();
   await page.getByRole('button', { name: /加入生成队列/ }).click();
   await expect(page.getByText('V2', { exact: true })).toBeVisible({ timeout: 10_000 });
   await expect(page.getByRole('button', { name: '在文件管理器中显示生成版本' })).toBeEnabled();
@@ -201,7 +211,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
       return '';
     };
   });
-  await page.getByRole('tab', { name: /任务中心/ }).click();
+  await openWorkspaceTab('任务中心');
   const exportTask = page.locator('.task-table-row').filter({ hasText: '导出' }).first();
   await exportTask.getByRole('button', { name: '查看导出报告' }).click();
   const exportReport = page.getByRole('region', { name: '导出报告' });
@@ -209,7 +219,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await expect(exportReport).toContainText('成功 1');
   await exportReport.getByRole('button', { name: '打开导出目录' }).click();
   expect(await electronApp.evaluate(() => (globalThis as typeof globalThis & { openedExportDirectory?: string }).openedExportDirectory)).toBe(exportDirectory);
-  await page.getByRole('tab', { name: '图库' }).click();
+  await page.getByRole('tab', { name: '看图' }).click();
 
   await page.getByRole('button', { name: '版本', exact: true }).click();
   await page.getByRole('button', { name: '回收版本 V1' }).click();
