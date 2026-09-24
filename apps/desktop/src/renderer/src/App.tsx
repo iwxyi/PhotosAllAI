@@ -95,14 +95,15 @@ const DEFAULT_GENERATION_TEMPLATE_BODY = [
 const FOLDER_APPEARANCE_KEY = 'photoallisai.folder-appearance.v1';
 const FOLDER_COLORS = ['none', 'red', 'orange', 'yellow', 'green', 'blue', 'purple'] as const;
 type FolderColor = typeof FOLDER_COLORS[number];
-type FolderAppearance = { collapsed: boolean; colors: Record<string, FolderColor> };
+type FolderAppearance = { sectionCollapsed: boolean; expandedIds: string[]; colors: Record<string, FolderColor> };
 
 function loadFolderAppearance(): FolderAppearance {
   try {
     const saved = JSON.parse(window.localStorage.getItem(FOLDER_APPEARANCE_KEY) ?? '') as Partial<FolderAppearance>;
-    return { collapsed: Boolean(saved.collapsed), colors: saved.colors ?? {} };
+    const legacy = saved as Partial<FolderAppearance> & { collapsed?: boolean };
+    return { sectionCollapsed: Boolean(legacy.sectionCollapsed ?? legacy.collapsed), expandedIds: legacy.expandedIds ?? [], colors: legacy.colors ?? {} };
   } catch {
-    return { collapsed: false, colors: {} };
+    return { sectionCollapsed: false, expandedIds: [], colors: {} };
   }
 }
 
@@ -428,18 +429,48 @@ function Sidebar({
   const [folderRemovalBusy, setFolderRemovalBusy] = useState(false);
   const [folderRemovalError, setFolderRemovalError] = useState('');
   const [folderAppearance, setFolderAppearance] = useState<FolderAppearance>(loadFolderAppearance);
-  const [folderColorMenuId, setFolderColorMenuId] = useState<string | null>(null);
+  const [folderContextMenu, setFolderContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const visibleFolders = isDemo
-    ? demoFolders.map((folder, index) => ({ id: `demo-${index}`, name: folder.name, assetCount: folder.count, offlineCount: 0 }))
+    ? demoFolders.map((folder, index) => ({ id: `demo-${index}`, name: folder.name, assetCount: folder.count, offlineCount: 0, parentId: null, rootId: `demo-${index}`, depth: 0, isRoot: true }))
     : folders;
-  const selectedOfflineFolder = visibleFolders.find((folder) => folder.id === selectedFolderId && folder.offlineCount > 0);
-  const selectedFolder = folders.find((folder) => folder.id === selectedFolderId);
-  const libraryAssetCount = isDemo ? 12_408 : folders.length > 0 ? folders.reduce((sum, folder) => sum + folder.assetCount, 0) : totalCount;
+  const selectedOfflineFolder = visibleFolders.find((folder) => folder.id === selectedFolderId && folder.isRoot && folder.offlineCount > 0);
+  const selectedFolder = folders.find((folder) => folder.id === selectedFolderId && folder.isRoot);
+  const libraryAssetCount = isDemo ? 12_408 : folders.length > 0 ? folders.filter((folder) => folder.isRoot).reduce((sum, folder) => sum + folder.assetCount, 0) : totalCount;
+  const folderChildren = useMemo(() => {
+    const children = new Map<string | null, CatalogFolder[]>();
+    for (const folder of visibleFolders) {
+      const siblings = children.get(folder.parentId) ?? [];
+      siblings.push(folder);
+      children.set(folder.parentId, siblings);
+    }
+    for (const siblings of children.values()) siblings.sort((left, right) => left.name.localeCompare(right.name));
+    return children;
+  }, [visibleFolders]);
+  const displayedFolders = useMemo(() => {
+    const result: CatalogFolder[] = [];
+    const append = (parentId: string | null) => {
+      for (const folder of folderChildren.get(parentId) ?? []) {
+        result.push(folder);
+        if (folderAppearance.expandedIds.includes(folder.id)) append(folder.id);
+      }
+    };
+    append(null);
+    return result;
+  }, [folderAppearance.expandedIds, folderChildren]);
   const recentCount = isDemo ? 248 : smartCollections.find((collection) => collection.id === 'recent')?.assetCount ?? 0;
   const favoriteCount = isDemo ? 86 : smartCollections.find((collection) => collection.id === 'favorites')?.assetCount ?? 0;
   useEffect(() => {
     window.localStorage.setItem(FOLDER_APPEARANCE_KEY, JSON.stringify(folderAppearance));
   }, [folderAppearance]);
+  useEffect(() => {
+    if (!folderContextMenu) return;
+    const close = () => setFolderContextMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') close(); };
+    window.addEventListener('pointerdown', close);
+    window.addEventListener('blur', close);
+    window.addEventListener('keydown', closeOnEscape);
+    return () => { window.removeEventListener('pointerdown', close); window.removeEventListener('blur', close); window.removeEventListener('keydown', closeOnEscape); };
+  }, [folderContextMenu]);
   useEffect(() => {
     if (!folderRemovalCandidate) return;
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -471,23 +502,25 @@ function Sidebar({
 
         <div className="sidebar-section">
           <div className="section-heading">
-            <button className="section-disclosure" type="button" aria-label={folderAppearance.collapsed ? '展开文件夹' : '收起文件夹'} aria-expanded={!folderAppearance.collapsed} onClick={() => setFolderAppearance((current) => ({ ...current, collapsed: !current.collapsed }))}><ChevronRight size={12} /><span>文件夹</span></button>
+            <button className="section-disclosure" type="button" aria-label={folderAppearance.sectionCollapsed ? '展开文件夹区域' : '收起文件夹区域'} aria-expanded={!folderAppearance.sectionCollapsed} onClick={() => setFolderAppearance((current) => ({ ...current, sectionCollapsed: !current.sectionCollapsed }))}><ChevronRight size={12} /><span>文件夹</span></button>
             <span>{selectedOfflineFolder && <button type="button" aria-label={`重新定位 ${selectedOfflineFolder.name}`} title="重新定位离线文件夹" onClick={() => void onRelinkFolder(selectedOfflineFolder.id)}><RotateCcw size={13} /></button>}{selectedFolder && <button type="button" aria-label={`从图库移除文件夹 ${selectedFolder.name}`} title="从图库移除文件夹" onClick={() => { setFolderRemovalError(''); setFolderRemovalCandidate(selectedFolder); }}><FolderMinus size={13} /></button>}<button type="button" aria-label="添加文件夹" onClick={() => void onImportFolders()}><Plus size={13} /></button></span>
           </div>
-          {!folderAppearance.collapsed && visibleFolders.map((folder) => {
+          {!folderAppearance.sectionCollapsed && displayedFolders.map((folder) => {
             const color = folderAppearance.colors[folder.id] ?? 'none';
+            const expanded = folderAppearance.expandedIds.includes(folder.id);
+            const hasChildren = (folderChildren.get(folder.id)?.length ?? 0) > 0;
             return <div className={`folder-entry color-${color}`} key={folder.id}>
-              <button className={`nav-row folder-row${selectedFolderId === folder.id ? ' is-selected' : ''}`} type="button" onClick={() => onSelectFolder(folder.id)}>
+              {hasChildren ? <button className="folder-disclosure" type="button" aria-label={`${expanded ? '收起' : '展开'} ${folder.name}`} aria-expanded={expanded} style={{ left: 3 + folder.depth * 13 }} onClick={() => setFolderAppearance((current) => ({ ...current, expandedIds: expanded ? current.expandedIds.filter((id) => id !== folder.id) : [...current.expandedIds, folder.id] }))}><ChevronRight size={11} className={expanded ? 'is-expanded' : ''} /></button> : <span className="folder-disclosure-spacer" style={{ width: 18, marginLeft: 3 + folder.depth * 13 }} />}
+              <button className={`nav-row folder-row${selectedFolderId === folder.id ? ' is-selected' : ''}`} style={{ paddingLeft: 25 + folder.depth * 13 }} type="button" onClick={() => onSelectFolder(folder.id)} onContextMenu={(event) => { event.preventDefault(); setFolderContextMenu({ id: folder.id, x: event.clientX, y: event.clientY }); }}>
                 <Folder size={15} />
                 <span>{folder.name}</span>
                 <span className="row-count">{folder.offlineCount > 0 ? `离线 ${folder.offlineCount}` : folder.assetCount}</span>
               </button>
-              <button className={`folder-color-trigger color-${color}`} type="button" aria-label={`设置文件夹 ${folder.name} 的颜色`} aria-expanded={folderColorMenuId === folder.id} onClick={() => setFolderColorMenuId((current) => current === folder.id ? null : folder.id)}><span /></button>
-              {folderColorMenuId === folder.id && <div className="folder-color-menu" role="menu" aria-label={`${folder.name} 颜色`}>
-                {FOLDER_COLORS.map((option) => <button className={`color-${option}${color === option ? ' is-active' : ''}`} type="button" role="menuitem" aria-label={option === 'none' ? '无颜色' : `${option} 色`} key={option} onClick={() => { setFolderAppearance((current) => ({ ...current, colors: { ...current.colors, [folder.id]: option } })); setFolderColorMenuId(null); }}><span />{color === option && <Check size={11} />}</button>)}
-              </div>}
             </div>;
           })}
+          {folderContextMenu && <div className="folder-context-menu" role="menu" aria-label="文件夹菜单" style={{ left: Math.min(folderContextMenu.x, Math.max(8, window.innerWidth - 170)), top: Math.min(folderContextMenu.y, Math.max(8, window.innerHeight - 76)) }} onPointerDown={(event) => event.stopPropagation()}>
+            <strong>文件夹颜色</strong><div className="folder-color-dots">{FOLDER_COLORS.map((option) => <button className={`color-${option}${(folderAppearance.colors[folderContextMenu.id] ?? 'none') === option ? ' is-active' : ''}`} type="button" role="menuitem" aria-label={option === 'none' ? '无颜色' : `${option} 色`} key={option} onClick={() => { setFolderAppearance((current) => ({ ...current, colors: { ...current.colors, [folderContextMenu.id]: option } })); setFolderContextMenu(null); }}><span />{(folderAppearance.colors[folderContextMenu.id] ?? 'none') === option && <Check size={10} />}</button>)}</div>
+          </div>}
         </div>
 
         {!isDemo && <div className="sidebar-section"><div className="section-heading"><span>相册</span><button type="button" aria-label="管理相册" onClick={() => { setAlbumManagerOpen(true); setEditingAlbumId(null); setAlbumName(''); }}><Plus size={13} /></button></div>{albums.length === 0 ? <small className="sidebar-empty">暂无相册</small> : albums.map((album) => <button className={`nav-row folder-row${selectedAlbumId === album.id ? ' is-selected' : ''}`} type="button" key={album.id} onClick={() => onSelectAlbum(selectedAlbumId === album.id ? null : album.id)}><FolderHeart size={15} /><span>{album.name}</span><span className="row-count">{album.assetCount}</span></button>)}</div>}
@@ -506,7 +539,7 @@ function Sidebar({
       </div>
       <div className="library-summary">
         <span>本地图库</span>
-        <strong>{isDemo ? demoFolders.length : folders.length} 个文件夹 · {libraryAssetCount.toLocaleString()} 张照片</strong>
+        <strong>{isDemo ? demoFolders.length : folders.filter((folder) => folder.isRoot).length} 个文件夹 · {libraryAssetCount.toLocaleString()} 张照片</strong>
       </div>
       {albumManagerOpen && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !albumBusy) setAlbumManagerOpen(false); }}><form className="album-dialog" role="dialog" aria-modal="true" aria-labelledby="album-dialog-title" onSubmit={async (event) => { event.preventDefault(); if (!albumName.trim() || albumBusy) return; setAlbumBusy(true); try { await window.desktopApi.saveCatalogAlbum({ id: editingAlbumId ?? undefined, name: albumName }); await onRefreshAlbums(); setAlbumName(''); setEditingAlbumId(null); } finally { setAlbumBusy(false); } }}><header><div><span className="dialog-icon"><FolderHeart size={16} /></span><div><h2 id="album-dialog-title">管理相册</h2><p>相册只管理图库关系，不会移动原文件。</p></div></div><IconButton label="关闭相册管理" onClick={() => setAlbumManagerOpen(false)}><X size={15} /></IconButton></header><div className="album-list">{albums.map((album) => <div className={`album-row${editingAlbumId === album.id ? ' is-selected' : ''}`} key={album.id}><button type="button" onClick={() => { setEditingAlbumId(album.id); setAlbumName(album.name); }}><FolderHeart size={14} /><span>{album.name}</span><small>{album.assetCount} 张</small></button><button type="button" aria-label={`删除相册 ${album.name}`} onClick={async () => { if (albumBusy) return; setAlbumBusy(true); try { await window.desktopApi.deleteCatalogAlbum(album.id); if (selectedAlbumId === album.id) onSelectAlbum(null); await onRefreshAlbums(); } finally { setAlbumBusy(false); } }}><Trash2 size={13} /></button></div>)}</div><label className="album-field"><span>{editingAlbumId ? '重命名相册' : '新建相册'}</span><input autoFocus value={albumName} maxLength={120} placeholder="例如：客户交付" onChange={(event) => setAlbumName(event.target.value)} /></label><footer><button className="quiet-button" type="button" onClick={() => setAlbumManagerOpen(false)}>关闭</button><button className="primary-action compact" type="submit" disabled={!albumName.trim() || albumBusy}>{editingAlbumId ? '保存名称' : '创建相册'}</button></footer></form></div>}
       {tagManagerOpen && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !tagBusy) setTagManagerOpen(false); }}><section className="album-dialog tag-dialog" role="dialog" aria-modal="true" aria-labelledby="tag-dialog-title"><header><div><span className="dialog-icon"><Tags size={16} /></span><div><h2 id="tag-dialog-title">管理标签</h2><p>删除标签只会移除标签关系，不会删除照片或文件。</p></div></div><IconButton label="关闭标签管理" disabled={tagBusy} onClick={() => setTagManagerOpen(false)}><X size={15} /></IconButton></header><div className="tag-list">{tags.length === 0 ? <div className="operation-history-empty">暂无可管理标签</div> : tags.map((tag) => <div className={`tag-manager-row${tagDeleteCandidate === tag.id ? ' is-pending' : ''}`} key={tag.id}><span><strong>{tag.name}</strong><small>{tag.assetCount} 张照片</small></span>{tagDeleteCandidate === tag.id ? <div><button className="quiet-button" type="button" disabled={tagBusy} onClick={() => setTagDeleteCandidate(null)}>取消</button><button className="danger-action compact" type="button" disabled={tagBusy} onClick={async () => { setTagBusy(true); try { await window.desktopApi.deleteCatalogTag(tag.id); if (selectedTagId === tag.id) onSelectTag(null); await onRefreshAlbums(); setTagDeleteCandidate(null); } finally { setTagBusy(false); } }}>确认删除</button></div> : <button type="button" aria-label={`删除标签 ${tag.name}`} onClick={() => setTagDeleteCandidate(tag.id)}><Trash2 size={13} /></button>}</div>)}</div><footer><button className="quiet-button" type="button" disabled={tagBusy} onClick={() => setTagManagerOpen(false)}>关闭</button></footer></section></div>}
@@ -677,7 +710,7 @@ function Viewer({
     setPan({ x: 0, y: 0 });
   }, [photo.id, latestResultId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const container = canvasWrapRef.current;
     if (!container) return;
     const fit = () => {
@@ -2777,6 +2810,7 @@ export function App(): React.JSX.Element {
   const [selectedSmartCollection, setSelectedSmartCollection] = useState<CatalogSmartCollection['id'] | null>(null);
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [viewerPreloading, setViewerPreloading] = useState(false);
   const [catalogTotal, setCatalogTotal] = useState(0);
   const [nextCursor, setNextCursor] = useState<CatalogAssetCursor | null>(null);
   const [catalogReady, setCatalogReady] = useState(false);
@@ -2995,16 +3029,43 @@ export function App(): React.JSX.Element {
     onOpenTaskCenter: () => openWorkspaceTab('tasks'),
     onOpenTemplates: () => openWorkspaceTab('templates')
   };
-  const openViewer = (assetId: string) => {
-    setSelectedAssetId(assetId);
-    openWorkspaceTab('viewer');
+  const openViewer = async (assetId: string) => {
+    const photo = availablePhotos.find((item) => item.id === assetId);
+    if (!photo || activeTab === 'viewer' && selectedAssetId === assetId) {
+      setSelectedAssetId(assetId);
+      openWorkspaceTab('viewer');
+      return;
+    }
+    setViewerPreloading(true);
+    try {
+      if (photo.src) {
+        const image = new window.Image();
+        await new Promise<void>((resolve) => {
+          let settled = false;
+          const finish = () => { if (settled) return; settled = true; resolve(); };
+          const decode = () => { void image.decode().then(finish, finish); };
+          image.onload = decode;
+          image.onerror = finish;
+          window.setTimeout(finish, 1_500);
+          image.src = photo.src;
+          if (image.complete) {
+            if (image.naturalWidth > 0) decode();
+            else finish();
+          }
+        });
+      }
+      setSelectedAssetId(assetId);
+      openWorkspaceTab('viewer');
+    } finally {
+      setViewerPreloading(false);
+    }
   };
 
   return (
     <div className="app-shell">
       <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
       {!sessionReady || !catalogReady ? <main className="workspace-loading"><span className="working-pulse" /><span>{sessionReady ? '正在读取图库' : '正在恢复工作区'}</span></main>
-        : activeTab === 'library' ? <CatalogWorkspace {...workspaceProps} onOpenViewer={openViewer} />
+        : activeTab === 'library' ? <><CatalogWorkspace {...workspaceProps} onOpenViewer={(assetId) => void openViewer(assetId)} />{viewerPreloading && <div className="viewer-preload-indicator" role="status"><span className="working-pulse" />正在准备预览</div>}</>
           : activeTab === 'viewer' ? <LibraryWorkspace {...workspaceProps} />
             : activeTab === 'settings' ? <SettingsPage onExportPresetsChange={setExportPresets} />
               : activeTab === 'tasks' ? <TaskCenterPage onCatalogChanged={refreshCatalog} />

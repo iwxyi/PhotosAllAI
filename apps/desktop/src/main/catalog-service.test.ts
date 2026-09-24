@@ -43,7 +43,7 @@ describe('catalog image discovery', () => {
 
     expect(imported).toBe(2);
     expect(assets.map((asset) => asset.fileName).sort()).toEqual(['raw.NEF', 'visible.jpg']);
-    expect(catalog.listFolders()).toEqual([{ id: assets[0]?.folderId, name: 'photos', assetCount: 2, offlineCount: 0 }]);
+    expect(catalog.listFolders()).toEqual([expect.objectContaining({ id: assets[0]?.folderId, name: 'photos', assetCount: 2, offlineCount: 0, parentId: null, rootId: assets[0]?.folderId, depth: 0, isRoot: true })]);
     const updated = catalog.updateMetadata({ assetIds: assets.map((asset) => asset.id), rating: 4 });
     expect(updated.every((asset) => asset.rating === 4)).toBe(true);
     const firstPage = catalog.listAssetPage({ folderId: null, cursor: null, limit: 1 });
@@ -97,6 +97,27 @@ describe('catalog image discovery', () => {
     expect(catalog.listTags().some((tag) => tag.id === portraitTag.id)).toBe(false);
     expect(assets.find((asset) => asset.fileName === 'visible.jpg')?.thumbnailUrl).toMatch(/^photoasset:\/\/thumbnail/);
     expect(assets.find((asset) => asset.fileName === 'raw.NEF')?.previewUrl).toMatch(/^photoasset:\/\/preview/);
+    catalog.close();
+  });
+
+  it('exposes nested folders and filters assets recursively', async () => {
+    const root = await createTemporaryDirectory();
+    const source = path.join(root, 'library');
+    await mkdir(path.join(source, '2026', '春季'), { recursive: true });
+    await mkdir(path.join(source, '2026', '夏季'), { recursive: true });
+    await writeFile(path.join(source, '2026', '春季', 'one.jpg'), 'one');
+    await writeFile(path.join(source, '2026', '夏季', 'two.jpg'), 'two');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([source]);
+    const folders = catalog.listFolders();
+    const rootFolder = folders.find((folder) => folder.isRoot)!;
+    const year = folders.find((folder) => folder.name === '2026')!;
+    const spring = folders.find((folder) => folder.name === '春季')!;
+    expect(year.parentId).toBe(rootFolder.id);
+    expect(spring.parentId).toBe(year.id);
+    expect(year.assetCount).toBe(2);
+    const page = catalog.listAssetPage({ folderId: year.id, cursor: null, limit: 20 });
+    expect(page.items.map((asset) => asset.fileName).sort()).toEqual(['one.jpg', 'two.jpg']);
     catalog.close();
   });
 

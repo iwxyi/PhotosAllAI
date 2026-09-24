@@ -40,9 +40,11 @@ suite('real photo catalog', () => {
       expect(fileNames.every((fileName) => isSupportedImage(fileName))).toBe(true);
       expect(countByExtension(fileNames)).toEqual(expectedExtensions);
     }
-    expect(catalog.listFolders()).toEqual([
-      expect.objectContaining({ name: path.basename(source), assetCount: imported })
+    const folders = catalog.listFolders();
+    expect(folders.filter((folder) => folder.isRoot)).toEqual([
+      expect.objectContaining({ name: path.basename(source), assetCount: imported, parentId: null })
     ]);
+    expect(folders.filter((folder) => !folder.isRoot).every((folder) => folders.some((parent) => parent.id === folder.parentId && parent.depth === folder.depth - 1))).toBe(true);
     expect(await inventoryFiles(source)).toEqual(sourceBefore);
     catalog.close();
   });

@@ -229,7 +229,11 @@ export const catalogFolderSchema = z.object({
   id: z.string(),
   name: z.string().min(1),
   assetCount: z.number().int().nonnegative(),
-  offlineCount: z.number().int().nonnegative()
+  offlineCount: z.number().int().nonnegative(),
+  parentId: z.string().nullable().default(null),
+  rootId: z.string(),
+  depth: z.number().int().nonnegative().default(0),
+  isRoot: z.boolean().default(true)
 });
 
 export type CatalogFolder = z.infer<typeof catalogFolderSchema>;

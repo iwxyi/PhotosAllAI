@@ -114,14 +114,14 @@ test('supports mouse and trackpad navigation in the viewer', async () => {
 
 test('supports folder appearance and professional catalog selection', async () => {
   await page.getByRole('tab', { name: '图库' }).click();
-  const folderDisclosure = page.getByRole('button', { name: '收起文件夹' });
+  const folderDisclosure = page.getByRole('button', { name: '收起文件夹区域' });
   await folderDisclosure.click();
-  await expect(page.getByRole('button', { name: '展开文件夹' })).toBeVisible();
-  await page.getByRole('button', { name: '展开文件夹' }).click();
-  const colorButton = page.getByRole('button', { name: /设置文件夹 .* 的颜色/ }).first();
-  await colorButton.click();
+  await expect(page.getByRole('button', { name: '展开文件夹区域' })).toBeVisible();
+  await page.getByRole('button', { name: '展开文件夹区域' }).click();
+  const folderEntry = page.locator('.folder-entry').first();
+  await folderEntry.locator('.folder-row').click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'red 色' }).click();
-  await expect(colorButton).toHaveClass(/color-red/);
+  await expect(folderEntry).toHaveClass(/color-red/);
 
   const cards = page.locator('.catalog-card');
   await expect(cards.nth(0).locator('.catalog-card-meta svg')).toHaveCount(5);

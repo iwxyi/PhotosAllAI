@@ -89,7 +89,9 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await expect(page.getByText('MOVE_ME.jpg', { exact: true }).first()).toBeVisible();
   await expect(page.getByRole('button', { name: /target 1/ })).toBeVisible();
   await page.getByRole('button', { name: /target 1/ }).click();
-  await expect(page.getByText('1 张照片', { exact: true })).toBeVisible();
+  await expect(page.getByRole('main').getByText('1 张照片', { exact: true })).toBeVisible();
+  await page.locator('.catalog-card').first().dblclick();
+  await expect(page.getByRole('button', { name: '复制到文件夹' })).toBeVisible();
 
   await page.getByRole('button', { name: '复制到文件夹' }).click();
   const copyDialog = page.getByRole('dialog', { name: '复制 1 张照片' });

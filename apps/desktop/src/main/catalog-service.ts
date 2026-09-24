@@ -77,6 +77,10 @@ function stableFolderId(folderPath: string): string {
   return createHash('sha256').update(folderPath).digest('hex').slice(0, 32);
 }
 
+function stableDirectoryId(rootId: string, relativePath: string): string {
+  return createHash('sha256').update(`${rootId}\0${normalizeRelativePath(relativePath)}`).digest('hex').slice(0, 32);
+}
+
 async function* walkImages(root: string): AsyncGenerator<string> {
   const directories = [root];
 
@@ -286,8 +290,15 @@ export class CatalogService {
     const baseConditions: string[] = ['removed_at IS NULL'];
     const baseValues: (string | number)[] = [];
     if (input.folderId) {
-      baseConditions.push('folder_id = ?');
-      baseValues.push(input.folderId);
+      const directory = this.#resolveDirectory(input.folderId);
+      if (directory?.relativePath) {
+        baseConditions.push('folder_id = ? AND (path = ? OR path LIKE ? ESCAPE \'\\\')');
+        const absolute = path.join(directory.rootPath, directory.relativePath);
+        baseValues.push(directory.rootId, absolute, `${escapeLike(absolute + path.sep)}%`);
+      } else {
+        baseConditions.push('folder_id = ?');
+        baseValues.push(directory?.rootId ?? input.folderId);
+      }
     }
     if (input.tagId) {
       baseConditions.push('id IN (SELECT asset_id FROM asset_tags WHERE tag_id = ?)');
@@ -386,21 +397,73 @@ export class CatalogService {
   }
 
   listFolders(): CatalogFolder[] {
-    const rows = this.#database.prepare(`
-      SELECT folders.id, folders.name, COUNT(assets.id) AS asset_count,
-        SUM(CASE WHEN assets.offline_at IS NOT NULL THEN 1 ELSE 0 END) AS offline_count
-      FROM folders
-      LEFT JOIN assets ON assets.folder_id = folders.id AND assets.removed_at IS NULL
-      WHERE folders.removed_at IS NULL
-      GROUP BY folders.id, folders.name
-      ORDER BY folders.name COLLATE NOCASE ASC, folders.id ASC
-    `).all() as { id: string; name: string; asset_count: number; offline_count: number | null }[];
-    return rows.map((row) => catalogFolderSchema.parse({
-      id: row.id,
-      name: row.name,
-      assetCount: row.asset_count,
-      offlineCount: row.offline_count ?? 0
-    }));
+    const roots = this.#database.prepare(`
+      SELECT id, path, name FROM folders WHERE removed_at IS NULL
+      ORDER BY name COLLATE NOCASE ASC, id ASC
+    `).all() as { id: string; path: string; name: string }[];
+    const assets = this.#database.prepare(`
+      SELECT folder_id, path, offline_at FROM assets WHERE removed_at IS NULL
+    `).all() as { folder_id: string; path: string; offline_at: number | null }[];
+    const assetsByRoot = new Map<string, typeof assets>();
+    for (const asset of assets) {
+      const items = assetsByRoot.get(asset.folder_id) ?? [];
+      items.push(asset);
+      assetsByRoot.set(asset.folder_id, items);
+    }
+    const result: CatalogFolder[] = [];
+    for (const root of roots) {
+      const rootAssets = assetsByRoot.get(root.id) ?? [];
+      result.push(catalogFolderSchema.parse({ id: root.id, name: root.name, assetCount: rootAssets.length, offlineCount: rootAssets.filter((asset) => asset.offline_at !== null).length, parentId: null, rootId: root.id, depth: 0, isRoot: true }));
+      const directories = new Map<string, { assetCount: number; offlineCount: number }>();
+      for (const asset of rootAssets) {
+        const relativeDirectory = path.relative(root.path, path.dirname(asset.path));
+        if (!relativeDirectory || relativeDirectory === '.' || relativeDirectory.startsWith(`..${path.sep}`) || path.isAbsolute(relativeDirectory)) continue;
+        const parts = relativeDirectory.split(path.sep).filter(Boolean);
+        for (let depth = 1; depth <= parts.length; depth += 1) {
+          const relativePath = parts.slice(0, depth).join(path.sep);
+          const current = directories.get(relativePath) ?? { assetCount: 0, offlineCount: 0 };
+          current.assetCount += 1;
+          if (asset.offline_at !== null) current.offlineCount += 1;
+          directories.set(relativePath, current);
+        }
+      }
+      for (const [relativePath, counts] of [...directories].sort(([left], [right]) => left.localeCompare(right))) {
+        const parentPath = path.dirname(relativePath);
+        result.push(catalogFolderSchema.parse({
+          id: stableDirectoryId(root.id, relativePath),
+          name: path.basename(relativePath),
+          assetCount: counts.assetCount,
+          offlineCount: counts.offlineCount,
+          parentId: parentPath === '.' ? root.id : stableDirectoryId(root.id, parentPath),
+          rootId: root.id,
+          depth: relativePath.split(path.sep).length,
+          isRoot: false
+        }));
+      }
+    }
+    return result;
+  }
+
+  #resolveDirectory(directoryId: string): { rootId: string; rootPath: string; relativePath: string } | null {
+    const roots = this.#database.prepare('SELECT id, path FROM folders WHERE removed_at IS NULL').all() as { id: string; path: string }[];
+    for (const root of roots) {
+      if (root.id === directoryId) return { rootId: root.id, rootPath: root.path, relativePath: '' };
+      const paths = this.#database.prepare('SELECT path FROM assets WHERE folder_id = ? AND removed_at IS NULL').all(root.id) as { path: string }[];
+      const checked = new Set<string>();
+      for (const item of paths) {
+        let relativePath = path.relative(root.path, path.dirname(item.path));
+        while (relativePath && relativePath !== '.' && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath)) {
+          if (!checked.has(relativePath)) {
+            if (stableDirectoryId(root.id, relativePath) === directoryId) return { rootId: root.id, rootPath: root.path, relativePath };
+            checked.add(relativePath);
+          }
+          const parent = path.dirname(relativePath);
+          if (parent === relativePath || parent === '.') break;
+          relativePath = parent;
+        }
+      }
+    }
+    return null;
   }
 
   unregisterFolder(folderId: string): UnregisterCatalogFolderReport {
