@@ -439,6 +439,8 @@ function Sidebar({
   const [albumName, setAlbumName] = useState('');
   const [editingAlbumId, setEditingAlbumId] = useState<string | null>(null);
   const [albumBusy, setAlbumBusy] = useState(false);
+  const [albumContextMenu, setAlbumContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [albumDeleteCandidate, setAlbumDeleteCandidate] = useState<CatalogAlbum | null>(null);
   const [tagManagerOpen, setTagManagerOpen] = useState(false);
   const [tagDeleteCandidate, setTagDeleteCandidate] = useState<string | null>(null);
   const [tagBusy, setTagBusy] = useState(false);
@@ -453,7 +455,6 @@ function Sidebar({
     ? demoFolders.map((folder, index) => ({ id: `demo-${index}`, name: folder.name, assetCount: folder.count, offlineCount: 0, parentId: null, rootId: `demo-${index}`, depth: 0, isRoot: true }))
     : folders;
   const selectedOfflineFolder = visibleFolders.find((folder) => folder.id === selectedFolderId && folder.isRoot && folder.offlineCount > 0);
-  const selectedFolder = folders.find((folder) => folder.id === selectedFolderId && folder.isRoot);
   const libraryAssetCount = isDemo ? 12_408 : folders.length > 0 ? folders.filter((folder) => folder.isRoot).reduce((sum, folder) => sum + folder.assetCount, 0) : totalCount;
   const folderChildren = useMemo(() => {
     const children = new Map<string | null, CatalogFolder[]>();
@@ -481,18 +482,19 @@ function Sidebar({
   const contextFolder = folderContextMenu ? visibleFolders.find((folder) => folder.id === folderContextMenu.id) : undefined;
   const contextHasChildren = contextFolder ? (folderChildren.get(contextFolder.id)?.length ?? 0) > 0 : false;
   const contextExpanded = contextFolder ? folderAppearance.expandedIds.includes(contextFolder.id) : false;
+  const contextAlbum = albumContextMenu ? albums.find((album) => album.id === albumContextMenu.id) : undefined;
   useEffect(() => {
     window.localStorage.setItem(FOLDER_APPEARANCE_KEY, JSON.stringify(folderAppearance));
   }, [folderAppearance]);
   useEffect(() => {
-    if (!folderContextMenu) return;
-    const close = () => setFolderContextMenu(null);
+    if (!folderContextMenu && !albumContextMenu) return;
+    const close = () => { setFolderContextMenu(null); setAlbumContextMenu(null); };
     const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') close(); };
     window.addEventListener('pointerdown', close);
     window.addEventListener('blur', close);
     window.addEventListener('keydown', closeOnEscape);
     return () => { window.removeEventListener('pointerdown', close); window.removeEventListener('blur', close); window.removeEventListener('keydown', closeOnEscape); };
-  }, [folderContextMenu]);
+  }, [albumContextMenu, folderContextMenu]);
   useEffect(() => {
     if (!folderRemovalCandidate) return;
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -525,7 +527,7 @@ function Sidebar({
         <div className="sidebar-section">
           <div className="section-heading">
             <button className="section-disclosure" type="button" aria-label={folderAppearance.sectionCollapsed ? '展开文件夹区域' : '收起文件夹区域'} aria-expanded={!folderAppearance.sectionCollapsed} onClick={() => setFolderAppearance((current) => ({ ...current, sectionCollapsed: !current.sectionCollapsed }))}><ChevronRight size={12} /><span>文件夹</span></button>
-            <span>{selectedOfflineFolder && <button type="button" aria-label={`重新定位 ${selectedOfflineFolder.name}`} title="重新定位离线文件夹" onClick={() => void onRelinkFolder(selectedOfflineFolder.id)}><RotateCcw size={13} /></button>}{selectedFolder && <button type="button" aria-label={`从图库移除文件夹 ${selectedFolder.name}`} title="从图库移除文件夹" onClick={() => { setFolderRemovalError(''); setFolderRemovalCandidate(selectedFolder); }}><FolderMinus size={13} /></button>}<button type="button" aria-label="添加文件夹" onClick={() => void onImportFolders()}><Plus size={13} /></button></span>
+            <span>{selectedOfflineFolder && <button type="button" aria-label={`重新定位 ${selectedOfflineFolder.name}`} title="重新定位离线文件夹" onClick={() => void onRelinkFolder(selectedOfflineFolder.id)}><RotateCcw size={13} /></button>}<button type="button" aria-label="添加文件夹" onClick={() => void onImportFolders()}><Plus size={13} /></button></span>
           </div>
           {!folderAppearance.sectionCollapsed && displayedFolders.map((folder) => {
             const color = folderAppearance.colors[folder.id] ?? 'none';
@@ -552,7 +554,14 @@ function Sidebar({
           </div>}
         </div>
 
-        {!isDemo && <div className="sidebar-section"><div className="section-heading"><span>相册</span><button type="button" aria-label="管理相册" onClick={() => { setAlbumManagerOpen(true); setEditingAlbumId(null); setAlbumName(''); }}><Plus size={13} /></button></div>{albums.length === 0 ? <small className="sidebar-empty">暂无相册</small> : albums.map((album) => <button className={`nav-row folder-row${selectedAlbumId === album.id ? ' is-selected' : ''}`} type="button" key={album.id} onClick={() => onSelectAlbum(selectedAlbumId === album.id ? null : album.id)}><FolderHeart size={15} /><span>{album.name}</span><span className="row-count">{album.assetCount}</span></button>)}</div>}
+        {!isDemo && <div className="sidebar-section"><div className="section-heading"><span>相册</span><button type="button" aria-label="新建相册" onClick={() => { setAlbumManagerOpen(true); setEditingAlbumId(null); setAlbumName(''); }}><Plus size={13} /></button></div>{albums.length === 0 ? <small className="sidebar-empty">暂无相册</small> : albums.map((album) => <button className={`nav-row folder-row${selectedAlbumId === album.id ? ' is-selected' : ''}`} type="button" key={album.id} onClick={() => onSelectAlbum(selectedAlbumId === album.id ? null : album.id)} onContextMenu={(event) => { event.preventDefault(); setFolderContextMenu(null); setAlbumContextMenu({ id: album.id, x: event.clientX, y: event.clientY }); }}><FolderHeart size={15} /><span>{album.name}</span><span className="row-count">{album.assetCount}</span></button>)}</div>}
+        {albumContextMenu && contextAlbum && <div className="folder-context-menu album-context-menu" role="menu" aria-label={`相册菜单 ${contextAlbum.name}`} style={{ left: Math.min(albumContextMenu.x, Math.max(8, window.innerWidth - 224)), top: Math.min(albumContextMenu.y, Math.max(8, window.innerHeight - 150)) }} onPointerDown={(event) => event.stopPropagation()}>
+          <div className="folder-menu-title"><FolderHeart size={14} /><span>{contextAlbum.name}</span></div>
+          <button type="button" role="menuitem" onClick={() => { onSelectAlbum(contextAlbum.id); setAlbumContextMenu(null); }}><GalleryHorizontalEnd size={14} /><span>在图库中显示</span></button>
+          <button type="button" role="menuitem" onClick={() => { setEditingAlbumId(contextAlbum.id); setAlbumName(contextAlbum.name); setAlbumManagerOpen(true); setAlbumContextMenu(null); }}><FilePenLine size={14} /><span>重命名相册…</span></button>
+          <span className="folder-menu-separator" />
+          <button className="is-danger" type="button" role="menuitem" onClick={() => { setAlbumDeleteCandidate(contextAlbum); setAlbumContextMenu(null); }}><Trash2 size={14} /><span>删除相册…</span></button>
+        </div>}
 
         <div className="sidebar-section">
           <div className="section-heading"><span>智能集合</span></div>
@@ -573,6 +582,7 @@ function Sidebar({
       {albumManagerOpen && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !albumBusy) setAlbumManagerOpen(false); }}><form className="album-dialog" role="dialog" aria-modal="true" aria-labelledby="album-dialog-title" onSubmit={async (event) => { event.preventDefault(); if (!albumName.trim() || albumBusy) return; setAlbumBusy(true); try { await window.desktopApi.saveCatalogAlbum({ id: editingAlbumId ?? undefined, name: albumName }); await onRefreshAlbums(); setAlbumName(''); setEditingAlbumId(null); } finally { setAlbumBusy(false); } }}><header><div><span className="dialog-icon"><FolderHeart size={16} /></span><div><h2 id="album-dialog-title">管理相册</h2><p>相册只管理图库关系，不会移动原文件。</p></div></div><IconButton label="关闭相册管理" onClick={() => setAlbumManagerOpen(false)}><X size={15} /></IconButton></header><div className="album-list">{albums.map((album) => <div className={`album-row${editingAlbumId === album.id ? ' is-selected' : ''}`} key={album.id}><button type="button" onClick={() => { setEditingAlbumId(album.id); setAlbumName(album.name); }}><FolderHeart size={14} /><span>{album.name}</span><small>{album.assetCount} 张</small></button><button type="button" aria-label={`删除相册 ${album.name}`} onClick={async () => { if (albumBusy) return; setAlbumBusy(true); try { await window.desktopApi.deleteCatalogAlbum(album.id); if (selectedAlbumId === album.id) onSelectAlbum(null); await onRefreshAlbums(); } finally { setAlbumBusy(false); } }}><Trash2 size={13} /></button></div>)}</div><label className="album-field"><span>{editingAlbumId ? '重命名相册' : '新建相册'}</span><input autoFocus value={albumName} maxLength={120} placeholder="例如：客户交付" onChange={(event) => setAlbumName(event.target.value)} /></label><footer><button className="quiet-button" type="button" onClick={() => setAlbumManagerOpen(false)}>关闭</button><button className="primary-action compact" type="submit" disabled={!albumName.trim() || albumBusy}>{editingAlbumId ? '保存名称' : '创建相册'}</button></footer></form></div>}
       {tagManagerOpen && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !tagBusy) setTagManagerOpen(false); }}><section className="album-dialog tag-dialog" role="dialog" aria-modal="true" aria-labelledby="tag-dialog-title"><header><div><span className="dialog-icon"><Tags size={16} /></span><div><h2 id="tag-dialog-title">管理标签</h2><p>删除标签只会移除标签关系，不会删除照片或文件。</p></div></div><IconButton label="关闭标签管理" disabled={tagBusy} onClick={() => setTagManagerOpen(false)}><X size={15} /></IconButton></header><div className="tag-list">{tags.length === 0 ? <div className="operation-history-empty">暂无可管理标签</div> : tags.map((tag) => <div className={`tag-manager-row${tagDeleteCandidate === tag.id ? ' is-pending' : ''}`} key={tag.id}><span><strong>{tag.name}</strong><small>{tag.assetCount} 张照片</small></span>{tagDeleteCandidate === tag.id ? <div><button className="quiet-button" type="button" disabled={tagBusy} onClick={() => setTagDeleteCandidate(null)}>取消</button><button className="danger-action compact" type="button" disabled={tagBusy} onClick={async () => { setTagBusy(true); try { await window.desktopApi.deleteCatalogTag(tag.id); if (selectedTagId === tag.id) onSelectTag(null); await onRefreshAlbums(); setTagDeleteCandidate(null); } finally { setTagBusy(false); } }}>确认删除</button></div> : <button type="button" aria-label={`删除标签 ${tag.name}`} onClick={() => setTagDeleteCandidate(tag.id)}><Trash2 size={13} /></button>}</div>)}</div><footer><button className="quiet-button" type="button" disabled={tagBusy} onClick={() => setTagManagerOpen(false)}>关闭</button></footer></section></div>}
       {folderRemovalCandidate && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !folderRemovalBusy) setFolderRemovalCandidate(null); }}><section className="removal-dialog" role="alertdialog" aria-modal="true" aria-labelledby="folder-removal-title" aria-describedby="folder-removal-description"><header><span className="dialog-icon"><FolderMinus size={17} /></span><div><h2 id="folder-removal-title">从图库移除文件夹「{folderRemovalCandidate.name}」？</h2><p id="folder-removal-description">只会取消此图库对文件夹的管理，不会删除、移动或修改磁盘上的任何文件。</p></div></header><div className="removal-impact"><Info size={15} /><span>其中 {folderRemovalCandidate.assetCount} 张照片会从图库和搜索结果中隐藏。AI 分析、生成版本、评分、标签和相册关系都会保留，重新导入同一路径后自动恢复。</span></div>{folderRemovalError && <div className="folder-removal-error" role="alert"><CircleAlert size={14} /><span>{folderRemovalError}</span></div>}<footer><button autoFocus className="quiet-button" type="button" disabled={folderRemovalBusy} onClick={() => setFolderRemovalCandidate(null)}>取消</button><button className="primary-action compact" type="button" disabled={folderRemovalBusy} onClick={async () => { setFolderRemovalBusy(true); setFolderRemovalError(''); try { await onUnregisterFolder(folderRemovalCandidate.id); setFolderRemovalCandidate(null); } catch (error) { const message = error instanceof Error ? error.message : String(error); setFolderRemovalError(message.includes('FOLDER_HAS_ACTIVE_TASKS') ? '此文件夹仍有正在运行或等待中的 AI 任务，请先取消或完成任务。' : message.includes('FOLDER_HAS_ACTIVE_FILE_OPERATIONS') ? '此文件夹仍有未完成的文件操作，请等待操作完成或恢复后重试。' : '无法移除此文件夹。请刷新图库后重试。'); } finally { setFolderRemovalBusy(false); } }}>{folderRemovalBusy ? '正在移除…' : '仅从图库移除'}</button></footer></section></div>}
+      {albumDeleteCandidate && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !albumBusy) setAlbumDeleteCandidate(null); }}><section className="removal-dialog" role="alertdialog" aria-modal="true" aria-labelledby="album-removal-title"><header><span className="dialog-icon"><Trash2 size={17} /></span><div><h2 id="album-removal-title">删除相册「{albumDeleteCandidate.name}」？</h2><p>只删除相册及其照片关系，不会删除或移动任何原图和 AI 生成版本。</p></div></header><div className="removal-impact"><Info size={15} /><span>相册内的 {albumDeleteCandidate.assetCount} 张照片仍会保留在图库和原文件夹中。</span></div><footer><button autoFocus className="quiet-button" type="button" disabled={albumBusy} onClick={() => setAlbumDeleteCandidate(null)}>取消</button><button className="danger-action" type="button" disabled={albumBusy} onClick={async () => { setAlbumBusy(true); try { await window.desktopApi.deleteCatalogAlbum(albumDeleteCandidate.id); if (selectedAlbumId === albumDeleteCandidate.id) onSelectAlbum(null); await onRefreshAlbums(); setAlbumDeleteCandidate(null); } finally { setAlbumBusy(false); } }}>{albumBusy ? '正在删除…' : '删除相册'}</button></footer></section></div>}
       {folderActionNotice && <div className="operation-toast" role="status">{folderActionNotice}<button type="button" aria-label="关闭文件夹提示" onClick={() => setFolderActionNotice('')}><X size={13} /></button></div>}
     </aside>
   );
@@ -591,7 +601,8 @@ function Filmstrip({
   onSortByChange,
   hasMore,
   loading,
-  onLoadMore
+  onLoadMore,
+  onOpenContextMenu
 }: {
   items: Photo[];
   selected: Photo;
@@ -606,6 +617,7 @@ function Filmstrip({
   hasMore: boolean;
   loading: boolean;
   onLoadMore: () => void;
+  onOpenContextMenu: (event: React.MouseEvent, photo: Photo) => void;
 }): React.JSX.Element {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState({ width: 0, scrollLeft: 0 });
@@ -655,6 +667,7 @@ function Filmstrip({
               photo,
               event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace'
             )}
+            onContextMenu={(event) => onOpenContextMenu(event, photo)}
             role="option"
             aria-selected={selection.selectedIds.has(photo.id)}
             type="button"
@@ -685,18 +698,10 @@ function Viewer({
   trackedExportNotice,
   onExportPresetChange,
   onExport,
-  onRate,
-  onFavorite,
   onRegenerate,
-  onEditTags,
-  onMove,
-  onCopy,
-  onRename,
-  onRemove,
-  onTrash,
   onReview,
-  onRevealOriginal,
-  onRevealResult
+  onRevealResult,
+  onOpenContextMenu
 }: {
   photo: Photo;
   results: GenerationResult[];
@@ -706,18 +711,10 @@ function Viewer({
   trackedExportNotice: string;
   onExportPresetChange: (presetId: string | null) => void;
   onExport: (resultIds: string[], presetId?: string | null) => Promise<string>;
-  onRate: (rating: number) => void;
-  onFavorite: (favorite: boolean) => void;
   onRegenerate: (result: GenerationResult) => Promise<string>;
-  onEditTags: () => void;
-  onMove: () => void;
-  onCopy: () => void;
-  onRename: () => void;
-  onRemove: () => void;
-  onTrash: () => void;
   onReview: (resultId: string, reviewState: GenerationResult['reviewState']) => Promise<void>;
-  onRevealOriginal: () => void;
   onRevealResult: (resultId: string) => void;
+  onOpenContextMenu: (event: React.MouseEvent) => void;
 }): React.JSX.Element {
   const [compareMode, setCompareMode] = useState<CompareMode>('single');
   const [split, setSplit] = useState(52);
@@ -814,7 +811,7 @@ function Viewer({
           {selectedResult && !isDemo && <span className="review-actions"><button type="button" aria-label="接受当前版本" className={selectedResult.reviewState === 'accepted' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'accepted')}>接受</button><button type="button" aria-label="标记为首选" className={selectedResult.reviewState === 'preferred' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'preferred')}><Star size={12} />首选</button><button type="button" aria-label="拒绝当前版本" className={selectedResult.reviewState === 'rejected' ? 'is-review-rejected' : ''} onClick={() => void onReview(selectedResult.id, 'rejected')}>拒绝</button></span>}
         </div>
       </div>
-      <div className={`canvas-wrap${zoom > 1 ? ' is-zoomed' : ''}`} ref={canvasWrapRef} onWheel={(event) => {
+      <div className={`canvas-wrap${zoom > 1 ? ' is-zoomed' : ''}`} ref={canvasWrapRef} onContextMenu={onOpenContextMenu} onWheel={(event) => {
         if (event.ctrlKey || event.metaKey || event.deltaMode !== WheelEvent.DOM_DELTA_PIXEL) {
           event.preventDefault();
           adjustZoom(event.deltaY < 0 ? 1.12 : 0.89);
@@ -873,7 +870,6 @@ function Viewer({
         </div>
       </div>
       <div className="viewer-footer">
-        <div className="viewer-meta-actions"><div className="rating">{[1, 2, 3, 4, 5].map((value) => <button type="button" aria-label={`设置评分 ${value}`} key={value} onClick={() => onRate(photo.rating === value ? 0 : value)}><Star size={13} fill={value <= photo.rating ? 'currentColor' : 'none'} /></button>)}</div>{!isDemo && <IconButton label={photo.favorite ? '取消收藏照片' : '收藏照片'} active={Boolean(photo.favorite)} pressed={Boolean(photo.favorite)} onClick={() => onFavorite(!photo.favorite)}><Heart size={13} fill={photo.favorite ? 'currentColor' : 'none'} /></IconButton>}{!isDemo && <><IconButton label="在文件管理器中显示原图" onClick={onRevealOriginal}><FolderOpen size={13} /></IconButton><IconButton label="重命名照片" onClick={onRename}><FilePenLine size={13} /></IconButton><IconButton label="复制到文件夹" onClick={onCopy}><Copy size={13} /></IconButton><IconButton label="移动到文件夹" onClick={onMove}><FolderInput size={13} /></IconButton><IconButton label="仅从图库移除" onClick={onRemove}><LibraryBig size={13} /></IconButton><IconButton label="移到系统回收站" onClick={onTrash}><Trash2 size={13} /></IconButton></>}<IconButton label="添加标签" onClick={onEditTags}><Tags size={13} /></IconButton></div>
         <div className="version-switcher">
           <button type="button" onMouseDown={() => setShowOriginal(true)} onMouseUp={() => setShowOriginal(false)} onMouseLeave={() => setShowOriginal(false)}>
             按住查看原图 <kbd>O</kbd>
@@ -1202,6 +1198,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
     setSelection(next);
     props.onSelectedAssetChange(photo.id);
   };
+
   const moveGridFocus = (event: React.KeyboardEvent<HTMLElement>) => {
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) || orderedIds.length === 0) return;
     event.preventDefault();
@@ -1418,6 +1415,7 @@ function PopulatedLibraryWorkspace({
   const [removalMode, setRemovalMode] = useState<'remove' | 'trash' | null>(null);
   const [removalBusy, setRemovalBusy] = useState(false);
   const [albumTargetId, setAlbumTargetId] = useState('');
+  const [photoContextMenu, setPhotoContextMenu] = useState<{ x: number; y: number } | null>(null);
   const [selectedExportPresetId, setSelectedExportPresetId] = useState<string | null>(exportPresets[0]?.id ?? null);
   const [exportSelectionMode, setExportSelectionMode] = useState<ExportSelectionMode>('preferred-or-latest');
   const [trackedExport, setTrackedExport] = useState<{ taskId: string; notice: string; surface: 'viewer' | 'operation' } | null>(null);
@@ -1580,6 +1578,26 @@ function PopulatedLibraryWorkspace({
     onSelectedAssetChange(photo.id);
     setSelection((current) => updateSelection(current, orderedIds, photo.id, intent));
   };
+
+  const openPhotoContextMenu = (event: React.MouseEvent, photo: Photo, forceSingle = false) => {
+    event.preventDefault();
+    if (forceSingle || !selection.selectedIds.has(photo.id)) {
+      setSelection({ selectedIds: new Set([photo.id]), anchorId: photo.id, focusId: photo.id });
+    }
+    setSelectedId(photo.id);
+    onSelectedAssetChange(photo.id);
+    setPhotoContextMenu({ x: event.clientX, y: event.clientY });
+  };
+
+  useEffect(() => {
+    if (!photoContextMenu) return;
+    const close = () => setPhotoContextMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') close(); };
+    window.addEventListener('pointerdown', close);
+    window.addEventListener('blur', close);
+    window.addEventListener('keydown', closeOnEscape);
+    return () => { window.removeEventListener('pointerdown', close); window.removeEventListener('blur', close); window.removeEventListener('keydown', closeOnEscape); };
+  }, [photoContextMenu]);
 
   const analyzeSelection = async () => {
     const profile = visionProfiles[0];
@@ -1897,8 +1915,8 @@ function PopulatedLibraryWorkspace({
     }
   };
 
-  const updateAlbumMembership = async (mode: 'add' | 'remove') => {
-    const albumId = mode === 'remove' ? selectedAlbumId : albumTargetId;
+  const updateAlbumMembership = async (mode: 'add' | 'remove', targetAlbumId?: string) => {
+    const albumId = mode === 'remove' ? selectedAlbumId : targetAlbumId ?? albumTargetId;
     if (!albumId) return;
     const assetIds = [...selection.selectedIds];
     try {
@@ -1926,30 +1944,27 @@ function PopulatedLibraryWorkspace({
       <Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={totalCount} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={onSelectFolder} onSelectAlbum={onSelectAlbum} onSelectSmartCollection={onSelectSmartCollection} onRefreshAlbums={onRefreshAlbums} onImportFolders={onImportFolders} onRelinkFolder={onRelinkFolder} onSynchronizeFolder={onSynchronizeFolder} onRevealFolder={onRevealFolder} onUnregisterFolder={onUnregisterFolder} onSelectTag={onSelectTag} isDemo={isDemo} />
       <PaneSplitter orientation="vertical" value={viewerLayout.leftWidth} minimum={160} maximum={420} label="调整左侧目录栏宽度" onChange={(value) => setViewerLayout('leftWidth', value)} />
       <main className="library-main" style={{ gridTemplateRows: `minmax(0, 1fr) 5px ${viewerLayout.filmstripHeight}px` }}>
-        <Viewer photo={selected} results={currentGenerationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRate={(rating) => void rateSelection(rating)} onFavorite={(favorite) => void favoriteSelection(favorite)} onRegenerate={regenerate} onEditTags={() => setTagEditorOpen(true)} onMove={() => openFolderDialog('move')} onCopy={() => openFolderDialog('copy')} onRename={openRenameDialog} onRemove={() => setRemovalMode('remove')} onTrash={() => setRemovalMode('trash')} onReview={reviewResult} onRevealOriginal={() => void window.desktopApi.revealCatalogAsset(selected.id)} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} />
+        <Viewer photo={selected} results={currentGenerationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRegenerate={regenerate} onReview={reviewResult} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} onOpenContextMenu={(event) => openPhotoContextMenu(event, selected, true)} />
         <PaneSplitter orientation="horizontal" value={viewerLayout.filmstripHeight} minimum={110} maximum={320} label="调整大图和胶片带高度" invert onChange={(value) => setViewerLayout('filmstripHeight', value)} />
-        <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} />
+        <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} onOpenContextMenu={(event, photo) => openPhotoContextMenu(event, photo)} />
       </main>
       <PaneSplitter orientation="vertical" value={viewerLayout.rightWidth} minimum={240} maximum={520} label="调整右侧 AI 面板宽度" invert onChange={(value) => setViewerLayout('rightWidth', value)} />
       <AiPanel photo={selected} results={currentGenerationResults} trashedResults={currentTrashedGenerationResults} revision={currentAnalysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onOpenTemplates={onOpenTemplates} onGenerate={generateSelection} onTrashResult={trashGenerationResult} onRestoreResult={restoreGenerationResult} />
-      {selection.selectedIds.size > 1 && (
-        <div className="batch-actionbar">
-          <strong>已选择 {selection.selectedIds.size} 张</strong>
-          <div className="batch-actions-scroll">
-            <button type="button" onClick={() => void rateSelection(5)}><Star size={14} />5 星</button>
-            <button type="button" onClick={() => void favoriteSelection(![...selection.selectedIds].every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite))}><Heart size={14} />{[...selection.selectedIds].every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite) ? '取消收藏' : '收藏'}</button>
-            <button type="button" onClick={() => setTagEditorOpen(true)}><Tags size={14} />标签</button>
-            {!isDemo && <><button type="button" onClick={() => openFolderDialog('copy')}><Copy size={14} />复制</button><button type="button" onClick={() => openFolderDialog('move')}><FolderInput size={14} />移动</button></>}
-            <button type="button" onClick={() => void analyzeSelection()}><Sparkles size={14} />AI 分析</button>
-            <button type="button" onClick={() => void generateSelection({ providerProfileId: generationProfiles[0]?.id ?? '', template: null, count: 1, instruction: '', disabledActionIds: new Set() })} disabled={generationProfiles.length === 0}><WandSparkles size={14} />批量生成</button>
-            <select aria-label="批量导出版本" value={exportSelectionMode} onChange={(event) => setExportSelectionMode(event.target.value as ExportSelectionMode)}><option value="preferred-or-latest">每张首选 / 最新</option><option value="accepted">所有已接受</option><option value="all">所有版本</option></select><select aria-label="导出预设" value={selectedExportPresetId ?? ''} onChange={(event) => setSelectedExportPresetId(event.target.value || null)}><option value="">默认命名</option>{exportPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select><button type="button" onClick={() => void exportLatestSelection()}><Download size={14} />导出</button>
-            {!isDemo && <button type="button" onClick={() => setBatchRenameDialogOpen(true)}><FilePenLine size={14} />批量重命名</button>}
-            {!isDemo && catalogAlbums.length > 0 && <><select aria-label="目标相册" value={albumTargetId} onChange={(event) => setAlbumTargetId(event.target.value)}><option value="">相册</option>{catalogAlbums.map((album) => <option key={album.id} value={album.id}>{album.name}</option>)}</select><button type="button" disabled={!albumTargetId} onClick={() => void updateAlbumMembership('add')}><FolderHeart size={14} />加入</button>{selectedAlbumId && <button type="button" onClick={() => void updateAlbumMembership('remove')}><FolderHeart size={14} />移出</button>}</>}
-            {!isDemo && <><button type="button" onClick={() => setRemovalMode('remove')}><LibraryBig size={14} />移除</button><button className="is-danger" type="button" onClick={() => setRemovalMode('trash')}><Trash2 size={14} />回收站</button></>}
-          </div>
-          <IconButton label="清除选择" onClick={() => setSelection({ selectedIds: new Set(), anchorId: null, focusId: selected.id })}><X size={14} /></IconButton>
-        </div>
-      )}
+      {photoContextMenu && <div className="folder-context-menu photo-context-menu" role="menu" aria-label={`照片菜单 ${selection.selectedIds.size} 张`} style={{ left: Math.min(photoContextMenu.x, Math.max(8, window.innerWidth - 244)), top: Math.min(photoContextMenu.y, Math.max(8, window.innerHeight - 530)) }} onPointerDown={(event) => event.stopPropagation()}>
+        <div className="folder-menu-title"><Image size={14} /><span>{selection.selectedIds.size > 1 ? `${selection.selectedIds.size} 张照片` : selected.fileName}</span></div>
+        <div className="photo-menu-rating"><span>评分</span><button type="button" aria-label="清除评分" onClick={() => { void rateSelection(0); setPhotoContextMenu(null); }}>0</button>{[1, 2, 3, 4, 5].map((rating) => <button type="button" aria-label={`${rating} 星`} key={rating} onClick={() => { void rateSelection(rating); setPhotoContextMenu(null); }}><Star size={12} fill={rating <= selected.rating && selection.selectedIds.size === 1 ? 'currentColor' : 'none'} /></button>)}</div>
+        <button type="button" role="menuitem" onClick={() => { void favoriteSelection(![...selection.selectedIds].every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite)); setPhotoContextMenu(null); }}><Heart size={14} /><span>{[...selection.selectedIds].every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite) ? '取消首选' : '标记为首选'}</span></button>
+        <button type="button" role="menuitem" onClick={() => { setTagEditorOpen(true); setPhotoContextMenu(null); }}><Tags size={14} /><span>添加标签…</span></button>
+        <span className="folder-menu-separator" />
+        <button type="button" role="menuitem" onClick={() => { void analyzeSelection(); setPhotoContextMenu(null); }}><Sparkles size={14} /><span>AI 分析{selection.selectedIds.size > 1 ? ` ${selection.selectedIds.size} 张` : ''}</span></button>
+        <button type="button" role="menuitem" disabled={generationProfiles.length === 0} onClick={() => { void generateSelection({ providerProfileId: generationProfiles[0]!.id, template: null, count: 1, instruction: '', disabledActionIds: new Set() }); setPhotoContextMenu(null); }}><WandSparkles size={14} /><span>按默认方案生成</span></button>
+        <div className="photo-menu-export-options"><select aria-label="导出版本范围" value={exportSelectionMode} onChange={(event) => setExportSelectionMode(event.target.value as ExportSelectionMode)}><option value="preferred-or-latest">每张首选 / 最新版本</option><option value="accepted">所有已接受版本</option><option value="all">所有生成版本</option></select><select aria-label="右键菜单导出预设" value={selectedExportPresetId ?? ''} onChange={(event) => setSelectedExportPresetId(event.target.value || null)}><option value="">默认命名</option>{exportPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select></div>
+        <button type="button" role="menuitem" onClick={() => { void exportLatestSelection(); setPhotoContextMenu(null); }}><Download size={14} /><span>导出 AI 版本…</span></button>
+        {!isDemo && <><span className="folder-menu-separator" />{selection.selectedIds.size === 1 && <button type="button" role="menuitem" onClick={() => { void window.desktopApi.revealCatalogAsset(selected.id); setPhotoContextMenu(null); }}><FolderOpen size={14} /><span>{FILE_MANAGER_LABEL}</span></button>}<button type="button" role="menuitem" onClick={() => { if (selection.selectedIds.size > 1) setBatchRenameDialogOpen(true); else openRenameDialog(); setPhotoContextMenu(null); }}><FilePenLine size={14} /><span>{selection.selectedIds.size > 1 ? '批量重命名…' : '重命名…'}</span></button><button type="button" role="menuitem" onClick={() => { void openFolderDialog('copy'); setPhotoContextMenu(null); }}><Copy size={14} /><span>复制到文件夹…</span></button><button type="button" role="menuitem" onClick={() => { void openFolderDialog('move'); setPhotoContextMenu(null); }}><FolderInput size={14} /><span>移动到文件夹…</span></button></>}
+        {!isDemo && catalogAlbums.length > 0 && <div className="photo-menu-album"><FolderHeart size={14} /><select aria-label="加入相册" value={albumTargetId} onChange={(event) => setAlbumTargetId(event.target.value)}><option value="">加入相册…</option>{catalogAlbums.map((album) => <option key={album.id} value={album.id}>{album.name}</option>)}</select><button type="button" disabled={!albumTargetId} onClick={() => { void updateAlbumMembership('add', albumTargetId); setPhotoContextMenu(null); }}>加入</button></div>}
+        {!isDemo && selectedAlbumId && <button type="button" role="menuitem" onClick={() => { void updateAlbumMembership('remove'); setPhotoContextMenu(null); }}><FolderHeart size={14} /><span>从当前相册移出</span></button>}
+        {!isDemo && <><span className="folder-menu-separator" /><button type="button" role="menuitem" onClick={() => { setRemovalMode('remove'); setPhotoContextMenu(null); }}><LibraryBig size={14} /><span>从图库移除…</span></button><button className="is-danger" type="button" role="menuitem" onClick={() => { setRemovalMode('trash'); setPhotoContextMenu(null); }}><Trash2 size={14} /><span>移到系统回收站…</span></button></>}
+      </div>}
       {tagEditorOpen && <form className="tag-editor-popover" onSubmit={(event) => { event.preventDefault(); void addTags(); }}><label><span>添加标签</span><input autoFocus value={tagDraft} onChange={(event) => setTagDraft(event.target.value)} placeholder="人像, 夜景" /></label><button className="primary-action compact" type="submit">应用</button><IconButton label="关闭标签编辑器" onClick={() => setTagEditorOpen(false)}><X size={13} /></IconButton></form>}
       {moveDialogOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !moveBusy) setMoveDialogOpen(false); }}>

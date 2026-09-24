@@ -61,13 +61,12 @@ test('loads cursor pages at the virtualized filmstrip boundary', async () => {
   expect(await options.count()).toBeLessThan(30);
   await options.nth(0).click();
   await options.nth(1).click({ modifiers: ['Meta'] });
-  await expect(page.locator('.batch-actionbar')).toContainText('已选择 2 张');
-  await page.locator('.batch-actionbar').getByRole('button', { name: '收藏', exact: true }).click();
+  await options.nth(1).click({ button: 'right' });
+  await expect(page.getByRole('menu', { name: '照片菜单 2 张' })).toBeVisible();
+  await page.getByRole('menuitem', { name: '标记为首选' }).click();
   await expect(page.getByRole('status')).toContainText('已收藏 2 张照片');
   await expect(page.getByRole('button', { name: /首选 2/ })).toBeVisible();
   await page.screenshot({ path: 'test-results/catalog-batch-favorite.png', animations: 'disabled' });
-  await page.getByRole('button', { name: '清除选择' }).click();
-
   const filmstrip = page.locator('.filmstrip');
   await filmstrip.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
   await expect(page.getByRole('button', { name: /更多|加载中/ })).toHaveCount(0);
