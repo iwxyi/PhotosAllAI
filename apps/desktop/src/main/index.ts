@@ -22,6 +22,7 @@ import {
   copyCatalogAssetsReportSchema,
   catalogCompanionPreviewInputSchema,
   catalogCompanionPreviewSchema,
+  catalogFolderSyncReportSchema,
   enqueueTaskInputSchema,
   exportGenerationResultsInputSchema,
   exportTaskPayloadSchema,
@@ -381,6 +382,19 @@ function registerIpc(): void {
     )));
     catalogWatcher.watchFolders(catalog.listFolderPaths());
     return relinkCatalogFolderResultSchema.parse(report);
+  });
+  ipcMain.handle('catalog.folder.synchronize.v1', async (_event, input: unknown) => {
+    const folderId = String(input);
+    if (!/^[a-f0-9]{32}$/u.test(folderId)) throw new Error('INVALID_FOLDER_ID');
+    return catalogFolderSyncReportSchema.parse(await catalog.synchronizeFolder(folderId));
+  });
+  ipcMain.handle('catalog.folder.reveal.v1', (_event, input: unknown) => {
+    const folderId = String(input);
+    if (!/^[a-f0-9]{32}$/u.test(folderId)) throw new Error('INVALID_FOLDER_ID');
+    const folderPath = catalog.resolveFolderPath(folderId);
+    if (!folderPath || !existsSync(folderPath)) return false;
+    shell.showItemInFolder(folderPath);
+    return true;
   });
   ipcMain.handle('catalog.folder.unregister.v1', (_event, input: unknown) => {
     const report = catalog.unregisterFolder(unregisterCatalogFolderInputSchema.parse(input).folderId);

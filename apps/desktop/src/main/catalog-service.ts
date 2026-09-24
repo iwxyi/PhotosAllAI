@@ -992,6 +992,29 @@ export class CatalogService {
     return { discovered, offline: row.value };
   }
 
+  resolveFolderPath(folderId: string): string | null {
+    const directory = this.#resolveDirectory(folderId);
+    return directory ? path.join(directory.rootPath, directory.relativePath) : null;
+  }
+
+  async synchronizeFolder(folderId: string): Promise<{ discovered: number; offline: number }> {
+    const directory = this.#resolveDirectory(folderId);
+    if (!directory) throw new Error('CATALOG_FOLDER_NOT_FOUND');
+    this.#database.prepare('UPDATE assets SET offline_at = ? WHERE folder_id = ? AND removed_at IS NULL')
+      .run(Date.now(), directory.rootId);
+    let discovered = 0;
+    try {
+      discovered = await this.importFolders([directory.rootPath]);
+    } catch {
+      // An inaccessible root remains offline and is reported to the caller.
+    }
+    const row = this.#database.prepare(`
+      SELECT COUNT(*) AS value FROM assets
+      WHERE folder_id = ? AND offline_at IS NOT NULL AND removed_at IS NULL
+    `).get(directory.rootId) as { value: number };
+    return { discovered, offline: row.value };
+  }
+
   resolveAssetFile(assetId: string): { path: string; fileName: string; modifiedAt: number; sizeBytes: number } | null {
     const row = this.#database
       .prepare('SELECT path, file_name, modified_at, size_bytes FROM assets WHERE id = ? AND removed_at IS NULL')

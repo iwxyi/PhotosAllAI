@@ -238,6 +238,12 @@ export const catalogFolderSchema = z.object({
 
 export type CatalogFolder = z.infer<typeof catalogFolderSchema>;
 
+export const catalogFolderSyncReportSchema = z.object({
+  discovered: z.number().int().nonnegative(),
+  offline: z.number().int().nonnegative()
+});
+export type CatalogFolderSyncReport = z.infer<typeof catalogFolderSyncReportSchema>;
+
 export const unregisterCatalogFolderInputSchema = z.object({
   folderId: z.string().regex(/^[a-f0-9]{32}$/u)
 });
@@ -878,6 +884,8 @@ export interface DesktopApi {
   undoFileOperation(input: UndoFileOperationInput): Promise<UndoFileOperationReport>;
   importFolders(): Promise<CatalogSnapshot | null>;
   relinkCatalogFolder(folderId: string): Promise<RelinkCatalogFolderResult | null>;
+  synchronizeCatalogFolder(folderId: string): Promise<CatalogFolderSyncReport>;
+  revealCatalogFolder(folderId: string): Promise<boolean>;
   unregisterCatalogFolder(input: UnregisterCatalogFolderInput): Promise<UnregisterCatalogFolderReport>;
   revealCatalogAsset(assetId: string): Promise<boolean>;
   listProviderProfiles(): Promise<ProviderProfile[]>;

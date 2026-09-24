@@ -118,6 +118,15 @@ describe('catalog image discovery', () => {
     expect(year.assetCount).toBe(2);
     const page = catalog.listAssetPage({ folderId: year.id, cursor: null, limit: 20 });
     expect(page.items.map((asset) => asset.fileName).sort()).toEqual(['one.jpg', 'two.jpg']);
+    await unlink(path.join(source, '2026', '春季', 'one.jpg'));
+    await writeFile(path.join(source, '2026', '春季', 'three.jpg'), 'three');
+    expect(await catalog.synchronizeFolder(spring.id)).toEqual({ discovered: 1, offline: 1 });
+    expect(catalog.resolveFolderPath(spring.id)).toBe(await realpath(path.join(source, '2026', '春季')));
+    expect(catalog.listAssetPage({ folderId: spring.id, cursor: null, limit: 20 }).items)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ fileName: 'one.jpg', offline: true }),
+        expect.objectContaining({ fileName: 'three.jpg', offline: false })
+      ]));
     catalog.close();
   });
 
