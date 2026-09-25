@@ -96,6 +96,20 @@ const DEFAULT_GENERATION_TEMPLATE_BODY = [
   '必须保留：\n{{preservation_rules}}'
 ].join('\n');
 
+function preparePhotoDrag(event: React.DragEvent, photo: Photo, selection: SelectionState): string[] {
+  const assetIds = selection.selectedIds.has(photo.id) ? [...selection.selectedIds] : [photo.id];
+  event.dataTransfer.effectAllowed = 'copyMove';
+  event.dataTransfer.setData('application/x-photoallisai-assets', JSON.stringify(assetIds));
+  event.dataTransfer.setData('text/plain', assetIds.length === 1 ? photo.fileName : `${assetIds.length} 张照片`);
+  const preview = document.createElement('div');
+  preview.className = 'photo-drag-preview';
+  preview.textContent = assetIds.length === 1 ? photo.fileName : `拖拽 ${assetIds.length} 张照片`;
+  document.body.append(preview);
+  event.dataTransfer.setDragImage(preview, 18, 18);
+  window.setTimeout(() => preview.remove(), 0);
+  return assetIds;
+}
+
 const FOLDER_APPEARANCE_KEY = 'photoallisai.folder-appearance.v1';
 const FOLDER_COLORS = ['none', 'red', 'orange', 'yellow', 'green', 'blue', 'purple'] as const;
 type FolderColor = typeof FOLDER_COLORS[number];
@@ -610,6 +624,8 @@ function Filmstrip({
   selected,
   selection,
   onSelect,
+  onSelectionChange,
+  onFocusPhoto,
   collectionName,
   totalCount,
   favoriteOnly,
@@ -625,6 +641,8 @@ function Filmstrip({
   selected: Photo;
   selection: SelectionState;
   onSelect: (photo: Photo, intent: SelectionIntent) => void;
+  onSelectionChange: React.Dispatch<React.SetStateAction<SelectionState>>;
+  onFocusPhoto: (photo: Photo) => void;
   collectionName: string;
   totalCount: number;
   favoriteOnly: boolean;
@@ -654,6 +672,20 @@ function Filmstrip({
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    const element = viewportRef.current;
+    const index = items.findIndex((photo) => photo.id === selected.id);
+    if (!element || index < 0) return;
+    if (viewMode === 'filmstrip') {
+      const left = index * itemSize;
+      if (left < element.scrollLeft || left + itemSize > element.scrollLeft + element.clientWidth) {
+        element.scrollTo({ left: Math.max(0, left - (element.clientWidth - itemSize) / 2), behavior: 'smooth' });
+      }
+    } else {
+      window.setTimeout(() => element.querySelector<HTMLElement>(`[data-asset-id="${selected.id}"]`)?.scrollIntoView({ block: 'nearest' }), 0);
+    }
+  }, [items, selected.id, viewMode]);
+
   return (
     <section className="filmstrip-region">
       <div className="filmstrip-toolbar">
@@ -667,7 +699,32 @@ function Filmstrip({
           </div>
         </div>
       </div>
-      <div className={`filmstrip${viewMode === 'grid' ? ' is-grid' : ''}`} role="listbox" aria-label="照片" ref={viewportRef} onScroll={(event) => {
+      <div className={`filmstrip${viewMode === 'grid' ? ' is-grid' : ''}`} role="listbox" aria-label="照片" aria-multiselectable="true" tabIndex={0} ref={viewportRef} onKeyDown={(event) => {
+        const focusIndex = Math.max(0, items.findIndex((photo) => photo.id === (selection.focusId ?? selected.id)));
+        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
+          event.preventDefault();
+          onSelectionChange(selectAll(items.map((photo) => photo.id)));
+          return;
+        }
+        if ((event.metaKey || event.ctrlKey) && event.code === 'Space') {
+          event.preventDefault();
+          const photo = items[focusIndex];
+          if (photo) onSelectionChange((current) => updateSelection(current, items.map((item) => item.id), photo.id, 'toggle'));
+          return;
+        }
+        if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) || items.length === 0) return;
+        event.preventDefault();
+        const columns = viewMode === 'grid' ? Math.max(1, Math.floor((viewportRef.current?.clientWidth ?? itemSize) / itemSize)) : 1;
+        const delta = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : event.key === 'ArrowUp' ? -columns : columns;
+        const nextPhoto = items[clamp(focusIndex + delta, 0, items.length - 1)]!;
+        if (event.metaKey || event.ctrlKey) {
+          onSelectionChange((current) => ({ ...current, focusId: nextPhoto.id }));
+          onFocusPhoto(nextPhoto);
+        } else {
+          onSelect(nextPhoto, event.shiftKey ? 'range' : 'replace');
+        }
+        window.setTimeout(() => viewportRef.current?.querySelector<HTMLElement>(`[data-asset-id="${nextPhoto.id}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' }), 0);
+      }} onScroll={(event) => {
         const element = event.currentTarget;
         setViewport((current) => ({ ...current, scrollLeft: element.scrollLeft }));
         if (hasMore && !loading && (viewMode === 'grid' ? element.scrollTop + element.clientHeight >= element.scrollHeight - 220 : element.scrollLeft + element.clientWidth >= element.scrollWidth - itemSize * 3)) onLoadMore();
@@ -677,14 +734,18 @@ function Filmstrip({
           const index = viewMode === 'grid' ? visibleIndex : virtual.start + visibleIndex;
           return (
           <button
-            className={`thumb${selected.id === photo.id ? ' is-selected' : ''}${photo.offline ? ' is-offline' : ''}`}
+            className={`thumb${selected.id === photo.id ? ' is-selected' : ''}${selection.selectedIds.has(photo.id) ? ' is-chosen' : ''}${photo.offline ? ' is-offline' : ''}`}
             key={photo.id}
+            data-asset-id={photo.id}
             style={viewMode === 'grid' ? undefined : { left: index * itemSize }}
             onClick={(event) => onSelect(
               photo,
               event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace'
             )}
             onContextMenu={(event) => onOpenContextMenu(event, photo)}
+            draggable
+            aria-grabbed={selection.selectedIds.has(photo.id)}
+            onDragStart={(event) => { preparePhotoDrag(event, photo, selection); }}
             role="option"
             aria-selected={selection.selectedIds.has(photo.id)}
             type="button"
@@ -741,6 +802,7 @@ function Viewer({
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const panOriginRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
+  const wheelEndTimerRef = useRef<number | undefined>(undefined);
   const [imageAspectRatio, setImageAspectRatio] = useState(() => photo.src ? IMAGE_ASPECT_RATIOS.get(photo.src) ?? 3 / 2 : 3 / 2);
   const [fittedSize, setFittedSize] = useState({ width: 0, height: 0 });
   const canvasWrapRef = useRef<HTMLDivElement>(null);
@@ -784,6 +846,10 @@ function Viewer({
     };
   }, []);
 
+  useEffect(() => () => {
+    if (wheelEndTimerRef.current !== undefined) window.clearTimeout(wheelEndTimerRef.current);
+  }, []);
+
   const adjustZoom = (factor: number) => {
     setZoom((current) => {
       const next = Math.min(4, Math.max(0.25, Math.round(current * factor * 100) / 100));
@@ -791,6 +857,13 @@ function Viewer({
       return next;
     });
   };
+  const constrainPan = useCallback((nextPan: { x: number; y: number }, nextZoom: number) => {
+    const container = canvasWrapRef.current;
+    if (!container || nextZoom <= 1) return { x: 0, y: 0 };
+    const maxX = Math.max(0, (fittedSize.width * nextZoom - Math.max(1, container.clientWidth - 36)) / 2);
+    const maxY = Math.max(0, (fittedSize.height * nextZoom - Math.max(1, container.clientHeight - 36)) / 2);
+    return { x: clamp(nextPan.x, -maxX, maxX), y: clamp(nextPan.y, -maxY, maxY) };
+  }, [fittedSize.height, fittedSize.width]);
   const captureAspectRatio = useCallback((image: HTMLImageElement) => {
     if (image.naturalWidth > 0 && image.naturalHeight > 0) {
       setImageAspectRatio(image.naturalWidth / image.naturalHeight);
@@ -829,12 +902,24 @@ function Viewer({
         </div>
       </div>
       <div className={`canvas-wrap${zoom > 1 ? ' is-zoomed' : ''}`} ref={canvasWrapRef} onContextMenu={onOpenContextMenu} onWheel={(event) => {
+        const container = event.currentTarget;
+        container.classList.add('is-gesturing');
+        if (wheelEndTimerRef.current !== undefined) window.clearTimeout(wheelEndTimerRef.current);
+        wheelEndTimerRef.current = window.setTimeout(() => container.classList.remove('is-gesturing'), 90);
         if (event.ctrlKey || event.metaKey || event.deltaMode !== WheelEvent.DOM_DELTA_PIXEL) {
           event.preventDefault();
-          adjustZoom(event.deltaY < 0 ? 1.12 : 0.89);
+          const rect = container.getBoundingClientRect();
+          const pointer = { x: event.clientX - (rect.left + rect.width / 2), y: event.clientY - (rect.top + rect.height / 2) };
+          const normalizedDelta = event.deltaY * (event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 80 : 1);
+          setZoom((current) => {
+            const next = clamp(current * Math.exp(-normalizedDelta * 0.0025), 0.25, 4);
+            const ratio = next / current;
+            setPan((currentPan) => constrainPan({ x: pointer.x - (pointer.x - currentPan.x) * ratio, y: pointer.y - (pointer.y - currentPan.y) * ratio }, next));
+            return next;
+          });
         } else if (zoom > 1) {
           event.preventDefault();
-          setPan((current) => ({ x: current.x - event.deltaX, y: current.y - event.deltaY }));
+          setPan((current) => constrainPan({ x: current.x - event.deltaX, y: current.y - event.deltaY }, zoom));
         }
       }} onPointerDown={(event) => {
         if (zoom <= 1 || event.button !== 0) return;
@@ -844,7 +929,7 @@ function Viewer({
       }} onPointerMove={(event) => {
         const origin = panOriginRef.current;
         if (!origin) return;
-        setPan({ x: origin.panX + event.clientX - origin.x, y: origin.panY + event.clientY - origin.y });
+        setPan(constrainPan({ x: origin.panX + event.clientX - origin.x, y: origin.panY + event.clientY - origin.y }, zoom));
       }} onPointerUp={(event) => {
         panOriginRef.current = null;
         event.currentTarget.classList.remove('is-panning');
@@ -1137,6 +1222,8 @@ type LibraryWorkspaceProps = {
   searchQuery: string;
   selectedAssetId: string | null;
   onSelectedAssetChange: (assetId: string | null) => void;
+  selection: SelectionState;
+  onSelectionChange: React.Dispatch<React.SetStateAction<SelectionState>>;
   onRefreshCatalog: () => Promise<void>;
   onOpenTaskCenter: () => void;
   onOpenTemplates: () => void;
@@ -1182,14 +1269,8 @@ function collectionTitle(props: Pick<LibraryWorkspaceProps, 'catalogFolders' | '
 }
 
 function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetId: string) => void }): React.JSX.Element {
-  const initialId = props.availablePhotos.some((photo) => photo.id === props.selectedAssetId)
-    ? props.selectedAssetId
-    : props.availablePhotos[0]?.id ?? null;
-  const [selection, setSelection] = useState<SelectionState>({
-    selectedIds: new Set(initialId ? [initialId] : []),
-    anchorId: initialId,
-    focusId: initialId
-  });
+  const selection = props.selection;
+  const setSelection = props.onSelectionChange;
   const [tagDraft, setTagDraft] = useState('');
   const [albumTargetId, setAlbumTargetId] = useState('');
   const [notice, setNotice] = useState('');
@@ -1199,15 +1280,12 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
   const orderedIds = useMemo(() => props.availablePhotos.map((photo) => photo.id), [props.availablePhotos]);
   const selectedPhoto = props.availablePhotos.find((photo) => selection.focusId === photo.id) ?? null;
 
-  useEffect(() => {
-    const visible = new Set(orderedIds);
-    const retained = [...selection.selectedIds].filter((id) => visible.has(id));
-    if (retained.length === selection.selectedIds.size) return;
-    const fallback = orderedIds[0] ?? null;
-    setSelection({ selectedIds: new Set(retained.length > 0 ? retained : fallback ? [fallback] : []), anchorId: retained[0] ?? fallback, focusId: retained.at(-1) ?? fallback });
-  }, [orderedIds, selection.selectedIds]);
-
   const selectPhoto = (photo: Photo, intent: SelectionIntent) => {
+    if (intent === 'replace' && selection.selectedIds.has(photo.id)) {
+      setSelection({ ...selection, focusId: photo.id });
+      props.onSelectedAssetChange(photo.id);
+      return;
+    }
     const next = updateSelection(selection, orderedIds, photo.id, intent);
     setSelection(next);
     props.onSelectedAssetChange(photo.id);
@@ -1329,7 +1407,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
             if (event.key === 'Enter' && selectedPhoto) props.onOpenViewer(selectedPhoto.id);
             moveGridFocus(event);
           }}>
-            {props.availablePhotos.map((photo) => <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} draggable={selection.selectedIds.has(photo.id)} key={photo.id} onDragStart={(event) => { if (!selection.selectedIds.has(photo.id)) { event.preventDefault(); return; } event.dataTransfer.effectAllowed = 'copyMove'; event.dataTransfer.setData('application/x-photoallisai-assets', JSON.stringify([...selection.selectedIds])); event.dataTransfer.setData('text/plain', `${selection.selectedIds.size} 张照片`); setNotice(`正在拖拽 ${selection.selectedIds.size} 张照片。`); }} onDragEnd={() => setNotice('')} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => props.onOpenViewer(photo.id)}>
+            {props.availablePhotos.map((photo) => <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} draggable key={photo.id} onDragStart={(event) => { const draggedIds = preparePhotoDrag(event, photo, selection); setNotice(`正在拖拽 ${draggedIds.length} 张照片。`); }} onDragEnd={() => setNotice('')} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>
               <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{photo.thumbnailSrc || photo.src ? <CatalogImage src={photo.thumbnailSrc ?? photo.src} /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
               <span className="catalog-card-meta"><strong>{photo.fileName}</strong><small>{photo.format} · {photo.dimensions}</small>{photo.rating > 0 && <span aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}</span>
             </button>)}
@@ -1385,6 +1463,8 @@ function PopulatedLibraryWorkspace({
   searchQuery,
   selectedAssetId,
   onSelectedAssetChange,
+  selection,
+  onSelectionChange,
   onRefreshCatalog,
   onOpenTaskCenter,
   onOpenTemplates,
@@ -1396,11 +1476,7 @@ function PopulatedLibraryWorkspace({
     ? selectedAssetId!
     : availablePhotos[0]!.id;
   const [selectedId, setSelectedId] = useState(initialSelectedId);
-  const [selection, setSelection] = useState<SelectionState>({
-    selectedIds: new Set([initialSelectedId]),
-    anchorId: initialSelectedId,
-    focusId: initialSelectedId
-  });
+  const setSelection = onSelectionChange;
   const [tasksOpen, setTasksOpen] = useState(false);
   const [visionProfiles, setVisionProfiles] = useState<ProviderProfile[]>([]);
   const [generationProfiles, setGenerationProfiles] = useState<ProviderProfile[]>([]);
@@ -1459,7 +1535,7 @@ function PopulatedLibraryWorkspace({
     setSelectedId(first.id);
     onSelectedAssetChange(first.id);
     setSelection({ selectedIds: new Set([first.id]), anchorId: first.id, focusId: first.id });
-  }, [availablePhotos, onSelectedAssetChange, selectedId]);
+  }, [availablePhotos, onSelectedAssetChange, selectedId, setSelection]);
 
   useEffect(() => {
     if (selectedExportPresetId && exportPresets.some((preset) => preset.id === selectedExportPresetId)) return;
@@ -1483,7 +1559,7 @@ function PopulatedLibraryWorkspace({
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [isDemo, onRefreshCatalog, orderedIds, selected.id, selection.selectedIds]);
+  }, [isDemo, onRefreshCatalog, orderedIds, selected.id, selection.selectedIds, setSelection]);
 
   useEffect(() => {
     if (isDemo) return;
@@ -1590,6 +1666,10 @@ function PopulatedLibraryWorkspace({
   const selectPhoto = (photo: Photo, intent: SelectionIntent) => {
     setSelectedId(photo.id);
     onSelectedAssetChange(photo.id);
+    if (intent === 'replace' && selection.selectedIds.has(photo.id)) {
+      setSelection({ ...selection, focusId: photo.id });
+      return;
+    }
     setSelection((current) => updateSelection(current, orderedIds, photo.id, intent));
   };
 
@@ -1960,7 +2040,7 @@ function PopulatedLibraryWorkspace({
       <main className="library-main" style={{ gridTemplateRows: `minmax(0, 1fr) 5px ${viewerLayout.filmstripHeight}px` }}>
         <Viewer photo={selected} results={currentGenerationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRegenerate={regenerate} onReview={reviewResult} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} onOpenContextMenu={(event) => openPhotoContextMenu(event, selected, true)} />
         <PaneSplitter orientation="horizontal" value={viewerLayout.filmstripHeight} minimum={110} maximum={320} label="调整大图和胶片带高度" invert onChange={(value) => setViewerLayout('filmstripHeight', value)} />
-        <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} onOpenContextMenu={(event, photo) => openPhotoContextMenu(event, photo)} />
+        <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} onSelectionChange={setSelection} onFocusPhoto={(photo) => { setSelectedId(photo.id); onSelectedAssetChange(photo.id); }} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} onOpenContextMenu={(event, photo) => openPhotoContextMenu(event, photo)} />
       </main>
       <PaneSplitter orientation="vertical" value={viewerLayout.rightWidth} minimum={240} maximum={520} label="调整右侧 AI 面板宽度" invert onChange={(value) => setViewerLayout('rightWidth', value)} />
       <AiPanel photo={selected} results={currentGenerationResults} trashedResults={currentTrashedGenerationResults} revision={currentAnalysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onOpenTemplates={onOpenTemplates} onGenerate={generateSelection} onTrashResult={trashGenerationResult} onRestoreResult={restoreGenerationResult} />
@@ -2874,6 +2954,7 @@ export function App(): React.JSX.Element {
   const [selectedSmartCollection, setSelectedSmartCollection] = useState<CatalogSmartCollection['id'] | null>(null);
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [sharedSelection, setSharedSelection] = useState<SelectionState>({ selectedIds: new Set(), anchorId: null, focusId: null });
   const [viewerPreloading, setViewerPreloading] = useState(false);
   const [catalogTotal, setCatalogTotal] = useState(0);
   const [nextCursor, setNextCursor] = useState<CatalogAssetCursor | null>(null);
@@ -3066,6 +3147,17 @@ export function App(): React.JSX.Element {
   const isDemo = E2E_DEMO_MODE && catalogReady && catalogTotal === 0 && catalogFolders.length === 0;
   const availablePhotos = !catalogReady || isDemo ? photos : catalogPhotos;
   const displayTotal = isDemo ? 128 : catalogTotal;
+  useEffect(() => {
+    if (!catalogReady) return;
+    const visibleIds = new Set(availablePhotos.map((photo) => photo.id));
+    setSharedSelection((current) => {
+      const retained = [...current.selectedIds].filter((id) => visibleIds.has(id));
+      const preferred = selectedAssetId && visibleIds.has(selectedAssetId) ? selectedAssetId : retained.at(-1) ?? availablePhotos[0]?.id ?? null;
+      if (retained.length === current.selectedIds.size && current.focusId === preferred) return current;
+      const selectedIds = new Set(retained.length > 0 ? retained : preferred ? [preferred] : []);
+      return { selectedIds, anchorId: selectedIds.has(current.anchorId ?? '') ? current.anchorId : preferred, focusId: preferred };
+    });
+  }, [availablePhotos, catalogReady, selectedAssetId]);
   const workspaceProps: LibraryWorkspaceProps = {
     availablePhotos,
     catalogFolders,
@@ -3079,6 +3171,7 @@ export function App(): React.JSX.Element {
     selectedSmartCollection,
     selectedTagId,
     selectedAssetId,
+    selection: sharedSelection,
     totalCount: displayTotal,
     favoriteOnly,
     sortBy,
@@ -3086,6 +3179,7 @@ export function App(): React.JSX.Element {
     loadingMore,
     searchQuery,
     onSelectedAssetChange: setSelectedAssetId,
+    onSelectionChange: setSharedSelection,
     onFavoriteOnlyChange: setFavoriteOnly,
     onSortByChange: setSortBy,
     onSelectFolder: (id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); },

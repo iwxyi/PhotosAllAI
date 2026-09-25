@@ -60,13 +60,14 @@ test('serves bounded cached images without exposing file paths', async () => {
   await page.getByRole('button', { name: /source 1/ }).click();
   await expect(page.getByText('source', { exact: true }).last()).toBeVisible();
   await expect(page.getByText('1 张照片', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '设置评分 4' }).click();
-  await expect(page.getByRole('button', { name: '设置评分 4' }).locator('svg')).toHaveAttribute('fill', 'currentColor');
+  await page.locator('.canvas-wrap').click({ button: 'right' });
+  await page.getByRole('button', { name: '4 星' }).click();
   await page.reload();
   await page.locator('.catalog-card').first().dblclick();
   await expect(page.getByText('IMPORTED_PORTRAIT.jpg', { exact: true }).first()).toBeVisible();
-  await expect(page.getByRole('button', { name: '设置评分 4' }).locator('svg')).toHaveAttribute('fill', 'currentColor');
-  await page.getByRole('button', { name: '添加标签' }).click();
+  await page.locator('.canvas-wrap').click({ button: 'right' });
+  await expect(page.getByRole('button', { name: '4 星' }).locator('svg')).toHaveAttribute('fill', 'currentColor');
+  await page.getByRole('menuitem', { name: /添加标签/ }).click();
   await page.getByPlaceholder('人像, 夜景').fill('测试人像');
   await page.getByRole('button', { name: '应用' }).click();
   await expect(page.getByRole('button', { name: /测试人像.*1/ })).toBeVisible();

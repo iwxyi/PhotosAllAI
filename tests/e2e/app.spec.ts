@@ -158,13 +158,42 @@ test('supports folder appearance and professional catalog selection', async () =
   await expect(cards.nth(2)).toHaveAttribute('aria-selected', 'false');
   await cards.nth(0).click();
   await page.getByRole('tab', { name: /看图/ }).click();
+  const filmstrip = page.locator('.filmstrip');
+  const filmOptions = filmstrip.getByRole('option');
+  await expect(filmOptions.nth(0)).toHaveAttribute('aria-selected', 'true');
+  await expect(filmOptions.nth(1)).toHaveAttribute('aria-selected', 'true');
+  await filmstrip.focus();
+  await page.keyboard.press('Shift+ArrowRight');
+  await page.keyboard.press('Shift+ArrowRight');
+  await expect(filmOptions.nth(2)).toHaveAttribute('aria-selected', 'true');
+  const selectedDrag = await filmOptions.nth(1).evaluate((element) => {
+    const transfer = new DataTransfer();
+    element.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    return JSON.parse(transfer.getData('application/x-photoallisai-assets')).length;
+  });
+  expect(selectedDrag).toBe(3);
+  const unselectedDrag = await filmOptions.nth(3).evaluate((element) => {
+    const transfer = new DataTransfer();
+    element.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: transfer }));
+    return JSON.parse(transfer.getData('application/x-photoallisai-assets')).length;
+  });
+  expect(unselectedDrag).toBe(1);
+  await page.getByRole('tab', { name: '图库' }).click();
+  await expect(cards.nth(0)).toHaveAttribute('aria-selected', 'true');
+  await expect(cards.nth(1)).toHaveAttribute('aria-selected', 'true');
+  await expect(cards.nth(2)).toHaveAttribute('aria-selected', 'true');
+  await cards.nth(1).click();
+  await expect(page.locator('.catalog-card[aria-selected="true"]')).toHaveCount(3);
+  await cards.nth(1).dblclick();
+  await expect(page.getByRole('tab', { name: '看图' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('.filmstrip [aria-selected="true"]')).toHaveCount(3);
 });
 
 test('switches photos and comparison modes', async () => {
   await expect(page.locator('.base-image')).toHaveClass(/is-ready/);
   const originalSource = await page.locator('.base-image').getAttribute('src');
-  await page.locator('.filmstrip [role="option"]').nth(1).click();
-  await expect(page.getByText('DSC_4837.NEF', { exact: true }).last()).toBeVisible();
+  await page.locator('.filmstrip [role="option"]').nth(2).click();
+  await expect(page.getByText('A7R_0912.ARW', { exact: true }).last()).toBeVisible();
   await expect(page.locator('.base-image')).not.toHaveAttribute('src', originalSource!);
   await expect(page.locator('.base-image')).toHaveClass(/is-ready/);
 
@@ -214,20 +243,23 @@ test('resizes and restores Lightroom-style viewer panes', async () => {
 
 test('supports additive, range, and select-all interactions', async () => {
   const options = page.locator('.filmstrip [role="option"]');
+  await options.nth(5).click();
   await options.nth(0).click();
   await options.nth(2).click({ modifiers: ['Meta'] });
-  await expect(page.getByText('已选择 2 张')).toBeVisible();
+  await expect(page.locator('.filmstrip [aria-selected="true"]')).toHaveCount(2);
 
   await options.nth(4).click({ modifiers: ['Shift'] });
-  await expect(page.getByText('已选择 3 张')).toBeVisible();
+  await expect(page.locator('.filmstrip [aria-selected="true"]')).toHaveCount(3);
 
   await page.keyboard.press('Meta+A');
-  await expect(page.getByText('已选择 6 张')).toBeVisible();
-  await expect(page.getByRole('button', { name: /批量生成/ })).toBeVisible();
-  await expect(page.getByLabel('批量导出版本')).toHaveValue('preferred-or-latest');
-  await page.getByLabel('批量导出版本').selectOption('all');
-  await expect(page.getByLabel('批量导出版本')).toHaveValue('all');
-  await page.getByRole('button', { name: '清除选择' }).click();
+  await expect(page.locator('.filmstrip [aria-selected="true"]')).toHaveCount(6);
+  await options.nth(0).click({ button: 'right' });
+  await expect(page.getByRole('menu', { name: '照片菜单 6 张' })).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: '按默认方案生成' })).toBeVisible();
+  await expect(page.getByLabel('导出版本范围')).toHaveValue('preferred-or-latest');
+  await page.getByLabel('导出版本范围').selectOption('all');
+  await expect(page.getByLabel('导出版本范围')).toHaveValue('all');
+  await page.keyboard.press('Escape');
 });
 
 test('opens the task drawer and application tabs', async () => {

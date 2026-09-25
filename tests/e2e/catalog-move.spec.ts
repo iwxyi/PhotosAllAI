@@ -50,8 +50,10 @@ test.afterAll(async () => {
 test('moves, copies, and renames originals through safe file dialogs', async () => {
   await page.locator('.catalog-card').first().dblclick();
   await expect(page.getByText('MOVE_ME.jpg', { exact: true }).first()).toBeVisible();
-  await expect(page.getByRole('button', { name: '在文件管理器中显示原图' })).toBeVisible();
-  await page.getByRole('button', { name: '管理相册' }).click();
+  await page.locator('.canvas-wrap').click({ button: 'right' });
+  await expect(page.getByRole('menuitem', { name: /在访达中显示|在文件资源管理器中显示/ })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: '新建相册' }).click();
   const albumDialog = page.getByRole('dialog', { name: '管理相册' });
   await expect(albumDialog).toBeVisible();
   await page.screenshot({ path: 'test-results/catalog-album-dialog.png', animations: 'disabled' });
@@ -65,13 +67,15 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await page.getByRole('button', { name: /未评分 1/ }).click();
   await expect(page.getByText('MOVE_ME.jpg', { exact: true }).first()).toBeVisible();
   await page.getByRole('button', { name: /未评分 1/ }).click();
-  await page.getByRole('button', { name: '移动到文件夹' }).click();
+  await page.locator('.canvas-wrap').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: /移动到文件夹/ }).click();
 
   const dialog = page.getByRole('dialog', { name: '移动 1 张照片' });
   await expect(dialog).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();
-  await page.getByRole('button', { name: '移动到文件夹' }).click();
+  await page.locator('.canvas-wrap').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: /移动到文件夹/ }).click();
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText(/同时处理 1 个关联文件/)).toBeVisible();
   await expect(dialog.getByRole('checkbox')).not.toBeChecked();
@@ -90,10 +94,8 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await expect(page.getByRole('button', { name: /target 1/ })).toBeVisible();
   await page.getByRole('button', { name: /target 1/ }).click();
   await expect(page.getByRole('main').getByText('1 张照片', { exact: true })).toBeVisible();
-  await page.locator('.catalog-card').first().dblclick();
-  await expect(page.getByRole('button', { name: '复制到文件夹' })).toBeVisible();
-
-  await page.getByRole('button', { name: '复制到文件夹' }).click();
+  await page.locator('.canvas-wrap').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: /复制到文件夹/ }).click();
   const copyDialog = page.getByRole('dialog', { name: '复制 1 张照片' });
   await expect(copyDialog).toBeVisible();
   await copyDialog.getByRole('checkbox').check();
@@ -104,7 +106,8 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   expect(await readFile(path.join(sourceDirectory, 'MOVE_ME.jpg'))).not.toHaveLength(0);
   expect(await readFile(path.join(sourceDirectory, 'MOVE_ME.xmp'), 'utf8')).toContain('fixture');
 
-  await page.getByRole('button', { name: '重命名照片' }).click();
+  await page.locator('.canvas-wrap').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: /^重命名/ }).click();
   const renameDialog = page.getByRole('dialog', { name: '重命名照片' });
   await expect(renameDialog).toBeVisible();
   await renameDialog.getByLabel('新文件名').fill('RENAMED.jpg');
@@ -120,7 +123,8 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await expect(page.getByRole('button', { name: /target 1/ })).toBeVisible();
 
   await page.getByRole('button', { name: /source 1/ }).click();
-  await page.getByRole('button', { name: '仅从图库移除' }).click();
+  await page.locator('.canvas-wrap').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: /从图库移除/ }).click();
   const removalDialog = page.getByRole('alertdialog', { name: /从图库移除 1 张照片/ });
   await expect(removalDialog).toBeVisible();
   await page.screenshot({ path: 'test-results/catalog-remove-dialog.png', animations: 'disabled' });
@@ -130,7 +134,8 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await expect(page.getByRole('button', { name: /source 0/ })).toBeVisible();
 
   await page.getByRole('button', { name: /target 1/ }).click();
-  await page.getByRole('button', { name: '移到系统回收站' }).click();
+  await page.locator('.canvas-wrap').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: /移到系统回收站/ }).click();
   const trashDialog = page.getByRole('alertdialog', { name: /移到系统回收站 1 张照片/ });
   await expect(trashDialog).toBeVisible();
   await page.screenshot({ path: 'test-results/catalog-trash-dialog.png', animations: 'disabled' });
