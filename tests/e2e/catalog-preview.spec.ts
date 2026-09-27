@@ -56,8 +56,8 @@ test('serves bounded cached images without exposing file paths', async () => {
   expect(await preview.evaluate((image) => image.naturalWidth)).toBeLessThanOrEqual(2560);
   await expect(page.getByText('等待视觉分析')).toBeVisible();
   await expect(page.getByText('处理中 0')).toBeVisible();
-  await expect(page.getByRole('button', { name: /source 1/ })).toBeVisible();
-  await page.getByRole('button', { name: /source 1/ }).click();
+  await expect(page.getByRole('treeitem', { name: /source 1/ })).toBeVisible();
+  await page.getByRole('treeitem', { name: /source 1/ }).click();
   await expect(page.getByText('source', { exact: true }).last()).toBeVisible();
   await expect(page.getByText('1 张照片', { exact: true })).toBeVisible();
   await page.locator('.canvas-wrap').click({ button: 'right' });

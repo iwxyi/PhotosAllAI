@@ -39,6 +39,8 @@ import {
   updateGenerationResultReviewInputSchema,
   moveCatalogAssetsInputSchema,
   moveCatalogAssetsReportSchema,
+  moveCatalogFolderInputSchema,
+  moveCatalogFolderResultSchema,
   renameCatalogAssetInputSchema,
   renameCatalogAssetsInputSchema,
   renameCatalogAssetsReportSchema,
@@ -401,6 +403,18 @@ function registerIpc(): void {
   ipcMain.handle('catalog.folder.rename.v1', async (_event, input: unknown) =>
     renameCatalogFolderResultSchema.parse(await catalog.renameFolder(renameCatalogFolderInputSchema.parse(input)))
   );
+  ipcMain.handle('catalog.folder.move.v1', async (_event, input: unknown) => {
+    const report = await catalog.moveFolder(moveCatalogFolderInputSchema.parse(input));
+    await Promise.allSettled(report.relocations.map((item) => generation.relocatePortableResults(
+      item.assetId,
+      item.previousPath,
+      item.nextPath,
+      item.previousFileName,
+      item.nextFileName
+    )));
+    catalogWatcher.watchFolders(catalog.listFolderPaths());
+    return moveCatalogFolderResultSchema.parse(report);
+  });
   ipcMain.handle('catalog.folder.unregister.v1', (_event, input: unknown) => {
     const report = catalog.unregisterFolder(unregisterCatalogFolderInputSchema.parse(input).folderId);
     catalogWatcher.watchFolders(catalog.listFolderPaths());

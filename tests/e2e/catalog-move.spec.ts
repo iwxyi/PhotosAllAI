@@ -91,8 +91,8 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
 
   await page.reload();
   await expect(page.getByText('MOVE_ME.jpg', { exact: true }).first()).toBeVisible();
-  await expect(page.getByRole('button', { name: /target 1/ })).toBeVisible();
-  await page.getByRole('button', { name: /target 1/ }).click();
+  await expect(page.getByRole('treeitem', { name: /target 1/ })).toBeVisible();
+  await page.getByRole('treeitem', { name: /target 1/ }).click();
   await expect(page.getByRole('main').getByText('1 张照片', { exact: true })).toBeVisible();
   await page.locator('.canvas-wrap').click({ button: 'right' });
   await page.getByRole('menuitem', { name: /复制到文件夹/ }).click();
@@ -119,10 +119,10 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
 
   await page.reload();
   await expect(page.getByText('RENAMED.jpg', { exact: true }).first()).toBeVisible();
-  await expect(page.getByRole('button', { name: /source 1/ })).toBeVisible();
-  await expect(page.getByRole('button', { name: /target 1/ })).toBeVisible();
+  await expect(page.getByRole('treeitem', { name: /source 1/ })).toBeVisible();
+  await expect(page.getByRole('treeitem', { name: /target 1/ })).toBeVisible();
 
-  await page.getByRole('button', { name: /source 1/ }).click();
+  await page.getByRole('treeitem', { name: /source 1/ }).click();
   await page.locator('.canvas-wrap').click({ button: 'right' });
   await page.getByRole('menuitem', { name: /从图库移除/ }).click();
   const removalDialog = page.getByRole('alertdialog', { name: /从图库移除 1 张照片/ });
@@ -131,9 +131,9 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await removalDialog.getByRole('button', { name: '仅从图库移除', exact: true }).click();
   await expect(page.getByRole('status')).toContainText('磁盘文件保持不变');
   expect(await readFile(path.join(sourceDirectory, 'MOVE_ME.jpg'))).not.toHaveLength(0);
-  await expect(page.getByRole('button', { name: /source 0/ })).toBeVisible();
+  await expect(page.getByRole('treeitem', { name: /source 0/ })).toBeVisible();
 
-  await page.getByRole('button', { name: /target 1/ }).click();
+  await page.getByRole('treeitem', { name: /target 1/ }).click();
   await page.locator('.canvas-wrap').click({ button: 'right' });
   await page.getByRole('menuitem', { name: /移到系统回收站/ }).click();
   const trashDialog = page.getByRole('alertdialog', { name: /移到系统回收站 1 张照片/ });

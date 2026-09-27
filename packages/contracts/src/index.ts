@@ -246,6 +246,14 @@ export type RenameCatalogFolderInput = z.infer<typeof renameCatalogFolderInputSc
 export const renameCatalogFolderResultSchema = z.object({ folder: catalogFolderSchema });
 export type RenameCatalogFolderResult = z.infer<typeof renameCatalogFolderResultSchema>;
 
+export const moveCatalogFolderInputSchema = z.object({
+  sourceFolderId: z.string().regex(/^[a-f0-9]{32}$/u),
+  targetFolderId: z.string().regex(/^[a-f0-9]{32}$/u)
+});
+export type MoveCatalogFolderInput = z.infer<typeof moveCatalogFolderInputSchema>;
+export const moveCatalogFolderResultSchema = z.object({ folder: catalogFolderSchema });
+export type MoveCatalogFolderResult = z.infer<typeof moveCatalogFolderResultSchema>;
+
 export const catalogFolderSyncReportSchema = z.object({
   discovered: z.number().int().nonnegative(),
   offline: z.number().int().nonnegative()
@@ -893,6 +901,7 @@ export interface DesktopApi {
   importFolders(): Promise<CatalogSnapshot | null>;
   relinkCatalogFolder(folderId: string): Promise<RelinkCatalogFolderResult | null>;
   renameCatalogFolder(input: RenameCatalogFolderInput): Promise<RenameCatalogFolderResult>;
+  moveCatalogFolder(input: MoveCatalogFolderInput): Promise<MoveCatalogFolderResult>;
   synchronizeCatalogFolder(folderId: string): Promise<CatalogFolderSyncReport>;
   revealCatalogFolder(folderId: string): Promise<boolean>;
   unregisterCatalogFolder(input: UnregisterCatalogFolderInput): Promise<UnregisterCatalogFolderReport>;

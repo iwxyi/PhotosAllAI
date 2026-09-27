@@ -54,7 +54,7 @@ test.afterAll(async () => {
 
 test('unregisters a source folder without touching files and restores its catalog identity', async () => {
   await page.locator('.catalog-card').first().dblclick();
-  await page.getByRole('button', { name: /source 1/ }).click();
+  await page.getByRole('treeitem', { name: /source 1/ }).click();
   await page.locator('.canvas-wrap').click({ button: 'right' });
   const photoMenu = page.getByRole('menu', { name: /照片菜单 1 张/ });
   await expect(photoMenu.getByText('取消首选')).toBeVisible();
@@ -65,9 +65,9 @@ test('unregisters a source folder without touching files and restores its catalo
   await page.getByRole('menuitem', { name: '标记为首选' }).click();
   await expect(page.getByRole('status')).toContainText('已收藏 1 张照片');
   await expect(page.getByRole('button', { name: /首选 1/ })).toBeVisible();
-  await page.getByRole('button', { name: /source 1/ }).click({ button: 'right' });
-  await page.getByRole('menuitem', { name: /从图库移除/ }).click();
-  const dialog = page.getByRole('alertdialog', { name: '从图库移除文件夹「source」？' });
+  await page.getByRole('treeitem', { name: /source 1/ }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: /取消关联/ }).click();
+  const dialog = page.getByRole('alertdialog', { name: '取消关联「source」？' });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText('不会删除、移动或修改磁盘上的任何文件');
   await expect(dialog).toContainText('AI 分析、生成版本、评分、标签和相册关系都会保留');
@@ -75,11 +75,11 @@ test('unregisters a source folder without touching files and restores its catalo
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();
 
-  await page.getByRole('button', { name: /source 1/ }).click({ button: 'right' });
-  await page.getByRole('menuitem', { name: /从图库移除/ }).click();
-  await dialog.getByRole('button', { name: '仅从图库移除' }).click();
+  await page.getByRole('treeitem', { name: /source 1/ }).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: /取消关联/ }).click();
+  await dialog.getByRole('button', { name: '取消关联' }).click();
   await expect(page.getByRole('status')).toContainText('磁盘文件和已有元数据保持不变');
-  await expect(page.getByRole('button', { name: /source 1/ })).toHaveCount(0);
+  await expect(page.getByRole('treeitem', { name: /source 1/ })).toHaveCount(0);
   expect(await readFile(path.join(sourceDirectory, 'KEEP_ME.jpg'))).not.toHaveLength(0);
 
   const removedDatabase = new DatabaseSync(databasePath, { readOnly: true });
@@ -92,8 +92,8 @@ test('unregisters a source folder without touching files and restores its catalo
   await electronApp.evaluate(({ dialog: electronDialog }, directory) => {
     electronDialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory], bookmarks: [] });
   }, sourceDirectory);
-  await page.getByRole('button', { name: '导入文件夹' }).click();
-  await expect(page.getByRole('button', { name: /source 1/ })).toBeVisible();
+  await page.getByRole('button', { name: '添加关联文件夹' }).click();
+  await expect(page.getByRole('treeitem', { name: /source 1/ })).toBeVisible();
 
   await expect.poll(() => {
     const restoredDatabase = new DatabaseSync(databasePath, { readOnly: true });

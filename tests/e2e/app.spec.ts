@@ -42,7 +42,7 @@ test('starts with the secure library workspace', async () => {
   await expect(page.getByText('PhotoAllIsAI')).toBeVisible();
   await expect(page.getByRole('tab', { name: '图库' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByText('2026 人像作品', { exact: true }).first()).toBeVisible();
-  await expect(page.getByLabel('添加文件夹')).toBeVisible();
+  await expect(page.getByLabel('添加关联文件夹')).toBeVisible();
   await page.evaluate(() => {
     (window as typeof window & { __viewerImageClasses?: string[] }).__viewerImageClasses = [];
     new MutationObserver((records) => {
@@ -98,6 +98,34 @@ test('starts with the secure library workspace', async () => {
   expect(Math.abs((canvas!.width / canvas!.height) - sourceRatio)).toBeLessThan(0.02);
 });
 
+test('keeps navigation and inspector mounted across library and viewer tabs', async () => {
+  await openWorkspaceTab('图库');
+  const firstCard = page.locator('.catalog-card').first();
+  await firstCard.click();
+  await page.getByRole('button', { name: '信息', exact: true }).click();
+  await expect(page.getByText('文件信息')).toBeVisible();
+  await page.evaluate(() => {
+    const left = document.querySelector('.sidebar');
+    const right = document.querySelector('.inspector');
+    if (left) (left as HTMLElement).dataset.sharedPane = 'left';
+    if (right) (right as HTMLElement).dataset.sharedPane = 'right';
+  });
+  await firstCard.dblclick();
+  await expect(page.locator('.sidebar[data-shared-pane="left"]')).toBeVisible();
+  await expect(page.locator('.inspector[data-shared-pane="right"]')).toBeVisible();
+  await expect(page.getByText('文件信息')).toBeVisible();
+  await page.getByRole('tab', { name: '图库' }).click();
+  await expect(page.locator('.sidebar[data-shared-pane="left"]')).toBeVisible();
+  await expect(page.locator('.inspector[data-shared-pane="right"]')).toBeVisible();
+  await expect(page.locator('.catalog-card').first()).toHaveAttribute('aria-selected', 'true');
+  const nextName = await page.locator('.catalog-card').nth(1).locator('.catalog-card-meta strong').textContent();
+  await page.locator('.catalog-card').nth(1).click();
+  await expect(page.locator('.inspector-info .metadata-list')).toContainText(nextName!);
+  await page.getByRole('tab', { name: '看图' }).click();
+  await expect(page.locator('.inspector-info .metadata-list')).toContainText(nextName!);
+  await page.getByRole('button', { name: 'AI', exact: true }).click();
+});
+
 test('honors the reduced motion preference', async () => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await expect.poll(() => page.locator('.working-pulse').first().evaluate((element) =>
@@ -123,12 +151,33 @@ test('supports mouse and trackpad navigation in the viewer', async () => {
   await expect(page.locator('.zoom-value')).toHaveText('100%');
 });
 
+test('uses arrow keys to change the current viewer photo', async () => {
+  await openWorkspaceTab('图库');
+  await page.locator('.catalog-card').first().dblclick();
+  const filmstrip = page.locator('.filmstrip');
+  const options = filmstrip.getByRole('option');
+  await options.first().click();
+  const firstSource = await page.locator('.base-image').getAttribute('src');
+  await filmstrip.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(options.nth(1)).toHaveClass(/is-selected/);
+  await expect(options.nth(1)).toHaveAttribute('aria-selected', 'true');
+  await expect.poll(() => page.locator('.base-image').getAttribute('src')).not.toBe(firstSource);
+  await page.keyboard.press('ArrowLeft');
+  await expect(options.first()).toHaveClass(/is-selected/);
+  await expect(options.first()).toHaveAttribute('aria-selected', 'true');
+  await page.locator('.canvas-wrap').click();
+  await page.keyboard.press('ArrowRight');
+  await expect(options.nth(1)).toHaveClass(/is-selected/);
+  await expect.poll(() => page.locator('.base-image').getAttribute('src')).not.toBe(firstSource);
+});
+
 test('supports folder appearance and professional catalog selection', async () => {
   await page.getByRole('tab', { name: '图库' }).click();
-  const folderDisclosure = page.getByRole('button', { name: '收起文件夹区域' });
+  const folderDisclosure = page.getByRole('button', { name: '收起关联文件夹区域' });
   await folderDisclosure.click();
-  await expect(page.getByRole('button', { name: '展开文件夹区域' })).toBeVisible();
-  await page.getByRole('button', { name: '展开文件夹区域' }).click();
+  await expect(page.getByRole('button', { name: '展开关联文件夹区域' })).toBeVisible();
+  await page.getByRole('button', { name: '展开关联文件夹区域' }).click();
   const folderEntry = page.locator('.folder-entry').first();
   await folderEntry.locator('.folder-row').click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'red 色' }).click();

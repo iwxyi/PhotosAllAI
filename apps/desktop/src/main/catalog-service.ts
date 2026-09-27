@@ -20,6 +20,8 @@ import {
   type CatalogAsset,
   type CatalogAssetPage,
   type CatalogFolder,
+  type MoveCatalogFolderInput,
+  type MoveCatalogFolderResult,
   type RelinkCatalogFolderResult,
   type RenameCatalogFolderInput,
   type RenameCatalogFolderResult,
@@ -69,6 +71,10 @@ export type RelinkCatalogFolderOperationResult = RelinkCatalogFolderResult & {
     previousFileName: string;
     nextFileName: string;
   }>;
+};
+
+export type MoveCatalogFolderOperationResult = MoveCatalogFolderResult & {
+  relocations: Array<{ assetId: string; previousPath: string; nextPath: string; previousFileName: string; nextFileName: string }>;
 };
 
 export function isSupportedImage(filePath: string): boolean {
@@ -676,6 +682,51 @@ export class CatalogService {
     const folder = this.listFolders().find((item) => item.id === input.folderId);
     if (!folder) throw new Error('CATALOG_FOLDER_NOT_FOUND');
     return { folder };
+  }
+
+  async moveFolder(input: MoveCatalogFolderInput): Promise<MoveCatalogFolderOperationResult> {
+    if (input.sourceFolderId === input.targetFolderId) throw new Error('FOLDER_MOVE_INTO_SELF');
+    const source = this.#resolveDirectory(input.sourceFolderId);
+    const target = this.#resolveDirectory(input.targetFolderId);
+    if (!source || !target) throw new Error('CATALOG_FOLDER_NOT_FOUND');
+    const sourcePath = path.join(source.rootPath, source.relativePath);
+    const targetPath = path.join(target.rootPath, target.relativePath);
+    const nextPath = path.join(targetPath, path.basename(sourcePath));
+    const sourcePrefix = `${sourcePath}${path.sep}`;
+    if (targetPath === sourcePath || targetPath.startsWith(sourcePrefix)) throw new Error('FOLDER_MOVE_INTO_DESCENDANT');
+    if (path.dirname(sourcePath) === targetPath) throw new Error('FOLDER_ALREADY_IN_TARGET');
+    try {
+      await stat(nextPath);
+      throw new Error('FOLDER_NAME_ALREADY_EXISTS');
+    } catch (error) {
+      if (error instanceof Error && error.message === 'FOLDER_NAME_ALREADY_EXISTS') throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const affected = (this.#database.prepare(`
+      SELECT id, path, file_name FROM assets WHERE folder_id = ? AND removed_at IS NULL
+    `).all(source.rootId) as Array<{ id: string; path: string; file_name: string }>).filter((asset) => asset.path === sourcePath || asset.path.startsWith(sourcePrefix));
+    await rename(sourcePath, nextPath);
+    const nextPrefix = `${nextPath}${path.sep}`;
+    const relocations = affected.map((asset) => {
+      const nextAssetPath = asset.path === sourcePath ? nextPath : `${nextPrefix}${asset.path.slice(sourcePrefix.length)}`;
+      return { assetId: asset.id, previousPath: asset.path, nextPath: nextAssetPath, previousFileName: asset.file_name, nextFileName: path.basename(nextAssetPath) };
+    });
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const update = this.#database.prepare('UPDATE assets SET folder_id = ?, path = ?, offline_at = NULL WHERE id = ?');
+      for (const item of relocations) update.run(target.rootId, item.nextPath, item.assetId);
+      if (source.relativePath === '') this.#database.prepare('UPDATE folders SET removed_at = ? WHERE id = ? AND removed_at IS NULL').run(Date.now(), source.rootId);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      try { await rename(nextPath, sourcePath); } catch { /* preserve the database error */ }
+      throw error;
+    }
+    const relativePath = path.relative(target.rootPath, nextPath);
+    const nextId = relativePath ? stableDirectoryId(target.rootId, relativePath) : target.rootId;
+    const folder = this.listFolders().find((item) => item.id === nextId);
+    if (!folder) throw new Error('CATALOG_FOLDER_NOT_FOUND');
+    return { folder, relocations };
   }
 
   listFolderPaths(): string[] {

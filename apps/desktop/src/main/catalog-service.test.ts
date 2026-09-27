@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -127,6 +127,52 @@ describe('catalog image discovery', () => {
         expect.objectContaining({ fileName: 'one.jpg', offline: true }),
         expect.objectContaining({ fileName: 'three.jpg', offline: false })
       ]));
+    catalog.close();
+  });
+
+  it('moves a nested folder and preserves catalog asset identity', async () => {
+    const root = await createTemporaryDirectory();
+    const source = path.join(root, 'library');
+    await mkdir(path.join(source, 'from', 'nested'), { recursive: true });
+    await mkdir(path.join(source, 'to'), { recursive: true });
+    await writeFile(path.join(source, 'from', 'nested', 'photo.jpg'), 'photo');
+    await writeFile(path.join(source, 'to', 'keep.jpg'), 'keep');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([source]);
+    const before = catalog.listAssets().find((asset) => asset.fileName === 'photo.jpg')!;
+    const folders = catalog.listFolders();
+    const nested = folders.find((folder) => folder.name === 'nested')!;
+    const target = folders.find((folder) => folder.name === 'to')!;
+    const result = await catalog.moveFolder({ sourceFolderId: nested.id, targetFolderId: target.id });
+    const after = catalog.listAssets().find((asset) => asset.fileName === 'photo.jpg')!;
+    const afterFile = catalog.resolveAssetFile(after.id)!;
+    expect(after.id).toBe(before.id);
+    expect(afterFile.path).toBe(path.join(await realpath(source), 'to', 'nested', 'photo.jpg'));
+    expect(result.folder.parentId).toBe(target.id);
+    expect(result.relocations).toEqual([expect.objectContaining({ assetId: before.id, nextPath: afterFile.path })]);
+    await expect(stat(path.join(source, 'to', 'nested', 'photo.jpg'))).resolves.toBeDefined();
+    await expect(catalog.moveFolder({ sourceFolderId: target.id, targetFolderId: result.folder.id })).rejects.toThrow('FOLDER_MOVE_INTO_DESCENDANT');
+    catalog.close();
+  });
+
+  it('moves an associated root into another root without duplicate indexing', async () => {
+    const root = await createTemporaryDirectory();
+    const source = path.join(root, 'source');
+    const target = path.join(root, 'target');
+    await mkdir(source, { recursive: true });
+    await mkdir(target, { recursive: true });
+    await writeFile(path.join(source, 'photo.jpg'), 'photo');
+    await writeFile(path.join(target, 'keep.jpg'), 'keep');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([source, target]);
+    const sourceRoot = catalog.listFolders().find((folder) => folder.isRoot && folder.name === 'source')!;
+    const targetRoot = catalog.listFolders().find((folder) => folder.isRoot && folder.name === 'target')!;
+    const assetId = catalog.listAssets().find((asset) => asset.fileName === 'photo.jpg')!.id;
+    const result = await catalog.moveFolder({ sourceFolderId: sourceRoot.id, targetFolderId: targetRoot.id });
+    expect(result.folder.parentId).toBe(targetRoot.id);
+    expect(catalog.listFolders().some((folder) => folder.id === sourceRoot.id)).toBe(false);
+    expect(catalog.listAssets().find((asset) => asset.id === assetId)?.folderId).toBe(targetRoot.id);
+    await expect(stat(path.join(target, 'source', 'photo.jpg'))).resolves.toBeDefined();
     catalog.close();
   });
 
