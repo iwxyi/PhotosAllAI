@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
+import { z } from 'zod';
 
 import {
   analysisResultSchema,
   analysisRevisionSchema,
+  collectionAnalysisReportSchema,
   type AnalysisResult,
-  type AnalysisRevision
+  type AnalysisRevision,
+  type CollectionAnalysisReport
 } from '@photoallisai/contracts';
 
 import type { ImageCacheService } from './image-cache-service';
@@ -27,21 +30,26 @@ type RevisionRow = {
 };
 
 const SYSTEM_PROMPT = `You are a professional photography analysis engine. Return only JSON matching schema version 1.0. Analyze image content, technical quality, deterministic adjustment suggestions, generative editing actions, and searchable catalog metadata. Never guess a person's identity or an exact location. Coordinates use normalized_box with x, y, width, height in 0..1. All confidence and severity values use 0..1.`;
+const COLLECTION_SYSTEM_PROMPT = `You are a professional photo editor reviewing a collection. Return only JSON with: summary, groups[{title,assetIds,reason}], keepAssetIds, reviewAssetIds, recommendations. Compare similarity, technical quality, storytelling value, and redundancy. Use only the supplied assetIds. Do not identify people or infer exact locations.`;
 const MAX_ANALYSIS_RESPONSE_BYTES = 5_000_000;
 const ANALYSIS_TIMEOUT_MS = 2 * 60 * 1_000;
+const ANALYSIS_RESPONSE_SCHEMA = JSON.stringify(z.toJSONSchema(analysisResultSchema));
 
 export class AnalysisService {
   readonly #database: DatabaseSync;
   readonly #providers: ProviderResolver;
   readonly #images: AnalysisImageSource;
+  readonly #locale: () => Promise<'zh-CN' | 'en-US'>;
 
   constructor(
     databasePath: string,
     providers: ProviderResolver,
-    images: AnalysisImageSource
+    images: AnalysisImageSource,
+    locale: () => Promise<'zh-CN' | 'en-US'> = async () => 'zh-CN'
   ) {
     this.#providers = providers;
     this.#images = images;
+    this.#locale = locale;
     this.#database = new DatabaseSync(databasePath);
     this.#database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.#database.exec(`
@@ -79,7 +87,8 @@ export class AnalysisService {
     `).all(assetId) as RevisionRow[]).map((row) => this.#toRevision(row));
   }
 
-  async analyze(assetId: string, providerProfileId: string, signal?: AbortSignal): Promise<AnalysisRevision> {
+  async analyze(assetId: string, providerProfileId: string, signal?: AbortSignal, locale?: 'zh-CN' | 'en-US'): Promise<AnalysisRevision> {
+    const language = analysisLanguageInstruction(locale ?? await this.#locale());
     const provider = await this.#providers.resolve(providerProfileId);
     if (provider.profile.purpose !== 'vision' || provider.profile.kind !== 'openai-compatible') {
       throw new Error('PROVIDER_DOES_NOT_SUPPORT_VISION');
@@ -87,7 +96,12 @@ export class AnalysisService {
 
     const previewPath = await this.#images.getOrCreate(assetId, 'preview');
     if (!previewPath) throw new Error('ASSET_PREVIEW_NOT_FOUND');
-    const image = await readFile(previewPath);
+    const image = await readFile(previewPath).catch((error: unknown) => {
+      const code = error instanceof Error && 'code' in error ? error.code : null;
+      if (code === 'ENOENT') throw new Error('ASSET_PREVIEW_NOT_FOUND');
+      if (code === 'EACCES' || code === 'EPERM') throw new Error('ANALYSIS_IMAGE_READ_DENIED');
+      throw new Error('ANALYSIS_IMAGE_READ_FAILED');
+    });
     if (image.byteLength > 15 * 1024 * 1024) throw new Error('ANALYSIS_IMAGE_TOO_LARGE');
 
     const response = await fetchBounded(`${provider.profile.baseUrl}/chat/completions`, {
@@ -96,14 +110,15 @@ export class AnalysisService {
       redirect: 'error',
       body: JSON.stringify({
         model: provider.profile.modelId,
+        stream: false,
         temperature: 0.1,
         response_format: { type: 'json_object' },
         messages: [
-          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'system', content: `${SYSTEM_PROMPT}\n${language}\nThe complete required response JSON Schema is:\n${ANALYSIS_RESPONSE_SCHEMA}` },
           {
             role: 'user',
             content: [
-              { type: 'text', text: 'Perform a complete editing and catalog analysis of this image.' },
+              { type: 'text', text: 'Perform a complete editing and catalog analysis of this image. Return only a JSON object matching the required JSON Schema.' },
               { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${image.toString('base64')}` } }
             ]
           }
@@ -115,13 +130,68 @@ export class AnalysisService {
       retryCount: provider.profile.retryCount,
       signal
     });
-    if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`);
+    if (!response.ok) throw new Error(analysisHttpErrorCode(response.status, response.bytes.toString('utf8')));
     const text = response.bytes.toString('utf8');
-    const envelope: unknown = JSON.parse(text);
+    const envelope = parseProviderJson(text);
     const content = extractContent(envelope);
-    const result = analysisResultSchema.parse(JSON.parse(stripCodeFence(content)) as unknown);
+    const parsedResult = parseProviderJson(stripCodeFence(content), 'ANALYSIS_CONTENT_NOT_JSON');
+    const result = analysisResultSchema.safeParse(parsedResult);
+    if (!result.success) throw new Error('ANALYSIS_RESPONSE_SCHEMA_INVALID');
     signal?.throwIfAborted();
-    return this.#save(assetId, providerProfileId, result);
+    try {
+      return this.#save(assetId, providerProfileId, result.data);
+    } catch {
+      throw new Error('ANALYSIS_RESULT_SAVE_FAILED');
+    }
+  }
+
+  async analyzeCollection(assetIds: string[], providerProfileId: string, signal?: AbortSignal, locale?: 'zh-CN' | 'en-US'): Promise<CollectionAnalysisReport> {
+    const language = analysisLanguageInstruction(locale ?? await this.#locale());
+    const provider = await this.#providers.resolve(providerProfileId);
+    if (provider.profile.purpose !== 'vision' || provider.profile.kind !== 'openai-compatible') throw new Error('PROVIDER_DOES_NOT_SUPPORT_VISION');
+    const uniqueIds = [...new Set(assetIds)].slice(0, 200);
+    if (uniqueIds.length < 2) throw new Error('COLLECTION_ANALYSIS_REQUIRES_MULTIPLE_ASSETS');
+    const inputs = uniqueIds.map((assetId) => {
+      const revision = this.list(assetId)[0];
+      if (!revision) return null;
+      return {
+        assetId,
+        summary: revision.result.summary,
+        description: revision.result.catalog.shortDescription,
+        scenes: revision.result.catalog.scenes,
+        subjects: revision.result.catalog.subjects,
+        score: revision.result.quality.overallScore,
+        issues: revision.result.quality.issues.map((issue) => issue.description)
+      };
+    }).filter((item): item is NonNullable<typeof item> => item !== null);
+    if (inputs.length < 2) throw new Error('COLLECTION_ANALYSIS_REQUIRES_MULTIPLE_ANALYSES');
+    const response = await fetchBounded(`${provider.profile.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: createProviderRequestHeaders(provider.profile.customHeaders, provider.apiKey),
+      redirect: 'error',
+      body: JSON.stringify({
+        model: provider.profile.modelId,
+        stream: false,
+        temperature: 0.1,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: `${COLLECTION_SYSTEM_PROMPT}\n${language}` },
+          { role: 'user', content: `Review this photo collection from its existing visual analyses. Return only a JSON object with the required fields:\n${JSON.stringify(inputs)}` }
+        ]
+      })
+    }, { maxBytes: MAX_ANALYSIS_RESPONSE_BYTES, timeoutMs: provider.profile.requestTimeoutMs ?? ANALYSIS_TIMEOUT_MS, retryCount: provider.profile.retryCount, signal });
+    if (!response.ok) throw new Error(analysisHttpErrorCode(response.status, response.bytes.toString('utf8')));
+    const content = extractContent(parseProviderJson(response.bytes.toString('utf8')));
+    const result = collectionAnalysisReportSchema.safeParse(parseProviderJson(stripCodeFence(content), 'ANALYSIS_CONTENT_NOT_JSON'));
+    if (!result.success) throw new Error('ANALYSIS_RESPONSE_SCHEMA_INVALID');
+    const parsed = result.data;
+    const allowed = new Set(inputs.map((item) => item.assetId));
+    return collectionAnalysisReportSchema.parse({
+      ...parsed,
+      groups: parsed.groups.map((group) => ({ ...group, assetIds: [...new Set(group.assetIds.filter((id) => allowed.has(id)))] })).filter((group) => group.assetIds.length >= 2),
+      keepAssetIds: [...new Set(parsed.keepAssetIds.filter((id) => allowed.has(id)))],
+      reviewAssetIds: [...new Set(parsed.reviewAssetIds.filter((id) => allowed.has(id)))]
+    });
   }
 
   #save(assetId: string, providerProfileId: string, result: AnalysisResult): AnalysisRevision {
@@ -178,6 +248,31 @@ export class AnalysisService {
   }
 }
 
+export function analysisLanguageInstruction(locale: 'zh-CN' | 'en-US'): string {
+  return `Write all human-readable descriptions, summaries, reports, reasons, recommendations, editing instructions and catalog tags in ${locale === 'zh-CN' ? 'Simplified Chinese (简体中文)' : 'English'}. Keep JSON property names, schema enum values, parameter identifiers, IDs and units unchanged. Preserve OCR text in its original language.`;
+}
+
+export function analysisHttpErrorCode(status: number, body: string): string {
+  // Classify explicit API errors without persisting echoed prompts, credentials or paths.
+  if (status === 400 || status === 404 || status === 422) {
+    try {
+      const data = JSON.parse(body);
+      const error = data?.error;
+      const code = typeof error?.code === 'string' ? error.code.toLowerCase() : '';
+      const message = typeof error?.message === 'string' ? error.message.toLowerCase() : '';
+      const param = typeof error?.param === 'string' ? error.param.toLowerCase() : '';
+      if (['model_not_found', 'invalid_model', 'unsupported_model', 'model_not_supported'].includes(code)
+        || (/\bmodel\b/u.test(message) && /not found|does not exist|unsupported model|model is not supported|invalid model|unknown model/u.test(message))) {
+        return 'PROVIDER_MODEL_UNAVAILABLE';
+      }
+      const unsupported = /not supported|unsupported|not allowed|unrecognized|unknown parameter/u.test(message);
+      if (unsupported && (param === 'response_format' || /response_format|json_object/u.test(message))) return 'PROVIDER_JSON_MODE_UNSUPPORTED';
+      if (unsupported && /image_url|image input|vision|images? (?:are |is )?not supported/u.test(message)) return 'PROVIDER_IMAGE_INPUT_UNSUPPORTED';
+    } catch { /* Preserve the HTTP status when no structured cause is available. */ }
+  }
+  return `PROVIDER_HTTP_${status}`;
+}
+
 function extractContent(envelope: unknown): string {
   if (typeof envelope !== 'object' || envelope === null || !('choices' in envelope) || !Array.isArray(envelope.choices)) {
     throw new Error('PROVIDER_RESPONSE_INVALID');
@@ -200,4 +295,44 @@ function extractContent(envelope: unknown): string {
 
 function stripCodeFence(value: string): string {
   return value.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+}
+
+function parseProviderJson(text: string, errorCode = 'PROVIDER_RESPONSE_NOT_JSON'): unknown {
+  const normalized = text.replace(/^\uFEFF/u, '').trim();
+  if (errorCode === 'PROVIDER_RESPONSE_NOT_JSON') {
+    if (!normalized) throw new Error('PROVIDER_RESPONSE_EMPTY');
+    if (/^(?:<!doctype\s+html|<html\b)/iu.test(normalized)) throw new Error('PROVIDER_RESPONSE_HTML');
+  }
+  const streamed = parseSseEnvelope(normalized);
+  if (streamed) return streamed;
+  const candidates = [normalized, stripCodeFence(normalized)];
+  for (const candidate of candidates) {
+    try { return JSON.parse(candidate) as unknown; } catch { /* try the next compatible envelope */ }
+  }
+  const objectStart = normalized.indexOf('{');
+  const objectEnd = normalized.lastIndexOf('}');
+  if (objectStart >= 0 && objectEnd > objectStart) {
+    try { return JSON.parse(normalized.slice(objectStart, objectEnd + 1)) as unknown; } catch { /* keep the stable error below */ }
+  }
+  throw new Error(errorCode);
+}
+
+function parseSseEnvelope(value: string): unknown {
+  const lines = value.split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trim())
+    .filter((line) => line && line !== '[DONE]');
+  if (lines.length === 0) return null;
+  let content = '';
+  for (const line of lines) {
+    let event: { choices?: { index?: number; delta?: { content?: unknown }; message?: { content?: unknown } }[] };
+    try { event = JSON.parse(line); } catch { throw new Error('PROVIDER_RESPONSE_NOT_JSON'); }
+    if (!event || !Array.isArray(event.choices)) throw new Error('PROVIDER_RESPONSE_INVALID');
+    const choice = event.choices.find((item) => (item.index ?? 0) === 0);
+    const text = choice?.delta?.content ?? choice?.message?.content;
+    if (typeof text === 'string') content += text;
+  }
+  if (!content) throw new Error('PROVIDER_RESPONSE_INVALID');
+  return { choices: [{ message: { content } }] };
 }

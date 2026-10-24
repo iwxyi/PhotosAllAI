@@ -34,6 +34,58 @@ afterEach(async () => {
 });
 
 describe('provider service', () => {
+  it('selects one enabled default per purpose and persists explicit replacements', async () => {
+    const { providers, settingsPath } = await serviceWithPath();
+    const base = { kind: 'openai-compatible' as const, purpose: 'vision' as const, baseUrl: 'https://example.com/v1', modelId: 'model', apiKey: 'test-key', enabled: true };
+    const first = await providers.save({ ...base, name: 'First' });
+    const second = await providers.save({ ...base, name: 'Second' });
+    const generation = await providers.save({ ...base, purpose: 'generation', name: 'Generation' });
+    expect(first.isDefault).toBe(true);
+    expect(second.isDefault).toBe(false);
+    expect(generation.isDefault).toBe(true);
+    await providers.save({ ...base, id: second.id, name: 'Second', isDefault: true });
+    const reloaded = new ProviderService(settingsPath, cipher);
+    let profiles = await reloaded.list();
+    expect(profiles.find((profile) => profile.purpose === 'vision')?.id).toBe(second.id);
+    expect(profiles.filter((profile) => profile.purpose === 'vision' && profile.isDefault)).toHaveLength(1);
+    expect(profiles.find((profile) => profile.id === generation.id)?.isDefault).toBe(true);
+    await reloaded.save({ ...base, id: second.id, name: 'Second', enabled: false });
+    profiles = await reloaded.list();
+    expect(profiles.find((profile) => profile.id === first.id)?.isDefault).toBe(true);
+    expect(profiles.find((profile) => profile.id === second.id)?.isDefault).toBe(false);
+    await reloaded.delete(first.id);
+    expect((await reloaded.list()).filter((profile) => profile.purpose === 'vision' && profile.isDefault)).toHaveLength(0);
+  });
+
+  it('migrates legacy configurations to an enabled default without losing credentials', async () => {
+    const { providers, settingsPath } = await serviceWithPath();
+    const saved = await providers.save({ name: 'Legacy', kind: 'openai-compatible', purpose: 'vision', baseUrl: 'https://example.com/v1', modelId: 'model', enabled: true, apiKey: 'test-key' });
+    const stored = JSON.parse(await readFile(settingsPath, 'utf8'));
+    delete stored[0].isDefault;
+    await writeFile(settingsPath, JSON.stringify(stored));
+    expect((await providers.list())[0]?.isDefault).toBe(true);
+    expect((await providers.resolve(saved.id)).apiKey).toBe('test-key');
+  });
+
+  it.each([
+    ['<!doctype html><html>Website</html>', '网页'],
+    ['not-json', '不是有效 JSON'],
+    ['{"error":"wrong endpoint"}', '模型列表']
+  ])('does not report a successful connection for HTTP 200 with an invalid API body (%s)', async (body, message) => {
+    const server = createServer((_request, response) => response.end(body));
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server unavailable');
+    const providers = await service();
+    const result = await providers.test({
+      name: 'Local', kind: 'openai-compatible', purpose: 'vision',
+      baseUrl: `http://127.0.0.1:${address.port}`, modelId: 'model', apiKey: 'test-key', enabled: true
+    });
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain(message);
+  });
+
   it('stores only an encrypted credential and returns masked metadata', async () => {
     const providers = await service();
     const saved = await providers.save({

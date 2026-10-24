@@ -17,8 +17,8 @@ describe('app settings service', () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-settings-'));
     temporaryDirectories.push(directory);
     const service = new AppSettingsService(path.join(directory, 'nested', 'app.json'));
-    await expect(service.get()).resolves.toEqual({ generationStorageMode: 'managed', theme: 'system', cacheMaxBytes: 5 * 1024 ** 3 });
-    const settings = { generationStorageMode: 'portable' as const, theme: 'light' as const, cacheMaxBytes: 10 * 1024 ** 3 };
+    await expect(service.get()).resolves.toEqual({ generationStorageMode: 'managed', theme: 'system', locale: 'zh-CN', cacheMaxBytes: 5 * 1024 ** 3 });
+    const settings = { generationStorageMode: 'portable' as const, theme: 'light' as const, locale: 'en-US' as const, cacheMaxBytes: 10 * 1024 ** 3 };
     await expect(service.save(settings)).resolves.toEqual(settings);
     await expect(service.get()).resolves.toEqual(settings);
     expect(JSON.parse(await readFile(path.join(directory, 'nested', 'app.json'), 'utf8'))).toEqual(settings);
@@ -33,7 +33,7 @@ describe('app settings service', () => {
     const settingsPath = path.join(directory, 'app.json');
     await writeFile(settingsPath, '{not-json');
     const service = new AppSettingsService(settingsPath);
-    await expect(service.get()).resolves.toEqual({ generationStorageMode: 'managed', theme: 'system', cacheMaxBytes: 5 * 1024 ** 3 });
+    await expect(service.get()).resolves.toEqual({ generationStorageMode: 'managed', theme: 'system', locale: 'zh-CN', cacheMaxBytes: 5 * 1024 ** 3 });
     expect((await readdir(directory)).some((name) => name.startsWith('app.json.corrupt-'))).toBe(true);
   });
 
@@ -44,7 +44,7 @@ describe('app settings service', () => {
     await writeFile(settingsPath, JSON.stringify({ theme: 'ultraviolet' }));
 
     await expect(new AppSettingsService(settingsPath).get()).resolves.toEqual({
-      generationStorageMode: 'managed', theme: 'system', cacheMaxBytes: 5 * 1024 ** 3
+      generationStorageMode: 'managed', theme: 'system', locale: 'zh-CN', cacheMaxBytes: 5 * 1024 ** 3
     });
     expect(await readdir(directory)).toEqual([expect.stringMatching(/^app\.json\.corrupt-/)]);
   });
@@ -73,7 +73,7 @@ describe('app settings service', () => {
     const settingsPath = path.join(directory, 'app.json');
     await writeFile(settingsPath, JSON.stringify({ generationStorageMode: 'portable' }));
     await expect(new AppSettingsService(settingsPath).get()).resolves.toEqual({
-      generationStorageMode: 'portable', theme: 'system', cacheMaxBytes: 5 * 1024 ** 3
+      generationStorageMode: 'portable', theme: 'system', locale: 'zh-CN', cacheMaxBytes: 5 * 1024 ** 3
     });
   });
 });

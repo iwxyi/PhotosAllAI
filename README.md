@@ -20,6 +20,10 @@ PhotoAllIsAI 是一款面向 macOS 与 Windows 的 AI 原生图片管理和生�
 - [质量、安全与发布规范](docs/quality-security.md)
 - [架构决策记录](docs/adr/README.md)
 
+## 本地开发
+
+使用 `pnpm dev` 启动应用。页面修改会热更新；主进程和预加载脚本修改会自动重建并重启 Electron，使原生菜单、快捷键和 IPC 同步生效。重启会关闭当前窗口，未保存的输入需要先保存。此前已运行的开发进程需要退出并重新执行一次 `pnpm dev` 才能启用监听。
+
 ## 本地打包
 
 `pnpm package:dir` 会构建当前平台的未签名可运行目录。macOS 和 Windows x64 的安装包分别使用 `pnpm package:mac`、`pnpm package:win`；签名、公证和证书由发布环境注入，仓库不包含任何证书或私钥。macOS 上的 Windows 交叉构建只验证产物生成，不能替代 Windows x64 真机安装、升级、卸载和硬件兼容性验收。

@@ -22,6 +22,15 @@ export const defaultWorkspaceSession: WorkspaceSession = {
   }
 };
 
+function migrateWorkspaceTabs(session: WorkspaceSession): WorkspaceSession {
+  const openTabs = [...new Set(session.openTabs.filter((tab) => tab !== 'viewer').map((tab) => tab === 'workflow' ? 'batch' : tab.startsWith('task:') ? 'tasks' : tab))];
+  return {
+    ...session,
+    openTabs,
+    activeTab: session.activeTab === 'viewer' ? 'library' : session.activeTab === 'workflow' ? 'batch' : session.activeTab.startsWith('task:') ? 'tasks' : session.activeTab
+  };
+}
+
 export class WorkspaceService {
   readonly #database: DatabaseSync;
 
@@ -50,22 +59,22 @@ export class WorkspaceService {
     try {
       if (row.schema_version === 1) {
         const legacy = workspaceSessionV1Schema.parse(JSON.parse(row.payload_json));
-        return workspaceSessionSchema.parse({
+        return migrateWorkspaceTabs(workspaceSessionSchema.parse({
           ...defaultWorkspaceSession,
           openTabs: legacy.openTabs,
           activeTab: legacy.activeTab,
           library: { ...defaultWorkspaceSession.library, ...legacy.library }
-        });
+        }));
       }
       if (row.schema_version !== 2) return structuredClone(defaultWorkspaceSession);
-      return workspaceSessionSchema.parse(JSON.parse(row.payload_json));
+      return migrateWorkspaceTabs(workspaceSessionSchema.parse(JSON.parse(row.payload_json)));
     } catch {
       return structuredClone(defaultWorkspaceSession);
     }
   }
 
   save(rawSession: WorkspaceSession): WorkspaceSession {
-    const session = workspaceSessionSchema.parse(rawSession);
+    const session = migrateWorkspaceTabs(workspaceSessionSchema.parse(rawSession));
     this.#database.prepare(`
       INSERT INTO application_state (key, schema_version, payload_json, updated_at)
       VALUES ('workspace_session', ?, ?, ?)

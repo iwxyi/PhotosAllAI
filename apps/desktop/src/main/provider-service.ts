@@ -13,10 +13,20 @@ import {
 
 import { quarantineInvalidRegularFile, replaceRegularFileSafely } from './safe-file-write';
 import { createProviderRequestHeaders } from './provider-request-headers';
+import { fetchBounded } from './network-safety';
 
 type StoredProviderProfile = Omit<ProviderProfile, 'hasCredential'> & {
   encryptedCredential?: string;
 };
+
+function withDefaults(profiles: StoredProviderProfile[]): StoredProviderProfile[] {
+  const defaults = new Set(['vision', 'generation'].map((purpose) =>
+    (profiles.find((profile) => profile.purpose === purpose && profile.enabled && profile.isDefault)
+      ?? profiles.find((profile) => profile.purpose === purpose && profile.enabled))?.id
+  ));
+  return profiles.map((profile) => ({ ...profile, isDefault: defaults.has(profile.id) }))
+    .sort((a, b) => Number(b.isDefault) - Number(a.isDefault));
+}
 
 export interface CredentialCipher {
   available(): boolean;
@@ -92,15 +102,18 @@ export class ProviderService {
       retryCount: input.retryCount,
       customHeaders: input.customHeaders,
       enabled: input.enabled,
+      isDefault: input.enabled && (input.isDefault ?? existing?.isDefault ?? false),
       updatedAt: Date.now(),
       ...(encryptedCredential ? { encryptedCredential } : {})
     };
 
-    const updated = existing
+    const replaced = existing
       ? profiles.map((profile) => profile.id === id ? next : profile)
       : [...profiles, next];
+    const updated = withDefaults(replaced.map((profile) => next.isDefault && profile.id !== id && profile.purpose === next.purpose
+      ? { ...profile, isDefault: false } : profile));
     await this.#write(updated);
-    const { encryptedCredential: storedCredential, ...profile } = next;
+    const { encryptedCredential: storedCredential, ...profile } = updated.find((profile) => profile.id === id)!;
     return providerProfileSchema.parse({ ...profile, hasCredential: Boolean(storedCredential) });
   }
 
@@ -127,11 +140,11 @@ export class ProviderService {
     const startedAt = performance.now();
 
     try {
-      const response = await fetch(endpoint, {
+      const response = await fetchBounded(endpoint, {
         headers: createProviderRequestHeaders(input.customHeaders, credential),
         redirect: 'error',
         signal: controller.signal
-      });
+      }, { maxBytes: 5_000_000, timeoutMs: 10_000 });
       const latencyMs = Math.round(performance.now() - startedAt);
       if (!response.ok) {
         return connectionTestSchema.parse({
@@ -140,7 +153,18 @@ export class ProviderService {
           latencyMs
         });
       }
-      return connectionTestSchema.parse({ ok: true, message: '连接成功', latencyMs });
+      const text = response.bytes.toString('utf8').replace(/^\uFEFF/u, '').trim();
+      if (/^(?:<!doctype\s+html|<html\b)/iu.test(text)) {
+        return connectionTestSchema.parse({ ok: false, message: '服务返回了网页，而不是 API 数据。请检查 Base URL 是否缺少 /v1 后缀，或填写了网站页面地址。', latencyMs });
+      }
+      let data: unknown;
+      try { data = JSON.parse(text); } catch {
+        return connectionTestSchema.parse({ ok: false, message: '服务响应不是有效 JSON，请检查 API 地址与代理配置。', latencyMs });
+      }
+      if (!data || typeof data !== 'object' || !('data' in data) || !Array.isArray(data.data)) {
+        return connectionTestSchema.parse({ ok: false, message: '服务未返回兼容的模型列表，请检查 API 地址与接口格式。', latencyMs });
+      }
+      return connectionTestSchema.parse({ ok: true, message: '连接成功（模型列表可访问，图片分析能力需实际任务验证）', latencyMs });
     } catch (error) {
       const message = error instanceof Error && error.name === 'AbortError'
         ? '连接超时'
@@ -178,7 +202,7 @@ export class ProviderService {
         }
         profiles.push({ ...parsed.data, ...(encryptedCredential ? { encryptedCredential } : {}) });
       }
-      return profiles;
+      return withDefaults(profiles);
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return [];
       if (error instanceof SyntaxError) {

@@ -61,7 +61,7 @@ test.beforeAll(async () => {
   mockServer = createServer((request, response) => {
     response.writeHead(200, { 'content-type': 'application/json' });
     if (request.url === '/v1/chat/completions') {
-      response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(analysis) } }] }));
+      setTimeout(() => response.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(analysis) } }] })), 2_500);
       return;
     }
     if (request.url === '/v1/images/edits') {
@@ -133,7 +133,11 @@ test('analyzes, generates, compares, and persists managed and portable results',
 
   await page.getByRole('tab', { name: '图库' }).click();
   await page.locator('.catalog-card').first().dblclick();
-  await page.getByRole('button', { name: '开始分析' }).click();
+  await page.getByRole('button', { name: '分析并给出建议' }).click();
+  await openWorkspaceTab('AI 工作流');
+  await expect(page.locator('.analysis-head')).toContainText(/已加入分析队列|正在视觉分析/);
+  await expect(page.locator('.task-statusbar')).toContainText(/运行 1 项|排队 1 项/);
+  await openWorkspaceTab('看图');
   await expect(page.getByText('可清理背景的人像')).toBeVisible({ timeout: 10_000 });
   await page.getByLabel('搜索图库').fill('自然光');
   await expect(page.getByText('搜索：自然光')).toBeVisible();
@@ -175,7 +179,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
   const managedResult = managedFiles.find((file) => file.endsWith('.jpg'));
   expect(managedResult).toBeTruthy();
   const managedResultPath = path.join(generatedRoot, managedResult!);
-  await page.getByRole('button', { name: '版本', exact: true }).click();
+  await page.getByRole('button', { name: '详情', exact: true }).click();
   await page.getByRole('button', { name: '回收版本 V1' }).click();
   await page.getByRole('button', { name: '确认', exact: true }).click();
   await expect(page.getByText('版本回收站')).toBeVisible();
@@ -222,7 +226,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
   expect(await electronApp.evaluate(() => (globalThis as typeof globalThis & { openedExportDirectory?: string }).openedExportDirectory)).toBe(exportDirectory);
   await page.getByRole('tab', { name: '看图' }).click();
 
-  await page.getByRole('button', { name: '版本', exact: true }).click();
+  await page.getByRole('button', { name: '详情', exact: true }).click();
   await page.getByRole('button', { name: '回收版本 V1' }).click();
   await page.getByRole('button', { name: '确认', exact: true }).click();
   await expect(page.getByText('版本回收站')).toBeVisible();

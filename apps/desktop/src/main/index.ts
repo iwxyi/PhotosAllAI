@@ -3,7 +3,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, safeStorage, shell, type MenuItemConstructorOptions } from 'electron';
 import {
   appInfoSchema,
   appSettingsSchema,
@@ -24,6 +24,7 @@ import {
   catalogCompanionPreviewSchema,
   catalogFolderSyncReportSchema,
   enqueueTaskInputSchema,
+  taskBatchInputSchema,
   exportGenerationResultsInputSchema,
   exportTaskPayloadSchema,
   generationResultIdInputSchema,
@@ -55,6 +56,8 @@ import {
   savePromptTemplateInputSchema,
   saveProviderProfileInputSchema,
   taskIdSchema,
+  deleteTasksInputSchema,
+  taskBatchActionInputSchema,
   updateCatalogMetadataInputSchema,
   updateCatalogTagsInputSchema,
   unregisterCatalogFolderInputSchema,
@@ -63,8 +66,10 @@ import {
   undoFileOperationReportSchema,
   saveCatalogAlbumInputSchema,
   updateCatalogAlbumAssetsInputSchema,
-  workspaceSessionSchema
+  workspaceSessionSchema,
+  menuStateSchema
 } from '@photoallisai/contracts';
+import type { AppSettings, MenuCommand, MenuState } from '@photoallisai/contracts';
 
 import { CatalogService } from './catalog-service';
 import { CatalogWatcher } from './catalog-watcher';
@@ -78,6 +83,7 @@ import { ProviderService } from './provider-service';
 import { replaceRegularFileSafely } from './safe-file-write';
 import { TaskService } from './task-service';
 import { TaskRunner } from './task-runner';
+import { AgentProcessor } from './agent-processor';
 import { toRendererTask } from './task-sanitizer';
 import { TemplateService } from './template-service';
 import { WorkspaceService } from './workspace-service';
@@ -119,12 +125,114 @@ let shuttingDown = false;
 let shutdownStarted = false;
 let shutdownFinished = false;
 let mainWindow: BrowserWindow | null = null;
+let startupReady = false;
+let menuState: MenuState = {
+  activeTab: 'library', hasSelection: false, selectionCount: 0,
+  hasVisionProvider: false, hasGenerationProvider: false, taskCount: 0, hasRunningTask: false
+};
+let appLocale: AppSettings['locale'] = 'zh-CN';
+const menuText = {
+  'zh-CN': { file: '文件', edit: '编辑', library: '图库', photo: '照片', ai: 'AI', view: '查看', window: '窗口', help: '帮助', workflow: 'AI 工作流', openLibrary: '打开图库', addFolder: '添加关联文件夹…', closeWorkspace: '关闭当前工作区', refresh: '刷新图库', tasks: '打开任务中心', selectAll: '全选', clear: '取消全选', openViewer: '打开看图', fit: '适合窗口', zoom: '100% 查看', toggle: '原图 / 生成图切换', analyze: '分析选中照片', generate: '生成修图结果', templates: '提示词模板', settings: '设置', shortcuts: '快捷键', idle: '任务队列空闲', running: '任务队列正在运行', quit: '退出' },
+  'en-US': { file: 'File', edit: 'Edit', library: 'Library', photo: 'Photo', ai: 'AI', view: 'View', window: 'Window', help: 'Help', workflow: 'AI Workflow', openLibrary: 'Open Library', addFolder: 'Add Linked Folder…', closeWorkspace: 'Close Workspace', refresh: 'Refresh Library', tasks: 'Open Task Center', selectAll: 'Select All', clear: 'Clear Selection', openViewer: 'Open Viewer', fit: 'Fit Image', zoom: 'View at 100%', toggle: 'Toggle Original / Generated', analyze: 'Analyze Selected Photos', generate: 'Generate Edited Results', templates: 'Prompt Templates', settings: 'Settings', shortcuts: 'Shortcuts', idle: 'Task queue idle', running: 'Task queue running', quit: 'Quit' }
+} as const;
 let startupRecovery = {
   trashPurges: { total: 0, recovered: 0, conflicts: 0, failed: 0 },
   fileOperations: { total: 0, resolved: 0, failed: 0 },
   generationWrites: { total: 0, recovered: 0, failed: 0 },
   automaticBackup: { status: 'pending' as AutomaticBackupStatus }
 };
+
+function sendMenuCommand(command: MenuCommand): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('menu.command.v1', command);
+}
+
+function commandItem(label: string, command: MenuCommand, options: Partial<MenuItemConstructorOptions> = {}): MenuItemConstructorOptions {
+  return { label, click: () => sendMenuCommand(command), ...options };
+}
+
+function buildApplicationMenu(): void {
+  const text = menuText[appLocale];
+  const hasPhotos = menuState.hasSelection;
+  const onLibrary = menuState.activeTab === 'library' || menuState.activeTab === 'viewer';
+  const template: MenuItemConstructorOptions[] = [
+    ...(process.platform === 'darwin' ? [{ role: 'appMenu' as const }] : []),
+    {
+      label: text.file, submenu: [
+        commandItem(text.openLibrary, 'open-library', { accelerator: 'CmdOrCtrl+Shift+L' }),
+        commandItem(text.addFolder, 'import-folders', { accelerator: 'CmdOrCtrl+Shift+O' }),
+        commandItem(text.closeWorkspace, 'close-workspace', { enabled: menuState.activeTab !== 'library', accelerator: 'CmdOrCtrl+W' }),
+        { type: 'separator' },
+        { role: 'quit', label: process.platform === 'darwin' ? `${text.quit} PhotoAllIsAI` : text.quit }
+      ]
+    },
+    {
+      label: text.edit, submenu: [
+        commandItem(text.selectAll, 'select-all', { accelerator: 'CmdOrCtrl+A' }),
+        commandItem(text.clear, 'clear-selection', { enabled: hasPhotos, accelerator: 'CmdOrCtrl+Shift+A' }),
+        { type: 'separator' },
+        { role: 'undo', label: '撤销' },
+        { role: 'redo', label: '重做' },
+        { type: 'separator' },
+        { role: 'cut', label: appLocale === 'en-US' ? 'Cut' : '剪切' },
+        { role: 'copy', label: appLocale === 'en-US' ? 'Copy' : '复制' },
+        { role: 'paste', label: appLocale === 'en-US' ? 'Paste' : '粘贴' }
+      ]
+    },
+    {
+      label: text.library, submenu: [
+        commandItem(text.refresh, 'refresh-catalog', { enabled: onLibrary, accelerator: 'CmdOrCtrl+R' }),
+        commandItem(text.tasks, 'open-task-center', { accelerator: 'CmdOrCtrl+J' }),
+        { type: 'separator' },
+        { label: '当前排序和筛选由图库工具栏控制', enabled: false }
+      ]
+    },
+    {
+      label: text.photo, submenu: [
+        commandItem(text.openViewer, 'open-viewer', { enabled: hasPhotos, accelerator: 'CmdOrCtrl+Enter' }),
+        commandItem(text.fit, 'fit-image', { enabled: menuState.activeTab === 'viewer' && hasPhotos }),
+        commandItem(text.zoom, 'zoom-100', { enabled: menuState.activeTab === 'viewer' && hasPhotos }),
+        commandItem(text.toggle, 'toggle-original', { enabled: menuState.activeTab === 'viewer' && hasPhotos })
+      ]
+    },
+    {
+      label: text.ai, submenu: [
+        commandItem(text.workflow, 'open-workflow'),
+        commandItem(text.analyze, 'analyze-selection', { enabled: hasPhotos && menuState.hasVisionProvider }),
+        commandItem(text.generate, 'generate-selection', { enabled: hasPhotos && menuState.hasGenerationProvider }),
+        { type: 'separator' },
+        commandItem(text.tasks, 'open-task-center'),
+        commandItem(text.templates, 'open-prompt-templates')
+      ]
+    },
+    {
+      label: text.view, submenu: [
+        commandItem(text.library, 'open-library', { type: 'normal' }),
+        commandItem(text.openViewer, 'open-viewer', { enabled: menuState.hasSelection }),
+        commandItem(text.workflow, 'open-workflow'),
+        commandItem(text.templates, 'open-templates'),
+        commandItem(`${text.tasks}${menuState.taskCount > 0 ? ` · ${menuState.taskCount}` : ''}`, 'open-tasks'),
+        commandItem(text.settings, 'open-settings'),
+        { type: 'separator' },
+        { label: menuState.hasRunningTask ? text.running : text.idle, enabled: false }
+      ]
+    },
+    {
+      label: text.window, submenu: [
+        { role: 'minimize', label: '最小化' },
+        { role: 'zoom', label: '缩放' },
+        ...(process.platform === 'darwin' ? [{ role: 'front' as const, label: '置于最前' }] : [])
+      ]
+    },
+    {
+      label: text.help, submenu: [
+        commandItem(text.shortcuts, 'show-shortcuts'),
+        { role: 'about', label: '关于 PhotoAllIsAI' }
+      ]
+    }
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
 
 async function createDiagnosticSnapshot() {
   const [profiles, cacheStats, raw, integrity] = await Promise.all([providers.list(), imageCache.getStats(), imageCache.getDecoderCapabilities(), libraryIntegrity.scan()]);
@@ -164,6 +272,14 @@ async function relocatePortableAfterFileOperation(
 }
 
 function registerIpc(): void {
+  ipcMain.on('menu.state.update.v1', (_event, input: unknown) => {
+    try {
+      menuState = menuStateSchema.parse(input);
+      buildApplicationMenu();
+    } catch {
+      // Menu state is advisory; an invalid update must not interrupt the renderer.
+    }
+  });
   ipcMain.handle('app.info.v1', () =>
     appInfoSchema.parse({
       name: app.getName(),
@@ -176,6 +292,8 @@ function registerIpc(): void {
     const parsed = appSettingsSchema.parse(input);
     const previous = await appSettings.get();
     const saved = await appSettings.save(parsed);
+    appLocale = saved.locale;
+    buildApplicationMenu();
     if (saved.cacheMaxBytes !== previous.cacheMaxBytes) await imageCache.setMaxBytes(saved.cacheMaxBytes);
     return saved;
   });
@@ -445,15 +563,26 @@ function registerIpc(): void {
   );
   ipcMain.handle('tasks.page.v1', (_event, input: unknown) => {
     const page = tasks.listPage(listTaskPageInputSchema.parse(input));
-    return { ...page, items: page.items.map(toRendererTask) };
+    return { ...page, items: page.items.map((task) => ({
+      ...toRendererTask(task),
+      ...(task.assetId ? { assetFileName: catalog.resolveAssetFile(task.assetId)?.fileName } : {})
+    })) };
+  });
+  ipcMain.handle('tasks.batch.v1', (_event, input: unknown) => {
+    const { kind, batchId } = taskBatchInputSchema.parse(input);
+    return tasks.listBatch(kind, batchId).map((task) => ({ ...toRendererTask(task),
+      ...(task.assetId ? { assetFileName: catalog.resolveAssetFile(task.assetId)?.fileName } : {}) }));
   });
   ipcMain.handle('tasks.get.v1', (_event, taskId: unknown) => {
     const task = tasks.find(taskIdSchema.parse(taskId));
     return task ? toRendererTask(task) : null;
   });
-  ipcMain.handle('tasks.enqueue.v1', (_event, input: unknown) => {
+  ipcMain.handle('tasks.enqueue.v1', async (_event, input: unknown) => {
     const parsed = enqueueTaskInputSchema.parse(input);
     if (parsed.kind === 'export') throw new Error('EXPORT_TASK_REQUIRES_DIRECTORY_SELECTION');
+    if (parsed.kind === 'analysis' || parsed.kind === 'collection-analysis') {
+      parsed.payload.locale ??= (await appSettings.get()).locale;
+    }
     const task = tasks.enqueue(parsed);
     taskRunner.wake();
     return toRendererTask(task);
@@ -462,6 +591,37 @@ function registerIpc(): void {
     const id = taskIdSchema.parse(taskId);
     taskRunner.cancel(id);
     return toRendererTask(tasks.cancel(id));
+  });
+  ipcMain.handle('tasks.delete.v1', async (_event, rawInput: unknown) => {
+    const input = deleteTasksInputSchema.parse(rawInput);
+    const targets = tasks.deletionTargets(input);
+    if (!targets.length) return { deletedIds: [] };
+    const running = targets.filter((task) => ['preparing', 'uploading', 'processing', 'downloading', 'saving'].includes(task.status));
+    if (running.length || targets.length > 1 || input.scope !== 'task') {
+      const confirmation = await dialog.showMessageBox({
+        type: 'question', title: '删除任务',
+        message: `删除 ${targets.length} 条任务？`,
+        detail: `${running.length ? `其中 ${running.length} 条正在执行，将停止处理。\n` : ''}仅删除任务记录，保留原图、分析结果和已生成的文件。`,
+        buttons: ['取消', '删除'], defaultId: 0, cancelId: 0, noLink: true
+      });
+      if (confirmation.response !== 1) return { deletedIds: [] };
+    }
+    for (const task of targets) taskRunner.cancel(task.id);
+    return { deletedIds: tasks.deleteTasks(targets.map((task) => task.id)) };
+  });
+  ipcMain.handle('tasks.batch.action.v1', (_event, rawInput: unknown) => {
+    const input = taskBatchActionInputSchema.parse(rawInput);
+    const eligible = {
+      retry: ['failed', 'canceled'], pause: ['queued', 'preparing', 'uploading', 'processing', 'downloading'],
+      resume: ['paused'], cancel: ['draft', 'queued', 'paused', 'preparing', 'uploading', 'processing', 'downloading']
+    }[input.action];
+    const targets = tasks.batchForTask(input.taskId).filter((task) => eligible.includes(task.status));
+    for (const task of targets) {
+      tasks[input.action](task.id);
+      if (input.action === 'pause' || input.action === 'cancel') taskRunner.cancel(task.id);
+    }
+    if (input.action === 'retry' || input.action === 'resume') taskRunner.wake();
+    return targets.length;
   });
   ipcMain.handle('tasks.pause.v1', (_event, taskId: unknown) => {
     const id = taskIdSchema.parse(taskId);
@@ -478,6 +638,12 @@ function registerIpc(): void {
     const task = tasks.retry(taskIdSchema.parse(taskId));
     taskRunner.wake();
     return toRendererTask(task);
+  });
+  ipcMain.handle('tasks.retry-all-failed.v1', () => {
+    const failed = tasks.list().filter((task) => task.status === 'failed');
+    for (const task of failed) tasks.retry(task.id);
+    if (failed.length) taskRunner.wake();
+    return failed.length;
   });
   ipcMain.handle('tasks.move.v1', (_event, input: unknown) =>
     toRendererTask(tasks.moveQueued(moveQueuedTaskInputSchema.parse(input)))
@@ -592,11 +758,13 @@ function registerIpc(): void {
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
+    title: 'PhotoAllIsAI',
     width: 1480,
     height: 940,
     minWidth: 1080,
     minHeight: 700,
     backgroundColor: '#111311',
+    show: false,
     ...getWindowChromeOptions(process.platform),
     webPreferences: {
       preload: join(__dirname, '../preload/index.cjs'),
@@ -612,8 +780,31 @@ function createWindow(): BrowserWindow {
     return { action: 'deny' };
   });
 
+  window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    console.error(`[renderer] failed to load ${validatedURL}: ${errorCode} ${errorDescription}`);
+    if (!window.isDestroyed()) {
+      void window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html><html><body style="margin:0;background:#111311;color:#d9ded2;font:14px system-ui;padding:32px"><h2>PhotoAllIsAI 无法加载</h2><p>渲染页面加载失败，请重新启动应用。</p><small>${errorCode} ${errorDescription}</small></body></html>`)}`);
+    }
+  });
+  window.webContents.on('render-process-gone', (_event, details) => {
+    console.error(`[renderer] process gone: ${details.reason}`);
+  });
+
   window.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith(APP_ORIGIN) && !process.env.ELECTRON_RENDERER_URL) event.preventDefault();
+  });
+
+  window.once('ready-to-show', () => {
+    if (!window.isDestroyed() && !shuttingDown) {
+      window.show();
+      window.focus();
+    }
+  });
+  window.on('closed', () => {
+    if (mainWindow === window) mainWindow = null;
+  });
+  window.webContents.once('did-finish-load', () => {
+    if (!window.isDestroyed() && !shuttingDown) window.show();
   });
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -625,17 +816,32 @@ function createWindow(): BrowserWindow {
       ? { query: { 'e2e-demo': '1' } }
       : undefined);
   }
-
   return window;
 }
-
-const hasLock = app.requestSingleInstanceLock();
-if (!hasLock) app.quit();
 
 const customUserData = process.env.PHOTOALLISAI_USER_DATA;
 if (customUserData) app.setPath('userData', customUserData);
 
+const hasLock = app.requestSingleInstanceLock();
+if (!hasLock) app.exit(0);
+
+function showMainWindow(): void {
+  if (!startupReady || shuttingDown) return;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    mainWindow = createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+// Register before async startup so Dock and second-instance events are never lost.
+app.on('second-instance', showMainWindow);
+app.on('activate', showMainWindow);
+
 app.whenReady().then(async () => {
+  if (!hasLock) return;
   const libraryDirectory = join(app.getPath('userData'), 'library');
   const prospectiveDatabasePath = join(libraryDirectory, 'catalog.sqlite');
   libraryBackup = new LibraryBackupService(prospectiveDatabasePath, join(libraryDirectory, 'generated'));
@@ -653,6 +859,7 @@ app.whenReady().then(async () => {
   workspace = new WorkspaceService(databasePath);
   appSettings = new AppSettingsService(join(app.getPath('userData'), 'settings', 'app.json'));
   const initialAppSettings = await appSettings.get();
+  appLocale = initialAppSettings.locale;
   databaseBackup = new DatabaseBackupService(databasePath);
   catalog = new CatalogService(databasePath);
   await catalog.reconcileImportedFolders();
@@ -673,7 +880,7 @@ app.whenReady().then(async () => {
     encrypt: (value) => safeStorage.encryptString(value).toString('base64'),
     decrypt: (value) => safeStorage.decryptString(Buffer.from(value, 'base64'))
   });
-  analysis = new AnalysisService(databasePath, providers, imageCache);
+  analysis = new AnalysisService(databasePath, providers, imageCache, async () => (await appSettings.get()).locale);
   generation = new GenerationService(
     databasePath,
     join(libraryDirectory, 'generated'),
@@ -707,12 +914,13 @@ app.whenReady().then(async () => {
         payload.destinationDirectory,
         payload.preset,
         signal,
-        taskId
+        taskId,
+        (progress) => tasks.reportProgress(taskId, progress.total ? (progress.succeeded + progress.failed) / progress.total : 0, progress)
       );
       signal?.throwIfAborted();
       return report;
     }
-  });
+  }, new AgentProcessor({ catalog: { listAssets: catalog.listAssets.bind(catalog), updateMetadata: catalog.updateMetadata.bind(catalog), updateTags: catalog.updateTags.bind(catalog), removeFromCatalog: (input) => fileOperations.removeFromCatalog(input) }, files: { move: (input) => fileOperations.move(input) }, generation, providers }));
   void databaseBackup.createAutomatic(join(libraryDirectory, 'backups'))
     .then((result) => {
       startupRecovery.automaticBackup.status = classifyAutomaticBackupResult(result);
@@ -776,33 +984,9 @@ app.whenReady().then(async () => {
 
   registerIpc();
   taskRunner.start();
-  mainWindow = createWindow();
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
-  app.on('second-instance', () => {
-    if (shuttingDown) return;
-    if (!mainWindow || mainWindow.isDestroyed()) {
-      mainWindow = BrowserWindow.getAllWindows()[0] ?? createWindow();
-      mainWindow.on('closed', () => {
-        mainWindow = null;
-      });
-    }
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    if (!mainWindow.isDestroyed()) mainWindow.focus();
-  });
-
-  app.on('activate', () => {
-    if (shuttingDown) return;
-    if (BrowserWindow.getAllWindows().length === 0) {
-      mainWindow = createWindow();
-      mainWindow.on('closed', () => {
-        mainWindow = null;
-      });
-    }
-  });
+  startupReady = true;
+  showMainWindow();
+  buildApplicationMenu();
 }).catch((error: unknown) => {
   const failure = createStartupFailureDialog(error);
   dialog.showErrorBox(failure.title, failure.content);
@@ -810,35 +994,48 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  // A dev window depends on a live Vite server. Do not leave an invisible
+  // Electron process holding the lock after closing that development session.
+  if (process.platform !== 'darwin' || process.env.ELECTRON_RENDERER_URL) app.quit();
 });
 
 app.on('before-quit', (event) => {
-  if (shutdownFinished) return;
+  if (shutdownFinished || !hasLock) return;
   event.preventDefault();
   if (shutdownStarted) return;
   shutdownStarted = true;
   shuttingDown = true;
-  if (contentHashTimer) clearTimeout(contentHashTimer);
-  catalogWatcher?.stop();
-  void settleBeforeShutdown([
-    ...(taskRunner ? [taskRunner.stop()] : []),
-    ...(contentHashPass ? [contentHashPass] : [])
-  ], 10_000).then((result) => {
-    if (result === 'timed-out') {
-      app.exit(0);
-      return;
+  // Bound the entire shutdown, including watcher and database cleanup failures.
+  const deadline = setTimeout(() => app.exit(0), 10_000);
+  void (async () => {
+    try {
+      if (contentHashTimer) clearTimeout(contentHashTimer);
+      catalogWatcher?.stop();
+      const result = await settleBeforeShutdown([
+        ...(taskRunner ? [taskRunner.stop()] : []),
+        ...(contentHashPass ? [contentHashPass] : [])
+      ], 9_000);
+      if (result === 'timed-out') {
+        app.exit(0);
+        return;
+      }
+      for (const service of [workspace, generation, exportService, exportPresets, analysis, templates, tasks, fileOperations, catalog]) {
+        try {
+          service?.close();
+        } catch (error) {
+          console.error('[shutdown] failed to close service', error);
+        }
+      }
+    } catch (error) {
+      console.error('[shutdown] cleanup failed', error);
+    } finally {
+      shutdownFinished = true;
+      app.quit();
+      clearTimeout(deadline);
     }
-    workspace?.close();
-    generation?.close();
-    exportService?.close();
-    exportPresets?.close();
-    analysis?.close();
-    templates?.close();
-    tasks?.close();
-    fileOperations?.close();
-    catalog?.close();
-    shutdownFinished = true;
-    app.quit();
-  });
+  })();
 });
+
+// electron-vite terminates its child on restart / Ctrl+C. Use the same cleanup.
+process.on('SIGTERM', () => app.quit());
+process.on('SIGINT', () => app.quit());

@@ -4,7 +4,9 @@ import { normalizeTaskErrorCode } from './task-error-code';
 
 const FALLBACK_ERROR_CODES: Record<PersistedTask['kind'], string> = {
   analysis: 'ANALYSIS_FAILED',
+  'collection-analysis': 'COLLECTION_ANALYSIS_FAILED',
   generation: 'GENERATION_FAILED',
+  agent: 'AGENT_FAILED',
   export: 'EXPORT_FAILED'
 };
 

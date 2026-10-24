@@ -1,0 +1,112 @@
+import path from 'node:path';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
+import { _electron as electron, expect, test } from '@playwright/test';
+import { TaskService } from '../../apps/desktop/src/main/task-service';
+
+test('batch and image menus have separate scopes and running batch deletion requires confirmation', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-task-actions-'));
+  const library = path.join(directory, 'library');
+  await mkdir(library);
+  const databasePath = path.join(library, 'catalog.sqlite');
+  const service = new TaskService(databasePath);
+  const makeTask = (assetId: string, batchId: string) => {
+    const task = service.enqueue({ kind: 'analysis', assetId, payload: { providerProfileId: 'cf9c8a2a-e903-45c9-b531-129a0d4fbe5d', mode: 'full', submissionId: batchId } });
+    service.pause(task.id);
+    return task;
+  };
+  const a = makeTask('a', 'first');
+  const b = makeTask('b', 'first');
+  const c = makeTask('c', 'first');
+  const d = makeTask('d', 'second');
+  const e = makeTask('e', 'second');
+  const f = makeTask('f', 'third');
+  service.close();
+  const database = new DatabaseSync(databasePath);
+  database.prepare("UPDATE tasks SET status = 'completed' WHERE id IN (?, ?)").run(a.id, f.id);
+  database.prepare("UPDATE tasks SET status = 'failed', error_code = 'PROVIDER_HTTP_400' WHERE id = ?").run(b.id);
+  const app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js')], env: { ...process.env, PHOTOALLISAI_USER_DATA: directory } });
+  try {
+    const page = await app.firstWindow();
+    await page.waitForLoadState('domcontentloaded');
+    await app.evaluate(({ dialog }) => {
+      const state = { response: 0, messages: [] as string[] };
+      (globalThis as unknown as { taskDialog: typeof state }).taskDialog = state;
+      dialog.showMessageBox = (async (options: { message: string; detail?: string }) => {
+        state.messages.push(`${options.message}\n${options.detail}`);
+        return { response: state.response, checkboxChecked: false };
+      }) as typeof dialog.showMessageBox;
+    });
+    await page.getByRole('button', { name: '打开工作区', exact: true }).click();
+    await page.getByRole('menuitem', { name: '任务中心', exact: true }).click();
+    const center = page.locator('.task-center-page');
+    await expect(center.locator('h2').filter({ hasText: '任务中心' })).toHaveCount(0);
+    await expect(center.getByRole('button', { name: '全部', exact: true })).toHaveText('全部6');
+    await expect(center.getByRole('button', { name: '暂停', exact: true })).toHaveText('暂停3');
+    const firstBatch = center.locator('.task-batch-group').filter({ has: page.locator(`[data-task-id="${a.id}"]`) });
+    const firstSummary = firstBatch.locator(':scope > summary');
+    await firstSummary.click({ button: 'right' });
+    const batchMenu = page.getByRole('menu', { name: '批次操作' });
+    await expect(batchMenu.getByRole('menuitem', { name: /重试|删除本批任务/ })).toHaveCount(0);
+    await expect(batchMenu.getByRole('menuitem', { name: '恢复暂停项', exact: true })).toBeVisible();
+    await expect(batchMenu.getByRole('menuitem', { name: '删除下面所有批次', exact: true })).toHaveCount(0);
+    await batchMenu.getByRole('menuitem', { name: '批量删除', exact: true }).click();
+    await expect(batchMenu.getByRole('menuitem', { name: '删除下面所有批次', exact: true })).toBeVisible();
+    await batchMenu.getByRole('menuitem', { name: '展开批次', exact: true }).click();
+    await expect(firstBatch).toHaveAttribute('open', '');
+    const failedRow = firstBatch.locator(`[data-task-id="${b.id}"]`);
+    await expect(failedRow.getByRole('button', { name: /删除|重试/ })).toHaveCount(0);
+    await failedRow.click({ button: 'right' });
+    const imageMenu = page.getByRole('menu', { name: '图片任务操作' });
+    await expect(imageMenu.getByRole('menuitem', { name: '重试任务', exact: true })).toBeVisible();
+    await expect(imageMenu.getByRole('menuitem', { name: '删除本批下面的项', exact: true })).toHaveCount(0);
+    await imageMenu.getByRole('menuitem', { name: '批量删除', exact: true }).click();
+    await expect(imageMenu.getByRole('menuitem', { name: '删除本批下面的项', exact: true })).toBeVisible();
+    await expect(imageMenu.getByRole('menuitem', { name: '删除所有任务', exact: true })).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await firstSummary.getByRole('button', { name: '重试批次失败项', exact: true }).click();
+    await expect.poll(() => page.evaluate((id) => window.desktopApi.getTask(id).then((task) => task?.attempt), b.id)).toBe(1);
+    expect(await page.evaluate((id) => window.desktopApi.getTask(id).then((task) => task?.attempt), a.id)).toBe(0);
+    await expect(firstBatch).toHaveAttribute('open', '');
+    await expect.poll(() => page.evaluate((id) => window.desktopApi.getTask(id).then((task) => task?.status), b.id)).toBe('failed');
+    database.prepare("UPDATE tasks SET status = 'processing' WHERE id = ?").run(c.id);
+    await expect(center.getByRole('button', { name: '运行', exact: true })).toHaveText('运行1');
+    for (const width of [1440, 900]) {
+      await app.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0]!.setSize(width, 900), width);
+      await expect.poll(() => center.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+      await page.screenshot({ path: `test-results/task-actions-${width}.png` });
+    }
+    await firstSummary.getByRole('button', { name: '删除批次', exact: true }).click();
+    await expect.poll(() => app.evaluate(() => (globalThis as unknown as { taskDialog: { messages: string[] } }).taskDialog.messages.length)).toBe(1);
+    await expect(firstBatch).toBeVisible();
+    expect(await app.evaluate(() => (globalThis as unknown as { taskDialog: { messages: string[] } }).taskDialog.messages[0])).toContain('1 条正在执行');
+    await app.evaluate(() => { (globalThis as unknown as { taskDialog: { response: number } }).taskDialog.response = 1; });
+    await firstSummary.getByRole('button', { name: '删除批次', exact: true }).click();
+    await expect(firstBatch).toHaveCount(0);
+    await expect(center.getByRole('button', { name: '全部', exact: true })).toHaveText('全部3');
+    await page.getByRole('button', { name: '后台任务', exact: true }).click();
+    const drawer = page.locator('.task-drawer');
+    const secondBatch = drawer.locator('.task-batch-group').filter({ has: page.locator(`[data-task-id="${d.id}"]`) });
+    await secondBatch.locator(':scope > summary').click({ button: 'right' });
+    await expect(page.getByRole('menu', { name: '批次操作' })).toBeVisible();
+    await page.getByRole('menuitem', { name: '展开批次', exact: true }).click();
+    const orderedIds = await secondBatch.locator('[data-task-id]').evaluateAll((rows) => rows.map((row) => (row as HTMLElement).dataset.taskId!));
+    await drawer.locator(`[data-task-id="${orderedIds[0]}"]`).click({ button: 'right' });
+    await expect(page.getByRole('menu', { name: '图片任务操作' })).toBeVisible();
+    await page.getByRole('menuitem', { name: '批量删除', exact: true }).click();
+    await page.screenshot({ path: 'test-results/task-delete-menu.png' });
+    await page.getByRole('menuitem', { name: '删除本批下面的项', exact: true }).click();
+    await expect.poll(() => page.evaluate((id) => window.desktopApi.getTask(id), orderedIds[1]!)).toBeNull();
+    expect(await page.evaluate((id) => window.desktopApi.getTask(id).then((task) => task?.id), orderedIds[0]!)).toBe(orderedIds[0]);
+    await page.getByRole('button', { name: '关闭任务抽屉', exact: true }).click();
+    await center.getByRole('button', { name: '清空', exact: true }).click();
+    await expect(center.getByRole('button', { name: '全部', exact: true })).toHaveText('全部0');
+    await expect(center.getByRole('button', { name: '清空', exact: true })).toBeDisabled();
+    await expect(page.locator('.task-status-batch')).toHaveCount(0);
+  } finally {
+    await app.close();
+    database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

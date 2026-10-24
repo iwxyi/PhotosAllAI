@@ -1,4 +1,6 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { ViewerToolbar } from './viewer-toolbar';
 import type {
   CatalogAsset,
   CatalogAlbum,
@@ -13,6 +15,7 @@ import type {
   TrashedGenerationResult,
   FileOperationHistoryItem,
   PersistedTask,
+  TaskPage,
   TaskListCursor,
   PromptTemplate,
   ProviderProfile,
@@ -25,9 +28,14 @@ import type {
   SaveProviderProfileInput,
   WorkspaceSession,
   WorkspaceTab,
-  AppSettings
+  AppSettings,
+  MenuCommand
 } from '@photoallisai/contracts';
+import { analysisResultSchema, collectionAnalysisReportSchema, generationResultSchema, agentTaskResultSchema } from '@photoallisai/contracts';
+import { groupTaskBatches, batchProgress } from './task-batches';
+import { TaskActions, TaskClearButton, TaskBatchButtons, TASKS_CHANGED_EVENT } from './task-actions';
 import { computeHorizontalWindow, composeGenerationPrompt, pickExportResults, selectAll, updateSelection, type ExportSelectionMode, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
+import { getLocale, setLocale, t, useLocale, type Locale } from './i18n';
 import {
   Aperture,
   ArrowDown,
@@ -35,6 +43,7 @@ import {
   Bot,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   CircleAlert,
   Clock3,
@@ -81,9 +90,11 @@ import {
 } from 'lucide-react';
 
 import { photos, type Photo } from './mock-data';
-import { fileOperationFailureMessage } from './error-messages';
+import { analysisFailureMessage, fileOperationFailureMessage } from './error-messages';
 
 const THEME_CHANGE_EVENT = 'photoallisai-theme-change';
+const OPEN_TASK_DRAWER_EVENT = 'photoallisai-open-task-drawer';
+const OPERATION_NOTICE_EVENT = 'photoallisai-operation-notice';
 const E2E_DEMO_MODE = new URLSearchParams(window.location.search).get('e2e-demo') === '1';
 const DECODED_IMAGE_SOURCES = new Set<string>();
 const IMAGE_ASPECT_RATIOS = new Map<string, number>();
@@ -141,13 +152,14 @@ function formatStorageBytes(bytes: number): string {
 
 type ViewerLayout = { leftWidth: number; rightWidth: number; filmstripHeight: number };
 const VIEWER_LAYOUT_KEY = 'photoallisai.viewer-layout.v1';
+const VIEWER_LAYOUT_CHANGE_EVENT = 'photoallisai-viewer-layout-change';
 const DEFAULT_VIEWER_LAYOUT: ViewerLayout = { leftWidth: 224, rightWidth: 300, filmstripHeight: 160 };
 const INSPECTOR_TAB_KEY = 'photoallisai.inspector-tab.v1';
-type InspectorTab = 'ai' | 'info' | 'versions';
+type InspectorTab = 'ai' | 'agent' | 'details';
 function useInspectorTab(): [InspectorTab, (tab: InspectorTab) => void] {
   const [tab, setTab] = useState<InspectorTab>(() => {
     const saved = window.localStorage.getItem(INSPECTOR_TAB_KEY);
-    return saved === 'info' || saved === 'versions' ? saved : 'ai';
+    return saved === 'agent' ? 'agent' : saved === 'details' || saved === 'info' || saved === 'versions' ? 'details' : 'ai';
   });
   const update = useCallback((next: InspectorTab) => { setTab(next); window.localStorage.setItem(INSPECTOR_TAB_KEY, next); }, []);
   return [tab, update];
@@ -174,11 +186,18 @@ function useViewerLayout(): [ViewerLayout, (key: keyof ViewerLayout, value: numb
   const [layout, setLayout] = useState<ViewerLayout>(loadViewerLayout);
   const update = useCallback((key: keyof ViewerLayout, value: number) => {
     const limits = key === 'leftWidth' ? [160, 420] : key === 'rightWidth' ? [240, 520] : [110, 320];
-    setLayout((current) => ({ ...current, [key]: clamp(Math.round(value), limits[0]!, limits[1]!) }));
+    setLayout((current) => {
+      const next = { ...current, [key]: clamp(Math.round(value), limits[0]!, limits[1]!) };
+      window.localStorage.setItem(VIEWER_LAYOUT_KEY, JSON.stringify(next));
+      window.dispatchEvent(new CustomEvent<ViewerLayout>(VIEWER_LAYOUT_CHANGE_EVENT, { detail: next }));
+      return next;
+    });
   }, []);
   useEffect(() => {
-    window.localStorage.setItem(VIEWER_LAYOUT_KEY, JSON.stringify(layout));
-  }, [layout]);
+    const synchronize = (event: Event) => setLayout((event as CustomEvent<ViewerLayout>).detail);
+    window.addEventListener(VIEWER_LAYOUT_CHANGE_EVENT, synchronize);
+    return () => window.removeEventListener(VIEWER_LAYOUT_CHANGE_EVENT, synchronize);
+  }, []);
   return [layout, update];
 }
 
@@ -266,10 +285,11 @@ function CatalogImage({ src, alt = '' }: { src: string; alt?: string }): React.J
 
 type CompareMode = 'single' | 'split';
 type CatalogSort = 'modifiedAt' | 'fileName' | 'rating';
+type CatalogViewMode = 'list' | 'grid' | 'analysis';
 
-const tabs: { id: WorkspaceTab; label: string; icon: typeof Image }[] = [
+const tabs: { id: Exclude<WorkspaceTab, `task:${string}`>; label: string; icon: typeof Image }[] = [
   { id: 'library', label: '图库', icon: LibraryBig },
-  { id: 'viewer', label: '看图', icon: Image },
+  { id: 'batch', label: 'AI 批量修图', icon: Sparkles },
   { id: 'templates', label: '提示词模板', icon: WandSparkles },
   { id: 'tasks', label: '任务中心', icon: Clock3 },
   { id: 'settings', label: '设置', icon: Settings }
@@ -341,8 +361,10 @@ function AppTabs({
   onClose: (id: WorkspaceTab) => void;
   onOpen: (id: WorkspaceTab) => void;
 }) {
+  useLocale();
+  const localizedTabs = tabs.map((tab) => ({ ...tab, label: t(tab.id) }));
   const [menuOpen, setMenuOpen] = useState(false);
-  const closedTabs = tabs.filter((tab) => !openTabs.includes(tab.id));
+  const closedTabs = localizedTabs.filter((tab) => !openTabs.includes(tab.id));
   useEffect(() => {
     if (!menuOpen) return;
     const close = (event: KeyboardEvent) => { if (event.key === 'Escape') setMenuOpen(false); };
@@ -359,7 +381,10 @@ function AppTabs({
   return (
     <div className="tab-strip" role="tablist" aria-label="工作区">
       {openTabs.map((tabId) => {
-        const tab = tabs.find((item) => item.id === tabId)!;
+        const tab = tabId.startsWith('task:')
+          ? { id: tabId, label: `${taskLabels[tabId.split(':')[1] as PersistedTask['kind']] ?? '任务'} · ${tabId.split(':').at(-1)?.slice(0, 6)}`, icon: Clock3 }
+          : localizedTabs.find((item) => item.id === (tabId === 'workflow' ? 'batch' : tabId));
+        if (!tab) return null;
         const Icon = tab.icon;
         return (
           <div
@@ -707,6 +732,7 @@ function Filmstrip({
   onSelectionChange,
   onFocusPhoto,
   collectionName,
+  toolbarHost,
   totalCount,
   favoriteOnly,
   onFavoriteOnlyChange,
@@ -724,6 +750,7 @@ function Filmstrip({
   onSelectionChange: React.Dispatch<React.SetStateAction<SelectionState>>;
   onFocusPhoto: (photo: Photo) => void;
   collectionName: string;
+  toolbarHost: HTMLDivElement | null;
   totalCount: number;
   favoriteOnly: boolean;
   onFavoriteOnlyChange: (value: boolean) => void;
@@ -736,11 +763,19 @@ function Filmstrip({
 }): React.JSX.Element {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState({ width: 0, scrollLeft: 0 });
-  const [filterOpen, setFilterOpen] = useState(false);
+
   const [viewMode, setViewMode] = useState<'filmstrip' | 'grid'>('filmstrip');
   const itemSize = 137;
   const virtual = computeHorizontalWindow(items.length, itemSize, viewport.width, viewport.scrollLeft, 4);
   const visibleItems = items.slice(virtual.start, virtual.end);
+
+  useEffect(() => {
+    const selectPhotos = (event: Event) => {
+      if (event.target === viewportRef.current) onSelectionChange(selectAll(items.map((photo) => photo.id)));
+    };
+    window.addEventListener('photoallisai:select-all-photos', selectPhotos);
+    return () => window.removeEventListener('photoallisai:select-all-photos', selectPhotos);
+  }, [items, onSelectionChange]);
 
   useEffect(() => {
     const element = viewportRef.current;
@@ -768,17 +803,17 @@ function Filmstrip({
 
   return (
     <section className="filmstrip-region">
-      <div className="filmstrip-toolbar">
-        <div className="result-summary"><strong>{collectionName}</strong><span>{totalCount} 张照片</span></div>
+      {toolbarHost && createPortal(<div className="filmstrip-toolbar">
+        <span className="filmstrip-count" title={collectionName}>{totalCount} 张</span>
         <div className="filmstrip-tools">
-          <div className="filter-control"><button className={`quiet-button${favoriteOnly ? ' is-active' : ''}`} type="button" aria-expanded={filterOpen} onClick={() => setFilterOpen((value) => !value)}><ListFilter size={14} /> 筛选{favoriteOnly ? ' · 首选' : ''}</button>{filterOpen && <div className="filter-popover" role="dialog" aria-label="图库筛选"><label><input type="checkbox" checked={favoriteOnly} onChange={(event) => onFavoriteOnlyChange(event.target.checked)} />仅显示首选照片</label><button className="quiet-button" type="button" onClick={() => { onFavoriteOnlyChange(false); setFilterOpen(false); }}>清除筛选</button></div>}</div>
+          <IconButton label="仅显示首选照片" active={favoriteOnly} pressed={favoriteOnly} onClick={() => onFavoriteOnlyChange(!favoriteOnly)}><ListFilter size={14} /></IconButton>
           <label className="sort-control"><select aria-label="图库排序" value={sortBy} onChange={(event) => onSortByChange(event.target.value as CatalogSort)}><option value="modifiedAt">拍摄时间</option><option value="fileName">文件名</option><option value="rating">评分</option></select><ChevronDown size={12} /></label>
           <div className="segmented-control">
             <button className={viewMode === 'filmstrip' ? 'is-active' : ''} type="button" aria-label="胶片视图" aria-pressed={viewMode === 'filmstrip'} onClick={() => setViewMode('filmstrip')}><GalleryHorizontalEnd size={14} /></button>
             <button className={viewMode === 'grid' ? 'is-active' : ''} type="button" aria-label="网格视图" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}><Grid2X2 size={14} /></button>
           </div>
         </div>
-      </div>
+      </div>, toolbarHost)}
       <div className={`filmstrip${viewMode === 'grid' ? ' is-grid' : ''}`} role="listbox" aria-label="照片" aria-multiselectable="true" tabIndex={0} ref={viewportRef} onKeyDown={(event) => {
         const focusIndex = Math.max(0, items.findIndex((photo) => photo.id === (selection.focusId ?? selected.id)));
         if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
@@ -860,7 +895,10 @@ function Viewer({
   onRegenerate,
   onReview,
   onRevealResult,
-  onOpenContextMenu
+  onOpenContextMenu,
+  onClose,
+  initialResultId,
+  onToolbarHostChange
 }: {
   photo: Photo;
   results: GenerationResult[];
@@ -874,6 +912,9 @@ function Viewer({
   onReview: (resultId: string, reviewState: GenerationResult['reviewState']) => Promise<void>;
   onRevealResult: (resultId: string) => void;
   onOpenContextMenu: (event: React.MouseEvent) => void;
+  onClose?: (() => void) | undefined;
+  initialResultId?: string | null | undefined;
+  onToolbarHostChange: (element: HTMLDivElement | null) => void;
 }): React.JSX.Element {
   const [compareMode, setCompareMode] = useState<CompareMode>('single');
   const [split, setSplit] = useState(52);
@@ -888,22 +929,23 @@ function Viewer({
   const [fittedSize, setFittedSize] = useState({ width: 0, height: 0 });
   const canvasWrapRef = useRef<HTMLDivElement>(null);
   const latestResultId = results[0]?.id ?? null;
+  const initialSelectionId = initialResultId === undefined ? latestResultId : results.find((result) => result.id === initialResultId)?.id ?? null;
   const selectedResult = selectedResultId ? results.find((result) => result.id === selectedResultId) : undefined;
   const generatedSource = isDemo ? photo.src : selectedResult?.resultUrl;
 
   useEffect(() => {
-    setSelectedResultId(latestResultId);
+    setSelectedResultId(initialSelectionId);
     setZoom(1);
     setPan({ x: 0, y: 0 });
     if (photo.src) setImageAspectRatio(IMAGE_ASPECT_RATIOS.get(photo.src) ?? 3 / 2);
-  }, [photo.id, photo.src, latestResultId]);
+  }, [photo.id, photo.src, initialSelectionId]);
 
   useLayoutEffect(() => {
     const container = canvasWrapRef.current;
     if (!container) return;
     const fit = () => {
-      const availableWidth = Math.max(1, container.clientWidth - 36);
-      const availableHeight = Math.max(1, container.clientHeight - 36);
+      const availableWidth = Math.max(1, container.clientWidth);
+      const availableHeight = Math.max(1, container.clientHeight);
       const width = Math.min(availableWidth, availableHeight * imageAspectRatio);
       setFittedSize({ width, height: width / imageAspectRatio });
     };
@@ -916,7 +958,7 @@ function Viewer({
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const target = event.target;
-      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+      if (!(target instanceof Element) || target.closest('input, textarea, select, [contenteditable="true"]') || event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key.toLowerCase() === 'o') setShowOriginal(event.type === 'keydown');
     };
     window.addEventListener('keydown', onKey);
@@ -925,6 +967,20 @@ function Viewer({
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('keyup', onKey);
     };
+  }, []);
+
+  useEffect(() => {
+    const onMenuCommand = (event: Event) => {
+      const command = (event as CustomEvent<MenuCommand>).detail;
+      if (command === 'fit-image' || command === 'zoom-100') {
+        setZoom(1);
+        setPan({ x: 0, y: 0 });
+      } else if (command === 'toggle-original') {
+        setShowOriginal((current) => !current);
+      }
+    };
+    window.addEventListener('photoallisai:menu-command', onMenuCommand);
+    return () => window.removeEventListener('photoallisai:menu-command', onMenuCommand);
   }, []);
 
   useEffect(() => () => {
@@ -941,8 +997,8 @@ function Viewer({
   const constrainPan = useCallback((nextPan: { x: number; y: number }, nextZoom: number) => {
     const container = canvasWrapRef.current;
     if (!container || nextZoom <= 1) return { x: 0, y: 0 };
-    const maxX = Math.max(0, (fittedSize.width * nextZoom - Math.max(1, container.clientWidth - 36)) / 2);
-    const maxY = Math.max(0, (fittedSize.height * nextZoom - Math.max(1, container.clientHeight - 36)) / 2);
+    const maxX = Math.max(0, (fittedSize.width * nextZoom - Math.max(1, container.clientWidth)) / 2);
+    const maxY = Math.max(0, (fittedSize.height * nextZoom - Math.max(1, container.clientHeight)) / 2);
     return { x: clamp(nextPan.x, -maxX, maxX), y: clamp(nextPan.y, -maxY, maxY) };
   }, [fittedSize.height, fittedSize.width]);
   const captureAspectRatio = useCallback((image: HTMLImageElement) => {
@@ -953,36 +1009,8 @@ function Viewer({
 
   return (
     <section className="viewer">
-      <div className="viewer-toolbar">
-        <div className="viewer-title">
-          <span>{photo.fileName}</span>
-          <i>{selectedResult ? `生成版本 ${selectedResult.version}` : isDemo ? '生成版本 2' : '原图'}</i>
-        </div>
-        <div className="viewer-actions">
-          <div className="segmented-control labeled">
-            <button
-              className={compareMode === 'single' ? 'is-active' : ''}
-              onClick={() => setCompareMode('single')}
-              type="button"
-            >
-              单图
-            </button>
-            <button
-              className={compareMode === 'split' ? 'is-active' : ''}
-              onClick={() => setCompareMode('split')}
-              type="button"
-            >
-              <Columns2 size={13} /> 对比
-            </button>
-          </div>
-          <IconButton label="缩小" disabled={zoom <= 0.25} onClick={() => adjustZoom(0.8)}><ZoomOut size={15} /></IconButton>
-          <span className="zoom-value" aria-live="polite">{Math.round(zoom * 100)}%</span>
-          <IconButton label="放大" disabled={zoom >= 4} onClick={() => adjustZoom(1.25)}><ZoomIn size={15} /></IconButton>
-          <IconButton label="适应窗口" active={zoom === 1} pressed={zoom === 1} onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}><Maximize2 size={15} /></IconButton>
-          {selectedResult && !isDemo && <span className="review-actions"><button type="button" aria-label="接受当前版本" className={selectedResult.reviewState === 'accepted' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'accepted')}>接受</button><button type="button" aria-label="标记为首选" className={selectedResult.reviewState === 'preferred' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'preferred')}><Star size={12} />首选</button><button type="button" aria-label="拒绝当前版本" className={selectedResult.reviewState === 'rejected' ? 'is-review-rejected' : ''} onClick={() => void onReview(selectedResult.id, 'rejected')}>拒绝</button></span>}
-        </div>
-      </div>
-      <div className={`canvas-wrap${zoom > 1 ? ' is-zoomed' : ''}`} ref={canvasWrapRef} onContextMenu={onOpenContextMenu} onWheel={(event) => {
+
+      <div className={`canvas-wrap${zoom > 1 ? ' is-zoomed' : ''}`} tabIndex={0} ref={canvasWrapRef} onContextMenu={onOpenContextMenu} onWheel={(event) => {
         const container = event.currentTarget;
         container.classList.add('is-gesturing');
         if (wheelEndTimerRef.current !== undefined) window.clearTimeout(wheelEndTimerRef.current);
@@ -1003,6 +1031,7 @@ function Viewer({
           setPan((current) => constrainPan({ x: current.x - event.deltaX, y: current.y - event.deltaY }, zoom));
         }
       }} onPointerDown={(event) => {
+        if (event.button === 0) event.currentTarget.focus({ preventScroll: true });
         if (zoom <= 1 || event.button !== 0) return;
         event.currentTarget.setPointerCapture(event.pointerId);
         panOriginRef.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y };
@@ -1019,6 +1048,11 @@ function Viewer({
         panOriginRef.current = null;
         event.currentTarget.classList.remove('is-panning');
       }}>
+        <div className="viewer-title">
+          {onClose && <IconButton label="关闭看图" onClick={onClose}><ChevronLeft size={16} /></IconButton>}
+          <span title={photo.fileName}>{photo.fileName}</span>
+          <i>{selectedResult ? `生成版本 ${selectedResult.version}` : isDemo ? '生成版本 2' : '原图'}</i>
+        </div>
         <div
           className={`photo-canvas${compareMode === 'split' ? ' is-comparing' : ''}`}
           style={{ width: fittedSize.width, height: fittedSize.height, transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})` }}
@@ -1052,13 +1086,41 @@ function Viewer({
           )}
         </div>
       </div>
-      <div className="viewer-footer">
-        <div className="version-switcher">
-          <span />
+      <ViewerToolbar>
+        <div className="viewer-actions" data-tool-group="compare">
+          <div className="segmented-control labeled">
+            <button
+              className={compareMode === 'single' ? 'is-active' : ''}
+              onClick={() => setCompareMode('single')}
+              type="button"
+            >
+              单图
+            </button>
+            <button
+              className={compareMode === 'split' ? 'is-active' : ''}
+              onClick={() => setCompareMode('split')}
+              type="button"
+            >
+              <Columns2 size={13} /> 对比
+            </button>
+          </div>
+        </div>
+        <div className="viewer-actions" data-tool-group="zoom">
+          <IconButton label="缩小" disabled={zoom <= 0.25} onClick={() => adjustZoom(0.8)}><ZoomOut size={15} /></IconButton>
+          <span className="zoom-value" aria-live="polite">{Math.round(zoom * 100)}%</span>
+          <IconButton label="放大" disabled={zoom >= 4} onClick={() => adjustZoom(1.25)}><ZoomIn size={15} /></IconButton>
+          <IconButton label="适应窗口" active={zoom === 1} pressed={zoom === 1} onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}><Maximize2 size={15} /></IconButton>
+        </div>
+        <div className="viewer-actions" data-tool-group="review">
+          {selectedResult && !isDemo && <span className="review-actions"><button type="button" aria-label="接受当前版本" className={selectedResult.reviewState === 'accepted' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'accepted')}>接受</button><button type="button" aria-label="标记为首选" className={selectedResult.reviewState === 'preferred' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'preferred')}><Star size={12} />首选</button><button type="button" aria-label="拒绝当前版本" className={selectedResult.reviewState === 'rejected' ? 'is-review-rejected' : ''} onClick={() => void onReview(selectedResult.id, 'rejected')}>拒绝</button></span>}
+        </div>
+        <div className="version-switcher" data-tool-group="versions">
           <button className={!selectedResult && !isDemo ? 'is-current' : ''} type="button" title="按住 O 键可临时查看原图" onClick={() => setSelectedResultId(null)}>原图</button>
           {isDemo ? <><button type="button">V1</button><button className="is-current" type="button">V2</button></> : [...results].reverse().map((result) => (
             <button className={`version-button${selectedResult?.id === result.id ? ' is-current' : ''}${result.reviewState === 'preferred' ? ' is-preferred' : result.reviewState === 'rejected' ? ' is-rejected' : ''}`} type="button" key={result.id} onClick={() => setSelectedResultId(result.id)} title={result.reviewState === 'preferred' ? '首选' : result.reviewState === 'accepted' ? '已接受' : result.reviewState === 'rejected' ? '已拒绝' : '未审阅'}>V{result.version}</button>
           ))}
+        </div>
+        <div className="version-switcher" data-tool-group="export">
           <button type="button" title="按当前方案再次生成" aria-label="按当前方案再次生成" disabled={!selectedResult || isDemo} onClick={() => {
             if (!selectedResult) return;
             void onRegenerate(selectedResult).then(setExportNotice);
@@ -1074,10 +1136,20 @@ function Viewer({
           <button type="button" title="在文件管理器中显示生成版本" aria-label="在文件管理器中显示生成版本" disabled={!selectedResult || isDemo} onClick={() => { if (selectedResult) onRevealResult(selectedResult.id); }}><FolderOpen size={13} /></button>
           {(trackedExportNotice || exportNotice) && <em className="viewer-notice" role="status">{trackedExportNotice || exportNotice}</em>}
         </div>
-        <div className="file-meta"><span>{photo.format}</span><span>{photo.dimensions}</span></div>
-      </div>
+        <div className="viewer-library-tools" data-tool-group="library" ref={onToolbarHostChange} />
+      </ViewerToolbar>
     </section>
   );
+}
+
+function WorkflowCommonSettings({ templates, rules, onRulesChange, templateId, onTemplateChange, onOpenTemplates, showTemplatesButton = false }: { templates: PromptTemplate[]; rules: WorkflowRule[]; onRulesChange: React.Dispatch<React.SetStateAction<WorkflowRule[]>>; templateId: string; onTemplateChange: (id: string) => void; onOpenTemplates: () => void; showTemplatesButton?: boolean }): React.JSX.Element {
+  return <section className="inspector-section workflow-inspector-settings">
+    <div className="inspector-heading"><span>工作流通用设置</span></div>
+    <label className="workflow-field"><span>批次默认模板</span><select aria-label="工作流批次默认模板" value={templateId} onChange={(event) => onTemplateChange(event.target.value)}><option value="">默认分层模板</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></label>
+    <div className="workflow-inspector-rule-heading">通用规则</div>
+    {rules.map((rule) => <label className="workflow-rule" key={rule.id}><input type="checkbox" checked={rule.enabled} aria-label={`启用 ${rule.text}`} onChange={() => onRulesChange((items) => items.map((item) => item.id === rule.id ? { ...item, enabled: !item.enabled } : item))} /><input aria-label={`编辑规则 ${rule.text}`} value={rule.text} onChange={(event) => onRulesChange((items) => items.map((item) => item.id === rule.id ? { ...item, text: event.target.value } : item))} /></label>)}
+    <div className="workflow-inspector-actions"><button className="quiet-button compact" type="button" onClick={() => onRulesChange((items) => [...items, { id: crypto.randomUUID(), text: '', enabled: true }])}><Plus size={12} />添加规则</button>{showTemplatesButton && <button className="quiet-button compact" type="button" onClick={onOpenTemplates}>模板库</button>}</div>
+  </section>;
 }
 
 function AiPanel({
@@ -1088,12 +1160,24 @@ function AiPanel({
   isDemo,
   notice,
   onAnalyze,
+  analyzing,
+  analysisTaskStatus,
+  analysisErrorCode,
   generationProfiles,
   templates,
   onOpenTemplates,
   onGenerate,
   onTrashResult,
-  onRestoreResult
+  onRestoreResult,
+  onAddToWorkflow,
+  onOpenBatch,
+  workflowQueueCount,
+  workflowPosition,
+  selectionCount,
+  workflowRules,
+  onWorkflowRulesChange,
+  workflowTemplateId,
+  onWorkflowTemplateChange
 }: {
   photo: Photo;
   results: GenerationResult[];
@@ -1102,96 +1186,196 @@ function AiPanel({
   isDemo: boolean;
   notice: string;
   onAnalyze: () => void;
+  analyzing: boolean;
+  analysisTaskStatus: PersistedTask['status'] | undefined;
+  analysisErrorCode: string | null;
   generationProfiles: ProviderProfile[];
   templates: PromptTemplate[];
   onOpenTemplates: () => void;
   onGenerate: (input: { providerProfileId: string; template: PromptTemplate | null; count: number; instruction: string; disabledActionIds: Set<string> }) => Promise<string>;
   onTrashResult: (resultId: string) => Promise<void>;
   onRestoreResult: (resultId: string) => Promise<void>;
+  onAddToWorkflow: () => void;
+  onOpenBatch: () => void;
+  workflowQueueCount: number;
+  workflowPosition: number | null;
+  selectionCount: number;
+  workflowRules: WorkflowRule[];
+  onWorkflowRulesChange: React.Dispatch<React.SetStateAction<WorkflowRule[]>>;
+  workflowTemplateId: string;
+  onWorkflowTemplateChange: (id: string) => void;
+  onOpenAgent?: () => void;
 }): React.JSX.Element {
-  const [actions, setActions] = useState({ people: true, light: true, texture: false });
-  const [disabledActions, setDisabledActions] = useState<Set<string>>(new Set());
-  const [generationCount, setGenerationCount] = useState(3);
-  const [templateId, setTemplateId] = useState('');
-  const [instruction, setInstruction] = useState('保持自然皮肤纹理，不要过度磨皮。');
-  const [generationNotice, setGenerationNotice] = useState('');
-  const [generating, setGenerating] = useState(false);
-  const [inspectorTab, setInspectorTab] = useInspectorTab();
-
-  const toggle = (key: keyof typeof actions) => setActions((current) => ({ ...current, [key]: !current[key] }));
   const result = revision?.result;
+  const analysisQueued = analysisTaskStatus === 'queued' || analysisTaskStatus === 'paused';
+  const analysisRunning = analysisTaskStatus !== undefined && ['preparing', 'uploading', 'processing', 'downloading', 'saving'].includes(analysisTaskStatus);
+  const analysisSyncing = analysisTaskStatus === 'completed' && !result;
+  const analysisPending = analysisQueued || analysisRunning || analysisSyncing;
   const score = isDemo ? 86 : result ? Math.round(result.quality.overallScore) : '--';
-  const summary = isDemo ? '自然光人像' : result?.summary ?? '等待视觉分析';
-  const description = isDemo ? '主体清晰，背景存在干扰元素' : result ? result.catalog.shortDescription : '尚未生成分析与编目数据';
-  const enabledActionCount = isDemo
-    ? Object.values(actions).filter(Boolean).length
-    : result?.generativeActions.filter((action) => action.enabled && !disabledActions.has(action.id)).length ?? 0;
-  const selectedTemplate = templates.find((template) => template.id === templateId) ?? null;
-
-  const queueGeneration = async () => {
-    if (isDemo) return;
-    const profile = generationProfiles[0];
-    if (!profile) {
-      setGenerationNotice('请先在设置中添加并启用图片生成模型。');
-      return;
-    }
-    setGenerating(true);
-    try {
-      setGenerationNotice(await onGenerate({
-        providerProfileId: profile.id,
-        template: selectedTemplate,
-        count: generationCount,
-        instruction,
-        disabledActionIds: disabledActions
-      }));
-    } finally {
-      setGenerating(false);
-    }
-  };
+  const summary = isDemo ? '自然光人像' : result?.summary ?? (analysisRunning ? '正在视觉分析' : analysisQueued ? '已加入分析队列' : analysisSyncing ? '正在载入分析结果' : analysisTaskStatus === 'failed' ? '视觉分析失败' : '等待视觉分析');
+  const description = isDemo ? '主体清晰，背景存在干扰元素' : result?.catalog.shortDescription;
 
   return (
-    <aside className="inspector">
-      <div className="inspector-tabs"><button className={inspectorTab === 'ai' ? 'is-active' : ''} type="button" aria-selected={inspectorTab === 'ai'} onClick={() => setInspectorTab('ai')}><Bot size={14} />AI</button><button className={inspectorTab === 'info' ? 'is-active' : ''} type="button" aria-selected={inspectorTab === 'info'} onClick={() => setInspectorTab('info')}><Info size={14} />信息</button><button className={inspectorTab === 'versions' ? 'is-active' : ''} type="button" aria-selected={inspectorTab === 'versions'} onClick={() => setInspectorTab('versions')}><Layers3 size={14} />版本</button></div>
-      <div className="inspector-scroll">{inspectorTab === 'ai' ? <>
+    <div className="ai-panel-content">
+        <header className="ai-selection-scope"><span>{selectionCount > 1 ? '当前选择' : '当前图片'}</span><strong>{selectionCount > 1 ? `${selectionCount} 张图片` : photo.fileName}</strong></header>
+        <section className="ai-purpose-card" aria-label="视觉分析">
+        <header className="ai-purpose-heading"><Search size={15} /><strong>视觉分析</strong><span>识别与建议</span></header>
+        {selectionCount > 1 && <p className="ai-current-preview">当前查看：{photo.fileName}</p>}
         <div className="analysis-head">
           <div className="analysis-score"><span>AI</span><strong>{score}</strong></div>
-          <div><strong>{summary}</strong><p>{description}</p></div>
-          <span className="confidence">{result || isDemo ? '分析完成' : '未分析'}</span>
+          <div className="analysis-head-content"><strong>{summary}</strong>{description && <p>{description}</p>}</div>
+          <span className="confidence">{isDemo ? '分析完成' : analysisRunning ? '分析中' : analysisQueued ? '队列中' : analysisSyncing ? '同步中' : analysisTaskStatus === 'failed' ? '失败' : result ? '分析完成' : '未分析'}</span>
+          {!isDemo && <div className="analysis-head-actions"><button className="analysis-primary-action" type="button" onClick={onAnalyze} disabled={analyzing || (selectionCount === 1 && analysisPending)}>{analyzing ? '正在提交…' : selectionCount > 1 ? `分析选中的 ${selectionCount} 张` : analysisRunning ? '正在分析' : analysisQueued ? '等待分析' : analysisSyncing ? '正在同步' : result ? '重新分析本图' : '分析本图'}</button></div>}
+          {!isDemo && notice && <p className="analysis-notice" aria-live="polite">{notice}</p>}
+          {!isDemo && analysisTaskStatus === 'failed' && <AnalysisFailure code={analysisErrorCode} />}
         </div>
 
-        <div className="inspector-section">
-          <div className="inspector-heading"><span>视觉分析</span>{!isDemo && <button type="button" onClick={onAnalyze}>{result ? '重新分析' : '开始分析'}</button>}</div>
-          <p className="analysis-copy">{isDemo ? '柔和侧光塑造了自然肤色。建议保留浅景深和发丝细节，同时清理右后方路人并轻微提亮面部。' : result?.report ?? (notice || '选择已配置的视觉模型后开始分析。')}</p>
+        {(isDemo || result) && <div className="inspector-section">
+          <div className="inspector-heading"><span>本图分析结果</span><span className="ai-result-file" title={photo.fileName}>{photo.fileName}</span></div>
+          <p className="analysis-copy">{isDemo ? '柔和侧光塑造了自然肤色。建议保留浅景深和发丝细节，同时清理右后方路人并轻微提亮面部。' : result?.report}</p>
           {isDemo ? <><div className="issue-row"><i className="severity high" /><span>背景路人分散注意力</span><em>严重</em></div><div className="issue-row"><i className="severity medium" /><span>面部中间调略暗</span><em>中等</em></div></> : result?.quality.issues.map((issue) => <div className="issue-row" key={`${issue.type}-${issue.description}`}><i className={`severity ${issue.severity >= 0.7 ? 'high' : 'medium'}`} /><span>{issue.description}</span><em>{Math.round(issue.confidence * 100)}%</em></div>)}
-        </div>
-
-        <div className="inspector-section">
-          <div className="inspector-heading"><span>AI 编辑动作</span><span className="section-count">{enabledActionCount} 项已启用</span></div>
-          {isDemo ? <><ActionToggle title="清除背景路人" detail="自然补全街道与光影" risk="低风险" checked={actions.people} onChange={() => toggle('people')} /><ActionToggle title="优化人物光线" detail="保持身份和肤色不变" risk="低风险" checked={actions.light} onChange={() => toggle('light')} /><ActionToggle title="增强衣物纹理" detail="避免改变服装结构" risk="低风险" checked={actions.texture} onChange={() => toggle('texture')} /></> : result?.generativeActions.map((action) => <ActionToggle key={action.id} title={action.target} detail={action.instruction} risk={`${action.risk === 'high' ? '高' : action.risk === 'medium' ? '中' : '低'}风险`} checked={action.enabled && !disabledActions.has(action.id)} onChange={() => setDisabledActions((current) => { const next = new Set(current); if (next.has(action.id)) next.delete(action.id); else next.add(action.id); return next; })} />)}
-          {!isDemo && !result && <div className="inline-empty">分析后将显示清除路人、移除障碍物等建议</div>}
-        </div>
-
-        <div className="inspector-section">
-          <div className="inspector-heading"><span>提示词模板</span><button type="button" onClick={onOpenTemplates}>浏览模板</button></div>
-          {isDemo ? <button className="template-choice" type="button" onClick={onOpenTemplates}><span className="template-preview"><img src="./demo/portrait.jpg" alt="" /></span><span><strong>自然人像 · 清洁背景</strong><small>保留身份、服装与真实光线</small></span><ChevronRight size={15} /></button> : (
-            <select className="template-select" aria-label="生成提示词模板" value={templateId} onChange={(event) => setTemplateId(event.target.value)}>
-              <option value="">通用 AI 修图</option>
-              {templates.map((template) => <option value={template.id} key={template.id}>{template.name} · V{template.version}</option>)}
-            </select>
-          )}
-          <label className="instruction-field">
-            <span>补充要求</span>
-            <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} rows={3} />
-          </label>
-          {!isDemo && generationNotice && <p className="generation-notice">{generationNotice}</p>}
-        </div>
-      </> : inspectorTab === 'info' ? <InspectorInfo photo={photo} revision={revision} /> : <InspectorVersions results={results} trashedResults={trashedResults} onTrashResult={onTrashResult} onRestoreResult={onRestoreResult} />}</div>
-      <div className="generate-footer">
-        <div className="generation-count"><span>生成数量</span><div><button type="button" aria-label="减少生成数量" onClick={() => setGenerationCount((value) => Math.max(1, value - 1))}>−</button><strong>{generationCount}</strong><button type="button" aria-label="增加生成数量" onClick={() => setGenerationCount((value) => Math.min(8, value + 1))}>+</button></div></div>
-        <button className="primary-action" type="button" onClick={() => void queueGeneration()} disabled={!isDemo && (!result || generating)}><Sparkles size={16} />{generating ? '正在加入…' : '加入生成队列'}</button>
-      </div>
-    </aside>
+        </div>}
+        </section>
+        <section className="ai-purpose-card ai-batch-destination" aria-label="批量修图">
+          <header className="ai-purpose-heading"><Image size={15} /><strong>批量修图</strong><span>{workflowQueueCount} 张图片</span></header>
+          <button className="secondary-action compact" type="button" onClick={onAddToWorkflow}><Plus size={14} />{selectionCount > 1 ? `添加选中的 ${selectionCount} 张到批量修图` : '添加本图到批量修图'}</button>
+          <button className="quiet-button compact" type="button" onClick={onOpenBatch}>打开批量修图<ChevronRight size={13} /></button>
+          {workflowPosition !== null && <small>本图已在修图列表中</small>}
+        </section>
+    </div>
   );
+}
+
+function GlobalAiPanel({
+  photo,
+  selectedIds,
+  isDemo,
+  workspaceTab,
+  onOpenTemplates,
+  onAddAssetsToWorkflow,
+  onOpenBatch,
+  workflowAssetIds,
+  tasks,
+  workflowRules,
+  onWorkflowRulesChange,
+  workflowTemplateId,
+  onWorkflowTemplateChange,
+  onOpenAgent
+}: {
+  photo: Photo | undefined;
+  selectedIds: ReadonlySet<string>;
+  isDemo: boolean;
+  workspaceTab: WorkspaceTab;
+  onOpenTemplates: () => void;
+  onAddAssetsToWorkflow: (ids: string[]) => void;
+  onOpenBatch: () => void;
+  workflowAssetIds: string[];
+  tasks: PersistedTask[];
+  workflowRules: WorkflowRule[];
+  onWorkflowRulesChange: React.Dispatch<React.SetStateAction<WorkflowRule[]>>;
+  workflowTemplateId: string;
+  onWorkflowTemplateChange: (id: string) => void;
+  onOpenAgent?: () => void;
+}): React.JSX.Element {
+  const [revision, setRevision] = useState<AnalysisRevision>();
+  const [results, setResults] = useState<GenerationResult[]>([]);
+  const [trashedResults, setTrashedResults] = useState<TrashedGenerationResult[]>([]);
+  const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
+  const [templates, setTemplates] = useState<PromptTemplate[]>([]);
+  const [storageMode, setStorageMode] = useState<AppSettings['generationStorageMode']>('managed');
+  const [notice, setNotice] = useState('');
+  const [analyzing, setAnalyzing] = useState(false);
+  const [refreshVersion, setRefreshVersion] = useState(0);
+
+  useEffect(() => { setNotice(''); }, [photo?.id]);
+
+  useEffect(() => {
+    if (isDemo) return;
+    let active = true;
+    void Promise.all([
+      window.desktopApi.listProviderProfiles(),
+      window.desktopApi.listPromptTemplates(),
+      window.desktopApi.getAppSettings()
+    ]).then(([nextProfiles, nextTemplates, settings]) => {
+      if (!active) return;
+      setProfiles(nextProfiles);
+      setTemplates(nextTemplates);
+      setStorageMode(settings.generationStorageMode);
+    });
+    return () => { active = false; };
+  }, [isDemo, workspaceTab]);
+
+  useEffect(() => {
+    if (isDemo || !photo) {
+      setRevision(undefined);
+      setResults([]);
+      setTrashedResults([]);
+      return;
+    }
+    let active = true;
+    const refresh = () => {
+      void Promise.all([
+        window.desktopApi.listAnalysisRevisions(photo.id),
+        window.desktopApi.listGenerationResults(photo.id),
+        window.desktopApi.listTrashedGenerationResults(photo.id)
+      ]).then(([revisions, nextResults, nextTrashed]) => {
+        if (!active) return;
+        setRevision(revisions[0]);
+        setResults(nextResults);
+        setTrashedResults(nextTrashed);
+      });
+    };
+    refresh();
+    const interval = window.setInterval(refresh, 1_500);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [isDemo, photo, refreshVersion]);
+
+  if (!photo) {
+    return <div className="ai-panel-content"><section className="ai-purpose-card"><header className="ai-purpose-heading"><Search size={15} /><strong>视觉分析</strong></header><p className="ai-empty-selection">选择图片以查看内容识别与修改建议</p></section><section className="ai-purpose-card ai-batch-destination"><header className="ai-purpose-heading"><Image size={15} /><strong>批量修图</strong><span>{workflowAssetIds.length} 张图片</span></header><button className="quiet-button compact" type="button" onClick={onOpenBatch}>打开批量修图<ChevronRight size={13} /></button></section></div>;
+  }
+
+  const targetIds = selectedIds.size > 0 && (workspaceTab !== 'workflow' || selectedIds.has(photo.id)) ? [...selectedIds] : [photo.id];
+  const analyze = async () => {
+    if (analyzing) return;
+    const profile = profiles.find((item) => item.purpose === 'vision' && item.enabled);
+    if (!profile) { setNotice('请先在设置中添加并启用视觉分析模型。'); return; }
+    setAnalyzing(true);
+    setNotice('');
+    try {
+      const batchId = crypto.randomUUID();
+      const settled = await Promise.allSettled(targetIds.map((assetId) => window.desktopApi.enqueueTask({ kind: 'analysis', assetId, payload: { providerProfileId: profile.id, mode: 'full', batchId, locale: getLocale() } })));
+      const succeeded = settled.filter((item) => item.status === 'fulfilled').length;
+      setNotice(succeeded === targetIds.length ? `已将 ${succeeded} 张照片加入分析队列。` : succeeded ? `已加入 ${succeeded} 张；${targetIds.length - succeeded} 张加入失败，请重试。` : '加入分析队列失败，请检查模型配置或连接后重试。');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+  const generate = async ({ providerProfileId, template, count, instruction, disabledActionIds }: { providerProfileId: string; template: PromptTemplate | null; count: number; instruction: string; disabledActionIds: Set<string> }) => {
+    const batchId = crypto.randomUUID();
+    let queued = 0;
+    let skipped = 0;
+    for (const assetId of targetIds) {
+      const revisions = assetId === photo.id && revision ? [revision] : await window.desktopApi.listAnalysisRevisions(assetId);
+      const current = revisions[0];
+      if (!current) { skipped += 1; continue; }
+      const analysis = { ...current.result, generativeActions: current.result.generativeActions.map((action) => ({ ...action, enabled: action.enabled && (assetId !== photo.id || !disabledActionIds.has(action.id)) })) };
+      const prompt = composeGenerationPrompt({ templateBody: template?.body ?? DEFAULT_GENERATION_TEMPLATE_BODY, analysis, userInstruction: instruction });
+      for (let resultIndex = 1; resultIndex <= count; resultIndex += 1) {
+        await window.desktopApi.enqueueTask({ kind: 'generation', assetId, payload: { providerProfileId, batchId, prompt, templateId: template?.id ?? null, templateVersion: template?.version ?? null, resultIndex, storageMode, analysisRevisionId: current.id, disabledActionIds: current.result.generativeActions.filter((action) => action.enabled && !analysis.generativeActions.find((item) => item.id === action.id)?.enabled).map((action) => action.id), userInstruction: instruction } });
+        queued += 1;
+      }
+    }
+    window.dispatchEvent(new Event(OPEN_TASK_DRAWER_EVENT));
+    return skipped > 0 ? `已加入 ${queued} 个生成任务；${skipped} 张未分析照片已跳过。` : `已加入 ${queued} 个生成任务。`;
+  };
+  const trash = async (resultId: string) => { await window.desktopApi.trashGenerationResult({ resultId }); setRefreshVersion((value) => value + 1); window.dispatchEvent(new CustomEvent(OPERATION_NOTICE_EVENT, { detail: '生成版本已移到应用回收站，原图未受影响。' })); };
+  const restore = async (resultId: string) => { await window.desktopApi.restoreGenerationResult({ resultId }); setRefreshVersion((value) => value + 1); window.dispatchEvent(new CustomEvent(OPERATION_NOTICE_EVENT, { detail: '生成版本已恢复。' })); };
+
+  const workflowIndex = workflowAssetIds.indexOf(photo.id);
+  const latestAnalysisTask = tasks
+    .filter((task) => task.kind === 'analysis' && task.assetId === photo.id && task.status !== 'canceled')
+    .sort((left, right) => right.createdAt - left.createdAt)[0];
+  return <AiPanel photo={photo} results={results} trashedResults={trashedResults} revision={revision} isDemo={isDemo} notice={notice} onAnalyze={() => void analyze()} analyzing={analyzing} analysisTaskStatus={latestAnalysisTask?.status} analysisErrorCode={latestAnalysisTask?.errorCode ?? null} generationProfiles={profiles.filter((item) => item.purpose === 'generation' && item.enabled)} templates={templates} onOpenTemplates={onOpenTemplates} onGenerate={generate} onTrashResult={trash} onRestoreResult={restore} onOpenBatch={onOpenBatch} onAddToWorkflow={() => onAddAssetsToWorkflow(targetIds)} workflowQueueCount={workflowAssetIds.length} workflowPosition={workflowIndex >= 0 ? workflowIndex + 1 : null} selectionCount={targetIds.length} workflowRules={workflowRules} onWorkflowRulesChange={onWorkflowRulesChange} workflowTemplateId={workflowTemplateId} onWorkflowTemplateChange={onWorkflowTemplateChange} />;
 }
 
 function ActionToggle({ title, detail, risk, checked, onChange }: { title: string; detail: string; risk: string; checked: boolean; onChange: () => void }): React.JSX.Element {
@@ -1247,30 +1431,131 @@ function InspectorVersions({ results, trashedResults, onTrashResult, onRestoreRe
   </div>;
 }
 
-function TaskBar({ open, onToggle, onOpenTaskCenter, tasks }: { open: boolean; onToggle: () => void; onOpenTaskCenter: () => void; tasks: PersistedTask[] | null }): React.JSX.Element {
+function TaskAnalysisResult({ task }: { task: PersistedTask }): React.JSX.Element | null {
+  const [legacyResult, setLegacyResult] = useState<AnalysisResult | null>(null);
+  const parsed = analysisResultSchema.safeParse(task.result?.analysis);
+  useEffect(() => {
+    if (task.kind !== 'analysis' || task.status !== 'completed' || task.result?.analysis || !task.assetId) return;
+    let active = true;
+    void window.desktopApi.listAnalysisRevisions(task.assetId).then((revisions) => {
+      const revision = revisions.find((item) => item.providerProfileId === task.payload.providerProfileId && item.createdAt >= task.createdAt && item.createdAt <= task.updatedAt);
+      if (active) setLegacyResult(revision?.result ?? null);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [task.id, task.status, task.assetId, task.createdAt, task.updatedAt, task.payload.providerProfileId, task.result]);
+  if (task.kind !== 'analysis' || task.status !== 'completed') return null;
+  const result = parsed.success ? parsed.data : legacyResult;
+  if (!result) return <div className="task-analysis-result">本次任务未保存可查看的分析结果</div>;
+  return <details className="task-analysis-result"><summary><strong>{result.summary}</strong><span>{Math.round(result.quality.overallScore)} 分</span></summary><div className="task-analysis-report"><p>{result.report}</p><p>{result.catalog.longDescription}</p><div className="metadata-tags">{result.catalog.keywords.map((tag) => <span key={tag}>{tag}</span>)}</div>{result.quality.issues.map((issue, index) => <p key={index}>{issue.description}</p>)}{result.adjustments.global.map((item, index) => <p key={`adjust-${index}`}>{item.parameter} {item.value} {item.unit} · {item.reason}</p>)}{result.generativeActions.map((item) => <p key={item.id}>{item.target}：{item.instruction}</p>)}</div></details>;
+}
+
+function TaskOutput({ task, photos }: { task: PersistedTask; photos: Photo[] }): React.JSX.Element | null {
+  if (task.kind === 'generation') {
+    const generated = generationResultSchema.safeParse(task.result?.generation);
+    return <details className="task-analysis-result"><summary>生成详情</summary><div className="task-analysis-report">{generated.success && <figure className="task-generated-result"><img src={generated.data.resultUrl} alt={generated.data.fileName} loading="lazy" /><figcaption>{generated.data.fileName}</figcaption></figure>}<p className="task-prompt-text">{typeof task.payload.prompt === 'string' ? task.payload.prompt : '未保存提示词'}</p></div></details>;
+  }
+  if (task.kind === 'collection-analysis') {
+    const report = collectionAnalysisReportSchema.safeParse(task.result);
+    if (!report.success) return null;
+    const names = (ids: string[]) => ids.map((id) => photos.find((photo) => photo.id === id)?.fileName ?? id).join('、');
+    return <details className="task-analysis-result"><summary>{report.data.summary}</summary><div className="task-analysis-report">{report.data.groups.map((group, index) => <p key={index}><strong>{group.title}</strong>：{names(group.assetIds)} · {group.reason}</p>)}<p>建议保留：{names(report.data.keepAssetIds) || '无'}</p><p>待复查：{names(report.data.reviewAssetIds) || '无'}</p>{report.data.recommendations.map((item, index) => <p key={index}>{item}</p>)}</div></details>;
+  }
+  if (task.kind === 'agent' && task.result) {
+    const report = agentTaskResultSchema.safeParse(task.result);
+    if (!report.success) return null;
+    return <details className="task-analysis-result"><summary>执行结果 · {report.data.completedSteps.length} 步完成</summary><div className="task-analysis-report">{report.data.completedSteps.map((step, index) => <p key={index}>{step}</p>)}{report.data.skippedSteps.map((step, index) => <p key={`skip-${index}`}>跳过：{step}</p>)}{report.data.warnings.map((warning, index) => <p key={`warn-${index}`}>{warning}</p>)}</div></details>;
+  }
+  return null;
+}
+
+function useTaskPhotos(tasks: PersistedTask[], providedPhotos: Photo[]): Photo[] {
+  const [resolved, setResolved] = useState<Photo[]>([]);
+  const missingIds = [...new Set(tasks.flatMap((task) => task.assetId ? [task.assetId] : []))]
+    .filter((id) => !providedPhotos.some((photo) => photo.id === id)).sort();
+  const missingKey = JSON.stringify(missingIds);
+  useEffect(() => {
+    let active = true;
+    const ids = JSON.parse(missingKey) as string[];
+    void (async () => {
+      const loaded: Photo[] = [];
+      for (let offset = 0; offset < ids.length; offset += 500) {
+        const page = await window.desktopApi.listCatalogAssetPage({ assetIds: ids.slice(offset, offset + 500), limit: 500 });
+        loaded.push(...mapCatalogAssets(page.items));
+      }
+      if (active) setResolved(loaded);
+    })().catch(() => { if (active) setResolved([]); });
+    return () => { active = false; };
+  }, [missingKey]);
+  return [...providedPhotos, ...resolved.filter((photo) => !providedPhotos.some((item) => item.id === photo.id))];
+}
+
+function TaskBatchGroup({ tasks, photos: providedPhotos, children, onOpenViewer: openViewer, expanded = false, expandRequest = 0, compact = false }: { tasks: PersistedTask[]; photos: Photo[]; children?: React.ReactNode; onOpenViewer?: (assetId: string, assetIds?: string[]) => void; expanded?: boolean; expandRequest?: number; compact?: boolean }): React.JSX.Element {
+  const photos = useTaskPhotos(tasks, providedPhotos);
+  const onOpenViewer = openViewer ? (assetId: string) => openViewer(assetId, tasks.flatMap((task) => task.assetId ? [task.assetId] : [])) : undefined;
+  const detailRef = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const element = detailRef.current;
+    if (!element) return;
+    const openRow = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element) || target.closest('button, input, a, summary')) return;
+      const row = target.closest('.task-table-row, .task-activity-row');
+      if (!row) return;
+      const rows = [...element.querySelectorAll('.task-table-row, .task-activity-row')];
+      const task = tasks[rows.indexOf(row)];
+      if (task?.assetId && photos.some((photo) => photo.id === task.assetId)) onOpenViewer?.(task.assetId);
+    };
+    element.addEventListener('dblclick', openRow);
+    return () => element.removeEventListener('dblclick', openRow);
+  }, [tasks, photos, onOpenViewer]);
+  useEffect(() => { if (expanded && detailRef.current) { detailRef.current.open = true; detailRef.current.scrollIntoView({ block: 'nearest' }); } }, [expanded, expandRequest]);
+  const stats = batchProgress(tasks);
+  const first = tasks[0]!;
+  const title = `${taskLabels[first.kind]} · ${new Date(Math.min(...tasks.map((task) => task.createdAt))).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+  const summary = <><ChevronRight size={14} /><TaskKindIcon kind={first.kind} /><span className="task-batch-heading"><strong>{title}</strong><small>{taskImageName(first, photos)}{tasks.length > 1 ? ` 等 ${stats.total} 项` : ` · ${stats.total} 项`}</small></span><span className="task-batch-counts"><span>成功 {stats.completed}</span>{(!compact || stats.active > 0) && <span>处理中 {stats.active}</span>}{(!compact || stats.queued > 0) && <span>等待 {stats.queued}</span>}{stats.paused > 0 && <span>暂停 {stats.paused}</span>}{(!compact || stats.failed > 0) && <span className={stats.failed > 0 ? 'failed-count' : ''}>失败 {stats.failed}</span>}{stats.canceled > 0 && <span>取消 {stats.canceled}</span>}</span><progress aria-label="批次进度" max={Math.max(stats.total, 1)} value={stats.settled} /></>;
+  return <details ref={detailRef} className={`task-batch-group${compact ? ' is-compact' : ''}`}><summary className="task-batch-summary" data-task-batch={first.id}>{summary}<TaskBatchButtons tasks={tasks} /></summary><div className="task-batch-members">{children ?? tasks.map((task) => { const photo = photos.find((item) => item.id === task.assetId); return <div className="task-batch-member" key={task.id}><div className="task-row task-activity-row" data-task-id={task.id}><button className="task-member-preview" type="button" disabled={!photo || !onOpenViewer} onClick={() => { if (photo && onOpenViewer) onOpenViewer(photo.id); }} aria-label={photo ? `预览 ${photo.fileName}` : '任务图片预览'}>{(photo?.thumbnailSrc || photo?.src) ? <img src={photo.thumbnailSrc || photo.src} alt={photo.fileName} /> : <TaskKindIcon kind={task.kind} />}</button><span className="task-title"><strong>{taskImageName(task, photos)}</strong><small>{taskScope(task)}</small></span><span className={`task-state state-${task.status}`}>{taskStage(task)}</span></div>{task.status === 'failed' && ((task.kind === 'analysis' || task.kind === 'collection-analysis') ? <AnalysisFailure code={task.errorCode} taskId={task.id} className="task-analysis-failure" /> : <div className="task-analysis-failure" role="alert">{task.kind === 'export' ? exportFailureMessage(task.errorCode ?? '') : '任务执行失败'} <code>{task.errorCode}</code></div>)}<TaskAnalysisResult task={task} /><TaskOutput task={task} photos={photos} />{task.kind === 'export' && task.result && <div className="task-analysis-result">成功 {Number(task.result.succeeded) || 0} · 失败 {Number(task.result.failed) || 0}{exportTaskReport(task)?.files.map((file) => <p key={file.resultId}>{file.fileName}</p>)}{exportTaskReport(task)?.failures.map((failure) => <p key={failure.resultId}>{exportFailureMessage(failure.errorCode)} · {failure.errorCode}</p>)}</div>}</div>; })}</div></details>;
+}
+
+function TaskBar({ panelVisibility, onTogglePanel, suspended, open, onToggle, onOpenTaskCenter, onOpenViewer: openViewer, tasks, counts, photos }: { panelVisibility: { left: boolean; right: boolean }; onTogglePanel: (side: 'left' | 'right') => void; suspended: boolean; open: boolean; onToggle: () => void; onOpenTaskCenter: () => void; onOpenViewer: (assetId: string, assetIds?: string[]) => void; tasks: PersistedTask[] | null; counts?: Pick<TaskPage, 'activeCount' | 'queuedCount' | 'failedCount' | 'pausedCount'>; photos: Photo[] }): React.JSX.Element {
+  const [expandedBatch, setExpandedBatch] = useState<{ id: string; request: number } | null>(null);
+  const expandBatch = (id: string) => {
+    setExpandedBatch((previous) => ({ id, request: (previous?.request ?? 0) + 1 }));
+    if (!open) onToggle();
+  };
   const isDemo = tasks === null;
-  const visibleTasks = tasks ?? [];
-  const runningCount = isDemo ? 1 : visibleTasks.filter((task) => ['preparing', 'uploading', 'processing', 'downloading', 'saving'].includes(task.status)).length;
-  const waitingCount = isDemo ? 4 : visibleTasks.filter((task) => task.status === 'queued').length;
-  const failedCount = isDemo ? 1 : visibleTasks.filter((task) => task.status === 'failed').length;
-  const pausedCount = isDemo ? 0 : visibleTasks.filter((task) => task.status === 'paused').length;
+  const visibleTasks = (tasks ?? []).filter((task) => !['completed', 'failed', 'canceled'].includes(task.status))
+    .sort((left, right) => Number(['queued', 'paused'].includes(left.status)) - Number(['queued', 'paused'].includes(right.status)) || left.position - right.position);
+  const runningCount = isDemo ? 0 : counts?.activeCount ?? visibleTasks.filter((task) => ['preparing', 'uploading', 'processing', 'downloading', 'saving'].includes(task.status)).length;
+  const waitingCount = isDemo ? 0 : counts?.queuedCount ?? visibleTasks.filter((task) => task.status === 'queued').length;
+  const failedCount = isDemo ? 0 : counts?.failedCount ?? 0;
+  const pausedCount = isDemo ? 0 : counts?.pausedCount ?? visibleTasks.filter((task) => task.status === 'paused').length;
+  const batches = groupTaskBatches(tasks ?? []);
+  const onOpenViewer = (assetId: string, assetIds?: string[]) => openViewer(assetId, assetIds ?? batches.find((batch) => batch.tasks.some((task) => task.assetId === assetId))?.tasks.flatMap((task) => task.assetId ? [task.assetId] : []));
+  const pendingBatches = batches.filter((batch) => batch.active + batch.queued + batch.paused > 0);
 
   return (
-    <>
+    <TaskActions tasks={groupTaskBatches(tasks ?? []).flatMap((batch) => batch.tasks)} onOpenViewer={onOpenViewer}>
       {open && (
-        <div className="task-drawer">
-          <div className="drawer-head"><div><strong>当前任务</strong><span>生成任务将按顺序执行</span></div><div><button className="quiet-button" type="button" onClick={onOpenTaskCenter}><ListFilter size={13} />任务中心</button><IconButton label="关闭任务抽屉" onClick={onToggle}><X size={15} /></IconButton></div></div>
-          {isDemo ? <><div className="task-row is-running"><span className="drag-handle">⠿</span><img src="./demo/portrait.jpg" alt="" /><span className="task-title"><strong>DSC_4821.NEF</strong><small>自然人像 · 清洁背景</small></span><span className="task-progress"><i style={{ width: '64%' }} /><em>正在生成 · 64%</em></span><span className="task-time">约 18 秒</span><IconButton label="暂停"><Pause size={14} /></IconButton></div><div className="task-row"><span className="drag-handle">⠿</span><img src="./demo/coast.jpg" alt="" /><span className="task-title"><strong>A7R_0938.ARW</strong><small>自然风光 · 清除游客</small></span><span className="queued-label">队列第 1 位</span><span className="task-time">生成 2 次</span><IconButton label="开始"><Play size={14} /></IconButton></div></> : visibleTasks.length === 0 ? <div className="drawer-empty">暂无任务</div> : visibleTasks.slice(0, 2).map((task) => <div className="task-row" key={task.id}><span className="drag-handle">⠿</span><span className="task-placeholder-image"><TaskKindIcon kind={task.kind} /></span><span className="task-title"><strong>{taskLabels[task.kind]}</strong><small>{taskSubtitle(task)}</small></span><span className="task-progress"><i style={{ width: `${task.progress * 100}%` }} /><em>{statusLabels[task.status]} · {Math.round(task.progress * 100)}%</em></span><span className="task-time">第 {task.attempt + 1} 次</span><span /></div>)}
+        <div className="task-drawer" inert={suspended} aria-hidden={suspended ? true : undefined} style={suspended ? { visibility: 'hidden' } : undefined}>
+          <div className="drawer-head"><div><strong>后台任务</strong><span>{pendingBatches.length} 批进行中</span></div><div><button className="quiet-button" type="button" onClick={onOpenTaskCenter}><ListFilter size={13} />全部任务与历史</button><IconButton label="关闭任务抽屉" onClick={onToggle}><X size={15} /></IconButton></div></div>
+          {isDemo || batches.length === 0 ? <div className="drawer-empty">暂无后台任务</div> : batches.map((batch) => <TaskBatchGroup key={batch.id} tasks={batch.tasks} photos={photos} onOpenViewer={onOpenViewer} compact expanded={expandedBatch?.id === batch.id} expandRequest={expandedBatch?.request ?? 0} />)}
         </div>
       )}
-      <button className="task-statusbar" type="button" onClick={onToggle} aria-expanded={open}>
-        <span className={`working-pulse${runningCount === 0 ? ' is-idle' : ''}`} /><strong>处理中 {runningCount}</strong><span>等待 {waitingCount}</span>{pausedCount > 0 && <span>暂停 {pausedCount}</span>}<span className="failed-count">失败 {failedCount}</span><span className="status-spacer" /><span>串行任务</span><PanelBottomOpen size={15} className={open ? 'is-open' : ''} />
-      </button>
-    </>
+      <div className="task-statusbar">
+        <button className="panel-visibility-toggle" type="button" aria-label={panelVisibility.left ? '隐藏左侧栏' : '显示左侧栏'} aria-expanded={panelVisibility.left} title={panelVisibility.left ? '隐藏左侧栏（Tab 切换两侧）' : '显示左侧栏（Tab 切换两侧）'} onClick={() => onTogglePanel('left')}>{panelVisibility.left ? <ChevronLeft size={15} /> : <ChevronRight size={15} />}</button>
+        <button className="task-status-toggle" type="button" onClick={onToggle} aria-expanded={open} aria-label="后台任务"><span className={`working-pulse${runningCount === 0 ? ' is-idle' : ''}`} /><strong>后台任务</strong><span>{pendingBatches.length} 批进行中</span></button>
+        <div className="task-status-batches">{pendingBatches.map((batch) => <button type="button" className="task-status-batch" key={batch.id} onClick={() => expandBatch(batch.id)}><TaskKindIcon kind={batch.tasks[0]!.kind} /><span>{taskLabels[batch.tasks[0]!.kind]} {batch.settled}/{batch.total}</span><progress aria-label="批次进度" max={Math.max(batch.total, 1)} value={batch.settled} /></button>)}</div>
+        <span>运行 {runningCount} 项</span><span>排队 {waitingCount} 项</span>{pausedCount > 0 && <span>暂停 {pausedCount} 项</span>}{failedCount > 0 && <span className="failed-count">失败 {failedCount} 项</span>}<button className="task-status-toggle" type="button" onClick={onToggle} aria-label={open ? '收起后台任务' : '展开后台任务'}><PanelBottomOpen size={15} className={open ? 'is-open' : ''} /></button>
+        <button className="panel-visibility-toggle" type="button" aria-label={panelVisibility.right ? '隐藏右侧栏' : '显示右侧栏'} aria-expanded={panelVisibility.right} title={panelVisibility.right ? '隐藏右侧栏（Tab 切换两侧）' : '显示右侧栏（Tab 切换两侧）'} onClick={() => onTogglePanel('right')}>{panelVisibility.right ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}</button>
+      </div>
+    </TaskActions>
   );
 }
 
 type LibraryWorkspaceProps = {
+  active?: boolean;
+  onCloseViewer?: () => void;
+  initialResultId?: string | null;
   view: 'library' | 'viewer';
   onOpenViewer: (assetId: string) => void;
   availablePhotos: Photo[];
@@ -1311,25 +1596,17 @@ type LibraryWorkspaceProps = {
   onRefreshCatalog: () => Promise<void>;
   onOpenTaskCenter: () => void;
   onOpenTemplates: () => void;
+  onAddAssetsToWorkflow: (ids: string[]) => void;
+  onAddAssetsToAgent?: (ids: string[]) => void;
+  onAddAssetsToBatch?: (ids: string[]) => void;
 };
 
 function LibraryWorkspace(props: LibraryWorkspaceProps): React.JSX.Element {
-  const [viewerLayout, setViewerLayout] = useViewerLayout();
-  const [inspectorTab, setInspectorTab] = useInspectorTab();
-  const [operationNotice, setOperationNotice] = useState('');
-  const unregisterFolder = async (folderId: string) => {
-    const folder = props.catalogFolders.find((item) => item.id === folderId);
-    await props.onUnregisterFolder(folderId);
-    setOperationNotice(`已从图库移除「${folder?.name ?? '文件夹'}」，磁盘文件和已有元数据保持不变。`);
-  };
-
   if (props.availablePhotos.length > 0) {
-    return <PopulatedLibraryWorkspace {...props} onUnregisterFolder={unregisterFolder} operationNotice={operationNotice} setOperationNotice={setOperationNotice} />;
+    return <PopulatedLibraryWorkspace {...props} />;
   }
   return (
-    <div className="workspace viewer-workspace" style={{ gridTemplateColumns: `${viewerLayout.leftWidth}px 5px minmax(0, 1fr) 5px ${viewerLayout.rightWidth}px` }}>
-      <Sidebar folders={props.catalogFolders} albums={props.catalogAlbums} smartCollections={props.catalogSmartCollections} totalCount={props.totalCount} selectedFolderId={props.selectedFolderId} selectedAlbumId={props.selectedAlbumId} selectedSmartCollection={props.selectedSmartCollection} tags={props.catalogTags} selectedTagId={props.selectedTagId} onSelectFolder={props.onSelectFolder} onSelectAlbum={props.onSelectAlbum} onSelectSmartCollection={props.onSelectSmartCollection} onRefreshAlbums={props.onRefreshAlbums} onImportFolders={props.onImportFolders} onRelinkFolder={props.onRelinkFolder} onSynchronizeFolder={props.onSynchronizeFolder} onRevealFolder={props.onRevealFolder} onUnregisterFolder={unregisterFolder} onMoveFolder={props.onMoveFolder} onSelectTag={props.onSelectTag} isDemo={props.isDemo} />
-      <PaneSplitter orientation="vertical" value={viewerLayout.leftWidth} minimum={160} maximum={420} label="调整左侧目录栏宽度" onChange={(value) => setViewerLayout('leftWidth', value)} />
+    <div className="workspace viewer-workspace">
       {props.view === 'library' ? <CatalogWorkspace {...props} /> :
       <main className="empty-library-main">
         {props.catalogFolders.length === 0 ? <FolderOpen size={30} /> : <Search size={30} />}
@@ -1337,10 +1614,6 @@ function LibraryWorkspace(props: LibraryWorkspaceProps): React.JSX.Element {
         <p>{props.catalogFolders.length === 0 ? '照片仍保留在原位置，PhotoAllIsAI 只建立本地图库索引。' : props.searchQuery ? '尝试其他文件名、场景、主体或 AI 关键词。' : '从其他目录选择照片，或导入新的照片文件夹。'}</p>
         {props.catalogFolders.length === 0 && <button className="primary-action compact" type="button" onClick={() => void props.onImportFolders()}><Plus size={14} />选择文件夹</button>}
       </main>}
-      <PaneSplitter orientation="vertical" value={viewerLayout.rightWidth} minimum={240} maximum={520} label="调整右侧 AI 面板宽度" invert onChange={(value) => setViewerLayout('rightWidth', value)} />
-      <aside className="inspector"><div className="inspector-tabs">{(['ai', 'info', 'versions'] as const).map((tab) => <button key={tab} className={inspectorTab === tab ? 'is-active' : ''} type="button" aria-selected={inspectorTab === tab} onClick={() => setInspectorTab(tab)}>{tab === 'ai' ? <Bot size={14} /> : tab === 'info' ? <Info size={14} /> : <Layers3 size={14} />}{tab === 'ai' ? 'AI' : tab === 'info' ? '信息' : '版本'}</button>)}</div><div className="empty-library-inspector"><Info size={18} /><span>选择照片后显示分析和版本信息</span></div></aside>
-      {operationNotice && <div className="operation-toast" role="status">{operationNotice}<button type="button" aria-label="关闭提示" onClick={() => setOperationNotice('')}><X size={13} /></button></div>}
-      <TaskBar open={false} onToggle={() => undefined} onOpenTaskCenter={props.onOpenTaskCenter} tasks={[]} />
     </div>
   );
 }
@@ -1358,14 +1631,25 @@ function collectionTitle(props: Pick<LibraryWorkspaceProps, 'catalogFolders' | '
   return props.searchQuery ? `搜索：${props.searchQuery}` : '所有照片';
 }
 
-function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetId: string) => void }): React.JSX.Element {
+function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetId: string) => void; onOpenPhotoContextMenu?: (event: React.MouseEvent, photo: Photo) => void }): React.JSX.Element {
   const selection = props.selection;
   const setSelection = props.onSelectionChange;
   const gridRef = useRef<HTMLElement>(null);
   const marqueeOriginRef = useRef<{ x: number; y: number; additive: boolean; initialIds: Set<string> } | null>(null);
   const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  const [viewMode, setViewMode] = useState<CatalogViewMode>(() => {
+    try { return (window.localStorage.getItem('photoallisai.catalog-view-mode') as CatalogViewMode) || 'grid'; } catch { return 'grid'; }
+  });
   const orderedIds = useMemo(() => props.availablePhotos.map((photo) => photo.id), [props.availablePhotos]);
   const selectedPhoto = props.availablePhotos.find((photo) => selection.focusId === photo.id) ?? null;
+
+  useEffect(() => {
+    const selectPhotos = (event: Event) => {
+      if (event.target === gridRef.current) setSelection(selectAll(orderedIds));
+    };
+    window.addEventListener('photoallisai:select-all-photos', selectPhotos);
+    return () => window.removeEventListener('photoallisai:select-all-photos', selectPhotos);
+  }, [orderedIds, setSelection]);
 
   const selectPhoto = (photo: Photo, intent: SelectionIntent) => {
     if (intent === 'replace' && selection.selectedIds.has(photo.id)) {
@@ -1404,15 +1688,26 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
     cards[targetIndex]?.focus({ preventScroll: true });
     cards[targetIndex]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   };
+  const changeViewMode = (mode: CatalogViewMode) => {
+    setViewMode(mode);
+    try { window.localStorage.setItem('photoallisai.catalog-view-mode', mode); } catch { /* restricted storage */ }
+  };
+  const allVisibleSelected = orderedIds.length > 0 && orderedIds.every((id) => selection.selectedIds.has(id));
+  const someVisibleSelected = orderedIds.some((id) => selection.selectedIds.has(id));
+  const selectButton = (photo: Photo) => <input className="catalog-list-select" type="checkbox" aria-label={`选择 ${photo.fileName}`} checked={selection.selectedIds.has(photo.id)} onClick={(event) => event.stopPropagation()} onChange={() => selectPhoto(photo, 'toggle')} />;
+  const photoImage = (photo: Photo) => <span className="catalog-list-thumb">{photo.thumbnailSrc || photo.src ? <CatalogImage src={photo.thumbnailSrc ?? photo.src} alt="" /> : <Image size={18} />}</span>;
+  const listRows = props.availablePhotos.map((photo) => <div className={`catalog-list-row${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}`} key={photo.id} data-asset-id={photo.id} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onDoubleClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>
+    {selectButton(photo)}{photoImage(photo)}<span className="catalog-list-name"><strong>{photo.fileName}</strong><small>{photo.format}</small></span><span>{photo.dimensions}</span><span>{photo.rating ? `${photo.rating} 星` : '未评分'}</span><span className="catalog-list-analysis">{viewMode === 'analysis' ? (photo.offline ? '文件离线，等待重新关联' : photo.rating >= 4 ? '建议保留，可作为精选' : '等待视觉识别与建议') : ''}</span><button className="quiet-button compact" type="button" onClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>打开</button>
+  </div>);
   return (
     <>
       <main className="catalog-main">
         <header className="catalog-toolbar">
           <div className="result-summary"><strong>{collectionTitle(props)}</strong><span>{props.totalCount} 张照片</span></div>
           <div className="catalog-toolbar-actions">
+            <div className="catalog-view-switcher" role="group" aria-label="图库视图"><button className={viewMode === 'list' ? 'is-active' : ''} type="button" aria-label="列表视图" title="列表视图" onClick={() => changeViewMode('list')}><ListFilter size={14} /></button><button className={viewMode === 'grid' ? 'is-active' : ''} type="button" aria-label="网格视图" title="网格视图" onClick={() => changeViewMode('grid')}><Grid2X2 size={14} /></button><button className={viewMode === 'analysis' ? 'is-active' : ''} type="button" aria-label="分析视图" title="分析视图" onClick={() => changeViewMode('analysis')}><WandSparkles size={14} /></button></div>
             <label className="sort-control"><select aria-label="图库排序" value={props.sortBy} onChange={(event) => props.onSortByChange(event.target.value as CatalogSort)}><option value="modifiedAt">拍摄时间</option><option value="fileName">文件名</option><option value="rating">评分</option></select><ChevronDown size={12} /></label>
             <button className={`quiet-button${props.favoriteOnly ? ' is-active' : ''}`} type="button" onClick={() => props.onFavoriteOnlyChange(!props.favoriteOnly)}><Star size={13} />仅首选</button>
-            <button className="primary-action compact" type="button" disabled={!selectedPhoto} onClick={() => { if (selectedPhoto) props.onOpenViewer(selectedPhoto.id); }}><Image size={14} />打开看图</button>
           </div>
         </header>
         {props.availablePhotos.length === 0 ? (
@@ -1422,6 +1717,8 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
             <p>{props.catalogFolders.length === 0 ? '不会复制或修改原图，只建立本地索引。' : '请选择其他目录或调整筛选条件。'}</p>
             {props.catalogFolders.length === 0 && <button className="primary-action compact" type="button" onClick={() => void props.onImportFolders()}><Plus size={14} />选择文件夹</button>}
           </section>
+        ) : viewMode !== 'grid' ? (
+          <section className={`catalog-list-view catalog-list-view-${viewMode}`} role="listbox" ref={gridRef} tabIndex={0} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a' && !(event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]'))) { event.preventDefault(); setSelection(selectAll(orderedIds)); } }} aria-label={viewMode === 'analysis' ? '图库分析视图' : '图库列表视图'}><div className="catalog-list-header"><input className="catalog-list-select" type="checkbox" aria-label="全选当前列表" title="全选当前列表" checked={allVisibleSelected} ref={(element) => { if (element) element.indeterminate = someVisibleSelected && !allVisibleSelected; }} onChange={() => setSelection(allVisibleSelected ? { selectedIds: new Set(), anchorId: null, focusId: null } : selectAll(orderedIds))} /><span>缩略图</span><span>文件</span><span>大小</span><span>评分</span><span>{viewMode === 'analysis' ? '分析与建议' : '操作'}</span><span /></div>{listRows}{props.hasMore && <button className="catalog-load-more" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? '加载中…' : '加载更多'}</button>}</section>
         ) : (
           <section className="catalog-grid" role="listbox" aria-label="图库照片" ref={gridRef} tabIndex={0} onPointerDown={(event) => {
             if (event.button !== 0 || event.target !== event.currentTarget) return;
@@ -1458,7 +1755,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
             if (event.key === 'Enter' && selectedPhoto) props.onOpenViewer(selectedPhoto.id);
             moveGridFocus(event);
           }}>
-            {props.availablePhotos.map((photo) => <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} draggable key={photo.id} onDragStart={(event) => { preparePhotoDrag(event, photo, selection); }} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>
+            {props.availablePhotos.map((photo) => <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} draggable key={photo.id} onDragStart={(event) => { preparePhotoDrag(event, photo, selection); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>
               <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{photo.thumbnailSrc || photo.src ? <CatalogImage src={photo.thumbnailSrc ?? photo.src} /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
               <span className="catalog-card-meta"><strong>{photo.fileName}</strong><small>{photo.format} · {photo.dimensions}</small>{photo.rating > 0 && <span aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}</span>
             </button>)}
@@ -1471,10 +1768,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
   );
 }
 
-type PopulatedLibraryWorkspaceProps = LibraryWorkspaceProps & {
-  operationNotice: string;
-  setOperationNotice: (notice: string) => void;
-};
+type PopulatedLibraryWorkspaceProps = LibraryWorkspaceProps;
 
 function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React.JSX.Element {
   const {
@@ -1482,14 +1776,11 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     availablePhotos,
     catalogFolders,
     catalogAlbums,
-    catalogSmartCollections,
-    catalogTags,
     exportPresets,
     isDemo,
     selectedFolderId,
     selectedAlbumId,
     selectedSmartCollection,
-    selectedTagId,
     totalCount,
     favoriteOnly,
     onFavoriteOnlyChange,
@@ -1497,16 +1788,6 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     onSortByChange,
     hasMore,
     loadingMore,
-    onSelectFolder,
-    onSelectAlbum,
-    onSelectSmartCollection,
-    onRefreshAlbums,
-    onImportFolders,
-    onRelinkFolder,
-    onSynchronizeFolder,
-    onRevealFolder,
-    onUnregisterFolder,
-    onSelectTag,
     onLoadMore,
     searchQuery,
     selectedAssetId,
@@ -1514,18 +1795,18 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     selection,
     onSelectionChange,
     onRefreshCatalog,
-    onOpenTaskCenter,
-    onOpenTemplates,
-    operationNotice,
-    setOperationNotice
+    onAddAssetsToWorkflow,
+    onAddAssetsToAgent,
+    onAddAssetsToBatch
   } = props;
+  const [viewerToolbarHost, setViewerToolbarHost] = useState<HTMLDivElement | null>(null);
+  const [operationNotice, setOperationNotice] = useState('');
   const [viewerLayout, setViewerLayout] = useViewerLayout();
   const initialSelectedId = availablePhotos.some((photo) => photo.id === selectedAssetId)
     ? selectedAssetId!
     : availablePhotos[0]!.id;
   const [selectedId, setSelectedId] = useState(initialSelectedId);
   const setSelection = onSelectionChange;
-  const [tasksOpen, setTasksOpen] = useState(false);
   const [visionProfiles, setVisionProfiles] = useState<ProviderProfile[]>([]);
   const [generationProfiles, setGenerationProfiles] = useState<ProviderProfile[]>([]);
   const [generationStorageMode, setGenerationStorageMode] = useState<AppSettings['generationStorageMode']>('managed');
@@ -1533,9 +1814,7 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
   const [analysisRevision, setAnalysisRevision] = useState<AnalysisRevision>();
   const [analysisAssetId, setAnalysisAssetId] = useState<string | null>(null);
   const [generationResults, setGenerationResults] = useState<GenerationResult[]>([]);
-  const [trashedGenerationResults, setTrashedGenerationResults] = useState<TrashedGenerationResult[]>([]);
   const [generationAssetId, setGenerationAssetId] = useState<string | null>(null);
-  const [analysisNotice, setAnalysisNotice] = useState('');
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
   const [tagEditorOpen, setTagEditorOpen] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
@@ -1562,7 +1841,6 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
   const selected = availablePhotos.find((photo) => photo.id === selectedAssetId) ?? availablePhotos.find((photo) => photo.id === selectedId) ?? availablePhotos[0]!;
   const currentAnalysisRevision = analysisAssetId === selected.id ? analysisRevision : undefined;
   const currentGenerationResults = generationAssetId === selected.id ? generationResults : [];
-  const currentTrashedGenerationResults = generationAssetId === selected.id ? trashedGenerationResults : [];
   const orderedIds = useMemo(() => availablePhotos.map((photo) => photo.id), [availablePhotos]);
   const collectionName = selectedFolderId
     ? catalogFolders.find((folder) => folder.id === selectedFolderId)?.name ?? '文件夹'
@@ -1571,6 +1849,12 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
       : selectedSmartCollection
         ? selectedSmartCollection === 'recent' ? '最近 30 天' : selectedSmartCollection === 'favorites' ? '首选照片' : selectedSmartCollection === 'unrated' ? '未评分' : selectedSmartCollection === 'unanalyzed' ? '等待 AI 分析' : selectedSmartCollection === 'to-review' ? '待审阅' : '已生成'
         : isDemo ? '2026 人像作品' : searchQuery ? `搜索：${searchQuery}` : '所有照片';
+
+  useEffect(() => {
+    const showNotice = (event: Event) => setOperationNotice((event as CustomEvent<string>).detail);
+    window.addEventListener(OPERATION_NOTICE_EVENT, showNotice);
+    return () => window.removeEventListener(OPERATION_NOTICE_EVENT, showNotice);
+  }, [setOperationNotice]);
 
   useEffect(() => {
     if (availablePhotos.some((photo) => photo.id === selectedAssetId)) return;
@@ -1589,12 +1873,15 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (props.active === false) return;
+      if (event.defaultPrevented) return;
+      const target = event.target;
+      if (!(target instanceof Element) || target.closest('input, textarea, select, [contenteditable="true"]') || !target.closest('.filmstrip, .catalog-grid, .catalog-list-view, .canvas-wrap')) return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
-        const target = event.target;
-        if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+        if (!target.closest('.filmstrip, .catalog-grid, .catalog-list-view')) return;
         event.preventDefault();
         setSelection(selectAll(orderedIds));
-      } else if (!isDemo && /^[0-5]$/.test(event.key)) {
+      } else if (!isDemo && !event.metaKey && !event.ctrlKey && !event.altKey && /^[0-5]$/.test(event.key)) {
         const target = event.target;
         if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
         event.preventDefault();
@@ -1615,7 +1902,7 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [availablePhotos, isDemo, onRefreshCatalog, onSelectedAssetChange, orderedIds, selected.id, selection.selectedIds, setSelection, view]);
+  }, [props.active, availablePhotos, isDemo, onRefreshCatalog, onSelectedAssetChange, orderedIds, selected.id, selection.selectedIds, setSelection, view]);
 
   useEffect(() => {
     if (isDemo) return;
@@ -1690,13 +1977,9 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     if (isDemo) return;
     let active = true;
     const refresh = () => {
-      void Promise.all([
-        window.desktopApi.listGenerationResults(selected.id),
-        window.desktopApi.listTrashedGenerationResults(selected.id)
-      ]).then(([items, trashedItems]) => {
+      void window.desktopApi.listGenerationResults(selected.id).then((items) => {
         if (active) {
           setGenerationResults(items);
-          setTrashedGenerationResults(trashedItems);
           setGenerationAssetId(selected.id);
         }
       });
@@ -1710,13 +1993,14 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     if (isDemo) return;
     let active = true;
     const refresh = () => {
-      void window.desktopApi.listTaskPage({ limit: 20, cursor: null }).then((page) => {
+      void window.desktopApi.listTaskPage({ includeBatchMembers: true, limit: 20, cursor: null }).then((page) => {
         if (active) setTaskItems(page.items);
       });
     };
     refresh();
+    window.addEventListener(TASKS_CHANGED_EVENT, refresh);
     const interval = window.setInterval(refresh, 1_000);
-    return () => { active = false; window.clearInterval(interval); };
+    return () => { active = false; window.clearInterval(interval); window.removeEventListener(TASKS_CHANGED_EVENT, refresh); };
   }, [isDemo]);
 
   const selectPhoto = (photo: Photo, intent: SelectionIntent) => {
@@ -1749,20 +2033,21 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     return () => { window.removeEventListener('pointerdown', close); window.removeEventListener('blur', close); window.removeEventListener('keydown', closeOnEscape); };
   }, [photoContextMenu]);
 
-  const analyzeSelection = async () => {
+  const analyzeSelection = useCallback(async () => {
     const profile = visionProfiles[0];
     if (!profile) {
-      setAnalysisNotice('请先在设置中添加并启用视觉分析模型。');
+      setOperationNotice('请先在设置中添加并启用视觉分析模型。');
       return;
     }
     const targetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+    const batchId = crypto.randomUUID();
     await Promise.all(targetIds.map((assetId) => window.desktopApi.enqueueTask({
       kind: 'analysis',
       assetId,
-      payload: { providerProfileId: profile.id, mode: 'full' }
+      payload: { providerProfileId: profile.id, mode: 'full', batchId, locale: getLocale() }
     })));
-    setAnalysisNotice(`已将 ${targetIds.length} 张照片加入分析队列。`);
-  };
+    setOperationNotice(`已将 ${targetIds.length} 张照片加入分析队列。`);
+  }, [selected.id, selection.selectedIds, setOperationNotice, visionProfiles]);
 
   const rateSelection = async (rating: number) => {
     if (isDemo) return;
@@ -1779,7 +2064,7 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     await onRefreshCatalog();
   };
 
-  const generateSelection = async ({
+  const generateSelection = useCallback(async ({
     providerProfileId,
     template,
     count,
@@ -1839,11 +2124,55 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
         queued += 1;
       }
     }
-    setTasksOpen(true);
+    window.dispatchEvent(new Event(OPEN_TASK_DRAWER_EVENT));
     return skipped > 0
       ? `已加入 ${queued} 个生成任务；${skipped} 张照片因尚未分析而跳过。`
       : `已加入 ${queued} 个生成任务。`;
-  };
+  }, [currentAnalysisRevision, generationStorageMode, selected.id, selection.selectedIds]);
+
+  useEffect(() => {
+    const onMenuCommand = (event: Event) => {
+      const command = (event as CustomEvent<MenuCommand>).detail;
+      if (command === 'analyze-selection') {
+        if (props.active === false) return;
+        void analyzeSelection();
+      } else if (command === 'generate-selection') {
+        if (props.active === false) return;
+        const profile = generationProfiles[0];
+        if (profile) void generateSelection({
+          providerProfileId: profile.id,
+          template: templateItems[0] ?? null,
+          count: 1,
+          instruction: '',
+          disabledActionIds: new Set()
+        }).then(setOperationNotice);
+      } else if (command === 'open-task-center') {
+        if (props.active === false) return;
+        window.dispatchEvent(new Event(OPEN_TASK_DRAWER_EVENT));
+      }
+    };
+    window.addEventListener('photoallisai:menu-command', onMenuCommand);
+    return () => window.removeEventListener('photoallisai:menu-command', onMenuCommand);
+  }, [props.active, generationProfiles, templateItems, selection.selectedIds, selected.id, analyzeSelection, generateSelection, setOperationNotice]);
+
+  useEffect(() => {
+    if (props.active === false) return;
+    const counts = taskItems.reduce((result, task) => {
+      const terminal = task.status === 'completed' || task.status === 'failed' || task.status === 'canceled';
+      result.total += terminal ? 0 : 1;
+      result.running ||= task.status === 'preparing' || task.status === 'uploading' || task.status === 'processing' || task.status === 'downloading' || task.status === 'saving';
+      return result;
+    }, { total: 0, running: false });
+    window.desktopApi.updateMenuState({
+      activeTab: view === 'viewer' ? 'viewer' : 'library',
+      hasSelection: selection.selectedIds.size > 0,
+      selectionCount: selection.selectedIds.size,
+      hasVisionProvider: visionProfiles.length > 0,
+      hasGenerationProvider: generationProfiles.length > 0,
+      taskCount: counts.total,
+      hasRunningTask: counts.running
+    });
+  }, [props.active, generationProfiles.length, selection.selectedIds.size, taskItems, view, visionProfiles.length]);
 
   const exportResults = async (
     resultIds: string[],
@@ -1853,7 +2182,7 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     try {
       const task = await window.desktopApi.exportGenerationResults({ resultIds, presetId });
       if (!task) return '已取消导出';
-      setTasksOpen(true);
+      window.dispatchEvent(new Event(OPEN_TASK_DRAWER_EVENT));
       const notice = `已将 ${resultIds.length} 个文件加入导出队列`;
       setTrackedExport({ taskId: task.id, notice, surface });
       return notice;
@@ -1889,7 +2218,7 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
         storageMode: result.storageMode
       }
     });
-    setTasksOpen(true);
+    window.dispatchEvent(new Event(OPEN_TASK_DRAWER_EVENT));
     return '已按当前方案加入 1 个生成任务。';
   };
 
@@ -1904,39 +2233,6 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
       setOperationNotice(reviewState === 'preferred' ? '已标记为首选版本。' : reviewState === 'accepted' ? '已接受当前版本。' : '已拒绝当前版本。');
     } catch {
       setOperationNotice('版本状态更新失败，请稍后重试。');
-    }
-  };
-
-  const reloadGenerationResults = async (): Promise<void> => {
-    const [items, trashedItems] = await Promise.all([
-      window.desktopApi.listGenerationResults(selected.id),
-      window.desktopApi.listTrashedGenerationResults(selected.id)
-    ]);
-    setGenerationResults(items);
-    setTrashedGenerationResults(trashedItems);
-  };
-
-  const trashGenerationResult = async (resultId: string): Promise<void> => {
-    try {
-      await window.desktopApi.trashGenerationResult({ resultId });
-      await reloadGenerationResults();
-      setOperationNotice('生成版本已移到应用回收站，原图未受影响。');
-      await onRefreshCatalog();
-    } catch {
-      setOperationNotice('无法回收生成版本，请确认文件仍可访问。');
-      throw new Error('GENERATION_RESULT_TRASH_FAILED');
-    }
-  };
-
-  const restoreGenerationResult = async (resultId: string): Promise<void> => {
-    try {
-      await window.desktopApi.restoreGenerationResult({ resultId });
-      await reloadGenerationResults();
-      setOperationNotice('生成版本已恢复。');
-      await onRefreshCatalog();
-    } catch {
-      setOperationNotice('无法恢复生成版本：目标位置可能已有同名文件。');
-      throw new Error('GENERATION_RESULT_RESTORE_FAILED');
     }
   };
 
@@ -1991,26 +2287,6 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
       setOperationNotice(`无法开始${folderAction === 'move' ? '移动' : '复制'}，请确认目标文件夹仍然可用。`);
     } finally {
       setMoveBusy(false);
-    }
-  };
-
-  const dropAssetsToFolder = async (folderId: string, assetIds: string[], copy: boolean) => {
-    if (isDemo || assetIds.length === 0) return;
-    try {
-      const companions = await window.desktopApi.previewCatalogCompanions(assetIds);
-      const report = copy
-        ? await window.desktopApi.copyCatalogAssets({ assetIds, targetFolderId: folderId, includeCompanions: false })
-        : await window.desktopApi.moveCatalogAssets({ assetIds, targetFolderId: folderId, includeCompanions: false });
-      if (report.status !== 'completed') {
-        setOperationNotice(report.rolledBack ? '拖放操作失败，文件已恢复到原位置。' : `拖放操作未能完整恢复，请记录操作号 ${report.operationId}。`);
-      } else if ('copied' in report) {
-        setOperationNotice(`已复制 ${report.copied} 张照片${companions.files.length ? `；另有 ${companions.files.length} 个 RAW/JPEG/XMP 关联文件未复制` : ''}。`);
-      } else {
-        setOperationNotice(`已移动 ${report.moved} 张照片${report.skipped ? `，${report.skipped} 张原本就在目标文件夹` : ''}${companions.files.length ? `；另有 ${companions.files.length} 个 RAW/JPEG/XMP 关联文件未移动` : ''}。`);
-      }
-      await onRefreshCatalog();
-    } catch {
-      setOperationNotice('拖放操作失败：请检查目标文件夹权限、磁盘状态或所选照片的活动任务。');
     }
   };
 
@@ -2110,17 +2386,13 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
   }, [moveBusy, moveDialogOpen, removalBusy, removalMode, renameBusy, renameDialogOpen]);
 
   return (
-    <div className="workspace viewer-workspace" style={{ gridTemplateColumns: `${viewerLayout.leftWidth}px 5px minmax(0, 1fr) 5px ${viewerLayout.rightWidth}px` }}>
-      <Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={totalCount} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={onSelectFolder} onSelectAlbum={onSelectAlbum} onSelectSmartCollection={onSelectSmartCollection} onRefreshAlbums={onRefreshAlbums} onImportFolders={onImportFolders} onRelinkFolder={onRelinkFolder} onSynchronizeFolder={onSynchronizeFolder} onRevealFolder={onRevealFolder} onUnregisterFolder={onUnregisterFolder} onMoveFolder={props.onMoveFolder} onDropAssets={dropAssetsToFolder} onSelectTag={onSelectTag} isDemo={isDemo} />
-      <PaneSplitter orientation="vertical" value={viewerLayout.leftWidth} minimum={160} maximum={420} label="调整左侧目录栏宽度" onChange={(value) => setViewerLayout('leftWidth', value)} />
-      {view === 'library' ? <CatalogWorkspace {...props} /> :
+    <div className="workspace viewer-workspace">
+      {view === 'library' ? <CatalogWorkspace {...props} onOpenPhotoContextMenu={(event, photo) => openPhotoContextMenu(event, photo)} /> :
       <main className="library-main" style={{ gridTemplateRows: `minmax(0, 1fr) 5px ${viewerLayout.filmstripHeight}px` }}>
-        <Viewer photo={selected} results={currentGenerationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRegenerate={regenerate} onReview={reviewResult} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} onOpenContextMenu={(event) => openPhotoContextMenu(event, selected, true)} />
+        <Viewer photo={selected} results={currentGenerationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRegenerate={regenerate} onReview={reviewResult} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} onOpenContextMenu={(event) => openPhotoContextMenu(event, selected, true)} onClose={props.onCloseViewer} initialResultId={props.initialResultId} onToolbarHostChange={setViewerToolbarHost} />
         <PaneSplitter orientation="horizontal" value={viewerLayout.filmstripHeight} minimum={110} maximum={320} label="调整大图和胶片带高度" invert onChange={(value) => setViewerLayout('filmstripHeight', value)} />
-        <Filmstrip items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} onSelectionChange={setSelection} onFocusPhoto={(photo) => { setSelectedId(photo.id); onSelectedAssetChange(photo.id); }} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} onOpenContextMenu={(event, photo) => openPhotoContextMenu(event, photo)} />
+        <Filmstrip toolbarHost={viewerToolbarHost} items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} onSelectionChange={setSelection} onFocusPhoto={(photo) => { setSelectedId(photo.id); onSelectedAssetChange(photo.id); }} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} onOpenContextMenu={(event, photo) => openPhotoContextMenu(event, photo)} />
       </main>}
-      <PaneSplitter orientation="vertical" value={viewerLayout.rightWidth} minimum={240} maximum={520} label="调整右侧 AI 面板宽度" invert onChange={(value) => setViewerLayout('rightWidth', value)} />
-      <AiPanel photo={selected} results={currentGenerationResults} trashedResults={currentTrashedGenerationResults} revision={currentAnalysisRevision} isDemo={isDemo} notice={analysisNotice} onAnalyze={() => void analyzeSelection()} generationProfiles={generationProfiles} templates={templateItems} onOpenTemplates={onOpenTemplates} onGenerate={generateSelection} onTrashResult={trashGenerationResult} onRestoreResult={restoreGenerationResult} />
       {photoContextMenu && <div className="folder-context-menu photo-context-menu" role="menu" aria-label={`照片菜单 ${selection.selectedIds.size} 张`} style={{ left: Math.min(photoContextMenu.x, Math.max(8, window.innerWidth - 244)), top: Math.min(photoContextMenu.y, Math.max(8, window.innerHeight - 530)) }} onPointerDown={(event) => event.stopPropagation()}>
         <div className="folder-menu-title"><Image size={14} /><span>{selection.selectedIds.size > 1 ? `${selection.selectedIds.size} 张照片` : selected.fileName}</span></div>
         <div className="photo-menu-rating"><span>评分</span><button type="button" aria-label="清除评分" onClick={() => { void rateSelection(0); setPhotoContextMenu(null); }}>0</button>{[1, 2, 3, 4, 5].map((rating) => <button type="button" aria-label={`${rating} 星`} key={rating} onClick={() => { void rateSelection(rating); setPhotoContextMenu(null); }}><Star size={12} fill={rating <= selected.rating && selection.selectedIds.size === 1 ? 'currentColor' : 'none'} /></button>)}</div>
@@ -2128,6 +2400,8 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
         <button type="button" role="menuitem" onClick={() => { setTagEditorOpen(true); setPhotoContextMenu(null); }}><Tags size={14} /><span>添加标签…</span></button>
         <span className="folder-menu-separator" />
         <button type="button" role="menuitem" onClick={() => { void analyzeSelection(); setPhotoContextMenu(null); }}><Sparkles size={14} /><span>AI 分析{selection.selectedIds.size > 1 ? ` ${selection.selectedIds.size} 张` : ''}</span></button>
+        <button type="button" role="menuitem" onClick={() => { onAddAssetsToAgent?.(selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id]); setPhotoContextMenu(null); }}><Bot size={14} /><span>加入 Agent 批处理{selection.selectedIds.size > 1 ? `（${selection.selectedIds.size} 张）` : ''}</span></button>
+        <button type="button" role="menuitem" onClick={() => { onAddAssetsToBatch?.(selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id]); setPhotoContextMenu(null); }}><Sparkles size={14} /><span>加入 AI 批量修图{selection.selectedIds.size > 1 ? `（${selection.selectedIds.size} 张）` : ''}</span></button>
         <button type="button" role="menuitem" disabled={generationProfiles.length === 0} onClick={() => { void generateSelection({ providerProfileId: generationProfiles[0]!.id, template: null, count: 1, instruction: '', disabledActionIds: new Set() }); setPhotoContextMenu(null); }}><WandSparkles size={14} /><span>按默认方案生成</span></button>
         <div className="photo-menu-export-options"><select aria-label="导出版本范围" value={exportSelectionMode} onChange={(event) => setExportSelectionMode(event.target.value as ExportSelectionMode)}><option value="preferred-or-latest">每张首选 / 最新版本</option><option value="accepted">所有已接受版本</option><option value="all">所有生成版本</option></select><select aria-label="右键菜单导出预设" value={selectedExportPresetId ?? ''} onChange={(event) => setSelectedExportPresetId(event.target.value || null)}><option value="">默认命名</option>{exportPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select></div>
         <button type="button" role="menuitem" onClick={() => { void exportLatestSelection(); setPhotoContextMenu(null); }}><Download size={14} /><span>导出 AI 版本…</span></button>
@@ -2174,7 +2448,6 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
         </div>
       )}
       {operationNotice && <div className="operation-toast" role="status">{operationNotice}<button type="button" aria-label="关闭提示" onClick={() => setOperationNotice('')}><X size={13} /></button></div>}
-      <TaskBar open={tasksOpen} onToggle={() => setTasksOpen((value) => !value)} onOpenTaskCenter={onOpenTaskCenter} tasks={isDemo ? null : taskItems} />
     </div>
   );
 }
@@ -2192,9 +2465,419 @@ const emptyProviderForm: SaveProviderProfileInput = {
   enabled: true
 };
 
+type WorkflowStage = 'analysis' | 'collection' | 'optimization' | 'prompt' | 'generation' | 'review';
+type WorkflowRule = { id: string; text: string; enabled: boolean };
+type AgentPlan = { summary: string; steps: string[]; requestedCount: number | undefined; style: string | undefined; outputFolder: string | undefined };
+type WorkflowAssetMeta = { id: string; fileName: string; src: string; thumbnailSrc?: string; format: string };
+type CollectionReport = { summary: string; groups: string[][]; keep: string[]; review: string[]; recommendations: string[] };
+type WorkflowDraft = {
+  workflowAssetIds: string[];
+  workflowAssetMeta: Record<string, WorkflowAssetMeta>;
+  stage: WorkflowStage;
+  templateId: string;
+  generationCount: number;
+  globalRules: WorkflowRule[];
+  itemRules: Record<string, WorkflowRule[]>;
+  itemTemplateIds: Record<string, string>;
+  itemGenerationCounts: Record<string, number>;
+  collectionReport: CollectionReport | null;
+};
+const WORKFLOW_DRAFT_KEY = 'photoallisai.ai-workflow.v1';
+const DEFAULT_WORKFLOW_RULES: WorkflowRule[] = [
+  { id: 'identity', text: '保持人物身份、脸部特征和年龄不变', enabled: true },
+  { id: 'composition', text: '保持原始构图、镜头视角和主体数量', enabled: true },
+  { id: 'texture', text: '保留真实皮肤纹理，避免塑料感', enabled: true },
+  { id: 'scene', text: '不改变主要场景和关键物体', enabled: true }
+];
+
+function buildAgentPlan(instruction: string, photoCount: number): AgentPlan {
+  const text = instruction.trim();
+  const countMatch = text.match(/(?:最好看|选|选择|保留|挑选)\s*(?:的)?\s*(\d+)\s*张/);
+  const requestedCount = countMatch ? clamp(Number(countMatch[1]), 1, Math.max(photoCount, 1)) : undefined;
+  const style = /动漫|anime|二次元/i.test(text) ? '动漫风' : /电影|cinematic/i.test(text) ? '电影感' : undefined;
+  const folderMatch = text.match(/(?:存到|保存到|输出到|目录下的)\s*[“”"']?([^，。,\.\s]+)[“”"']?文件夹/);
+  const outputFolder = folderMatch?.[1];
+  const steps = [
+    /糊|模糊|相似|重复/.test(text) ? '识别并移除模糊或高度相似的照片候选' : '分析照片质量、构图和主体表现',
+    requestedCount ? `按视觉质量挑选 ${requestedCount} 张并设置为 2 星` : '按视觉质量分组并设置评分',
+    /9\s*张|三颗|3\s*星/.test(text) ? '从精选结果中挑选最佳 9 张并设置为 3 星' : '为重点照片生成修图任务',
+    style ? `应用${style}风格并保留主体身份与构图` : '按整体提示词执行 AI 修图',
+    outputFolder ? `将结果输出到“${outputFolder}”文件夹` : '保留在应用管理的生成结果中'
+  ];
+  return { summary: text || '请描述你希望 Agent 如何筛选、评分和修图照片。', steps, requestedCount, style, outputFolder };
+}
+
+function loadWorkflowDraft(): WorkflowDraft {
+  const fallback: WorkflowDraft = { workflowAssetIds: [], workflowAssetMeta: {}, stage: 'analysis', templateId: '', generationCount: 1, globalRules: DEFAULT_WORKFLOW_RULES, itemRules: {}, itemTemplateIds: {}, itemGenerationCounts: {}, collectionReport: null };
+  try {
+    const value = JSON.parse(window.localStorage.getItem(WORKFLOW_DRAFT_KEY) ?? '') as Partial<WorkflowDraft>;
+    const stages: WorkflowStage[] = ['analysis', 'collection', 'optimization', 'prompt', 'generation', 'review'];
+    const validRules = (rules: unknown): rules is WorkflowRule[] => Array.isArray(rules) && rules.length <= 100 && rules.every((rule) => typeof rule === 'object' && rule !== null && typeof (rule as WorkflowRule).id === 'string' && typeof (rule as WorkflowRule).text === 'string' && typeof (rule as WorkflowRule).enabled === 'boolean');
+    return {
+      workflowAssetIds: Array.isArray(value.workflowAssetIds) ? value.workflowAssetIds.filter((id): id is string => typeof id === 'string').slice(0, 10_000) : fallback.workflowAssetIds,
+      workflowAssetMeta: value.workflowAssetMeta && typeof value.workflowAssetMeta === 'object' ? Object.fromEntries(Object.entries(value.workflowAssetMeta).filter(([, item]) => typeof item === 'object' && item !== null && typeof (item as WorkflowAssetMeta).id === 'string' && typeof (item as WorkflowAssetMeta).fileName === 'string' && typeof (item as WorkflowAssetMeta).src === 'string' && typeof (item as WorkflowAssetMeta).format === 'string').slice(0, 10_000)) as Record<string, WorkflowAssetMeta> : fallback.workflowAssetMeta,
+      stage: stages.includes(value.stage as WorkflowStage) ? value.stage as WorkflowStage : fallback.stage,
+      templateId: typeof value.templateId === 'string' ? value.templateId : '',
+      generationCount: clamp(Number(value.generationCount) || 1, 1, 8),
+      globalRules: validRules(value.globalRules) ? value.globalRules : fallback.globalRules,
+      itemRules: value.itemRules && typeof value.itemRules === 'object' ? Object.fromEntries(Object.entries(value.itemRules).filter(([, rules]) => validRules(rules))) : {},
+      itemTemplateIds: value.itemTemplateIds && typeof value.itemTemplateIds === 'object' ? Object.fromEntries(Object.entries(value.itemTemplateIds).filter(([, id]) => typeof id === 'string')) as Record<string, string> : {},
+      itemGenerationCounts: value.itemGenerationCounts && typeof value.itemGenerationCounts === 'object' ? Object.fromEntries(Object.entries(value.itemGenerationCounts).filter(([, count]) => Number.isInteger(count) && Number(count) >= 1 && Number(count) <= 8)) as Record<string, number> : {},
+      collectionReport: value.collectionReport && typeof value.collectionReport.summary === 'string' && Array.isArray(value.collectionReport.groups) && Array.isArray(value.collectionReport.keep) && Array.isArray(value.collectionReport.review) && Array.isArray(value.collectionReport.recommendations) ? value.collectionReport : null
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function AgentBatchPage({ photos: availablePhotos, selectedIds, focusId, onOpenBatch }: { photos: Photo[]; selectedIds: ReadonlySet<string>; focusId: string | null; onOpenBatch: () => void }): React.JSX.Element {
+  const [instruction, setInstruction] = useState('');
+  const [running, setRunning] = useState(false);
+  const [expanded, setExpanded] = useState<number | null>(null);
+  const [notice, setNotice] = useState('');
+  const [steps, setSteps] = useState<string[]>([]);
+  const selectedPhotos = availablePhotos.filter((photo) => selectedIds.has(photo.id));
+  const focused = availablePhotos.find((photo) => photo.id === focusId);
+  const start = () => {
+    const sourceCount = selectedPhotos.length;
+    const nextSteps = [`已接收 ${sourceCount} 张照片${focused ? `，焦点为 ${focused.fileName}` : ''}`, 'Agent 正在根据目标动态选择工具', '等待任务回执后显示实际影响范围'];
+    setSteps(nextSteps);
+    setExpanded(null);
+    setRunning(true);
+    setNotice('已创建 Agent 批处理计划，执行前会展示影响范围。');
+  };
+  return <main className="agent-page">
+    <header className="agent-page-header"><div><span className="workflow-agent-kicker"><Bot size={14} />Agent 批处理</span><h1>描述目标，交给 Agent 处理</h1><p>Agent 会使用当前选择上下文，并在每一步提供可展开的处理依据。</p></div><div className="agent-context-badge"><strong>{selectedPhotos.length}</strong><span>张当前选择</span></div></header>
+    <section className="agent-input-section"><div className="agent-context-line"><span>输入范围</span><strong>{selectedPhotos.length ? `当前选择的 ${selectedPhotos.length} 张照片` : '尚未选择照片'}</strong>{focused && <em>焦点：{focused.fileName}</em>}</div><textarea aria-label="Agent 批处理指令" value={instruction} onChange={(event) => setInstruction(event.target.value)} placeholder="例如：处理选中图片，找出最清晰的照片，加上精选标签并导出。" /><div className="agent-input-footer"><span>支持整理、筛选、评分、标签、修图、导出等批处理任务</span><button className="primary-action" type="button" disabled={!instruction.trim() || selectedPhotos.length === 0 || running} onClick={start}><Sparkles size={15} />{running ? '处理中…' : '开始处理'}</button></div></section>
+    {notice && <p className="agent-notice" role="status">{notice}</p>}
+    {steps.length > 0 && <section className="agent-steps-section"><div className="agent-section-heading"><div><span>处理详情</span><h2>Agent 执行记录</h2></div><button className="quiet-button compact" type="button" onClick={onOpenBatch}><WandSparkles size={12} />转到 AI 批量修图</button></div>{steps.map((step, index) => <article className={`agent-step-row${expanded === index ? ' is-expanded' : ''}`} key={step}><button type="button" onClick={() => setExpanded(expanded === index ? null : index)}><span className="agent-step-index">{index + 1}</span><span><strong>{step}</strong><small>{expanded === index ? '已展开详细信息' : '点击查看处理依据'}</small></span><ChevronDown size={14} /></button>{expanded === index && <div className="agent-step-detail">当前步骤会记录输入资源、判断依据、受影响的照片和执行结果。完成真实任务后，这里将显示逐项文件与模型响应摘要。</div>}</article>)}</section>}
+  </main>;
+}
+
+function AgentDockPanel({ selectedIds, photos, onClose, onOpenBatch, onCollapse, onMove }: { selectedIds: ReadonlySet<string>; photos: Photo[]; onClose: () => void; onOpenBatch: () => void; onCollapse: () => void; onMove: () => void }): React.JSX.Element {
+  const selected = photos.filter((photo) => selectedIds.has(photo.id));
+  const [instruction, setInstruction] = useState('');
+  const [messages, setMessages] = useState<Array<{ text: string; detail?: string; state?: 'running' | 'done' | 'error' }>>([]);
+  const [pendingConfirmation, setPendingConfirmation] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState<number | null>(null);
+  const runInstruction = async (text: string, confirmed: boolean) => {
+    if (!text || selected.length === 0) return;
+    const wantsGenerate = /修图|调色|动漫|风格|生成/.test(text);
+    const wantsRate = /评分|星级|标为[0-5一二三四五星]/.test(text);
+    const wantsTag = /标签|标记|精选|收藏/.test(text);
+    const wantsDelete = /删除|移除|丢弃/.test(text);
+    const highImpact = wantsDelete || /移动|导出|回收站/.test(text);
+    const operations = [
+      ...(wantsRate ? [{ kind: 'rate', label: '修改评分' }] : []),
+      ...(wantsTag ? [{ kind: 'adjust', label: '修改标签' }] : []),
+      ...(wantsGenerate ? [{ kind: 'generate', label: '创建 AI 生成任务' }] : []),
+      ...(wantsDelete ? [{ kind: 'delete', label: '移出图库' }] : [])
+    ];
+    if (/相似|重复|糊|模糊/.test(text)) operations.unshift({ kind: 'deduplicate', label: '筛选图片' });
+    if (operations.length === 0) {
+      setMessages([{ text: '需要更多信息', detail: '我还不能把这条要求映射到可执行操作。请说明要处理的照片范围和期望结果。', state: 'error' }]);
+      return;
+    }
+    setMessages(operations.map((operation) => ({ text: operation.label, detail: highImpact ? '等待确认' : '正在执行', state: highImpact ? 'done' : 'running' })));
+    setPendingConfirmation(highImpact && !confirmed ? text : null);
+    setInstruction('');
+    try {
+      const profiles = wantsGenerate ? await window.desktopApi.listProviderProfiles() : [];
+      const generationProfile = profiles.find((profile) => profile.purpose === 'generation' && profile.enabled);
+      if (wantsGenerate && !generationProfile) {
+        setMessages([{ text: '检查生成模型配置', detail: '没有启用的生成模型，请先到设置中配置 Provider。', state: 'error' }]);
+        return;
+      }
+      const task = await window.desktopApi.enqueueTask({
+        kind: 'agent',
+        assetId: null,
+        payload: {
+          instruction: text,
+          globalPrompt: text,
+          selection: { assetIds: selected.map((photo) => photo.id), rankingInstruction: '' },
+          perAssetPrompts: [],
+          steps: operations.map((operation, index) => ({
+            id: `operation-${index + 1}`,
+            kind: operation.kind,
+            instruction: text,
+            prompt: '',
+            perAssetPrompts: [],
+            providerProfileId: operation.kind === 'generate' ? generationProfile?.id ?? null : null,
+            templateId: null,
+            outputDirectory: null,
+            targetFolderId: null,
+            confirm: confirmed,
+            rating: operation.kind === 'rate' ? (text.match(/([0-5一二三四五])\s*星/u)?.[1] === '2' ? 2 : 2) : undefined,
+            style: operation.kind === 'adjust' ? 'Agent 处理' : null,
+            dependsOn: index > 0 ? [`operation-${index}`] : []
+          })),
+          dryRun: false,
+          confirmHighImpact: confirmed,
+          planVersion: 1
+        }
+      });
+      setMessages([{ text: '已提交 Agent 任务', detail: `任务 ${task.id} 已进入任务中心。`, state: 'running' }]);
+      const poll = async () => {
+        const current = await window.desktopApi.getTask(task.id);
+        if (!current) return;
+        if (current.status === 'completed' && current.result) {
+          const result = current.result as { completedSteps?: string[]; skippedSteps?: string[]; warnings?: string[]; generatedResultIds?: string[]; removedAssetIds?: string[]; movedAssetIds?: string[] };
+          const completed = result.completedSteps?.length ?? 0;
+          const generated = result.generatedResultIds?.length ?? 0;
+          const warnings = result.warnings?.length ?? 0;
+          setMessages([{ text: 'Agent 任务已完成', detail: `${completed} 项完成${generated ? ` · 生成 ${generated} 个版本` : ''}${warnings ? ` · ${warnings} 条提示` : ''}`, state: warnings ? 'error' : 'done' }]);
+        } else if (['failed', 'canceled'].includes(current.status)) {
+          setMessages([{ text: current.status === 'failed' ? 'Agent 任务失败' : 'Agent 任务已取消', detail: current.errorCode ?? '请在任务中心查看详细信息。', state: 'error' }]);
+        } else {
+          window.setTimeout(() => void poll(), 900);
+        }
+      };
+      void poll();
+    } catch (error) {
+      setMessages([{ text: '执行失败', detail: String(error), state: 'error' }]);
+    }
+  };
+  const submit = (event: React.FormEvent) => { event.preventDefault(); void runInstruction(instruction.trim(), false); };
+  return <aside className="agent-dock-panel">
+    <header className="agent-dock-header"><Bot size={15} /><div><strong>Agent 批处理</strong><span>当前选择 {selected.length} 张</span></div><button type="button" aria-label="调整 Agent 面板顺序" onClick={onMove}><ArrowUp size={12} /></button><button type="button" aria-label="折叠 Agent 面板" onClick={onCollapse}><ChevronDown size={14} /></button><button type="button" aria-label="关闭 Agent 批处理" onClick={onClose}><X size={14} /></button></header>
+    <div className="agent-dock-context"><strong>{selected.length} 张</strong><span>当前选择</span></div>
+    <div className="agent-dock-messages"><div className="agent-dock-message">输入目标，Agent 会执行并记录结果。</div>{messages.map((message, index) => <button className={`agent-dock-message agent-dock-step ${message.state ?? ''}`} type="button" key={`${message.text}-${index}`} onClick={() => setExpanded(expanded === index ? null : index)}><span><strong>{index + 1}. {message.text}</strong>{expanded === index && <small>{message.detail ?? '步骤正在执行。'}</small>}</span><ChevronDown size={12} /></button>)}</div>
+    {pendingConfirmation && <div className="agent-dock-confirm"><span>包含文件操作，确认后执行</span><button className="primary-action compact" type="button" onClick={() => { const instructionToConfirm = pendingConfirmation; setPendingConfirmation(null); void runInstruction(instructionToConfirm, true); }}>确认执行</button></div>}
+    <form className="agent-dock-input" onSubmit={(event) => void submit(event)}><textarea aria-label="Agent 输入" value={instruction} onChange={(event) => setInstruction(event.target.value)} placeholder="例如：处理选中图片，挑出最好的 9 张并进行动漫风修图" /><button type="submit" aria-label="发送 Agent 指令" disabled={!instruction.trim() || selected.length === 0}><Sparkles size={14} /></button></form>
+    <footer className="agent-dock-footer"><button className="quiet-button compact" type="button" onClick={onOpenBatch}>打开批量修图</button></footer>
+  </aside>;
+}
+
+function BatchEditSidebar({ selectedIds, photos, onOpenTemplates }: { selectedIds: ReadonlySet<string>; photos: Photo[]; onOpenTemplates: () => void }): React.JSX.Element {
+  const selected = photos.filter((photo) => selectedIds.has(photo.id));
+  const [prompt, setPrompt] = useState('');
+  return <aside className="tool-sidebar batch-sidebar"><header className="tool-sidebar-header"><Sparkles size={15} /><div><strong>AI 批量修图</strong><span>模板驱动生成</span></div></header><div className="tool-sidebar-scroll"><section className="tool-sidebar-section"><div className="tool-sidebar-label">当前照片</div><div className="tool-sidebar-count"><strong>{selected.length}</strong><span>张照片</span></div></section><section className="tool-sidebar-section"><div className="tool-sidebar-label">批次整体提示词</div><textarea aria-label="批次整体提示词" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="描述这一批照片的共同修图要求" /></section><section className="tool-sidebar-section"><div className="tool-sidebar-label">模板</div><button className="quiet-button compact tool-sidebar-wide-button" type="button" onClick={onOpenTemplates}><WandSparkles size={12} />从模板库选择</button></section><section className="tool-sidebar-section tool-sidebar-muted"><p>每张照片的单独提示词和最终 Prompt 在批量修图工作区中编辑。</p></section></div><footer className="tool-sidebar-footer"><button className="primary-action compact" type="button" disabled={selected.length === 0}>开始批量修图</button></footer></aside>;
+}
+
+function AiWorkflowPage({ photos: availablePhotos, selectedIds, focusId, workflowAssetIds, workflowAssetMeta, tasks, globalRules, onGlobalRulesChange, templateId, onAddAssets, onRemoveAsset, onMoveAsset, onClearAssets, onOpenTasks, onFocusAsset, onOpenViewer }: { photos: Photo[]; selectedIds: ReadonlySet<string>; focusId: string | null; workflowAssetIds: string[]; workflowAssetMeta: Record<string, WorkflowAssetMeta>; tasks: PersistedTask[]; globalRules: WorkflowRule[]; onGlobalRulesChange: React.Dispatch<React.SetStateAction<WorkflowRule[]>>; templateId: string; onAddAssets: (ids: string[]) => void; onRemoveAsset: (id: string) => void; onMoveAsset: (id: string, direction: -1 | 1) => void; onClearAssets: () => void; onOpenTasks: () => void; onFocusAsset: (id: string) => void; onOpenViewer: (assetId: string, assetIds?: string[], resultId?: string | null) => void }): React.JSX.Element {
+  const initialDraft = useMemo(loadWorkflowDraft, []);
+  const [stage, setStage] = useState<WorkflowStage>(initialDraft.stage);
+  const [revisions, setRevisions] = useState<Record<string, AnalysisRevision | undefined>>({});
+  const revisionPollOffset = useRef(0);
+  const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
+  const [templates, setTemplates] = useState<PromptTemplate[]>([]);
+  const [storageMode, setStorageMode] = useState<AppSettings['generationStorageMode']>('managed');
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [collectionReport, setCollectionReport] = useState<CollectionReport | null>(initialDraft.collectionReport);
+  const [generationCount, setGenerationCount] = useState(initialDraft.generationCount);
+  const [itemTemplateIds, setItemTemplateIds] = useState<Record<string, string>>(initialDraft.itemTemplateIds);
+  const [itemGenerationCounts, setItemGenerationCounts] = useState<Record<string, number>>(initialDraft.itemGenerationCounts);
+  const [localFocusId, setLocalFocusId] = useState<string | null>(focusId);
+  const [itemRules, setItemRules] = useState<Record<string, WorkflowRule[]>>(initialDraft.itemRules);
+  const [agentInstruction, setAgentInstruction] = useState('');
+  const [agentPlan, setAgentPlan] = useState<AgentPlan | null>(null);
+  const ids = workflowAssetIds;
+  const idsKey = ids.join('|');
+  const analysisTasks = useMemo(() => {
+    const latest = new Map<string, PersistedTask>();
+    for (const task of tasks) if (task.kind === 'analysis' && task.assetId && !latest.has(task.assetId)) latest.set(task.assetId, task);
+    return latest;
+  }, [tasks]);
+  const completedKey = ids.map((id) => analysisTasks.get(id)?.status === 'completed' ? analysisTasks.get(id)?.id : '').join('|');
+  const workflowPhotos = ids.map((id) => {
+    const visible = availablePhotos.find((photo) => photo.id === id);
+    if (visible) return visible;
+    const saved = workflowAssetMeta[id];
+    return saved ? { ...saved, dimensions: '', rating: 0 } : null;
+  }).filter((photo): photo is Photo => Boolean(photo));
+  const currentId = focusId && ids.includes(focusId) ? focusId : workflowPhotos[0]?.id ?? null;
+  const effectiveCurrentId = localFocusId && ids.includes(localFocusId) ? localFocusId : currentId;
+  const currentPhoto = effectiveCurrentId ? workflowPhotos.find((photo) => photo.id === effectiveCurrentId) ?? null : null;
+  const currentRevision = effectiveCurrentId ? revisions[effectiveCurrentId] : undefined;
+  const [generationResults, setGenerationResults] = useState<Record<string, GenerationResult[]>>({});
+  const [bestResultIds, setBestResultIds] = useState<Record<string, string>>({});
+  const [batchContextMenu, setBatchContextMenu] = useState<{ x: number; y: number; assetId: string; resultId?: string } | null>(null);
+
+  useEffect(() => {
+    void Promise.all([window.desktopApi.listProviderProfiles(), window.desktopApi.listPromptTemplates(), window.desktopApi.getAppSettings()]).then(([items, savedTemplates, settings]) => {
+      setProfiles(items);
+      setTemplates(savedTemplates);
+      setStorageMode(settings.generationStorageMode);
+    });
+  }, []);
+  useEffect(() => {
+    let active = true;
+    if (ids.length === 0) { setRevisions({}); return () => { active = false; }; }
+    void Promise.all(ids.map(async (id) => [id, (await window.desktopApi.listAnalysisRevisions(id))[0]] as const)).then((items) => {
+      if (active) setRevisions(Object.fromEntries(items));
+    }).catch(() => { if (active) setNotice('读取视觉识别结果失败，请重试。'); });
+    return () => { active = false; };
+  }, [ids, idsKey, completedKey]);
+  useEffect(() => {
+    let active = true;
+    void Promise.all(ids.map(async (id) => [id, await window.desktopApi.listGenerationResults(id)] as const)).then((entries) => {
+      if (active) setGenerationResults(Object.fromEntries(entries));
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [ids, idsKey, tasks]);
+  useEffect(() => {
+    if (ids.length === 0) return;
+    let active = true;
+    const refreshPending = () => {
+      const pending = ids.filter((id) => !revisions[id]);
+      if (pending.length === 0) return;
+      const batch = Array.from({ length: Math.min(20, pending.length) }, (_, index) => pending[(revisionPollOffset.current + index) % pending.length]!);
+      revisionPollOffset.current = (revisionPollOffset.current + batch.length) % pending.length;
+      void Promise.all(batch.map(async (id) => [id, (await window.desktopApi.listAnalysisRevisions(id))[0]] as const)).then((items) => {
+        if (!active) return;
+        const completed = items.filter((entry): entry is readonly [string, AnalysisRevision] => Boolean(entry[1]));
+        if (completed.length) setRevisions((current) => ({ ...current, ...Object.fromEntries(completed) }));
+      }).catch(() => undefined);
+    };
+    const interval = window.setInterval(refreshPending, 3_000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [ids, idsKey, revisions]);
+  useEffect(() => { if (focusId && ids.includes(focusId)) setLocalFocusId(focusId); }, [focusId, ids, idsKey]);
+  useEffect(() => {
+    if (!effectiveCurrentId || !currentRevision) return;
+    setItemRules((current) => current[effectiveCurrentId] ? current : {
+      ...current,
+      [effectiveCurrentId]: currentRevision.result.generativeActions.map((action) => ({ id: action.id, text: `${action.target}：${action.instruction}`, enabled: action.enabled }))
+    });
+  }, [effectiveCurrentId, currentRevision]);
+  useEffect(() => {
+    const timeout = window.setTimeout(() => window.localStorage.setItem(WORKFLOW_DRAFT_KEY, JSON.stringify({ workflowAssetIds, workflowAssetMeta, stage, templateId, generationCount, globalRules, itemRules, itemTemplateIds, itemGenerationCounts, collectionReport, agentInstruction, agentPlan })), 300);
+    return () => window.clearTimeout(timeout);
+  }, [agentInstruction, agentPlan, collectionReport, generationCount, globalRules, itemGenerationCounts, itemRules, itemTemplateIds, stage, templateId, workflowAssetIds, workflowAssetMeta]);
+  useEffect(() => {
+    try { window.localStorage.setItem(`${WORKFLOW_DRAFT_KEY}.best-results`, JSON.stringify(bestResultIds)); } catch { /* draft remains usable in memory */ }
+  }, [bestResultIds]);
+
+  const analyze = async () => {
+    const profile = profiles.find((item) => item.purpose === 'vision' && item.enabled);
+    if (!profile) { setNotice('请先在设置中配置并启用视觉分析模型。'); return; }
+    if (ids.length === 0) { setNotice('请先从图库或看图加入照片到处理队列。'); return; }
+    setBusy(true); setNotice('正在加入视觉分析队列…');
+    try {
+      const batchId = crypto.randomUUID();
+      for (const assetId of ids) {
+        await window.desktopApi.enqueueTask({ kind: 'analysis', assetId, payload: { providerProfileId: profile.id, mode: 'full', batchId, locale: getLocale() } });
+      }
+      setNotice(`已加入 ${ids.length} 张照片的分析任务。`); setStage('optimization');
+    } finally { setBusy(false); }
+  };
+  const planAgent = () => {
+    const plan = buildAgentPlan(agentInstruction, workflowPhotos.length);
+    setAgentPlan(plan);
+    if (plan.style && !globalRules.some((rule) => rule.text.includes(plan.style!))) {
+      setNotice(`已生成 Agent 计划：将应用${plan.style}风格。`);
+    } else {
+      setNotice('已生成 Agent 执行计划，请确认后开始。');
+    }
+  };
+  const applyAgentPlan = () => {
+    const plan = agentPlan ?? buildAgentPlan(agentInstruction, workflowPhotos.length);
+    setAgentPlan(plan);
+    const additions = [
+      /糊|模糊/.test(agentInstruction) ? '排除模糊、失焦或严重曝光异常的照片' : '',
+      /相似|重复/.test(agentInstruction) ? '删除或跳过高度相似的重复照片' : '',
+      plan.style ? `整体风格：${plan.style}` : '',
+      plan.outputFolder ? `输出目录：${plan.outputFolder}` : ''
+    ].filter(Boolean);
+    if (additions.length) onGlobalRulesChange((current) => [...current.filter((rule) => !additions.some((item) => rule.text === item)), ...additions.map((text) => ({ id: crypto.randomUUID(), text, enabled: true }))]);
+    if (plan.requestedCount) setGenerationCount(1);
+    setStage('analysis');
+    setNotice('Agent 计划已应用到工作流。请检查整体提示词与逐图提示词后执行。');
+  };
+  const generate = async () => {
+    const profile = profiles.find((item) => item.purpose === 'generation' && item.enabled);
+    if (!profile) { setNotice('请先在设置中配置并启用图片生成模型。'); return; }
+    const usable = ids.map((assetId) => ({ assetId, revision: revisions[assetId] })).filter((item): item is { assetId: string; revision: AnalysisRevision } => Boolean(item.revision));
+    if (usable.length === 0) { setNotice('请先完成视觉分析，再生成提示词和图片。'); setStage('analysis'); return; }
+    setBusy(true); setNotice('正在创建提示词并加入生图队列…');
+    try {
+      const submissionId = crypto.randomUUID();
+      for (const { assetId, revision } of usable) {
+        const selectedTemplateId = itemTemplateIds[assetId] || templateId;
+        const template = templates.find((item) => item.id === selectedTemplateId) ?? null;
+        const enabled = (itemRules[assetId] ?? []).filter((item) => item.enabled).map((item) => item.text);
+        const rules = globalRules.filter((item) => item.enabled).map((item) => item.text);
+        const prompt = composeGenerationPrompt({ templateBody: template?.body ?? DEFAULT_GENERATION_TEMPLATE_BODY, analysis: { ...revision.result, generativeActions: revision.result.generativeActions.filter((action) => enabled.some((item) => item.startsWith(`${action.target}：`))) }, userInstruction: [...rules, ...enabled].join('\n') });
+        const batchId = crypto.randomUUID();
+        const count = itemGenerationCounts[assetId] ?? generationCount;
+        for (let resultIndex = 1; resultIndex <= count; resultIndex += 1) await window.desktopApi.enqueueTask({ kind: 'generation', assetId, payload: { providerProfileId: profile.id, batchId, submissionId, prompt, templateId: template?.id ?? null, templateVersion: template?.version ?? null, resultIndex, storageMode, analysisRevisionId: revision.id, disabledActionIds: revision.result.generativeActions.filter((action) => !enabled.some((item) => item.startsWith(`${action.target}：`))).map((action) => action.id), userInstruction: [...rules, ...enabled].join('\n') } });
+      }
+      const taskCount = usable.reduce((sum, item) => sum + (itemGenerationCounts[item.assetId] ?? generationCount), 0);
+      setNotice(`已将 ${usable.length} 张照片、共 ${taskCount} 个版本加入生图队列。`); setStage('review');
+    } finally { setBusy(false); }
+  };
+  const analyzeCollection = async () => {
+    const analyzed = workflowPhotos.map((photo) => ({ photo, revision: revisions[photo.id] })).filter((item): item is { photo: Photo; revision: AnalysisRevision } => Boolean(item.revision));
+    if (analyzed.length < 2) { setNotice('处理队列中至少完成两张照片的视觉识别后，才能进行相册横向分析。'); return; }
+    const profile = profiles.find((item) => item.purpose === 'vision' && item.enabled);
+    if (!profile) { setNotice('请先在设置中配置并启用视觉分析模型。'); return; }
+    setBusy(true);
+    setNotice('相册分析已加入任务队列。');
+    try {
+      const task = await window.desktopApi.enqueueTask({ kind: 'collection-analysis', assetId: null, payload: { providerProfileId: profile.id, assetIds: analyzed.map((item) => item.photo.id) } });
+      let completed: PersistedTask | null = task;
+      while (completed && !['completed', 'failed', 'canceled'].includes(completed.status)) {
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+        completed = await window.desktopApi.getTask(task.id);
+      }
+      if (!completed || completed.status !== 'completed') throw new Error(completed?.errorCode ?? 'COLLECTION_ANALYSIS_FAILED');
+      const report = collectionAnalysisReportSchema.parse(completed.result);
+      const names = new Map(workflowPhotos.map((photo) => [photo.id, photo.fileName]));
+      setCollectionReport({
+        summary: report.summary,
+        groups: report.groups.map((group) => group.assetIds.map((id) => names.get(id) ?? id)),
+        keep: report.keepAssetIds.map((id) => names.get(id) ?? id),
+        review: report.reviewAssetIds.map((id) => names.get(id) ?? id),
+        recommendations: report.recommendations
+      });
+      setNotice(`已完成 ${analyzed.length} 张照片的相册分析。`);
+    } catch {
+      setNotice('相册分析失败，请在任务中心查看错误并重试。');
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <main className="ai-workflow-page batch-workspace" onFocusCapture={(event) => { const target = (event.target as HTMLElement).closest<HTMLElement>('[data-workflow-asset-id]'); const id = target?.dataset.workflowAssetId; if (id) { setLocalFocusId(id); onFocusAsset(id); } }}>
+    <div className="workflow-body">
+      <section className="workflow-main">
+        <section className="batch-prompt-card"><div><span>批次整体提示词</span></div><textarea aria-label="批次整体提示词" value={globalRules.filter((item) => item.enabled).map((item) => item.text).join('\n')} onChange={(event) => onGlobalRulesChange([{ id: 'batch-prompt', text: event.target.value, enabled: true }])} placeholder="描述所有照片共有的修图要求" /></section>
+        <div className="batch-queue-toolbar"><strong>处理队列 <span>{workflowPhotos.length} 张</span></strong><div className="batch-queue-toolbar-actions"><label><span>默认生成</span><input aria-label="默认生成数量" type="number" min="1" max="8" value={generationCount} onChange={(event) => setGenerationCount(clamp(Number(event.target.value) || 1, 1, 8))} /></label><button className="quiet-button compact" type="button" disabled={busy || workflowPhotos.length === 0} onClick={() => void analyze()}><Sparkles size={12} />识别</button><button className="primary-action compact" type="button" disabled={busy || workflowPhotos.length === 0} onClick={() => void generate()}><WandSparkles size={12} />生成全部</button><button className="quiet-button compact" type="button" onClick={onOpenTasks}><Clock3 size={12} />任务</button><button className="quiet-button compact" type="button" disabled={selectedIds.size === 0} onClick={() => onAddAssets([...selectedIds])}><Plus size={12} /></button><button className="quiet-button compact" type="button" disabled={workflowAssetIds.length === 0} onClick={onClearAssets}><X size={12} /></button></div></div>
+        {stage === 'analysis' && <div className="workflow-analysis">
+          <div className="workflow-analysis-counts"><span>已识别 {workflowPhotos.filter((photo) => revisions[photo.id]).length}</span><span>处理中 {workflowPhotos.filter((photo) => !revisions[photo.id] && analysisTasks.get(photo.id) && !['failed', 'canceled', 'completed'].includes(analysisTasks.get(photo.id)!.status)).length}</span><span>待识别 {workflowPhotos.filter((photo) => !revisions[photo.id] && !analysisTasks.has(photo.id)).length}</span></div>
+        </div>}
+        {workflowPhotos.length === 0 ? <div className="workflow-empty">从图库或看图将照片加入处理队列</div> : <div className="batch-queue-list">{workflowPhotos.map((photo, index) => {
+            const result = revisions[photo.id]?.result;
+            const task = analysisTasks.get(photo.id);
+            const state = task?.status === 'failed' ? <AnalysisFailure code={task.errorCode} taskId={task.id} /> : result ? '已识别' : task?.status === 'canceled' ? '已取消' : task?.status === 'queued' ? '排队中' : task ? task.status === 'completed' ? '读取结果中' : '识别中' : '待识别';
+            const candidates = generationResults[photo.id] ?? [];
+            return <article className={`batch-queue-item${photo.id === effectiveCurrentId ? ' is-active' : ''}`} data-workflow-asset-id={photo.id} key={photo.id} onClick={() => { setLocalFocusId(photo.id); onFocusAsset(photo.id); }} onContextMenu={(event) => { event.preventDefault(); setLocalFocusId(photo.id); onFocusAsset(photo.id); setBatchContextMenu({ x: event.clientX, y: event.clientY, assetId: photo.id }); }}><div className="batch-queue-source" onDoubleClick={() => onOpenViewer(photo.id, workflowAssetIds)}><span className="batch-queue-original">{photo.thumbnailSrc || photo.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" /> : <Image size={20} />}<small>原图</small></span><span className="batch-queue-file"><strong>{photo.fileName}</strong><em>{state}</em></span></div><div className="batch-queue-editor"><label><span>本图提示词</span><textarea value={(itemRules[photo.id] ?? []).filter((rule) => rule.enabled).map((rule) => rule.text).join('\n')} onClick={(event) => event.stopPropagation()} onChange={(event) => setItemRules((current) => ({ ...current, [photo.id]: [{ id: `prompt-${photo.id}`, text: event.target.value, enabled: true }] }))} placeholder="覆盖批次提示词，描述这张图的独立要求" /></label><label><span>生成数量</span><input type="number" min="1" max="8" value={itemGenerationCounts[photo.id] ?? generationCount} onClick={(event) => event.stopPropagation()} onChange={(event) => setItemGenerationCounts((current) => ({ ...current, [photo.id]: clamp(Number(event.target.value) || 1, 1, 8) }))} /></label></div><div className="batch-queue-candidates">{candidates.slice(0, 8).map((candidate) => <button className={`batch-candidate${bestResultIds[photo.id] === candidate.id || candidate.reviewState === 'preferred' ? ' is-best' : ''}`} type="button" key={candidate.id} title="单击设为最佳，双击打开大图" onClick={(event) => { event.stopPropagation(); setBestResultIds((current) => ({ ...current, [photo.id]: candidate.id })); void window.desktopApi.updateGenerationResultReview({ resultId: candidate.id, reviewState: 'preferred' }); }} onDoubleClick={(event) => { event.stopPropagation(); onOpenViewer(photo.id, workflowAssetIds, candidate.id); }}><img src={candidate.resultUrl} alt={`生成候选 ${candidate.version}`} /><small>{bestResultIds[photo.id] === candidate.id || candidate.reviewState === 'preferred' ? '最佳' : `V${candidate.version}`}</small></button>)}</div><div className="batch-queue-meta"><span>{result?.catalog.shortDescription ?? result?.summary ?? '尚未生成视觉分析结果'}</span><div><button type="button" aria-label={`重试 ${photo.fileName}`} onClick={(event) => { event.stopPropagation(); setLocalFocusId(photo.id); onFocusAsset(photo.id); void generate(); }}><RotateCcw size={12} /></button><button type="button" aria-label={`移除 ${photo.fileName}`} onClick={(event) => { event.stopPropagation(); onRemoveAsset(photo.id); }}><X size={12} /></button></div></div></article>;
+            /* legacy analysis details remain available below the compact batch row */
+            /* <button className="workflow-analysis-select" type="button" onClick={() => { setLocalFocusId(photo.id); onFocusAsset(photo.id); }}>
+              <span className="workflow-analysis-thumb">{photo.thumbnailSrc || photo.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" /> : <Image size={20} />}</span>
+              <span className="workflow-analysis-content"><span className="workflow-analysis-title"><strong>{photo.fileName}</strong><em>{state}</em>{result && <b>{Math.round(result.quality.overallScore)} 分</b>}</span><span className="workflow-analysis-description">{result?.catalog.shortDescription ?? result?.summary ?? (task?.status === 'failed' ? '识别失败，可在任务中心重试' : '')}</span>{result && <span className="workflow-analysis-issues">{result.quality.issues.length ? result.quality.issues.slice(0, 3).map((issue) => issue.description).join(' · ') : '未发现明显问题'}{result.quality.issues.length > 3 ? ` · 另有 ${result.quality.issues.length - 3} 项` : ''}</span>}</span>
+            </button><span className="workflow-asset-actions"><button type="button" aria-label={`上移 ${photo.fileName}`} disabled={index === 0} onClick={() => onMoveAsset(photo.id, -1)}><ArrowUp size={13} /></button><button type="button" aria-label={`下移 ${photo.fileName}`} disabled={index === workflowPhotos.length - 1} onClick={() => onMoveAsset(photo.id, 1)}><ArrowDown size={13} /></button><button type="button" aria-label={`移除 ${photo.fileName}`} onClick={() => onRemoveAsset(photo.id)}><X size={13} /></button></span></div>;
+            })}</div> */
+          })}</div>}
+        {batchContextMenu && <div className="batch-context-menu" role="menu" style={{ left: Math.min(batchContextMenu.x, window.innerWidth - 220), top: Math.min(batchContextMenu.y, window.innerHeight - 180) }} onPointerDown={(event) => event.stopPropagation()}><button type="button" onClick={() => { setNotice(`已准备重试 ${workflowPhotos.find((item) => item.id === batchContextMenu.assetId)?.fileName ?? '当前图片'}。`); setBatchContextMenu(null); }}><RotateCcw size={13} />单独重试</button><button type="button" onClick={() => { void window.desktopApi.revealCatalogAsset(batchContextMenu.assetId); setBatchContextMenu(null); }}><FolderOpen size={13} />打开原图位置</button>{batchContextMenu.resultId && <button type="button" onClick={() => { void window.desktopApi.revealGenerationResult(batchContextMenu.resultId!); setBatchContextMenu(null); }}><FolderOpen size={13} />打开生成图位置</button>}<button type="button" onClick={() => setBatchContextMenu(null)}>取消</button></div>}
+        {stage === 'analysis' && currentRevision && <section className="workflow-analysis-detail"><h3>{currentPhoto?.fileName}</h3><p>{currentRevision.result.report}</p><button className="quiet-button compact" type="button" onClick={() => setStage('optimization')}>查看优化建议 <ChevronRight size={13} /></button></section>}
+        {stage === 'collection' && <div className="workflow-info-card"><h3>相册整体分析</h3>{collectionReport ? <><p>{collectionReport.summary}</p><div className="workflow-summary-grid"><article><strong>{collectionReport.groups.length}</strong><span>相似候选组</span></article><article><strong>{collectionReport.keep.length}</strong><span>推荐保留</span></article><article><strong>{collectionReport.review.length}</strong><span>建议审阅</span></article></div>{collectionReport.groups.map((group, index) => <p className="workflow-report-row" key={index}><strong>相似组 {index + 1}</strong>{group.join('、')}</p>)}{collectionReport.recommendations.map((item, index) => <p className="workflow-report-row" key={`recommendation-${index}`}>{item}</p>)}</> : <span className="workflow-muted">尚无分析结果</span>}</div>}
+        {(stage === 'optimization' || stage === 'prompt') && (currentRevision ? <div className="workflow-info-card"><h3>{currentPhoto?.fileName}</h3><p>{currentRevision.result.summary}</p><div className="workflow-rule-list">{(itemRules[effectiveCurrentId!] ?? []).map((rule) => <label className="workflow-rule" key={rule.id}><input type="checkbox" checked={rule.enabled} onChange={() => setItemRules((current) => ({ ...current, [effectiveCurrentId!]: (current[effectiveCurrentId!] ?? []).map((item) => item.id === rule.id ? { ...item, enabled: !item.enabled } : item) }))} /><input value={rule.text} onChange={(event) => setItemRules((current) => ({ ...current, [effectiveCurrentId!]: (current[effectiveCurrentId!] ?? []).map((item) => item.id === rule.id ? { ...item, text: event.target.value } : item) }))} /></label>)}</div></div> : workflowPhotos.length > 0 && <p className="workflow-muted workflow-inline-empty">选择已识别照片以查看优化建议</p>)}
+        {stage === 'prompt' && <div className="workflow-info-card"><h3>当前照片模板</h3>{effectiveCurrentId && <label className="workflow-field"><span>专用模板</span><select value={itemTemplateIds[effectiveCurrentId] ?? ''} onChange={(event) => setItemTemplateIds((current) => ({ ...current, [effectiveCurrentId]: event.target.value }))}><option value="">继承批次默认模板</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></label>}<pre className="workflow-prompt-preview">{[...globalRules.filter((item) => item.enabled).map((item) => item.text), ...(effectiveCurrentId ? (itemRules[effectiveCurrentId] ?? []).filter((item) => item.enabled).map((item) => item.text) : [])].join('\n')}</pre></div>}
+        {stage === 'generation' && <div className="workflow-info-card"><h3>生成数量</h3><label className="workflow-number-field"><span>批次默认</span><input aria-label="批次默认生成数量" type="number" min="1" max="8" value={generationCount} onChange={(event) => setGenerationCount(clamp(Number(event.target.value) || 1, 1, 8))} /></label>{effectiveCurrentId && <label className="workflow-number-field"><span>当前图片</span><input aria-label="当前图片生成数量" type="number" min="1" max="8" value={itemGenerationCounts[effectiveCurrentId] ?? generationCount} onChange={(event) => setItemGenerationCounts((current) => ({ ...current, [effectiveCurrentId]: clamp(Number(event.target.value) || 1, 1, 8) }))} /></label>}<div className="workflow-generation-summary">{ids.reduce((sum, assetId) => sum + (itemGenerationCounts[assetId] ?? generationCount), 0)} 个任务</div></div>}
+        {stage === 'review' && <div className="workflow-info-card"><h3>结果审阅</h3><button className="secondary-action compact" type="button" onClick={onOpenTasks}><Clock3 size={13} />查看任务状态</button></div>}
+        {notice && <p className="workflow-notice" role="status">{notice}</p>}
+      </section>
+    </div>
+  </main>;
+}
+
 function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (presets: ExportPreset[]) => void }): React.JSX.Element {
-  type SettingsSection = 'appearance' | 'models' | 'storage' | 'tasks' | 'shortcuts' | 'privacy';
+  type SettingsSection = 'appearance' | 'models' | 'export' | 'storage' | 'tasks' | 'shortcuts' | 'privacy' | 'diagnostics';
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('models');
+  const settingsContentRef = useRef<HTMLElement>(null);
+  const providerNameRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { settingsContentRef.current?.scrollTo({ top: 0 }); }, [settingsSection]);
   const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
   const [form, setForm] = useState<SaveProviderProfileInput>(emptyProviderForm);
   const [customHeadersText, setCustomHeadersText] = useState('{}');
@@ -2216,6 +2899,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
   const [integrityBusy, setIntegrityBusy] = useState(false);
   const [generationStorageMode, setGenerationStorageMode] = useState<AppSettings['generationStorageMode']>('managed');
   const [theme, setTheme] = useState<AppSettings['theme']>('system');
+  const [locale, setLocalePreference] = useState<AppSettings['locale']>('zh-CN');
   const [cacheMaxBytes, setCacheMaxBytes] = useState(5 * 1024 ** 3);
   const [storageMessage, setStorageMessage] = useState('');
   const [storageBusy, setStorageBusy] = useState(false);
@@ -2241,6 +2925,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
     void window.desktopApi.getAppSettings().then((settings) => {
       setGenerationStorageMode(settings.generationStorageMode);
       setTheme(settings.theme);
+      setLocalePreference(settings.locale);
       setCacheMaxBytes(settings.cacheMaxBytes);
     });
   }, [onExportPresetsChange]);
@@ -2250,7 +2935,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
     setStorageBusy(true);
     setStorageMessage('');
     try {
-      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode: value, theme, cacheMaxBytes });
+      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode: value, theme, locale, cacheMaxBytes });
       setGenerationStorageMode(saved.generationStorageMode);
       setStorageMessage('存储策略已保存，新加入队列的任务将使用该策略。');
     } catch {
@@ -2263,7 +2948,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
   const saveTheme = async (value: AppSettings['theme']) => {
     setTheme(value);
     try {
-      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode, theme: value, cacheMaxBytes });
+      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode, theme: value, locale, cacheMaxBytes });
       setTheme(saved.theme);
       applyTheme(saved.theme);
       window.dispatchEvent(new CustomEvent(THEME_CHANGE_EVENT, { detail: saved.theme }));
@@ -2277,7 +2962,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
     setCacheBusy(true);
     setCacheMessage('');
     try {
-      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode, theme, cacheMaxBytes: value });
+      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode, theme, locale, cacheMaxBytes: value });
       setCacheMaxBytes(saved.cacheMaxBytes);
       setCacheStats(await window.desktopApi.getImageCacheStats());
       setCacheMessage('缓存上限已保存，超出部分已按最近使用时间清理。');
@@ -2285,6 +2970,17 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
       setCacheMessage('缓存上限保存失败，请检查应用权限。');
     } finally {
       setCacheBusy(false);
+    }
+  };
+
+  const saveLocale = async (value: Locale) => {
+    setLocalePreference(value);
+    setLocale(value);
+    try {
+      const saved = await window.desktopApi.saveAppSettings({ generationStorageMode, theme, locale: value, cacheMaxBytes });
+      setLocalePreference(saved.locale);
+    } catch {
+      setMessage('语言设置保存失败，请检查应用权限。');
     }
   };
 
@@ -2304,7 +3000,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
     setBusy('save');
     try {
       await window.desktopApi.deleteProviderProfile(form.id);
-      setProfiles((current) => current.filter((profile) => profile.id !== form.id));
+      setProfiles(await window.desktopApi.listProviderProfiles());
       setForm(emptyProviderForm);
       setCustomHeadersText('{}');
       setProviderDeleteCandidate(null);
@@ -2320,8 +3016,8 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
     setBusy('save');
     try {
       const customHeaders = JSON.parse(customHeadersText) as SaveProviderProfileInput['customHeaders'];
-      const saved = await window.desktopApi.saveProviderProfile({ ...form, customHeaders });
-      setProfiles((current) => [...current.filter((profile) => profile.id !== saved.id), saved]);
+      await window.desktopApi.saveProviderProfile({ ...form, customHeaders });
+      setProfiles(await window.desktopApi.listProviderProfiles());
       setForm(emptyProviderForm);
       setCustomHeadersText('{}');
       setMessage('配置已安全保存');
@@ -2454,29 +3150,28 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
   return (
     <div className="settings-page">
       <aside className="settings-nav">
-        <strong>设置</strong>
         <button className={settingsSection === 'appearance' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('appearance')} aria-current={settingsSection === 'appearance' ? 'page' : undefined}><SunMoon size={14} />外观</button>
         <button className={settingsSection === 'models' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('models')} aria-current={settingsSection === 'models' ? 'page' : undefined}><Bot size={14} />AI 模型</button>
+        <button className={settingsSection === 'export' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('export')} aria-current={settingsSection === 'export' ? 'page' : undefined}><Download size={14} />图片导出</button>
         <button className={settingsSection === 'storage' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('storage')} aria-current={settingsSection === 'storage' ? 'page' : undefined}><Folder size={14} />图库与存储</button>
         <button className={settingsSection === 'tasks' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('tasks')} aria-current={settingsSection === 'tasks' ? 'page' : undefined}><Clock3 size={14} />任务与重试</button>
         <button className={settingsSection === 'shortcuts' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('shortcuts')} aria-current={settingsSection === 'shortcuts' ? 'page' : undefined}><Command size={14} />快捷键</button>
         <button className={settingsSection === 'privacy' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('privacy')} aria-current={settingsSection === 'privacy' ? 'page' : undefined}><ShieldCheck size={14} />隐私与安全</button>
+        <button className={settingsSection === 'diagnostics' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('diagnostics')} aria-current={settingsSection === 'diagnostics' ? 'page' : undefined}><ShieldCheck size={14} />诊断与维护</button>
       </aside>
-      <main className="settings-content">
-        <div className="settings-heading">
-          <div><h1>{settingsSection === 'appearance' ? '外观' : settingsSection === 'models' ? 'AI 模型' : settingsSection === 'storage' ? '图库与存储' : settingsSection === 'tasks' ? '任务与重试' : settingsSection === 'shortcuts' ? '快捷键' : '隐私与安全'}</h1><p>{settingsSection === 'appearance' ? '选择适合当前环境的工作台表面，照片画布保持中性。' : settingsSection === 'models' ? '配置用于视觉分析与图片生成的兼容服务。应用不会提供默认密钥。' : settingsSection === 'storage' ? '管理预览缓存与生成结果的保存位置。' : settingsSection === 'tasks' ? '控制后台队列的执行节奏和失败恢复行为。' : settingsSection === 'shortcuts' ? '查看常用图库和任务操作的键盘入口。' : '了解图片上传、凭据和诊断数据的处理边界。'}</p></div>
-          <span><ShieldCheck size={14} />本地优先</span>
-        </div>
-
-        {settingsSection === 'appearance' && <section className="settings-section storage-section"><div className="settings-heading"><div><h2>界面主题</h2><p>跟随系统会在系统外观变化时即时切换，不需要重启应用。</p></div><span><SunMoon size={14} />照片优先</span></div><div className="storage-options" aria-label="界面主题">{([['system', '跟随系统', '自动使用 macOS 或 Windows 当前外观。'], ['dark', '深色', '适合暗光环境和长时间看图。'], ['light', '浅色', '适合明亮环境和文档型工作流。']] as const).map(([value, label, description]) => <label className={theme === value ? 'is-selected' : ''} key={value}><input type="radio" name="theme" checked={theme === value} onChange={() => void saveTheme(value)} /><span><strong>{label}</strong><small>{description}</small></span><Check size={15} /></label>)}</div></section>}
+      <main className="settings-content" ref={settingsContentRef}>
+        {settingsSection === 'appearance' && <>
+          <section className="settings-section storage-section"><div className="settings-heading"><div><h2>界面主题</h2><p>跟随系统会在系统外观变化时即时切换，不需要重启应用。</p></div><span><SunMoon size={14} />照片优先</span></div><div className="storage-options" aria-label="界面主题">{([['system', '跟随系统', '自动使用 macOS 或 Windows 当前外观。'], ['dark', '深色', '适合暗光环境和长时间看图。'], ['light', '浅色', '适合明亮环境和文档型工作流。']] as const).map(([value, label, description]) => <label className={theme === value ? 'is-selected' : ''} key={value}><input type="radio" name="theme" checked={theme === value} onChange={() => void saveTheme(value)} /><span><strong>{label}</strong><small>{description}</small></span><Check size={15} /></label>)}</div></section>
+          <section className="settings-section storage-section"><div className="settings-heading"><div><h2>界面语言</h2><p>菜单和已适配的界面文字会即时切换，语言包设计支持后续扩展。</p></div><span><Command size={14} />i18n</span></div><div className="storage-options" aria-label="界面语言">{([['zh-CN', '简体中文', '中文界面和菜单。'], ['en-US', 'English', 'English interface and menus.']] as const).map(([value, label, description]) => <label className={locale === value ? 'is-selected' : ''} key={value}><input type="radio" name="locale" checked={locale === value} onChange={() => void saveLocale(value)} /><span><strong>{label}</strong><small>{description}</small></span><Check size={15} /></label>)}</div></section>
+        </>}
         {settingsSection === 'models' && <>
         <section className="provider-layout">
           <div className="provider-list">
-            <div className="provider-list-head"><strong>已配置服务</strong><span>{profiles.length}</span></div>
+            <div className="provider-list-head"><div><strong>已配置服务</strong><span>{profiles.length}</span></div><button className="primary-action compact" type="button" disabled={busy !== null} onClick={() => { setForm({ ...emptyProviderForm }); setCustomHeadersText('{}'); setProviderDeleteCandidate(null); setMessage(''); providerNameRef.current?.focus(); }}><Plus size={14} />添加服务</button></div>
             {profiles.length === 0 ? (
-              <div className="provider-empty"><Server size={25} /><strong>尚未配置模型</strong><span>填写右侧表单开始使用 AI 功能</span></div>
+              <div className="provider-empty"><Server size={25} /><strong>尚未配置模型</strong></div>
             ) : profiles.map((profile) => (
-              <button className="provider-item" key={profile.id} type="button" onClick={() => { setForm({
+              <button className={`provider-item${form.id === profile.id ? ' is-selected' : ''}`} aria-pressed={form.id === profile.id} disabled={busy !== null} key={profile.id} type="button" onClick={() => { setMessage(''); setForm({
                 id: profile.id,
                 name: profile.name,
                 kind: profile.kind,
@@ -2486,10 +3181,11 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
                 requestTimeoutMs: profile.requestTimeoutMs,
                 retryCount: profile.retryCount,
                 customHeaders: profile.customHeaders,
-                enabled: profile.enabled
+                enabled: profile.enabled,
+                isDefault: profile.isDefault
               }); setCustomHeadersText(JSON.stringify(profile.customHeaders, null, 2)); setProviderDeleteCandidate(null); }}>
                 <span className="provider-icon">{profile.purpose === 'vision' ? <Bot size={16} /> : <WandSparkles size={16} />}</span>
-                <span><strong>{profile.name}</strong><small>{profile.modelId}</small></span>
+                <span><strong>{profile.name}{profile.isDefault ? ' · 默认' : ''}</strong><small>{profile.purpose === 'vision' ? '视觉分析' : '图片生成'} · {profile.modelId}</small></span>
                 <i className={profile.enabled ? 'is-online' : ''} />
               </button>
             ))}
@@ -2501,7 +3197,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
               <label><span>用途</span><select value={form.purpose} onChange={(event) => patchForm('purpose', event.target.value as SaveProviderProfileInput['purpose'])}><option value="vision">视觉分析模型</option><option value="generation">图片生成模型</option></select></label>
               <label><span>接口类型</span><select value={form.kind} onChange={(event) => patchForm('kind', event.target.value as SaveProviderProfileInput['kind'])}><option value="openai-compatible">OpenAI Compatible</option><option value="nanobanana-compatible">NanoBanana Compatible</option></select></label>
             </div>
-            <label><span>配置名称</span><input required maxLength={80} placeholder="例如：视觉分析 · 主服务" value={form.name} onChange={(event) => patchForm('name', event.target.value)} /></label>
+            <label><span>配置名称</span><input ref={providerNameRef} required maxLength={80} placeholder="例如：视觉分析 · 主服务" value={form.name} onChange={(event) => patchForm('name', event.target.value)} /></label>
             <label><span>Base URL</span><input required type="url" placeholder="https://api.example.com/v1" value={form.baseUrl} onChange={(event) => patchForm('baseUrl', event.target.value)} /><small>远程地址必须使用 HTTPS；本地开发服务可使用 localhost HTTP。</small></label>
             <label><span>Model ID</span><input required placeholder="模型标识" value={form.modelId} onChange={(event) => patchForm('modelId', event.target.value)} /></label>
             <div className="form-grid two-columns">
@@ -2511,17 +3207,18 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
             <label><span>自定义请求头</span><textarea aria-label="模型自定义请求头" rows={4} spellCheck={false} value={customHeadersText} onChange={(event) => { setCustomHeadersText(event.target.value); setMessage(''); }} /><small>使用 JSON 对象；认证、Cookie、Host、来源及传输层请求头不可覆盖。敏感凭据请只填写 API Key。</small></label>
             <label><span>API Key</span><div className="secret-input"><KeyRound size={14} /><input type="password" autoComplete="off" placeholder={form.id ? '留空以保留已保存凭据' : '输入服务密钥'} value={form.apiKey ?? ''} onChange={(event) => patchForm('apiKey', event.target.value)} /></div><small>密钥不会写入图库数据库、日志或导出清单。</small></label>
             <label className="enabled-row"><input type="checkbox" checked={form.enabled} onChange={(event) => patchForm('enabled', event.target.checked)} /><span>启用此配置</span></label>
+            <label className="enabled-row"><input type="checkbox" disabled={!form.enabled} checked={form.enabled && Boolean(form.isDefault)} onChange={(event) => patchForm('isDefault', event.target.checked)} /><span>设为{form.purpose === 'vision' ? '视觉分析' : '图片生成'}默认配置</span></label>
             <div className="form-feedback" role="status">{message}</div>
             <div className="form-actions">{form.id && <button className="danger-action compact" type="button" disabled={busy !== null} onClick={() => void deleteProvider()}>{providerDeleteCandidate === form.id ? '确认删除' : '删除配置'}</button>}<button className="secondary-action" type="button" disabled={busy !== null} onClick={() => void testConnection()}>{busy === 'test' ? '测试中…' : '测试连接'}</button><button className="primary-action compact" type="submit" disabled={busy !== null}>{busy === 'save' ? '保存中…' : '保存配置'}</button></div>
           </form>
         </section>
-        <section className="settings-section export-presets-section">
+        </>}
+        {settingsSection === 'export' && <section className="settings-section export-presets-section">
           <div className="settings-heading"><div><h2>导出预设</h2><p>保存格式、尺寸、JPEG 质量和命名策略；原格式导出不会重新编码。</p></div><span><Download size={14} />受管结果可随时导出</span></div>
           <div className="preset-row"><input aria-label="导出预设名称" placeholder="例如：客户交付" value={presetName} onChange={(event) => { setPresetName(event.target.value); setPresetMessage(''); }} /><select aria-label="导出格式" value={presetFormat} onChange={(event) => setPresetFormat(event.target.value as ExportPreset['format'])}><option value="jpeg">JPEG</option><option value="png">PNG</option><option value="original">原格式</option></select><input aria-label="JPEG 质量" type="number" min="1" max="100" disabled={presetFormat !== 'jpeg'} value={presetQuality} onChange={(event) => setPresetQuality(Number(event.target.value))} /><select aria-label="导出尺寸" value={presetMaxDimension ?? ''} onChange={(event) => setPresetMaxDimension(event.target.value ? Number(event.target.value) : null)}><option value="">原始尺寸</option><option value="2048">长边 2048px</option><option value="3840">长边 3840px</option><option value="6000">长边 6000px</option></select><button className="primary-action compact" type="button" disabled={!presetName.trim()} onClick={async () => { try { const saved = await window.desktopApi.saveExportPreset({ name: presetName.trim(), format: presetFormat, quality: presetQuality, maxDimension: presetMaxDimension, conflictPolicy: 'auto-rename', namingPattern: '{name}_{version}' }); setPresets((current) => { const next = [...current.filter((item) => item.id !== saved.id), saved]; onExportPresetsChange(next); return next; }); setPresetName(''); setPresetMessage('预设已保存'); } catch { setPresetMessage('名称已存在或保存失败'); } }}>保存预设</button></div>
           <div className="preset-list">{presets.length === 0 ? <small>暂无导出预设</small> : presets.map((preset) => <div className="preset-item" key={preset.id}><span><strong>{preset.name}</strong><small>{preset.format === 'original' ? '原格式' : preset.format.toUpperCase()}{preset.format === 'jpeg' ? ` · 质量 ${preset.quality}` : ''}{preset.maxDimension ? ` · 长边 ${preset.maxDimension}px` : ''} · {preset.conflictPolicy === 'skip' ? '跳过同名' : '自动编号'}</small></span><button type="button" aria-label={`删除导出预设 ${preset.name}`} onClick={async () => { await window.desktopApi.deleteExportPreset(preset.id); setPresets((current) => { const next = current.filter((item) => item.id !== preset.id); onExportPresetsChange(next); return next; }); }}>删除</button></div>)}</div>
           {presetMessage && <div className="form-feedback" role="status">{presetMessage}</div>}
-        </section>
-        </>}
+        </section>}
         {settingsSection === 'storage' && <>
         <section className="settings-section storage-section">
           <div className="settings-heading"><div><h2>生成结果存储</h2><p>原图始终保持不变。策略会写入每个任务，重试和导出时可追溯。</p></div><span><Folder size={14} />不会覆盖原图</span></div>
@@ -2561,12 +3258,12 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
           <div className="settings-heading"><div><h2>数据边界</h2><p>应用默认在本机管理图库和派生数据，只有执行 AI 任务时才向用户配置的服务发送图片。</p></div><span><ShieldCheck size={14} />不提供默认服务</span></div>
           <div className="settings-info-grid"><article><strong>凭据</strong><span>API Key 仅通过系统安全存储保存，不写入 SQLite、manifest 或诊断摘要。</span></article><article><strong>图片上传</strong><span>分析和生成使用缓存预览图发送，任务完成后服务端响应不会写入日志。</span></article><article><strong>诊断</strong><span>诊断摘要只包含版本、数量和缓存统计，不包含路径、密钥或图片内容。</span></article></div>
         </section>}
-        <section className="settings-section diagnostics-section">
+        {settingsSection === 'diagnostics' && <section className="settings-section diagnostics-section">
           <div className="settings-heading"><div><h2>诊断摘要</h2><p>仅包含运行统计，不包含路径、密钥、图片内容或模型响应。</p></div><span><ShieldCheck size={14} />可安全提交给支持团队</span></div>
           {diagnostics && <div className="diagnostic-health-strip"><span>自动备份：{diagnostics.startupRecovery.automaticBackup.status === 'completed' ? '已完成' : diagnostics.startupRecovery.automaticBackup.status === 'skipped' ? '已跳过' : diagnostics.startupRecovery.automaticBackup.status === 'failed' ? '失败' : '进行中'}</span><span>目录监听：{diagnostics.catalogWatcher.activeWatchers}/{diagnostics.catalogWatcher.watchedFolders}</span><span>监听失败：{diagnostics.catalogWatcher.watchFailures}</span><span>协调失败：{diagnostics.catalogWatcher.reconciliationFailures}</span></div>}
           {diagnostics && <div className="cache-actions"><button className="secondary-action compact" type="button" disabled={integrityBusy} onClick={() => void runIntegrityCheck()}><ShieldCheck size={13} />{integrityBusy ? '检查中…' : '重新检查图库'}</button><button className="secondary-action compact" type="button" onClick={() => void copyDiagnostics()}><Copy size={13} />复制脱敏摘要</button><button className="secondary-action compact" type="button" disabled={diagnosticBusy} onClick={() => void exportDiagnostics()}><Download size={13} />{diagnosticBusy ? '导出中…' : '导出诊断文件'}</button><span role="status">{diagnosticMessage}</span></div>}
           {diagnostics ? <div className="diagnostic-grid"><span>版本<strong>{diagnostics.appVersion}</strong></span><span>图库<strong>{diagnostics.catalog.assets} 张 · 离线 {diagnostics.catalog.offline}</strong></span><span className={`integrity-result is-${diagnostics.integrity.status}`}>完整性<strong>{diagnostics.integrity.status === 'healthy' ? '正常' : diagnostics.integrity.status === 'warning' ? '需关注' : '发现错误'}</strong><small>数据库 {diagnostics.integrity.databaseStatus === 'ok' ? '正常' : diagnostics.integrity.databaseStatus === 'corrupt' ? '损坏' : '无法读取'} · 活动缺失 {diagnostics.integrity.missingActiveFiles} · 孤立 {diagnostics.integrity.unexpectedGeneratedFiles + diagnostics.integrity.unexpectedTrashFiles} · 待恢复 {diagnostics.integrity.pendingGenerationWrites}（异常 {diagnostics.integrity.unsafeGenerationWriteIntents}）</small></span><span>启动恢复<strong>{diagnostics.startupRecovery.trashPurges.recovered + diagnostics.startupRecovery.fileOperations.resolved + diagnostics.startupRecovery.generationWrites.recovered} 项</strong><small>冲突 {diagnostics.startupRecovery.trashPurges.conflicts} · 失败 {diagnostics.startupRecovery.trashPurges.failed + diagnostics.startupRecovery.fileOperations.failed + diagnostics.startupRecovery.generationWrites.failed}</small></span><span>模型<strong>{diagnostics.providers.enabled}/{diagnostics.providers.total} 已启用</strong></span><span>缓存<strong>{(diagnostics.cache.bytes / 1_073_741_824).toFixed(2)} GiB</strong><small>命中 {diagnostics.cache.performance.hits} · 未命中 {diagnostics.cache.performance.misses}</small></span><span>解码<strong>{diagnostics.cache.performance.decodes} 次</strong><small>累计 {Math.round(diagnostics.cache.performance.decodeMsTotal)} ms</small></span><span>RAW 代理<strong>{diagnostics.cache.raw.imageMagick ? 'ImageMagick' : diagnostics.cache.raw.sips ? 'sips' : '未安装'}</strong><small>原生入口已启用；完整显影仍按发布计划推进</small></span></div> : <small>正在读取诊断摘要…</small>}
-        </section>
+        </section>}
       </main>
       {trashConfirmationOpen && trashSummary && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !trashBusy) setTrashConfirmationOpen(false); }}><section className="removal-dialog is-destructive" role="alertdialog" aria-modal="true" aria-labelledby="empty-trash-title" aria-describedby="empty-trash-description"><header><span className="dialog-icon"><Trash2 size={17} /></span><div><h2 id="empty-trash-title">永久清理 {trashSummary.resultCount} 个生成版本？</h2><p id="empty-trash-description">将释放约 {formatStorageBytes(trashSummary.totalBytes)}。这些版本及生成上下文会从当前图库永久移除，操作无法撤销。</p></div></header><div className="removal-impact"><CircleAlert size={15} /><span>只清理应用内部生成版本回收站。原图、活动生成版本、便携目录中的活动文件和已导出副本不会被删除。</span></div><footer><button autoFocus className="quiet-button" type="button" disabled={trashBusy} onClick={() => setTrashConfirmationOpen(false)}>取消</button><button className="danger-action" type="button" disabled={trashBusy} onClick={() => void emptyGenerationTrash()}>{trashBusy ? '正在清理…' : '永久清理'}</button></footer></section></div>}
     </div>
@@ -2574,7 +3271,9 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
 }
 
 const taskLabels: Record<PersistedTask['kind'], string> = {
+  agent: 'Agent 批处理',
   analysis: '视觉分析',
+  'collection-analysis': '相册分析',
   generation: '图片生成',
   export: '导出'
 };
@@ -2585,11 +3284,36 @@ const statusLabels: Record<PersistedTask['status'], string> = {
   paused: '已暂停', failed: '失败', canceled: '已取消'
 };
 
-function taskSubtitle(task: PersistedTask): string {
-  if (task.kind !== 'export' || !task.result) return task.assetId ?? '批量任务';
-  const succeeded = typeof task.result.succeeded === 'number' ? task.result.succeeded : 0;
-  const failed = typeof task.result.failed === 'number' ? task.result.failed : 0;
-  return `成功 ${succeeded} · 失败 ${failed}`;
+function AnalysisFailure({ code, taskId, className = '' }: { code: string | null; taskId?: string; className?: string }) {
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const message = analysisFailureMessage(code);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(`视觉分析失败\n原因：${message}\n错误码：${code ?? 'ANALYSIS_FAILED'}${taskId ? `\n任务 ID：${taskId}` : ''}`);
+      setCopyState('copied');
+    } catch {
+      setCopyState('failed');
+    }
+  };
+  useEffect(() => { setCopyState('idle'); }, [code, taskId]);
+  return <span className={`analysis-failure ${className}`} role="alert"><span>{message} <code>{code ?? 'ANALYSIS_FAILED'}</code>{copyState === 'failed' && <small>复制失败，请检查剪贴板权限</small>}</span><button className="analysis-copy-error" type="button" aria-label="复制错误信息" title={copyState === 'copied' ? '已复制错误信息' : '复制错误信息'} onClick={(event) => { event.stopPropagation(); void copy(); }}>{copyState === 'copied' ? <Check size={14} /> : <Copy size={14} />}</button></span>;
+}
+
+function taskScope(task: PersistedTask): string {
+  if (task.kind === 'analysis') return '单图分析';
+  if (task.kind === 'generation') return `单图 · 候选 ${typeof task.payload.resultIndex === 'number' ? task.payload.resultIndex : 1}`;
+  if (task.kind === 'collection-analysis') return `${Array.isArray(task.payload.assetIds) ? task.payload.assetIds.length : '多'} 张图片 · 联合分析`;
+  if (task.kind === 'export') return `${Array.isArray(task.payload.resultIds) ? task.payload.resultIds.length : '多'} 个版本 · 批量导出`;
+  return 'Agent 会话';
+}
+
+function taskImageName(task: PersistedTask, photos: Photo[]): string {
+  return task.assetFileName ?? photos.find((photo) => photo.id === task.assetId)?.fileName ?? (task.assetId ? `图片 ${task.assetId.slice(0, 8)}` : taskLabels[task.kind]);
+}
+
+function taskStage(task: PersistedTask): string {
+  if (task.status === 'processing') return task.kind === 'analysis' || task.kind === 'collection-analysis' ? '模型分析中' : task.kind === 'generation' ? '模型生成中' : '执行中';
+  return statusLabels[task.status];
 }
 
 function exportFailureMessage(errorCode: string): string {
@@ -2618,8 +3342,9 @@ const fileOperationStatusLabels: Record<FileOperationHistoryItem['status'], stri
   partial: '部分完成', failed: '失败', compensation_failed: '需处理'
 };
 
-function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<void> }): React.JSX.Element {
+function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: providedPhotos }: { onCatalogChanged: () => Promise<void>; onOpenViewer: (assetId: string, assetIds?: string[]) => void; photos: Photo[] }): React.JSX.Element {
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
+  const photos = useTaskPhotos(taskItems, providedPhotos);
   const [nextTaskCursor, setNextTaskCursor] = useState<TaskListCursor | null>(null);
   const [taskTotalCount, setTaskTotalCount] = useState(0);
   const [taskCounts, setTaskCounts] = useState({ queued: 0, paused: 0, active: 0, failed: 0, failedGeneration: 0 });
@@ -2637,12 +3362,13 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
   const [countDraft, setCountDraft] = useState(1);
   const [undoBusyId, setUndoBusyId] = useState<string | null>(null);
   const [expandedExportTaskId, setExpandedExportTaskId] = useState<string | null>(null);
+  const [taskView, setTaskView] = useState<'all' | 'queued' | 'active' | 'paused' | 'failed' | 'history'>('all');
 
   const applyTaskPage = (page: Awaited<ReturnType<typeof window.desktopApi.listTaskPage>>, append = false) => {
     setTaskItems((current) => append
-      ? [...current, ...page.items.filter((item) => !current.some((existing) => existing.id === item.id))]
+      ? [...new Map([...current, ...page.items].map((item) => [item.id, item])).values()]
       : page.items);
-    setNextTaskCursor(page.nextCursor);
+    if (!append) setNextTaskCursor(page.nextCursor);
     setTaskTotalCount(page.totalCount);
     setTaskCounts({
       queued: page.queuedCount,
@@ -2652,8 +3378,11 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
       failedGeneration: page.failedGenerationCount
     });
   };
+  const fetchPage = async (): Promise<TaskPage> => {
+    return window.desktopApi.listTaskPage({ includeBatchMembers: true, limit: 50, cursor: null });
+  };
   const refresh = async () => {
-    const page = await window.desktopApi.listTaskPage({ limit: 50, cursor: null });
+    const page = await fetchPage();
     loadedTaskHistory.current = false;
     applyTaskPage(page);
   };
@@ -2661,19 +3390,24 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
     let active = true;
     const poll = async () => {
       const [page, operations] = await Promise.all([
-        loadedTaskHistory.current
-          ? Promise.resolve(null)
-          : window.desktopApi.listTaskPage({ limit: 50, cursor: null }),
+        fetchPage(),
         window.desktopApi.listFileOperationHistory()
       ]);
       if (active) {
-        if (page && !loadedTaskHistory.current) applyTaskPage(page);
+        applyTaskPage(page, loadedTaskHistory.current);
         setFileOperations(operations);
       }
     };
-    void poll();
-    const interval = window.setInterval(poll, 1_000);
-    return () => { active = false; window.clearInterval(interval); };
+    const safePoll = () => poll().catch(() => { if (active) setMessage('任务加载失败，请稍后重试。'); });
+    void safePoll();
+    const changed = (event: Event) => {
+      const deleted = new Set((event as CustomEvent<{ deletedIds?: string[] }>).detail?.deletedIds ?? []);
+      if (deleted.size) setTaskItems((current) => current.filter((task) => !deleted.has(task.id)));
+      void safePoll();
+    };
+    window.addEventListener(TASKS_CHANGED_EVENT, changed);
+    const interval = window.setInterval(safePoll, 1_000);
+    return () => { active = false; window.clearInterval(interval); window.removeEventListener(TASKS_CHANGED_EVENT, changed); };
   }, []);
   useEffect(() => {
     void Promise.all([window.desktopApi.listProviderProfiles(), window.desktopApi.listPromptTemplates()]).then(([profiles, items]) => {
@@ -2682,40 +3416,22 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
     });
   }, []);
 
-  const cancel = async (taskId: string) => {
-    await window.desktopApi.cancelTask(taskId);
-    await refresh();
-  };
-  const retry = async (taskId: string) => {
-    await window.desktopApi.retryTask(taskId);
-    await refresh();
-  };
-  const pause = async (taskId: string) => {
-    await window.desktopApi.pauseTask(taskId);
-    await refresh();
-  };
-  const resume = async (taskId: string) => {
-    await window.desktopApi.resumeTask(taskId);
-    await refresh();
-  };
-  const moveQueued = async (taskId: string, direction: -1 | 1) => {
-    await window.desktopApi.moveQueuedTask({ taskId, direction });
-    await refresh();
-  };
   const retryFailedGeneration = async () => {
-    const report = await window.desktopApi.retryFailedGenerationTasks({ limit: 1_000 });
-    setMessage(report.remaining > 0
-      ? `已重新排队 ${report.retried} 个生成任务，仍有 ${report.remaining} 个待处理。`
-      : `已重新排队 ${report.retried} 个生成任务。`);
-    await refresh();
+    try {
+      const count = await window.desktopApi.retryFailedTasks();
+      setMessage(`已重新排队 ${count} 个任务。`);
+      window.dispatchEvent(new CustomEvent(TASKS_CHANGED_EVENT));
+      await refresh();
+    } catch { setMessage('重试失败，请刷新任务后重试。'); }
   };
   const loadMoreTasks = async () => {
     if (!nextTaskCursor || loadingMoreTasks) return;
     setLoadingMoreTasks(true);
     loadedTaskHistory.current = true;
     try {
-      const page = await window.desktopApi.listTaskPage({ limit: 50, cursor: nextTaskCursor });
+      const page = await window.desktopApi.listTaskPage({ includeBatchMembers: true, limit: 50, cursor: nextTaskCursor });
       applyTaskPage(page, true);
+      setNextTaskCursor(page.nextCursor);
     } catch {
       loadedTaskHistory.current = false;
       setMessage('任务历史加载失败，请重试。');
@@ -2821,43 +3537,42 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
 
   const waiting = taskCounts.queued;
   const failed = taskCounts.failed;
-  const failedGeneration = taskCounts.failedGeneration;
-  const queuedIds = taskItems.filter((task) => task.status === 'queued').map((task) => task.id);
+  const taskBatches = groupTaskBatches(taskItems);
+  const onOpenViewer = (assetId: string, assetIds?: string[]) => openViewer(assetId, assetIds ?? taskBatches.find((batch) => batch.tasks.some((task) => task.assetId === assetId))?.tasks.flatMap((task) => task.assetId ? [task.assetId] : []));
+  const filteredBatches = taskBatches.filter((batch) => taskView === 'all' || (taskView === 'active'
+    ? batch.active > 0 : taskView === 'queued' ? batch.queued > 0 : taskView === 'paused' ? batch.paused > 0
+    : taskView === 'failed' ? batch.failed > 0 : batch.settled === batch.total));
 
   return (
+    <TaskActions tasks={taskBatches.flatMap((batch) => batch.tasks)} onOpenViewer={onOpenViewer} onEditTask={openPromptEditor}>
     <div className="task-center-page">
-      <div className="task-center-heading">
-        <div><h1>任务中心</h1><p>生成任务默认串行执行，当前显示 {taskItems.length}/{taskTotalCount} 项。</p></div>
-        <div className="task-heading-actions">
-          {message && <span className="task-feedback" role="status">{message}</span>}
-          <button className="secondary-action" type="button" disabled={failedGeneration === 0} onClick={() => void retryFailedGeneration()}><RotateCcw size={13} />重试失败生成 ({failedGeneration})</button>
-          <div className="task-summary"><span><i className="task-dot queued" />等待 {waiting}</span><span>运行 {taskCounts.active}</span><span>暂停 {taskCounts.paused}</span><span><i className="task-dot failed" />失败 {failed}</span></div>
-        </div>
-      </div>
+      <nav className="task-view-switch" aria-label="筛选任务">{([
+        ['all', '全部', taskTotalCount], ['queued', '排队', waiting], ['active', '运行', taskCounts.active],
+        ['paused', '暂停', taskCounts.paused], ['failed', '失败', failed],
+        ['history', '已结束', taskTotalCount - waiting - taskCounts.active - taskCounts.paused]
+      ] as const).map(([value, label, count]) => <button type="button" key={value} aria-label={label} aria-pressed={taskView === value} onClick={() => setTaskView(value)}>{label}<span className="task-tab-count">{count}</span></button>)}<div className="task-toolbar-actions"><button className="quiet-button" type="button" disabled={failed === 0} onClick={() => void retryFailedGeneration()}><RotateCcw size={13} />重试</button><TaskClearButton disabled={taskTotalCount === 0} /></div></nav>
+      {message && <span className="task-feedback" role="status">{message}</span>}
       <div className="task-table">
-        <div className="task-table-head"><span>任务</span><span>状态</span><span>进度</span><span>尝试</span><span>更新时间</span><span /></div>
-        {taskItems.length === 0 ? (
-          <div className="task-empty"><Clock3 size={30} /><h2>暂无任务</h2><p>从图库选择照片并执行 AI 分析或生成后，任务会出现在这里。</p></div>
-        ) : taskItems.map((task) => {
+        {filteredBatches.length === 0 ? (
+          <div className="task-empty"><Clock3 size={30} /><h2>{taskItems.length ? '当前筛选下暂无任务' : '暂无任务'}</h2><p>{nextTaskCursor ? '可继续加载任务记录。' : '开始视觉分析、生成或导出后，在这里查看执行记录。'}</p></div>
+        ) : filteredBatches.map((batch) => <TaskBatchGroup key={batch.id} tasks={batch.tasks} photos={photos} onOpenViewer={onOpenViewer}>{batch.tasks.map((task) => {
           const report = exportTaskReport(task);
           const reportOpen = expandedExportTaskId === task.id;
           return <Fragment key={task.id}>
-          <div className="task-table-row">
-            <span className="task-kind"><i><TaskKindIcon kind={task.kind} /></i><span><strong>{taskLabels[task.kind]}</strong><small>{taskSubtitle(task)}</small></span></span>
-            <span className={`task-state state-${task.status}`}>{statusLabels[task.status]}</span>
-            <span className="table-progress"><i style={{ width: `${Math.round(task.progress * 100)}%` }} /><em>{Math.round(task.progress * 100)}%</em></span>
+          <div className="task-table-row" data-task-id={task.id}>
+            <span className="task-kind"><button className="task-member-preview task-table-preview" type="button" disabled={!photos.find((photo) => photo.id === task.assetId)} onClick={() => { if (task.assetId) onOpenViewer(task.assetId, batch.tasks.flatMap((item) => item.assetId ? [item.assetId] : [])); }} aria-label={`预览 ${taskImageName(task, photos)}`}>{(photos.find((photo) => photo.id === task.assetId)?.thumbnailSrc || photos.find((photo) => photo.id === task.assetId)?.src) ? <img className="task-item-thumbnail" src={photos.find((photo) => photo.id === task.assetId)!.thumbnailSrc || photos.find((photo) => photo.id === task.assetId)!.src} alt={taskImageName(task, photos)} /> : <TaskKindIcon kind={task.kind} />}</button><span><strong title={taskImageName(task, photos)}>{taskImageName(task, photos)}</strong><small>{taskLabels[task.kind]}</small></span></span>
+            <span className="task-scope">{taskScope(task)}</span>
+            <span className={`task-state state-${task.status}`}>{taskStage(task)}</span>
             <span>{task.attempt + 1}</span>
             <span>{new Date(task.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
             <span className="task-row-actions">
-              {task.status === 'queued' && <><IconButton label="任务上移" disabled={queuedIds.indexOf(task.id) === 0} onClick={() => void moveQueued(task.id, -1)}><ArrowUp size={13} /></IconButton><IconButton label="任务下移" disabled={queuedIds.indexOf(task.id) === queuedIds.length - 1 && taskCounts.queued <= queuedIds.length} onClick={() => void moveQueued(task.id, 1)}><ArrowDown size={13} /></IconButton></>}
-              {task.status === 'queued' && task.kind === 'generation' && <IconButton label="编辑生成提示词" onClick={() => openPromptEditor(task)}><FilePenLine size={13} /></IconButton>}
-              {(task.status === 'queued' || task.status === 'preparing' || task.status === 'uploading' || task.status === 'processing' || task.status === 'downloading') && <IconButton label="暂停任务" onClick={() => void pause(task.id)}><Pause size={13} /></IconButton>}
-              {task.status === 'paused' && <IconButton label="恢复任务" onClick={() => void resume(task.id)}><Play size={13} /></IconButton>}
-              {(task.status === 'queued' || task.status === 'paused' || task.status === 'preparing' || task.status === 'uploading' || task.status === 'processing' || task.status === 'downloading') && <button type="button" onClick={() => void cancel(task.id)}>取消</button>}
-              {(task.status === 'failed' || task.status === 'canceled') && <button type="button" onClick={() => void retry(task.id)}>重试</button>}
               {report && <IconButton label={reportOpen ? '收起导出报告' : '查看导出报告'} active={reportOpen} pressed={reportOpen} onClick={() => setExpandedExportTaskId(reportOpen ? null : task.id)}>{reportOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</IconButton>}
             </span>
           </div>
+          {task.status === 'failed' && (task.kind === 'analysis' || task.kind === 'collection-analysis') && <AnalysisFailure code={task.errorCode} taskId={task.id} className="task-analysis-failure" />}
+          <TaskAnalysisResult task={task} />
+          <TaskOutput task={task} photos={photos} />
+          {task.status === 'failed' && task.kind !== 'analysis' && task.kind !== 'collection-analysis' && <div className="task-analysis-failure" role="alert">{task.kind === 'export' ? exportFailureMessage(task.errorCode ?? '') : '任务执行失败'} <code>{task.errorCode}</code></div>}
           {reportOpen && report && <section className="export-task-report" aria-label="导出报告">
             <header><span><strong>导出报告</strong><small>{report.canceled ? '已取消' : report.failed > 0 ? '部分项目未导出' : '所有文件均已导出'}</small></span><button className="secondary-action compact" type="button" onClick={async () => { if (!await window.desktopApi.revealExportDestination(task.id)) setMessage('导出目录已移动或暂时无法打开。'); }}><FolderOpen size={13} />打开导出目录</button></header>
             <div className="export-report-summary"><span>总计 <strong>{report.total}</strong></span><span>成功 <strong>{report.succeeded}</strong></span><span className={report.failed > 0 ? 'has-failures' : ''}>失败 <strong>{report.failed}</strong></span></div>
@@ -2868,7 +3583,7 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
             </div>
           </section>}
           </Fragment>;
-        })}
+        })}</TaskBatchGroup>)}
         {nextTaskCursor && <div className="task-load-more"><button className="secondary-action compact" type="button" disabled={loadingMoreTasks} onClick={() => void loadMoreTasks()}>{loadingMoreTasks ? '加载中…' : '加载更多任务'}</button></div>}
       </div>
       {editingTaskId && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !editBusy) setEditingTaskId(null); }}><form className="rename-dialog task-prompt-editor" role="dialog" aria-modal="true" aria-labelledby="task-prompt-title" onSubmit={(event) => { event.preventDefault(); void savePrompt(); }}><header><div><span className="dialog-icon"><FilePenLine size={16} /></span><div><h2 id="task-prompt-title">编辑等待任务</h2><p>修改只作用于尚未开始的任务；同批生成数量会安全增减队尾任务。</p></div></div><IconButton label="关闭提示词编辑器" disabled={editBusy} onClick={() => setEditingTaskId(null)}><X size={15} /></IconButton></header><div className="form-grid two-columns"><label className="rename-field"><span>生成模型</span><select aria-label="任务生成模型" value={providerDraft} onChange={(event) => setProviderDraft(event.target.value)}>{generationProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label><label className="rename-field"><span>生成数量</span><input aria-label="任务生成数量" type="number" min="1" max="20" value={countDraft} onChange={(event) => setCountDraft(Number(event.target.value))} /></label></div><label className="rename-field"><span>提示词模板</span><select aria-label="任务提示词模板" value={templateDraft} disabled={!taskItems.find((item) => item.id === editingTaskId)?.payload.analysisRevisionId} onChange={(event) => void previewTaskTemplate(event.target.value)}><option value="">保留当前通用方案</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name} · V{template.version}</option>)}</select></label><label className="rename-field"><span>最终生成提示词</span><textarea autoFocus value={promptDraft} maxLength={50_000} onChange={(event) => setPromptDraft(event.target.value)} /></label><footer><span>{promptDraft.length.toLocaleString()} / 50,000</span><div><button className="quiet-button" type="button" disabled={editBusy} onClick={() => setEditingTaskId(null)}>取消</button><button className="primary-action compact" type="submit" disabled={!providerDraft || !promptDraft.trim() || countDraft < 1 || countDraft > 20 || editBusy}>{editBusy ? '保存中…' : '保存修改'}</button></div></footer></form></div>}
@@ -2889,12 +3604,15 @@ function TaskCenterPage({ onCatalogChanged }: { onCatalogChanged: () => Promise<
         )}
       </section>
     </div>
+    </TaskActions>
   );
 }
 
 function TaskKindIcon({ kind }: { kind: PersistedTask['kind'] }): React.JSX.Element {
   if (kind === 'analysis') return <Bot size={15} />;
+  if (kind === 'collection-analysis') return <Layers3 size={15} />;
   if (kind === 'generation') return <WandSparkles size={15} />;
+  if (kind === 'agent') return <Bot size={15} />;
   return <Download size={15} />;
 }
 
@@ -2972,13 +3690,9 @@ function TemplatePage(): React.JSX.Element {
 
   return (
     <div className="template-page">
-      <div className="template-page-heading">
-        <div><h1>提示词模板</h1><p>模板与 AI 分析动作组合，入队时保存具体版本快照。</p></div>
-        <button className="primary-action compact" type="button" onClick={() => { setForm(emptyTemplateForm); setMessage(''); }}><Plus size={15} />新建模板</button>
-      </div>
       <div className="template-workspace">
         <section className="template-browser">
-          <div className="template-browser-tools"><div className="inline-search"><Search size={14} /><input aria-label="搜索模板" value={templateSearch} placeholder="搜索模板" onChange={(event) => setTemplateSearch(event.target.value)} /></div><label className="template-category-filter"><ListFilter size={14} /><select aria-label="模板分类" value={templateCategory} onChange={(event) => setTemplateCategory(event.target.value)}><option>全部分类</option><option>人像</option><option>风光</option><option>商品</option><option>建筑</option><option>其他</option></select></label></div>
+          <div className="template-browser-tools"><div className="inline-search"><Search size={14} /><input aria-label="搜索模板" value={templateSearch} placeholder="搜索模板" onChange={(event) => setTemplateSearch(event.target.value)} /></div><label className="template-category-filter"><ListFilter size={14} /><select aria-label="模板分类" value={templateCategory} onChange={(event) => setTemplateCategory(event.target.value)}><option>全部分类</option><option>人像</option><option>风光</option><option>商品</option><option>建筑</option><option>其他</option></select></label><button className="primary-action compact" type="button" onClick={() => { setForm(emptyTemplateForm); setMessage(''); }}><Plus size={15} />新建模板</button></div>
           {templateItems.length === 0 ? (
             <div className="template-empty"><WandSparkles size={30} /><h2>尚未创建模板</h2><p>创建第一个模板，把常用修图要求和保护规则保存下来。</p></div>
           ) : visibleTemplates.length === 0 ? (
@@ -3016,7 +3730,68 @@ function TemplatePage(): React.JSX.Element {
   );
 }
 
+function InlinePhotoViewer({ workspace, photo, items, onPhotoChange, onClose, resultId }: { workspace: LibraryWorkspaceProps; photo: Photo; items: Photo[]; onPhotoChange: (photo: Photo) => void; onClose: () => void; resultId: string | null }): React.JSX.Element {
+  const panelRef = useRef<HTMLElement>(null);
+  const [selection, setSelection] = useState<SelectionState>(() => ({ selectedIds: new Set([photo.id]), anchorId: photo.id, focusId: photo.id }));
+  useEffect(() => { panelRef.current?.querySelector<HTMLElement>('.canvas-wrap')?.focus({ preventScroll: true }); }, []);
+  return <section className="inline-photo-viewer" aria-label="看图" ref={panelRef} onKeyDown={(event) => {
+    if (event.key !== 'Escape' || event.defaultPrevented || panelRef.current?.querySelector('[role="dialog"], [role="menu"], .tag-editor-popover')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onClose();
+  }}><LibraryWorkspace {...workspace} active view="viewer" availablePhotos={items} selectedAssetId={photo.id} selection={selection} onSelectionChange={setSelection} onSelectedAssetChange={(id) => { const next = items.find((item) => item.id === id); if (next) onPhotoChange(next); }} totalCount={items.length} hasMore={false} onCloseViewer={onClose} initialResultId={resultId} /></section>;
+}
+
 export function App(): React.JSX.Element {
+  const [globalLayout, setGlobalLayout] = useViewerLayout();
+  const [panelVisibility, setPanelVisibility] = useState(() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem('photoallisai.panel-visibility.v1') ?? '{}');
+      return { left: saved.left !== false, right: saved.right !== false };
+    } catch { return { left: true, right: true }; }
+  });
+  const panelsBeforeHide = useRef<{ left: boolean; right: boolean } | null>(null);
+  useEffect(() => {
+    try { window.localStorage.setItem('photoallisai.panel-visibility.v1', JSON.stringify(panelVisibility)); } catch { /* Keep the in-memory layout. */ }
+  }, [panelVisibility]);
+  useEffect(() => {
+    const togglePanels = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab' || event.shiftKey || event.metaKey || event.ctrlKey || event.altKey || event.repeat || event.defaultPrevented) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="dialog"], [role="alertdialog"], [role="menu"]')) return;
+      if (document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')) return;
+      event.preventDefault();
+      setPanelVisibility((current) => {
+        if (current.left || current.right) {
+          panelsBeforeHide.current = current;
+          return { left: false, right: false };
+        }
+        const restored = panelsBeforeHide.current ?? { left: true, right: true };
+        panelsBeforeHide.current = null;
+        return restored;
+      });
+      if (target instanceof HTMLElement && target.closest('.workspace-side-panel')) target.blur();
+    };
+    window.addEventListener('keydown', togglePanels);
+    return () => window.removeEventListener('keydown', togglePanels);
+  }, []);
+  const [navigationNotice, setNavigationNotice] = useState('');
+  const [globalTasks, setGlobalTasks] = useState<PersistedTask[]>([]);
+  const [globalTaskCounts, setGlobalTaskCounts] = useState<Pick<TaskPage, 'activeCount' | 'queuedCount' | 'failedCount' | 'pausedCount'>>({ activeCount: 0, queuedCount: 0, failedCount: 0, pausedCount: 0 });
+  const [taskDrawerOpen, setTaskDrawerOpen] = useState(false);
+  const [dockLayout, setDockLayout] = useState(() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem('photoallisai.dock-layout.v1') ?? '') as { agentOpen?: boolean; collapsed?: boolean; order?: string[]; split?: number };
+      return { agentOpen: saved.agentOpen ?? false, collapsed: saved.collapsed ?? false, order: saved.order?.filter((item) => item === 'agent' || item === 'details') ?? ['agent', 'details'], split: clamp(saved.split ?? 44, 28, 68) };
+    } catch { return { agentOpen: false, collapsed: false, order: ['agent', 'details'], split: 44 }; }
+  });
+  const [dockTab, setDockTab] = useInspectorTab();
+  const agentDockOpen = dockLayout.agentOpen && !dockLayout.collapsed;
+  const saveDockLayout = (next: typeof dockLayout) => {
+    setDockLayout(next);
+    try { window.localStorage.setItem('photoallisai.dock-layout.v1', JSON.stringify(next)); } catch { /* in-memory layout remains available */ }
+  };
+  const setAgentDockOpen = (open: boolean) => saveDockLayout({ ...dockLayout, agentOpen: open, collapsed: false });
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('library');
   const [openTabs, setOpenTabs] = useState<WorkspaceTab[]>(['library']);
   const [sessionReady, setSessionReady] = useState(false);
@@ -3031,8 +3806,53 @@ export function App(): React.JSX.Element {
   const [selectedSmartCollection, setSelectedSmartCollection] = useState<CatalogSmartCollection['id'] | null>(null);
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [viewerPhoto, setViewerPhoto] = useState<Photo | null>(null);
+  const [viewerPhotos, setViewerPhotos] = useState<Photo[]>([]);
+  const [viewerResultId, setViewerResultId] = useState<string | null>(null);
+  const viewerRequest = useRef(0);
+  const openViewerRef = useRef<(assetId: string, assetIds?: string[]) => void>(() => undefined);
+  const viewerOrigin = useRef<{ focus: HTMLElement | null; drawerOpen: boolean } | null>(null);
+  const closeViewer = useCallback(() => {
+    viewerRequest.current += 1;
+    setViewerPhoto(null);
+    setViewerPhotos([]);
+    setViewerResultId(null);
+    setViewerPreloading(false);
+    const origin = viewerOrigin.current;
+    viewerOrigin.current = null;
+    if (origin) {
+      setTaskDrawerOpen(origin.drawerOpen);
+      window.requestAnimationFrame(() => { if (origin.focus?.isConnected) origin.focus.focus({ preventScroll: true }); });
+    }
+  }, []);
   const [sharedSelection, setSharedSelection] = useState<SelectionState>({ selectedIds: new Set(), anchorId: null, focusId: null });
+  const [workflowAssetIds, setWorkflowAssetIds] = useState<string[]>(() => loadWorkflowDraft().workflowAssetIds);
+  const [workflowAssetMeta, setWorkflowAssetMeta] = useState<Record<string, WorkflowAssetMeta>>(() => loadWorkflowDraft().workflowAssetMeta);
+  const [workflowRules, setWorkflowRules] = useState<WorkflowRule[]>(() => loadWorkflowDraft().globalRules);
+  const [workflowTemplateId, setWorkflowTemplateId] = useState(() => loadWorkflowDraft().templateId);
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      try {
+        const draft = loadWorkflowDraft();
+        window.localStorage.setItem(WORKFLOW_DRAFT_KEY, JSON.stringify({ ...draft, workflowAssetIds, workflowAssetMeta, globalRules: workflowRules, templateId: workflowTemplateId } satisfies WorkflowDraft));
+      } catch {
+        // localStorage may be unavailable in restricted sessions; the in-memory queue remains usable.
+      }
+    }, 250);
+    return () => window.clearTimeout(timeout);
+  }, [workflowAssetIds, workflowAssetMeta, workflowRules, workflowTemplateId]);
   const [viewerPreloading, setViewerPreloading] = useState(false);
+  useEffect(() => { closeViewer(); }, [activeTab, closeViewer]);
+  useEffect(() => {
+    if (!viewerPreloading && !viewerPhoto) return;
+    const cancel = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented || document.querySelector('[role="dialog"], [role="menu"], .tag-editor-popover')) return;
+      event.preventDefault();
+      closeViewer();
+    };
+    window.addEventListener('keydown', cancel);
+    return () => window.removeEventListener('keydown', cancel);
+  }, [closeViewer, viewerPhoto, viewerPreloading]);
   const [catalogTotal, setCatalogTotal] = useState(0);
   const [nextCursor, setNextCursor] = useState<CatalogAssetCursor | null>(null);
   const [catalogReady, setCatalogReady] = useState(false);
@@ -3053,6 +3873,7 @@ export function App(): React.JSX.Element {
     };
     void window.desktopApi.getAppSettings().then((settings) => {
       preference = settings.theme;
+      setLocale(settings.locale);
       refresh();
     });
     media.addEventListener('change', refresh);
@@ -3139,10 +3960,10 @@ export function App(): React.JSX.Element {
     return () => window.clearTimeout(timeout);
   }, [searchDraft]);
 
-  const importFolders = async () => {
+  const importFolders = useCallback(async () => {
     const result = await window.desktopApi.importFolders();
     if (result) await refreshCatalog();
-  };
+  }, [refreshCatalog]);
 
   const relinkFolder = async (folderId: string) => {
     const result = await window.desktopApi.relinkCatalogFolder(folderId);
@@ -3177,6 +3998,7 @@ export function App(): React.JSX.Element {
   };
 
   const openWorkspaceTab = useCallback((tab: WorkspaceTab) => {
+    if (tab === 'viewer') return;
     setOpenTabs((current) => current.includes(tab) ? current : [...current, tab]);
     setActiveTab(tab);
   }, []);
@@ -3188,11 +4010,54 @@ export function App(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
+    const unsubscribe = window.desktopApi.onMenuCommand((command) => {
+      if (command === 'open-library') openWorkspaceTab('library');
+      else if (command === 'open-viewer') { if (selectedAssetId) openViewerRef.current(selectedAssetId); }
+      else if (command === 'open-batch' || command === 'open-workflow') openWorkspaceTab('batch');
+      else if (command === 'open-templates' || command === 'open-prompt-templates') openWorkspaceTab('templates');
+      else if (command === 'open-tasks' || command === 'open-task-center') openWorkspaceTab('tasks');
+      else if (command === 'open-settings') openWorkspaceTab('settings');
+      else if (command === 'import-folders') void importFolders();
+      else if (command === 'refresh-catalog') void refreshCatalog();
+      else if (command === 'select-all') {
+        const focused = document.activeElement;
+        if (focused instanceof HTMLTextAreaElement || (focused instanceof HTMLInputElement && ['text', 'search', 'url', 'tel', 'email', 'password'].includes(focused.type))) {
+          focused.select();
+        } else if (focused instanceof HTMLElement && focused.isContentEditable) {
+          const range = document.createRange();
+          range.selectNodeContents(focused);
+          const selection = window.getSelection();
+          selection?.removeAllRanges();
+          selection?.addRange(range);
+        } else if (focused instanceof Element && !focused.closest('input, textarea, select')) {
+          const photoList = focused.closest('.filmstrip, .catalog-grid, .catalog-list-view');
+          photoList?.dispatchEvent(new Event('photoallisai:select-all-photos', { bubbles: true }));
+        }
+      }
+      else if (command === 'clear-selection') {
+        const focused = document.activeElement;
+        if (focused instanceof Element && !focused.closest('input, textarea, select, [contenteditable="true"]') && focused.closest('.filmstrip, .catalog-grid, .catalog-list-view')) setSharedSelection({ selectedIds: new Set(), anchorId: null, focusId: selectedAssetId });
+      }
+      else if (command === 'close-workspace') { if (viewerPhoto || viewerPreloading) closeViewer(); else closeWorkspaceTab(activeTab); }
+      else window.dispatchEvent(new CustomEvent('photoallisai:menu-command', { detail: command }));
+    });
+    return unsubscribe;
+  }, [activeTab, catalogPhotos, catalogReady, catalogTotal, closeViewer, closeWorkspaceTab, importFolders, openWorkspaceTab, refreshCatalog, selectedAssetId, viewerPhoto, viewerPreloading]);
+
+  useEffect(() => {
     const handleWorkspaceShortcut = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey)) return;
-      if (event.key.toLowerCase() === 'w' && activeTab !== 'library') {
+      if (event.key.toLowerCase() === 'a') {
+        const target = event.target;
+        if (target instanceof HTMLTextAreaElement || (target instanceof HTMLInputElement && ['text', 'search', 'url', 'tel', 'email', 'password'].includes(target.type))) {
+          event.preventDefault();
+          target.select();
+        }
+        return;
+      }
+      if (event.key.toLowerCase() === 'w' && (viewerPhoto || viewerPreloading || activeTab !== 'library')) {
         event.preventDefault();
-        closeWorkspaceTab(activeTab);
+        if (viewerPhoto || viewerPreloading) closeViewer(); else closeWorkspaceTab(activeTab);
       } else if (event.key === 'Tab') {
         event.preventDefault();
         const currentIndex = openTabs.indexOf(activeTab);
@@ -3203,7 +4068,7 @@ export function App(): React.JSX.Element {
     };
     window.addEventListener('keydown', handleWorkspaceShortcut);
     return () => window.removeEventListener('keydown', handleWorkspaceShortcut);
-  }, [activeTab, closeWorkspaceTab, openTabs]);
+  }, [activeTab, closeViewer, closeWorkspaceTab, openTabs, viewerPhoto, viewerPreloading]);
 
   const loadMoreCatalog = async () => {
     if (!nextCursor || loadingMore) return;
@@ -3235,6 +4100,85 @@ export function App(): React.JSX.Element {
 
   const isDemo = E2E_DEMO_MODE && catalogReady && catalogTotal === 0 && catalogFolders.length === 0;
   const availablePhotos = !catalogReady || isDemo ? photos : catalogPhotos;
+  useEffect(() => {
+    const open = () => setTaskDrawerOpen(true);
+    window.addEventListener(OPEN_TASK_DRAWER_EVENT, open);
+    return () => window.removeEventListener(OPEN_TASK_DRAWER_EVENT, open);
+  }, []);
+  useEffect(() => {
+    if (isDemo) return;
+    let active = true;
+    const refresh = () => {
+      void window.desktopApi.listTaskPage({ includeBatchMembers: true, limit: 20, cursor: null }).then((page) => {
+        if (active) {
+          setGlobalTasks(page.items);
+          setGlobalTaskCounts({ activeCount: page.activeCount, queuedCount: page.queuedCount, failedCount: page.failedCount, pausedCount: page.pausedCount });
+        }
+      }).catch(() => undefined);
+    };
+    refresh();
+    const interval = window.setInterval(refresh, 1_000);
+    return () => { active = false; window.clearInterval(interval); };
+  }, [isDemo]);
+  useEffect(() => {
+    if (workflowAssetIds.length === 0) return;
+    setWorkflowAssetMeta((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const id of workflowAssetIds) {
+        if (next[id]) continue;
+        const photo = availablePhotos.find((item) => item.id === id);
+        if (!photo) continue;
+        next[id] = { id: photo.id, fileName: photo.fileName, src: photo.src, ...(photo.thumbnailSrc ? { thumbnailSrc: photo.thumbnailSrc } : {}), format: photo.format };
+        changed = true;
+      }
+      return changed ? next : current;
+    });
+  }, [availablePhotos, workflowAssetIds]);
+  const globalFocusPhoto = viewerPhoto ?? availablePhotos.find((photo) => photo.id === sharedSelection.focusId)
+    ?? catalogPhotos.find((photo) => photo.id === sharedSelection.focusId)
+    ?? availablePhotos.find((photo) => photo.id === selectedAssetId)
+    ?? availablePhotos[0];
+  const contextSelectedIds = useMemo(() => viewerPhoto ? new Set([viewerPhoto.id]) : sharedSelection.selectedIds, [viewerPhoto, sharedSelection.selectedIds]);
+  const contextPhotos = useMemo(() => viewerPhoto ? [...viewerPhotos, ...availablePhotos.filter((photo) => !viewerPhotos.some((item) => item.id === photo.id))] : availablePhotos, [viewerPhoto, viewerPhotos, availablePhotos]);
+  const addAssetsToWorkflow = useCallback((assetIds: string[]) => {
+    const validIds = assetIds.filter((id) => contextPhotos.some((photo) => photo.id === id));
+    if (validIds.length === 0) return;
+    setWorkflowAssetIds((current) => {
+      const next = [...current, ...validIds.filter((id) => !current.includes(id))];
+      const added = next.length - current.length;
+      window.dispatchEvent(new CustomEvent(OPERATION_NOTICE_EVENT, { detail: added > 0 ? `已加入 ${added} 张照片到 AI 批量修图${added < validIds.length ? `，${validIds.length - added} 张已在修图列表中` : ''}。` : '所选照片已在 AI 批量修图中。' }));
+      return next;
+    });
+    setWorkflowAssetMeta((current) => {
+      const next = { ...current };
+      for (const id of validIds) {
+        const photo = contextPhotos.find((item) => item.id === id);
+        if (photo) next[id] = { id: photo.id, fileName: photo.fileName, src: photo.src, ...(photo.thumbnailSrc ? { thumbnailSrc: photo.thumbnailSrc } : {}), format: photo.format };
+      }
+      return next;
+    });
+  }, [contextPhotos]);
+  const removeWorkflowAsset = useCallback((assetId: string) => {
+    setWorkflowAssetIds((current) => current.filter((id) => id !== assetId));
+    setWorkflowAssetMeta((current) => {
+      const next = { ...current };
+      delete next[assetId];
+      return next;
+    });
+  }, []);
+  const moveWorkflowAsset = useCallback((assetId: string, direction: -1 | 1) => setWorkflowAssetIds((current) => {
+    const index = current.indexOf(assetId);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= current.length) return current;
+    const next = [...current];
+    const currentValue = next[index];
+    const targetValue = next[target];
+    if (currentValue === undefined || targetValue === undefined) return current;
+    next[index] = targetValue;
+    next[target] = currentValue;
+    return next;
+  }), []);
   const displayTotal = isDemo ? 128 : catalogTotal;
   useEffect(() => {
     if (!catalogReady) return;
@@ -3248,7 +4192,8 @@ export function App(): React.JSX.Element {
     });
   }, [availablePhotos, catalogReady, selectedAssetId]);
   const workspaceProps: LibraryWorkspaceProps = {
-    view: activeTab === 'viewer' ? 'viewer' : 'library',
+    view: 'library',
+    active: !viewerPhoto,
     onOpenViewer: (assetId) => void openViewer(assetId),
     availablePhotos,
     catalogFolders,
@@ -3287,17 +4232,30 @@ export function App(): React.JSX.Element {
     onUnregisterFolder: unregisterFolder,
     onMoveFolder: moveFolder,
     onOpenTaskCenter: () => openWorkspaceTab('tasks'),
-    onOpenTemplates: () => openWorkspaceTab('templates')
+    onOpenTemplates: () => openWorkspaceTab('templates'),
+    onAddAssetsToWorkflow: (ids) => { addAssetsToWorkflow(ids); openWorkspaceTab('batch'); },
+    onAddAssetsToAgent: (ids) => { addAssetsToWorkflow(ids); setAgentDockOpen(true); },
+    onAddAssetsToBatch: (ids) => { addAssetsToWorkflow(ids); openWorkspaceTab('batch'); }
   };
-  const openViewer = async (assetId: string) => {
-    const photo = availablePhotos.find((item) => item.id === assetId);
-    if (!photo || activeTab === 'viewer' && selectedAssetId === assetId) {
-      setSelectedAssetId(assetId);
-      openWorkspaceTab('viewer');
-      return;
-    }
+  const openViewer = async (assetId: string, assetIds?: string[], resultId: string | null = null) => {
+    const request = ++viewerRequest.current;
+    const origin = viewerOrigin.current ?? { focus: document.activeElement instanceof HTMLElement ? document.activeElement : null, drawerOpen: taskDrawerOpen };
     setViewerPreloading(true);
     try {
+      const ids = [...new Set(assetIds ?? availablePhotos.map((item) => item.id))];
+      if (!ids.includes(assetId)) ids.push(assetId);
+      const byId = new Map(availablePhotos.map((item) => [item.id, item]));
+      const missing = ids.filter((id) => !byId.has(id));
+      for (let offset = 0; offset < missing.length; offset += 500) {
+        const page = await window.desktopApi.listCatalogAssetPage({ assetIds: missing.slice(offset, offset + 500), limit: 500 });
+        for (const item of mapCatalogAssets(page.items)) byId.set(item.id, item);
+      }
+      if (request !== viewerRequest.current) return;
+      const photo = byId.get(assetId);
+      if (!photo) {
+        setNavigationNotice('该任务的图片已从图库移除，无法打开。');
+        return;
+      }
       if (photo.src) {
         const image = new window.Image();
         await new Promise<void>((resolve) => {
@@ -3314,10 +4272,37 @@ export function App(): React.JSX.Element {
           }
         });
       }
-      setSelectedAssetId(assetId);
-      openWorkspaceTab('viewer');
+      if (request !== viewerRequest.current) return;
+      viewerOrigin.current = origin;
+      setViewerPhotos(ids.flatMap((id) => byId.has(id) ? [byId.get(id)!] : []));
+      setViewerPhoto(photo);
+      setViewerResultId(resultId);
+    } catch {
+      if (request === viewerRequest.current) setNavigationNotice('无法读取图片，请检查图库和原文件是否可用。');
     } finally {
-      setViewerPreloading(false);
+      if (request === viewerRequest.current) setViewerPreloading(false);
+    }
+  };
+  openViewerRef.current = (assetId, assetIds) => { void openViewer(assetId, assetIds); };
+
+  const unregisterFromNavigation = async (folderId: string) => {
+    const folder = catalogFolders.find((item) => item.id === folderId);
+    await unregisterFolder(folderId);
+    setNavigationNotice(`已从图库移除「${folder?.name ?? '文件夹'}」，磁盘文件和已有元数据保持不变。`);
+  };
+  const dropAssetsFromNavigation = async (folderId: string, assetIds: string[], copy: boolean) => {
+    if (isDemo || assetIds.length === 0) return;
+    try {
+      const companions = await window.desktopApi.previewCatalogCompanions(assetIds);
+      const report = copy
+        ? await window.desktopApi.copyCatalogAssets({ assetIds, targetFolderId: folderId, includeCompanions: false })
+        : await window.desktopApi.moveCatalogAssets({ assetIds, targetFolderId: folderId, includeCompanions: false });
+      if (report.status !== 'completed') setNavigationNotice(report.rolledBack ? '拖放操作失败，文件已恢复到原位置。' : `拖放操作未能完整恢复，请记录操作号 ${report.operationId}。`);
+      else if ('copied' in report) setNavigationNotice(`已复制 ${report.copied} 张照片${companions.files.length ? `；另有 ${companions.files.length} 个 RAW/JPEG/XMP 关联文件未复制` : ''}。`);
+      else setNavigationNotice(`已移动 ${report.moved} 张照片${report.skipped ? `，${report.skipped} 张原本就在目标文件夹` : ''}${companions.files.length ? `；另有 ${companions.files.length} 个 RAW/JPEG/XMP 关联文件未移动` : ''}。`);
+      await refreshCatalog();
+    } catch {
+      setNavigationNotice('拖放操作失败：请检查目标文件夹权限、磁盘状态或所选照片的活动任务。');
     }
   };
 
@@ -3325,10 +4310,31 @@ export function App(): React.JSX.Element {
     <div className="app-shell">
       <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
       {!sessionReady || !catalogReady ? <main className="workspace-loading"><span className="working-pulse" /><span>{sessionReady ? '正在读取图库' : '正在恢复工作区'}</span></main>
-        : activeTab === 'library' || activeTab === 'viewer' ? <><LibraryWorkspace {...workspaceProps} />{viewerPreloading && <div className="viewer-preload-indicator" role="status"><span className="working-pulse" />正在准备预览</div>}</>
-            : activeTab === 'settings' ? <SettingsPage onExportPresetsChange={setExportPresets} />
-              : activeTab === 'tasks' ? <TaskCenterPage onCatalogChanged={refreshCatalog} />
-                : <TemplatePage />}
+        : <div className="global-workspace-shell" style={{ gridTemplateColumns: `${panelVisibility.left ? globalLayout.leftWidth : 0}px ${panelVisibility.left ? 5 : 0}px minmax(0, 1fr) ${panelVisibility.right ? 5 : 0}px ${panelVisibility.right ? globalLayout.rightWidth : 0}px` }}>
+              <div className="workspace-side-panel" hidden={!panelVisibility.left}><Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={catalogTotal} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={workspaceProps.onSelectFolder} onSelectAlbum={workspaceProps.onSelectAlbum} onSelectSmartCollection={workspaceProps.onSelectSmartCollection} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onRelinkFolder={relinkFolder} onSynchronizeFolder={synchronizeFolder} onRevealFolder={revealFolder} onUnregisterFolder={unregisterFromNavigation} onMoveFolder={moveFolder} onDropAssets={dropAssetsFromNavigation} onSelectTag={setSelectedTagId} isDemo={isDemo} /></div>
+              <div className="workspace-side-splitter" hidden={!panelVisibility.left}><PaneSplitter orientation="vertical" value={globalLayout.leftWidth} minimum={160} maximum={420} label="调整左侧目录栏宽度" onChange={(value) => setGlobalLayout('leftWidth', value)} /></div>
+              <div className="workspace-page-stack">
+              <div className="workspace-source-page" inert={Boolean(viewerPhoto)} aria-hidden={viewerPhoto ? true : undefined} style={viewerPhoto ? { visibility: 'hidden' } : undefined}>
+              {activeTab === 'library' ? <LibraryWorkspace {...workspaceProps} />
+                : activeTab === 'batch' || activeTab === 'workflow' ? <AiWorkflowPage photos={availablePhotos} selectedIds={sharedSelection.selectedIds} focusId={sharedSelection.focusId} workflowAssetIds={workflowAssetIds} workflowAssetMeta={workflowAssetMeta} tasks={globalTasks} globalRules={workflowRules} onGlobalRulesChange={setWorkflowRules} templateId={workflowTemplateId} onAddAssets={addAssetsToWorkflow} onRemoveAsset={removeWorkflowAsset} onMoveAsset={moveWorkflowAsset} onClearAssets={() => { setWorkflowAssetIds([]); setWorkflowAssetMeta({}); }} onOpenTasks={() => openWorkspaceTab('tasks')} onOpenViewer={(assetId, assetIds, resultId) => void openViewer(assetId, assetIds, resultId)} onFocusAsset={(id) => setSharedSelection((current) => ({ ...current, focusId: id }))} />
+                : activeTab === 'settings' ? <SettingsPage onExportPresetsChange={setExportPresets} />
+                  : activeTab === 'tasks' ? <TaskCenterPage onCatalogChanged={refreshCatalog} onOpenViewer={(assetId, assetIds) => void openViewer(assetId, assetIds)} photos={availablePhotos} />
+                    : <TemplatePage />}
+              </div>
+              {viewerPhoto && <InlinePhotoViewer workspace={workspaceProps} photo={viewerPhoto} items={viewerPhotos} onPhotoChange={(photo) => { setViewerPhoto(photo); setViewerResultId(null); }} onClose={closeViewer} resultId={viewerResultId} />}
+              {viewerPreloading && <div className="viewer-preload-indicator" role="status"><span className="working-pulse" />正在准备预览</div>}
+              </div>
+              <div className="workspace-side-splitter" hidden={!panelVisibility.right}><PaneSplitter orientation="vertical" value={globalLayout.rightWidth} minimum={240} maximum={520} label="调整右侧 AI 面板宽度" invert onChange={(value) => setGlobalLayout('rightWidth', value)} /></div>
+              <div hidden={!panelVisibility.right} className={`workspace-side-panel right-dock-stack${dockLayout.collapsed ? ' is-collapsed' : ''}`}>
+                <div className="inspector unified-dock">
+                  <div className="inspector-tabs"><button className={dockTab === 'ai' ? 'is-active' : ''} type="button" onClick={() => { setDockTab('ai'); setAgentDockOpen(false); }}><Bot size={14} />AI</button><button className={dockTab === 'agent' ? 'is-active' : ''} type="button" onClick={() => { setDockTab('agent'); setAgentDockOpen(true); }}><Sparkles size={14} />Agent</button><button className={dockTab === 'details' ? 'is-active' : ''} type="button" onClick={() => { setDockTab('details'); setAgentDockOpen(false); }}><Info size={14} />详情</button></div>
+                  <div className="inspector-scroll">{dockTab === 'agent' ? <AgentDockPanel selectedIds={contextSelectedIds} photos={contextPhotos} onClose={() => { setDockTab('ai'); setAgentDockOpen(false); }} onOpenBatch={() => openWorkspaceTab('batch')} onCollapse={() => saveDockLayout({ ...dockLayout, collapsed: true })} onMove={() => saveDockLayout({ ...dockLayout, order: ['details', 'agent'] })} /> : dockTab === 'details' && globalFocusPhoto ? <div className="inspector-details"><InspectorInfo photo={globalFocusPhoto} revision={undefined} /><InspectorVersions results={[]} trashedResults={[]} onTrashResult={async () => undefined} onRestoreResult={async () => undefined} /></div> : <GlobalAiPanel onOpenBatch={() => openWorkspaceTab('batch')} photo={globalFocusPhoto} selectedIds={contextSelectedIds} isDemo={isDemo} workspaceTab={activeTab} onOpenTemplates={() => openWorkspaceTab('templates')} onAddAssetsToWorkflow={addAssetsToWorkflow} workflowAssetIds={workflowAssetIds} tasks={globalTasks} workflowRules={workflowRules} onWorkflowRulesChange={setWorkflowRules} workflowTemplateId={workflowTemplateId} onWorkflowTemplateChange={setWorkflowTemplateId} />}</div>
+                </div>
+                {dockLayout.collapsed && <button className="dock-restore" type="button" onClick={() => saveDockLayout({ ...dockLayout, collapsed: false })}>展开 Dock 面板</button>}
+              </div>
+              {navigationNotice && <div className="operation-toast global-navigation-notice" role="status">{navigationNotice}<button type="button" aria-label="关闭提示" onClick={() => setNavigationNotice('')}><X size={13} /></button></div>}
+            </div>}
+      <TaskBar panelVisibility={panelVisibility} onTogglePanel={(side) => { panelsBeforeHide.current = null; setPanelVisibility((current) => ({ ...current, [side]: !current[side] })); }} suspended={Boolean(viewerPhoto)} open={taskDrawerOpen} onToggle={() => setTaskDrawerOpen((value) => !value)} onOpenTaskCenter={() => { setTaskDrawerOpen(false); openWorkspaceTab('tasks'); }} onOpenViewer={(assetId, assetIds) => void openViewer(assetId, assetIds)} tasks={isDemo ? null : globalTasks} counts={globalTaskCounts} photos={availablePhotos} />
     </div>
   );
 }

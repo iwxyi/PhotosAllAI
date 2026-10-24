@@ -42,6 +42,10 @@ describe('catalog image discovery', () => {
     const assets = catalog.listAssets();
 
     expect(imported).toBe(2);
+    const taskAsset = catalog.listAssetPage({ assetIds: [assets[0]!.id], limit: 500 });
+    expect(taskAsset.items.map((asset) => asset.id)).toEqual([assets[0]!.id]);
+    expect(taskAsset.totalCount).toBe(1);
+    expect(catalog.listAssetPage({ assetIds: ['missing-asset'] }).items).toEqual([]);
     expect(assets.map((asset) => asset.fileName).sort()).toEqual(['raw.NEF', 'visible.jpg']);
     expect(catalog.listFolders()).toEqual([expect.objectContaining({ id: assets[0]?.folderId, name: 'photos', assetCount: 2, offlineCount: 0, parentId: null, rootId: assets[0]?.folderId, depth: 0, isRoot: true })]);
     const updated = catalog.updateMetadata({ assetIds: assets.map((asset) => asset.id), rating: 4 });

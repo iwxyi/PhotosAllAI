@@ -20,6 +20,31 @@ afterEach(async () => {
 });
 
 describe('workspace session service', () => {
+  it('removes legacy viewer tabs and restores the library when the viewer was active', async () => {
+    const file = await databasePath();
+    const service = new WorkspaceService(file);
+    service.save({ ...defaultWorkspaceSession, openTabs: ['library', 'viewer', 'tasks'], activeTab: 'viewer' });
+    expect(service.get()).toMatchObject({ openTabs: ['library', 'tasks'], activeTab: 'library' });
+    service.close();
+    const database = new DatabaseSync(file);
+    database.prepare('UPDATE application_state SET payload_json = ? WHERE key = ?').run(JSON.stringify({ ...defaultWorkspaceSession, openTabs: ['library', 'viewer'], activeTab: 'viewer' }), 'workspace_session');
+    database.close();
+    const restored = new WorkspaceService(file);
+    expect(restored.get()).toMatchObject({ openTabs: ['library'], activeTab: 'library' });
+    restored.close();
+  });
+  it('merges legacy task detail tabs into the task center after restart', async () => {
+    const file = await databasePath();
+    const service = new WorkspaceService(file);
+    const tab = 'task:analysis:19d42fac-a42a-405a-8a82-b67154f259a3' as const;
+    service.save({ ...defaultWorkspaceSession, openTabs: ['library', tab], activeTab: tab });
+    service.close();
+    const restored = new WorkspaceService(file);
+    expect(restored.get().openTabs).toEqual(['library', 'tasks']);
+    expect(restored.get().activeTab).toBe('tasks');
+    restored.close();
+  });
+
   it('returns defaults and restores a versioned session after restart', async () => {
     const file = await databasePath();
     const service = new WorkspaceService(file);
@@ -99,6 +124,24 @@ describe('workspace session service', () => {
         sortBy: 'modifiedAt',
         searchQuery: '旧会话'
       }
+    });
+    restored.close();
+  });
+
+  it('restores the retired workflow tab as AI batch editing', async () => {
+    const file = await databasePath();
+    const service = new WorkspaceService(file);
+    service.save({
+      ...defaultWorkspaceSession,
+      openTabs: ['library', 'viewer', 'workflow'],
+      activeTab: 'workflow'
+    });
+    service.close();
+
+    const restored = new WorkspaceService(file);
+    expect(restored.get()).toMatchObject({
+      openTabs: ['library', 'batch'],
+      activeTab: 'batch'
     });
     restored.close();
   });

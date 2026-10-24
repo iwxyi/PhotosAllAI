@@ -38,6 +38,23 @@ test.afterAll(async () => {
   ]);
 });
 
+test('catalog list checkbox selects all, deselects all and shows partial selection', async () => {
+  await page.getByRole('button', { name: '列表视图', exact: true }).click();
+  const header = page.getByRole('checkbox', { name: '全选当前列表', exact: true });
+  const rows = page.locator('.catalog-list-row input[type="checkbox"]');
+  expect(await rows.count()).toBeGreaterThan(1);
+  await header.check();
+  expect(await rows.evaluateAll((elements) => elements.every((element) => (element as HTMLInputElement).checked))).toBe(true);
+  await header.uncheck();
+  expect(await rows.evaluateAll((elements) => elements.every((element) => !(element as HTMLInputElement).checked))).toBe(true);
+  await rows.first().check();
+  await expect(header).toHaveJSProperty('indeterminate', true);
+  await header.check();
+  await expect(header).toHaveJSProperty('indeterminate', false);
+  await header.uncheck();
+  await page.getByRole('button', { name: '网格视图', exact: true }).click();
+});
+
 test('starts with the secure library workspace', async () => {
   await expect(page.getByText('PhotoAllIsAI')).toBeVisible();
   await expect(page.getByRole('tab', { name: '图库' })).toHaveAttribute('aria-selected', 'true');
@@ -57,12 +74,11 @@ test('starts with the secure library workspace', async () => {
   await expect(page.getByRole('tab', { name: '看图' })).toHaveAttribute('aria-selected', 'true');
   await expect.poll(() => page.evaluate(() => (window as typeof window & { __viewerImageClasses?: string[] }).__viewerImageClasses?.[0] ?? '')).toContain('is-ready');
   await expect(page.getByRole('button', { name: /加入生成队列/ })).toBeVisible();
-  await page.getByRole('button', { name: '浏览模板' }).click();
-  await expect(page.getByRole('heading', { name: '提示词模板' })).toBeVisible();
+  await page.getByRole('button', { name: '模板库' }).click();
+  await expect(page.getByLabel('搜索模板')).toBeVisible();
   await page.getByRole('tab', { name: /看图/ }).click();
-  await page.getByRole('button', { name: '信息', exact: true }).click();
+  await page.getByRole('button', { name: '详情', exact: true }).click();
   await expect(page.getByText('文件信息')).toBeVisible();
-  await page.getByRole('button', { name: '版本', exact: true }).click();
   await expect(page.getByText('生成版本', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'AI', exact: true }).click();
   await page.getByRole('button', { name: /筛选/ }).click();
@@ -102,7 +118,7 @@ test('keeps navigation and inspector mounted across library and viewer tabs', as
   await openWorkspaceTab('图库');
   const firstCard = page.locator('.catalog-card').first();
   await firstCard.click();
-  await page.getByRole('button', { name: '信息', exact: true }).click();
+  await page.getByRole('button', { name: '详情', exact: true }).click();
   await expect(page.getByText('文件信息')).toBeVisible();
   await page.evaluate(() => {
     const left = document.querySelector('.sidebar');
@@ -124,6 +140,77 @@ test('keeps navigation and inspector mounted across library and viewer tabs', as
   await page.getByRole('tab', { name: '看图' }).click();
   await expect(page.locator('.inspector-info .metadata-list')).toContainText(nextName!);
   await page.getByRole('button', { name: 'AI', exact: true }).click();
+});
+
+test('keeps the selected photo AI inspector global across workflow tabs', async () => {
+  await openWorkspaceTab('图库');
+  const folderSidebar = page.locator('.global-workspace-shell > .sidebar');
+  await folderSidebar.evaluate((element) => { (element as HTMLElement).dataset.globalNavigation = 'true'; });
+  const leftWidth = await folderSidebar.evaluate((element) => element.getBoundingClientRect().width);
+  const selectedName = await page.locator('.catalog-card').nth(1).locator('.catalog-card-meta strong').textContent();
+  await page.locator('.catalog-card').nth(1).click();
+  await page.getByRole('button', { name: 'AI', exact: true }).click();
+  await page.locator('.inspector').evaluate((element) => { (element as HTMLElement).dataset.globalInspector = 'true'; });
+
+  await openWorkspaceTab('AI 工作流');
+  await expect(page.locator('.sidebar[data-global-navigation="true"]')).toBeVisible();
+  await expect(page.getByRole('tree', { name: '关联文件夹' })).toBeVisible();
+  await expect.poll(() => folderSidebar.evaluate((element) => element.getBoundingClientRect().width)).toBe(leftWidth);
+  await expect(page.locator('.workflow-analysis')).toBeVisible();
+  await expect(page.locator('.inspector[data-global-inspector="true"]')).toBeVisible();
+  await expect(page.getByRole('button', { name: /处理中 1/ })).toBeVisible();
+  await page.getByRole('button', { name: '详情', exact: true }).click();
+  await expect(page.locator('.inspector-info .metadata-list')).toContainText(selectedName!);
+  await expect(page.getByRole('navigation', { name: 'AI 工作流阶段' })).toBeVisible();
+
+  await openWorkspaceTab('任务中心');
+  await expect(page.locator('.sidebar[data-global-navigation="true"]')).toBeVisible();
+  await expect(page.locator('.inspector[data-global-inspector="true"]')).toBeVisible();
+  await expect(page.locator('.inspector-info .metadata-list')).toContainText(selectedName!);
+  await openWorkspaceTab('看图');
+  await expect(page.locator('.sidebar[data-global-navigation="true"]')).toBeVisible();
+});
+
+test('adds selected photos to an independent ordered AI workflow queue', async () => {
+  await openWorkspaceTab('图库');
+  await expect(page.getByRole('button', { name: '打开看图' })).toHaveCount(0);
+  const cards = page.locator('.catalog-card');
+  await cards.nth(0).click();
+  await cards.nth(0).click({ button: 'right' });
+  await expect(page.getByRole('menuitem', { name: '加入 AI 工作流' })).toBeVisible();
+  await page.getByRole('menuitem', { name: '加入 AI 工作流' }).click();
+  await page.getByRole('button', { name: 'AI', exact: true }).click();
+  await expect(page.getByLabel('AI 处理队列摘要')).toContainText('1 张');
+  await cards.nth(1).click();
+  await page.getByRole('button', { name: '加入 AI 工作流' }).click();
+  await expect(page.getByLabel('AI 处理队列摘要')).toContainText('2 张');
+  await expect(page.getByLabel('AI 处理队列摘要')).toContainText('第 2 位');
+
+  await openWorkspaceTab('AI 工作流');
+  await expect(page.locator('.workflow-queue-heading')).toContainText('处理队列');
+  await expect(page.locator('.workflow-assets')).toHaveCount(0);
+  await expect(page.getByLabel('工作流批次默认模板')).toBeVisible();
+  const firstRule = page.locator('.workflow-inspector-settings .workflow-rule input[type="checkbox"]').first();
+  await firstRule.uncheck();
+  await openWorkspaceTab('图库');
+  await expect(firstRule).not.toBeChecked();
+  await openWorkspaceTab('AI 工作流');
+  await firstRule.check();
+  await expect(page.locator('.workflow-asset')).toHaveCount(2);
+  const firstName = await page.locator('.workflow-asset').first().locator('strong').textContent();
+  const secondName = await page.locator('.workflow-asset').nth(1).locator('strong').textContent();
+  expect(firstName).not.toBe(secondName);
+  await page.locator('.workflow-asset').first().getByRole('button', { name: /下移/ }).click();
+  await expect(page.locator('.workflow-asset').first().locator('strong')).toHaveText(secondName!);
+  await page.getByRole('navigation', { name: 'AI 工作流阶段' }).getByRole('button', { name: /优化建议/ }).click();
+  await expect(page.locator('.workflow-asset')).toHaveCount(2);
+  await page.locator('.workflow-asset').first().locator('.workflow-analysis-select').click();
+  await expect(page.getByLabel('AI 处理队列摘要')).toContainText('第 1 位');
+  await page.locator('.workflow-asset').first().getByRole('button', { name: /移除/ }).click();
+  await expect(page.locator('.workflow-asset')).toHaveCount(1);
+  await page.getByRole('button', { name: '清空队列' }).click();
+  await expect(page.locator('.workflow-asset')).toHaveCount(0);
+  await openWorkspaceTab('看图');
 });
 
 test('honors the reduced motion preference', async () => {
@@ -316,14 +403,14 @@ test('opens the task drawer and application tabs', async () => {
   await expect(page.getByText('当前任务')).toBeVisible();
   await expect(page.getByText('正在生成 · 64%')).toBeVisible();
   await page.getByRole('button', { name: '任务中心', exact: true }).click();
-  await expect(page.getByRole('heading', { name: '任务中心' })).toBeVisible();
+  await expect(page.locator('.task-table')).toBeVisible();
 
   await page.getByRole('tab', { name: /任务中心/ }).click();
-  await expect(page.getByRole('heading', { name: '任务中心' })).toBeVisible();
+  await expect(page.locator('.task-summary')).toBeVisible();
   await expect(page.getByText('暂无任务')).toBeVisible();
 
   await openWorkspaceTab('提示词模板');
-  await expect(page.getByRole('heading', { name: '提示词模板' })).toBeVisible();
+  await expect(page.getByLabel('搜索模板')).toBeVisible();
   await expect(page.getByText('尚未创建模板')).toBeVisible();
   await expect(page.getByText('{{analysis.generative_actions}}', { exact: true })).toBeVisible();
   await page.getByLabel('模板名称').fill('E2E 人像清洁');
@@ -348,7 +435,7 @@ test('opens the task drawer and application tabs', async () => {
   await expect(page.getByText('尚未创建模板')).toBeVisible();
 
   await openWorkspaceTab('设置');
-  await expect(page.getByRole('heading', { name: 'AI 模型' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'AI 模型' })).toHaveAttribute('aria-current', 'page');
   await expect(page.getByLabel('Base URL')).toBeVisible();
   await expect(page.getByLabel('API Key')).toHaveAttribute('type', 'password');
   await expect(page.getByText('尚未配置模型')).toBeVisible();
@@ -368,7 +455,7 @@ test('opens the task drawer and application tabs', async () => {
   await page.getByRole('button', { name: '删除导出预设 客户交付' }).click();
   await expect(page.getByText('客户交付', { exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: '图库与存储' }).click();
-  await expect(page.getByRole('heading', { name: '图库与存储' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '图库与存储' })).toHaveAttribute('aria-current', 'page');
   await expect(page.getByRole('heading', { name: '生成结果存储' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '预览缓存' })).toBeVisible();
   await page.getByLabel('预览缓存磁盘上限').selectOption(String(1024 ** 3));
@@ -479,7 +566,7 @@ test('restores open tabs, active workspace, and selected photo', async () => {
   await page.getByRole('button', { name: '打开工作区' }).click();
   await page.screenshot({ path: 'test-results/workspace-tab-menu.png', animations: 'disabled' });
   await page.getByRole('menuitem', { name: '设置' }).click();
-  await expect(page.getByRole('heading', { name: 'AI 模型' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'AI 模型' })).toHaveAttribute('aria-current', 'page');
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await page.getByRole('tab', { name: /看图/ }).click();
 });

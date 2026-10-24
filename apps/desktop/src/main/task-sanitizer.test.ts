@@ -60,6 +60,9 @@ describe('renderer task sanitization', () => {
   });
 
   it('preserves stable task error codes', () => {
+    for (const errorCode of ['PROVIDER_CONNECTION_FAILED', 'ANALYSIS_RESPONSE_SCHEMA_INVALID', 'IMAGE_PREVIEW_UNAVAILABLE', 'COLLECTION_ANALYSIS_REQUIRES_MULTIPLE_ANALYSES']) {
+      expect(toRendererTask({ ...baseTask, kind: 'analysis', errorCode }).errorCode).toBe(errorCode);
+    }
     expect(toRendererTask({ ...baseTask, errorCode: 'EXPORT_DESTINATION_NOT_DIRECTORY' }).errorCode)
       .toBe('EXPORT_DESTINATION_NOT_DIRECTORY');
     expect(toRendererTask({ ...baseTask, errorCode: 'PRIVATE_SECRET' }).errorCode).toBe('EXPORT_FAILED');

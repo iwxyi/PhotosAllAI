@@ -33,12 +33,20 @@ export async function fetchBounded(
     try {
       const response = await fetch(input, { ...init, signal: request.signal });
       if (!response.ok) {
-        await response.body?.cancel().catch(() => undefined);
         if (attempt < retryCount && isRetryableStatus(response.status)) {
+          await response.body?.cancel().catch(() => undefined);
           await waitForRetry(retryDelayMs(response.headers, attempt, limits.retryBaseDelayMs ?? 1_000), limits.signal);
           continue;
         }
-        return { ok: false, status: response.status, headers: response.headers, bytes: Buffer.alloc(0) };
+        let bytes: Buffer;
+        try {
+          bytes = await readBoundedBody(response, Math.min(limits.maxBytes, 64 * 1024));
+        } catch (error) {
+          if (!(error instanceof Error) || error.message !== 'PROVIDER_RESPONSE_TOO_LARGE') throw error;
+          // Keep the HTTP status even when a gateway returns an oversized error page.
+          bytes = Buffer.alloc(0);
+        }
+        return { ok: false, status: response.status, headers: response.headers, bytes };
       }
       return {
         ok: true,
@@ -46,6 +54,11 @@ export async function fetchBounded(
         headers: response.headers,
         bytes: await readBoundedBody(response, limits.maxBytes)
       };
+    } catch (error) {
+      if (request.signal.aborted && !limits.signal?.aborted) throw new Error('PROVIDER_REQUEST_TIMEOUT');
+      if (error instanceof TypeError && error.message === 'fetch failed') throw new Error('PROVIDER_CONNECTION_FAILED');
+      if (error instanceof TypeError) throw new Error('PROVIDER_REQUEST_INVALID');
+      throw error;
     } finally {
       request.dispose();
     }

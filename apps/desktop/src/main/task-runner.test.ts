@@ -21,6 +21,57 @@ afterEach(async () => {
 });
 
 describe('analysis task runner', () => {
+  it('does not restore a deleted running task when its processor returns late', async () => {
+    const queue = await tasks();
+    const task = queue.enqueue({ kind: 'analysis', assetId: 'deleted', payload: { providerProfileId, mode: 'full' } });
+    let resolveAnalysis!: (value: unknown) => void;
+    let signal: AbortSignal | undefined;
+    const analyze = vi.fn((_id: string, _profile: string, received?: AbortSignal) => {
+      signal = received;
+      return new Promise((resolve) => { resolveAnalysis = resolve; });
+    });
+    const runner = new TaskRunner(queue, { analyze }, { generate: vi.fn() });
+    runner.start();
+    await vi.waitFor(() => expect(queue.find(task.id)?.status).toBe('processing'));
+    runner.cancel(task.id);
+    queue.deleteTasks([task.id]);
+    expect(signal?.aborted).toBe(true);
+    resolveAnalysis({});
+    await runner.stop();
+    expect(queue.find(task.id)).toBeNull();
+    expect(queue.listPage({}).totalCount).toBe(0);
+    queue.close();
+  });
+  it('runs an agent plan and persists its structured workflow result', async () => {
+    const queue = await tasks();
+    const payload = {
+      instruction: '删除模糊图，选出最好看的 30 张并进行动漫风修图',
+      globalPrompt: '动漫风，保留人物身份',
+      selection: { excludeBlurry: true, excludeNearDuplicates: true, limit: 30 },
+      perAssetPrompts: [{ assetId: 'asset-1', prompt: '突出眼神', negativePrompt: '过度磨皮' }],
+      steps: [
+        { id: 'select', kind: 'select', selection: { limit: 30 } },
+        { id: 'edit', kind: 'generate', providerProfileId, prompt: '动漫风', dependsOn: ['select'] }
+      ],
+      outputDirectory: '/tmp/动漫',
+      dryRun: false
+    };
+    const result = {
+      selectedAssetIds: ['asset-1'], removedAssetIds: ['asset-2'], ratedAssetIds: ['asset-1'],
+      generatedResultIds: ['32b027ec-aa41-4d0e-a9ea-5c42a2393108'], movedAssetIds: ['asset-1'],
+      completedSteps: ['select', 'edit'], skippedSteps: [], warnings: [], dryRun: false
+    };
+    const run = vi.fn().mockResolvedValue(result);
+    const task = queue.enqueue({ kind: 'agent', assetId: null, payload });
+    const runner = new TaskRunner(queue, { analyze: vi.fn() }, { generate: vi.fn() }, undefined, { run });
+    runner.start();
+    await vi.waitFor(() => expect(queue.find(task.id)?.status).toBe('completed'));
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ globalPrompt: payload.globalPrompt }), expect.any(AbortSignal), expect.any(Function));
+    expect(queue.find(task.id)?.result).toEqual(result);
+    await runner.stop();
+    queue.close();
+  });
+
   it('keeps an actively paused task paused after aborting its processor', async () => {
     const queue = await tasks();
     const task = queue.enqueue({ kind: 'analysis', assetId: 'asset-paused', payload: { providerProfileId, mode: 'full' } });
@@ -73,15 +124,38 @@ describe('analysis task runner', () => {
 
   it('processes queued analysis work through completion', async () => {
     const queue = await tasks();
-    const analyze = vi.fn().mockResolvedValue({});
-    queue.enqueue({ kind: 'analysis', assetId: 'asset-1', payload: { providerProfileId, mode: 'full' } });
+    const revision = { id: 'revision-1', result: { summary: '中文分析' } };
+    const analyze = vi.fn().mockResolvedValue(revision);
+    queue.enqueue({ kind: 'analysis', assetId: 'asset-1', payload: { providerProfileId, mode: 'full', locale: 'zh-CN' } });
     const runner = new TaskRunner(queue, { analyze }, { generate: vi.fn() });
     runner.start();
 
     await vi.waitFor(() => expect(queue.list()[0]?.status).toBe('completed'));
-    expect(analyze).toHaveBeenCalledWith('asset-1', providerProfileId, expect.any(AbortSignal));
+    expect(analyze).toHaveBeenCalledWith('asset-1', providerProfileId, expect.any(AbortSignal), 'zh-CN');
+    expect(queue.list()[0]?.result).toEqual({ analysisRevisionId: revision.id, analysis: revision.result });
     expect(analyze.mock.calls[0]?.[2].aborted).toBe(false);
     runner.stop();
+    queue.close();
+  });
+
+  it('processes collection analysis and persists its structured report', async () => {
+    const queue = await tasks();
+    const report = {
+      summary: '两张照片内容相近，第一张质量更好。',
+      groups: [{ title: '相似人像', assetIds: ['asset-1', 'asset-2'], reason: '构图与主体一致' }],
+      keepAssetIds: ['asset-1'],
+      reviewAssetIds: ['asset-2'],
+      recommendations: ['保留第一张作为主选']
+    };
+    const analyzeCollection = vi.fn().mockResolvedValue(report);
+    queue.enqueue({ kind: 'collection-analysis', assetId: null, payload: { providerProfileId, assetIds: ['asset-1', 'asset-2'] } });
+    const runner = new TaskRunner(queue, { analyze: vi.fn(), analyzeCollection }, { generate: vi.fn() });
+    runner.start();
+
+    await vi.waitFor(() => expect(queue.list()[0]?.status).toBe('completed'));
+    expect(analyzeCollection).toHaveBeenCalledWith(['asset-1', 'asset-2'], providerProfileId, expect.any(AbortSignal), undefined);
+    expect(queue.list()[0]?.result).toEqual(report);
+    await runner.stop();
     queue.close();
   });
 

@@ -3,6 +3,8 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   enqueueTaskInputSchema,
+  deleteTasksInputSchema,
+  type DeleteTasksInput,
   generationTaskPayloadSchema,
   listTaskPageInputSchema,
   moveQueuedTaskInputSchema,
@@ -157,6 +159,10 @@ export class TaskService {
     return row ? this.#toTask(row) : null;
   }
 
+  listBatch(kind: PersistedTask['kind'], batchId: string): PersistedTask[] {
+    return (this.#database.prepare(`SELECT * FROM tasks WHERE kind = ? AND COALESCE(json_extract(payload_json, '$.submissionId'), json_extract(payload_json, '$.batchId'), id) = ? ORDER BY position, created_at, id`).all(kind, batchId) as TaskRow[]).map((row) => this.#toTask(row));
+  }
+
   hasQueued(kinds: readonly PersistedTask['kind'][]): boolean {
     if (kinds.length === 0) return false;
     const placeholders = kinds.map(() => '?').join(', ');
@@ -231,6 +237,22 @@ export class TaskService {
     const hasMore = rows.length > input.limit;
     const pageRows = hasMore ? rows.slice(0, input.limit) : rows;
     const last = pageRows.at(-1);
+    const items = pageRows.map((row) => this.#toTask(row));
+    if (input.includeBatchMembers) {
+      // Keep every running submission visible in the global task bar even when
+      // one large batch occupies the entire first page.
+      if (!input.cursor) {
+        const activeRows = this.#database.prepare(`SELECT * FROM tasks WHERE status IN ('queued', 'paused', 'preparing', 'uploading', 'processing', 'downloading', 'saving') ORDER BY position, created_at, id`).all() as TaskRow[];
+        const included = new Set(items.map((task) => task.id));
+        for (const row of activeRows) if (!included.has(row.id)) items.push(this.#toTask(row));
+      }
+      const batchIds = [...new Set(items.map((task) => task.payload.submissionId ?? task.payload.batchId).filter((id): id is string => typeof id === 'string'))];
+      if (batchIds.length) {
+        const members = this.#database.prepare(`SELECT * FROM tasks WHERE COALESCE(json_extract(payload_json, '$.submissionId'), json_extract(payload_json, '$.batchId')) IN (${batchIds.map(() => '?').join(',')}) ORDER BY position, created_at, id`).all(...batchIds) as TaskRow[];
+        const included = new Set(items.map((task) => task.id));
+        for (const row of members) if (!included.has(row.id)) items.push(this.#toTask(row));
+      }
+    }
     const counts = this.#database.prepare(`
       SELECT
         COUNT(*) AS total_count,
@@ -249,7 +271,7 @@ export class TaskService {
       failed_generation_count: number | null;
     };
     return taskPageSchema.parse({
-      items: pageRows.map((row) => this.#toTask(row)),
+      items,
       totalCount: counts.total_count,
       queuedCount: counts.queued_count ?? 0,
       pausedCount: counts.paused_count ?? 0,
@@ -271,10 +293,30 @@ export class TaskService {
     const id = randomUUID();
     this.#database.exec('BEGIN IMMEDIATE');
     try {
+      // Different entry points can submit the same photo before the UI refreshes.
+      // Generation deliberately allows multiple candidates; analysis reuses work in flight.
+      if (input.kind === 'analysis' && input.assetId) {
+        const candidates = this.#database.prepare(`
+          SELECT * FROM tasks WHERE kind = 'analysis' AND asset_id = ?
+          AND status IN ('queued', 'paused', 'preparing', 'uploading', 'processing', 'downloading', 'saving')
+          ORDER BY created_at DESC
+        `).all(input.assetId) as TaskRow[];
+        const existing = candidates.find((row) => {
+          const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+          return payload.providerProfileId === input.payload.providerProfileId && payload.mode === input.payload.mode
+            && payload.locale === input.payload.locale && payload.batchId === input.payload.batchId
+            && (input.payload.submissionId === undefined || payload.submissionId === input.payload.submissionId);
+        });
+        if (existing) {
+          this.#database.exec('COMMIT');
+          return this.#toTask(existing);
+        }
+      }
       const maximum = this.#database.prepare(`
         SELECT COALESCE(MAX(position), -1) AS value FROM tasks WHERE status = 'queued'
       `).get() as { value: number };
       const position = maximum.value + 1;
+      input.payload.submissionId ??= input.payload.batchId ?? randomUUID();
       this.#database.prepare(`
         INSERT INTO tasks (
           id, kind, asset_id, status, position, progress, attempt,
@@ -345,6 +387,15 @@ export class TaskService {
     return this.#get(taskId);
   }
 
+  reportProgress(taskId: string, progress: number, result?: Record<string, unknown>): PersistedTask {
+    const task = this.#get(taskId);
+    if (task.status !== 'processing') return task;
+    this.#database.prepare(`UPDATE tasks SET progress = ?, result_json = ?, updated_at = ? WHERE id = ?`)
+      .run(Math.max(task.progress, Math.min(0.84, Math.max(0, progress))),
+        result === undefined ? (task.result === null ? null : JSON.stringify(task.result)) : JSON.stringify(result), Date.now(), taskId);
+    return this.#get(taskId);
+  }
+
   finish(taskId: string, status: 'completed' | 'failed', result: Record<string, unknown> | null, errorCode: string | null = null): PersistedTask {
     const task = this.#get(taskId);
     assertTaskTransition(task.status, status);
@@ -371,6 +422,57 @@ export class TaskService {
     if (task.status === 'canceled') return task;
     if (task.status === 'completed') throw new Error('TASK_ALREADY_COMPLETED');
     return this.#transition(task, 'canceled');
+  }
+
+  deletionTargets(rawInput: DeleteTasksInput): PersistedTask[] {
+    const input = deleteTasksInputSchema.parse(rawInput);
+    if (input.scope === 'task') return [this.#get(input.taskId!)];
+    if (input.scope === 'batch' || input.scope === 'batch-unfinished') {
+      return this.batchForTask(input.taskId!).filter((task) => input.scope === 'batch' || task.status !== 'completed');
+    }
+    const all = (this.#database.prepare(`SELECT * FROM tasks ORDER BY
+      CASE WHEN status IN ('queued', 'paused', 'preparing', 'uploading', 'processing', 'downloading', 'saving') THEN 0
+        WHEN status = 'failed' THEN 1 ELSE 2 END, position, created_at DESC, id`).all() as TaskRow[]).map((row) => this.#toTask(row));
+    if (input.scope === 'all') return all;
+    if (input.scope === 'unfinished') return all.filter((task) => task.status !== 'completed');
+    const byId = new Map(all.map((task) => [task.id, task]));
+    const ordered = [...new Set([...input.orderedTaskIds, ...all.map((task) => task.id)])]
+      .flatMap((id) => byId.has(id) ? [byId.get(id)!] : []);
+    const groups = new Map<string, PersistedTask[]>();
+    for (const task of ordered) {
+      const key = `${task.kind}:${task.payload.submissionId ?? task.payload.batchId ?? task.id}`;
+      const group = groups.get(key) ?? [];
+      group.push(task);
+      groups.set(key, group);
+    }
+    const flattened = [...groups.values()].flat();
+    const index = flattened.findIndex((task) => task.id === input.taskId);
+    if (index < 0) throw new Error('TASK_NOT_FOUND');
+    const anchor = flattened[index]!;
+    const keyFor = (task: PersistedTask) => `${task.kind}:${task.payload.submissionId ?? task.payload.batchId ?? task.id}`;
+    if (input.scope === 'below') return flattened.slice(index + 1).filter((task) => keyFor(task) === keyFor(anchor));
+    const keys = [...groups.keys()];
+    return keys.slice(keys.indexOf(keyFor(anchor)) + 1).flatMap((key) => groups.get(key)!);
+  }
+
+  batchForTask(taskId: string): PersistedTask[] {
+    const task = this.#get(taskId);
+    const batchId = task.payload.submissionId ?? task.payload.batchId;
+    return typeof batchId === 'string' ? this.listBatch(task.kind, batchId) : [task];
+  }
+
+  deleteTasks(taskIds: string[]): string[] {
+    const deleted: string[] = [];
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const remove = this.#database.prepare('DELETE FROM tasks WHERE id = ?');
+      for (const id of new Set(taskIds)) if (remove.run(id).changes) deleted.push(id);
+      this.#database.exec('COMMIT');
+      return deleted;
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   pause(taskId: string): PersistedTask {

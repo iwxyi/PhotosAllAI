@@ -95,7 +95,8 @@ export class ExportService {
     requestedDirectory: string,
     preset?: ExportPreset,
     signal?: AbortSignal,
-    requestedRunId?: string
+    requestedRunId?: string,
+    onProgress?: (report: ExportReport) => void
   ): Promise<ExportReport> {
     signal?.throwIfAborted();
     const destinationDirectory = await realpath(requestedDirectory);
@@ -108,7 +109,11 @@ export class ExportService {
     this.#openRun(id, destinationDirectory, requestHash);
     const completedFiles = await this.#recoverCompletedFiles(id, destinationDirectory);
     const failures: ExportReport['failures'] = [];
-    this.#persistRun(id, 'running', uniqueIds, completedFiles, failures, false);
+    const reportProgress = () => {
+      const report = this.#persistRun(id, 'running', uniqueIds, completedFiles, failures, false);
+      onProgress?.(report);
+    };
+    reportProgress();
 
     for (const resultId of uniqueIds) {
       if (signal?.aborted) break;
@@ -116,7 +121,7 @@ export class ExportService {
       const sourcePath = this.#results.resolveResultFile(resultId);
       if (!sourcePath) {
         failures.push({ resultId, errorCode: 'EXPORT_RESULT_NOT_FOUND' });
-        this.#persistRun(id, 'running', uniqueIds, completedFiles, failures, false);
+        reportProgress();
         continue;
       }
       const temporaryPath = path.join(destinationDirectory, `.photoallisai-export-${id}-${resultId}.tmp`);
@@ -136,7 +141,7 @@ export class ExportService {
           errorCode: toExportErrorCode(error)
         });
       }
-      this.#persistRun(id, 'running', uniqueIds, completedFiles, failures, false);
+      reportProgress();
     }
 
     const canceled = signal?.aborted ?? false;

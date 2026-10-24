@@ -1,0 +1,63 @@
+import path from 'node:path';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { _electron as electron, expect, test } from '@playwright/test';
+
+test('toggles global side panels independently and together without disrupting text inputs', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-panels-'));
+  const app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js')], env: { ...process.env, PHOTOALLISAI_USER_DATA: directory, PHOTOALLISAI_E2E_DEMO: '1' } });
+  try {
+    const page = await app.firstWindow();
+    const left = page.locator('.global-workspace-shell > .workspace-side-panel').first();
+    const right = page.locator('.right-dock-stack');
+    const center = page.locator('.workspace-page-stack');
+    await expect(left).toBeVisible();
+    await expect(right).toBeVisible();
+    const width = (await center.boundingBox())!.width;
+    await page.getByRole('button', { name: '隐藏左侧栏', exact: true }).click();
+    await expect(left).toBeHidden();
+    await expect(right).toBeVisible();
+    expect((await center.boundingBox())!.width).toBeGreaterThan(width);
+    await page.keyboard.press('Tab');
+    await expect(right).toBeHidden();
+    await page.keyboard.press('Tab');
+    await expect(right).toBeVisible();
+    await expect(left).toBeHidden();
+    await page.getByRole('button', { name: '显示左侧栏', exact: true }).click();
+    await page.locator('.catalog-grid').focus();
+    await page.keyboard.press('Tab');
+    await expect(left).toBeHidden();
+    await expect(right).toBeHidden();
+    await page.keyboard.press('Tab');
+    await expect(left).toBeVisible();
+    await expect(right).toBeVisible();
+    await page.locator('.catalog-card').first().dblclick();
+    await expect(page.locator('.inline-photo-viewer')).toBeVisible();
+    await page.keyboard.press('Tab');
+    await expect(left).toBeHidden();
+    await expect(right).toBeHidden();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.inline-photo-viewer')).toHaveCount(0);
+    await page.keyboard.press('Tab');
+    await expect(left).toBeVisible();
+    await expect(right).toBeVisible();
+    await page.getByRole('button', { name: '打开工作区', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'AI 批量修图', exact: true }).click();
+    const prompt = page.getByLabel('批次整体提示词');
+    await prompt.fill('保留提示词');
+    await page.keyboard.press('Tab');
+    await expect(left).toBeVisible();
+    await expect(right).toBeVisible();
+    await expect(prompt).not.toBeFocused();
+    await page.getByRole('button', { name: '隐藏右侧栏', exact: true }).click();
+    await page.reload();
+    await expect(left).toBeVisible();
+    await expect(right).toBeHidden();
+    await page.getByRole('button', { name: '显示右侧栏', exact: true }).click();
+    await expect(right).toBeVisible();
+    await page.screenshot({ path: 'test-results/panel-visibility.png' });
+  } finally {
+    await app.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

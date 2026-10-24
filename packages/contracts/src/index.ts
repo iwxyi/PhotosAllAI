@@ -118,16 +118,20 @@ export type LibraryRestoreResult = z.infer<typeof libraryRestoreResultSchema>;
 export const appSettingsSchema = z.object({
   generationStorageMode: z.enum(['managed', 'portable']).default('managed'),
   theme: z.enum(['system', 'dark', 'light']).default('system'),
+  locale: z.enum(['zh-CN', 'en-US']).default('zh-CN'),
   cacheMaxBytes: z.number().int().min(1024 ** 3).max(50 * 1024 ** 3).default(5 * 1024 ** 3)
 });
 export type AppSettings = z.infer<typeof appSettingsSchema>;
 
-export const workspaceTabSchema = z.enum(['library', 'viewer', 'templates', 'tasks', 'settings']);
+export const workspaceTabSchema = z.union([
+  z.enum(['library', 'viewer', 'batch', 'workflow', 'templates', 'tasks', 'settings']),
+  z.templateLiteral(['task:', z.string().max(160)])
+]);
 export type WorkspaceTab = z.infer<typeof workspaceTabSchema>;
 
 export const workspaceSessionV1Schema = z.object({
   version: z.literal(1),
-  openTabs: z.array(workspaceTabSchema).min(1).max(5)
+  openTabs: z.array(workspaceTabSchema).min(1).max(100)
     .refine((items) => new Set(items).size === items.length, 'Workspace tabs must be unique')
     .refine((items) => items.includes('library'), 'Library tab must remain open'),
   activeTab: workspaceTabSchema,
@@ -144,7 +148,7 @@ export type WorkspaceSessionV1 = z.infer<typeof workspaceSessionV1Schema>;
 
 export const workspaceSessionSchema = z.object({
   version: z.literal(2),
-  openTabs: z.array(workspaceTabSchema).min(1).max(5)
+  openTabs: z.array(workspaceTabSchema).min(1).max(100)
     .refine((items) => new Set(items).size === items.length, 'Workspace tabs must be unique')
     .refine((items) => items.includes('library'), 'Library tab must remain open'),
   activeTab: workspaceTabSchema,
@@ -162,6 +166,25 @@ export const workspaceSessionSchema = z.object({
   message: 'Active workspace tab must be open'
 });
 export type WorkspaceSession = z.infer<typeof workspaceSessionSchema>;
+
+export const menuCommandSchema = z.enum([
+  'open-library', 'open-viewer', 'open-batch', 'open-workflow', 'open-templates', 'open-tasks', 'open-settings',
+  'import-folders', 'refresh-catalog', 'select-all', 'clear-selection',
+  'analyze-selection', 'generate-selection', 'open-task-center', 'open-prompt-templates',
+  'toggle-original', 'fit-image', 'zoom-100', 'close-workspace', 'show-shortcuts'
+]);
+export type MenuCommand = z.infer<typeof menuCommandSchema>;
+
+export const menuStateSchema = z.object({
+  activeTab: workspaceTabSchema,
+  hasSelection: z.boolean(),
+  selectionCount: z.number().int().nonnegative(),
+  hasVisionProvider: z.boolean(),
+  hasGenerationProvider: z.boolean(),
+  taskCount: z.number().int().nonnegative(),
+  hasRunningTask: z.boolean()
+});
+export type MenuState = z.infer<typeof menuStateSchema>;
 
 export const openPathResultSchema = z.object({
   canceled: z.boolean(),
@@ -204,6 +227,7 @@ export const catalogAssetCursorSchema = z.object({
 export type CatalogAssetCursor = z.infer<typeof catalogAssetCursorSchema>;
 
 export const listCatalogAssetsInputSchema = z.object({
+  assetIds: z.array(z.string().min(1)).min(1).max(500).optional(),
   folderId: z.string().min(1).nullable().default(null),
   tagId: z.string().uuid().nullable().default(null),
   albumId: z.string().uuid().nullable().default(null),
@@ -506,6 +530,7 @@ export const providerProfileSchema = z.object({
   customHeaders: providerCustomHeadersSchema.default({}),
   hasCredential: z.boolean(),
   enabled: z.boolean(),
+  isDefault: z.boolean().optional(),
   updatedAt: z.number().nonnegative()
 });
 
@@ -528,7 +553,10 @@ export const connectionTestSchema = z.object({
 
 export type ConnectionTest = z.infer<typeof connectionTestSchema>;
 
-export const taskKindSchema = z.enum(['analysis', 'generation', 'export']);
+/** A durable, multi-step photo editing workflow planned from natural language. */
+export const taskKindSchema = z.enum(['analysis', 'collection-analysis', 'generation', 'agent', 'export']);
+export const taskBatchInputSchema = z.object({ kind: taskKindSchema, batchId: z.string().min(1).max(160) });
+export type TaskBatchInput = z.infer<typeof taskBatchInputSchema>;
 export const taskStatusSchema = z.enum([
   'draft', 'queued', 'paused', 'preparing', 'uploading', 'processing',
   'downloading', 'saving', 'completed', 'failed', 'canceled'
@@ -538,6 +566,7 @@ export const persistedTaskSchema = z.object({
   id: z.string().uuid(),
   kind: taskKindSchema,
   assetId: z.string().nullable(),
+  assetFileName: z.string().optional(),
   status: taskStatusSchema,
   position: z.number().int().nonnegative(),
   progress: z.number().min(0).max(1),
@@ -560,6 +589,7 @@ export const taskListCursorSchema = z.object({
 export type TaskListCursor = z.infer<typeof taskListCursorSchema>;
 
 export const listTaskPageInputSchema = z.object({
+  includeBatchMembers: z.boolean().default(false),
   limit: z.number().int().min(1).max(200).default(50),
   cursor: taskListCursorSchema.nullable().default(null)
 });
@@ -602,6 +632,105 @@ export const enqueueTaskInputSchema = z.object({
 
 export type EnqueueTaskInput = z.infer<typeof enqueueTaskInputSchema>;
 export const taskIdSchema = z.string().uuid();
+export const deleteTasksInputSchema = z.object({
+  scope: z.enum(['task', 'batch', 'below', 'below-batches', 'batch-unfinished', 'all', 'unfinished']),
+  taskId: taskIdSchema.optional(),
+  orderedTaskIds: z.array(taskIdSchema).max(10_000).default([])
+}).refine((input) => ['all', 'unfinished'].includes(input.scope) || Boolean(input.taskId), 'Task ID is required');
+export type DeleteTasksInput = z.input<typeof deleteTasksInputSchema>;
+export const taskBatchActionInputSchema = z.object({ taskId: taskIdSchema, action: z.enum(['retry', 'pause', 'resume', 'cancel']) });
+export type TaskBatchActionInput = z.input<typeof taskBatchActionInputSchema>;
+
+export const agentStepKindSchema = z.enum([
+  'select', 'deduplicate', 'rank', 'rate', 'adjust', 'generate', 'move', 'delete', 'export'
+]);
+export type AgentStepKind = z.infer<typeof agentStepKindSchema>;
+
+export const agentSelectionRuleSchema = z.object({
+  /** Optional explicit input set. Omit to use the workspace selection. */
+  assetIds: z.array(z.string().min(1)).max(10_000).optional(),
+  limit: z.number().int().positive().max(10_000).optional(),
+  minimumQuality: z.number().min(0).max(100).optional(),
+  excludeBlurry: z.boolean().default(false),
+  excludeNearDuplicates: z.boolean().default(false),
+  ranking: z.enum(['quality', 'aesthetic', 'sharpness', 'composition', 'custom']).default('aesthetic'),
+  rankingInstruction: z.string().max(4_000).default('')
+}).refine((rule) => !rule.assetIds || new Set(rule.assetIds).size === rule.assetIds.length, {
+  message: 'Agent assetIds must be unique'
+});
+export type AgentSelectionRule = z.infer<typeof agentSelectionRuleSchema>;
+
+export const agentPerAssetPromptSchema = z.object({
+  assetId: z.string().min(1),
+  prompt: z.string().max(50_000),
+  negativePrompt: z.string().max(20_000).default(''),
+  enabled: z.boolean().default(true)
+});
+export type AgentPerAssetPrompt = z.infer<typeof agentPerAssetPromptSchema>;
+
+export const agentStepSchema = z.object({
+  id: z.string().min(1).max(100),
+  kind: agentStepKindSchema,
+  instruction: z.string().max(20_000).default(''),
+  selection: agentSelectionRuleSchema.optional(),
+  assetIds: z.array(z.string().min(1)).max(10_000).optional(),
+  rating: z.number().int().min(0).max(5).optional(),
+  prompt: z.string().max(50_000).default(''),
+  perAssetPrompts: z.array(agentPerAssetPromptSchema).max(10_000).default([]),
+  providerProfileId: z.string().uuid().nullable().default(null),
+  templateId: z.string().uuid().nullable().default(null),
+  outputDirectory: z.string().trim().max(4_096).nullable().default(null),
+  targetFolderId: z.string().min(1).nullable().default(null),
+  confirm: z.boolean().default(false),
+  style: z.string().max(500).nullable().default(null),
+  dependsOn: z.array(z.string().min(1).max(100)).max(100).default([])
+}).refine((step) => new Set(step.dependsOn).size === step.dependsOn.length, {
+  message: 'Agent step dependencies must be unique'
+});
+export type AgentStep = z.infer<typeof agentStepSchema>;
+
+export const agentTaskPayloadSchema = z.object({
+  instruction: z.string().trim().min(1).max(50_000),
+  globalPrompt: z.string().max(50_000).default(''),
+  selection: z.preprocess((value) => value ?? {}, agentSelectionRuleSchema),
+  perAssetPrompts: z.array(agentPerAssetPromptSchema).max(10_000).default([]),
+  steps: z.array(agentStepSchema).min(1).max(100),
+  outputDirectory: z.string().trim().max(4_096).nullable().default(null),
+  confirmHighImpact: z.boolean().default(false),
+  dryRun: z.boolean().default(false),
+  planVersion: z.number().int().positive().default(1)
+}).superRefine((payload, context) => {
+  const ids = new Set<string>();
+  for (const [index, step] of payload.steps.entries()) {
+    if (ids.has(step.id)) context.addIssue({ code: 'custom', path: ['steps', index, 'id'], message: 'Agent step ids must be unique' });
+    ids.add(step.id);
+    if (step.kind === 'generate' && !step.providerProfileId) {
+      context.addIssue({ code: 'custom', path: ['steps', index, 'providerProfileId'], message: 'Generation steps require a provider profile' });
+    }
+  }
+  for (const [index, step] of payload.steps.entries()) {
+    for (const dependency of step.dependsOn) {
+      if (!ids.has(dependency)) context.addIssue({ code: 'custom', path: ['steps', index, 'dependsOn'], message: `Unknown dependency: ${dependency}` });
+    }
+  }
+  if (new Set(payload.perAssetPrompts.map((item) => item.assetId)).size !== payload.perAssetPrompts.length) {
+    context.addIssue({ code: 'custom', path: ['perAssetPrompts'], message: 'Per-asset prompts must be unique by assetId' });
+  }
+});
+export type AgentTaskPayload = z.infer<typeof agentTaskPayloadSchema>;
+
+export const agentTaskResultSchema = z.object({
+  selectedAssetIds: z.array(z.string().min(1)).default([]),
+  removedAssetIds: z.array(z.string().min(1)).default([]),
+  ratedAssetIds: z.array(z.string().min(1)).default([]),
+  generatedResultIds: z.array(z.string().uuid()).default([]),
+  movedAssetIds: z.array(z.string().min(1)).default([]),
+  completedSteps: z.array(z.string().min(1)).default([]),
+  skippedSteps: z.array(z.string().min(1)).default([]),
+  warnings: z.array(z.string().max(2_000)).default([]),
+  dryRun: z.boolean().default(false)
+});
+export type AgentTaskResult = z.infer<typeof agentTaskResultSchema>;
 export const updateQueuedGenerationTaskInputSchema = z.object({
   taskId: taskIdSchema,
   prompt: z.string().trim().min(1).max(50_000)
@@ -744,11 +873,34 @@ export type AnalysisRevision = z.infer<typeof analysisRevisionSchema>;
 export const listAnalysisInputSchema = z.object({ assetId: z.string().min(1) });
 export const listGenerationResultsInputSchema = z.object({ assetId: z.string().min(1) });
 export const analysisTaskPayloadSchema = z.object({
+  batchId: z.string().uuid().optional(),
+  locale: z.enum(['zh-CN', 'en-US']).optional(),
   providerProfileId: z.string().uuid(),
   mode: z.enum(['catalog', 'full']).default('full')
 });
 
+export const collectionAnalysisTaskPayloadSchema = z.object({
+  locale: z.enum(['zh-CN', 'en-US']).optional(),
+  providerProfileId: z.string().uuid(),
+  assetIds: z.array(z.string().min(1)).min(2).max(200)
+    .refine((items) => new Set(items).size === items.length, 'Collection assets must be unique')
+});
+
+export const collectionAnalysisReportSchema = z.object({
+  summary: z.string().min(1).max(4_000),
+  groups: z.array(z.object({
+    title: z.string().min(1).max(200),
+    assetIds: z.array(z.string().min(1)).min(2).max(100),
+    reason: z.string().min(1).max(2_000)
+  })).max(100),
+  keepAssetIds: z.array(z.string().min(1)).max(200),
+  reviewAssetIds: z.array(z.string().min(1)).max(200),
+  recommendations: z.array(z.string().min(1).max(1_000)).max(100)
+});
+export type CollectionAnalysisReport = z.infer<typeof collectionAnalysisReportSchema>;
+
 export const generationTaskPayloadSchema = z.object({
+  submissionId: z.string().uuid().optional(),
   providerProfileId: z.string().uuid(),
   batchId: z.string().uuid(),
   prompt: z.string().min(1).max(50_000),
@@ -865,6 +1017,8 @@ export type ImageCacheStats = z.infer<typeof imageCacheStatsSchema>;
 export const pruneImageCacheInputSchema = z.object({ maxBytes: z.number().int().nonnegative().max(100 * 1024 * 1024 * 1024) });
 
 export interface DesktopApi {
+  onMenuCommand(listener: (command: MenuCommand) => void): () => void;
+  updateMenuState(state: MenuState): void;
   getAppInfo(): Promise<AppInfo>;
   getAppSettings(): Promise<AppSettings>;
   saveAppSettings(input: AppSettings): Promise<AppSettings>;
@@ -911,12 +1065,16 @@ export interface DesktopApi {
   deleteProviderProfile(profileId: string): Promise<void>;
   testProviderConnection(input: SaveProviderProfileInput): Promise<ConnectionTest>;
   listTaskPage(input: ListTaskPageInput): Promise<TaskPage>;
+  listTaskBatch(input: TaskBatchInput): Promise<PersistedTask[]>;
   getTask(taskId: string): Promise<PersistedTask | null>;
   enqueueTask(input: EnqueueTaskInput): Promise<PersistedTask>;
   cancelTask(taskId: string): Promise<PersistedTask>;
+  deleteTasks(input: DeleteTasksInput): Promise<{ deletedIds: string[] }>;
+  actOnTaskBatch(input: TaskBatchActionInput): Promise<number>;
   pauseTask(taskId: string): Promise<PersistedTask>;
   resumeTask(taskId: string): Promise<PersistedTask>;
   retryTask(taskId: string): Promise<PersistedTask>;
+  retryFailedTasks(): Promise<number>;
   moveQueuedTask(input: MoveQueuedTaskInput): Promise<PersistedTask>;
   retryFailedGenerationTasks(input?: RetryFailedGenerationTasksInput): Promise<RetryFailedGenerationTasksReport>;
   updateQueuedGenerationTask(input: UpdateQueuedGenerationTaskInput): Promise<PersistedTask>;

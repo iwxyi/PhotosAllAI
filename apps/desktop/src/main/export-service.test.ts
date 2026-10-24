@@ -49,7 +49,10 @@ describe('generation result export', () => {
   it('renames conflicts and reports missing results without aborting the batch', async () => {
     const { service, destination } = await fixture();
     await writeFile(path.join(destination, 'PORTRAIT__ai__v0001__A1B2C3D4.jpg'), 'existing');
-    const report = await service.exportToDirectory([firstId, missingId, firstId], destination);
+    const progress: { succeeded: number; failed: number; total: number }[] = [];
+    const report = await service.exportToDirectory([firstId, missingId, firstId], destination, undefined, undefined, undefined,
+      (snapshot) => progress.push(snapshot));
+    expect(progress.map((item) => [item.succeeded, item.failed, item.total])).toEqual([[0, 0, 2], [1, 0, 2], [1, 1, 2]]);
     expect(report).toMatchObject({ total: 2, succeeded: 1, failed: 1 });
     expect(report.files[0]?.fileName).toBe('PORTRAIT__ai__v0001__A1B2C3D4 (1).jpg');
     expect(report.failures[0]).toEqual({ resultId: missingId, errorCode: 'EXPORT_RESULT_NOT_FOUND' });

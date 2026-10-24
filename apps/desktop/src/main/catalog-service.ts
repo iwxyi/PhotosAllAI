@@ -297,6 +297,10 @@ export class CatalogService {
       : '1';
     const baseConditions: string[] = ['removed_at IS NULL'];
     const baseValues: (string | number)[] = [];
+    if (input.assetIds) {
+      baseConditions.push(`id IN (${input.assetIds.map(() => '?').join(',')})`);
+      baseValues.push(...input.assetIds);
+    }
     if (input.folderId) {
       const directory = this.#resolveDirectory(input.folderId);
       if (directory?.relativePath) {

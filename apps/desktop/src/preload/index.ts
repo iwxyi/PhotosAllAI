@@ -1,7 +1,15 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { DesktopApi } from '@photoallisai/contracts';
+import type { DesktopApi, MenuCommand } from '@photoallisai/contracts';
 
 const api: DesktopApi = {
+  onMenuCommand: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, command: MenuCommand) => listener(command);
+    ipcRenderer.on('menu.command.v1', handler);
+    return () => ipcRenderer.removeListener('menu.command.v1', handler);
+  },
+  updateMenuState: (state) => {
+    ipcRenderer.send('menu.state.update.v1', state);
+  },
   getAppInfo: () => ipcRenderer.invoke('app.info.v1') as ReturnType<DesktopApi['getAppInfo']>,
   getAppSettings: () => ipcRenderer.invoke('app.settings.get.v1') as ReturnType<DesktopApi['getAppSettings']>,
   saveAppSettings: (input) => ipcRenderer.invoke('app.settings.save.v1', input) as ReturnType<DesktopApi['saveAppSettings']>,
@@ -85,17 +93,21 @@ const api: DesktopApi = {
   testProviderConnection: (input) =>
     ipcRenderer.invoke('providers.test.v1', input) as ReturnType<DesktopApi['testProviderConnection']>,
   listTaskPage: (input) => ipcRenderer.invoke('tasks.page.v1', input) as ReturnType<DesktopApi['listTaskPage']>,
+  listTaskBatch: (input) => ipcRenderer.invoke('tasks.batch.v1', input) as ReturnType<DesktopApi['listTaskBatch']>,
   getTask: (taskId) => ipcRenderer.invoke('tasks.get.v1', taskId) as ReturnType<DesktopApi['getTask']>,
   enqueueTask: (input) =>
     ipcRenderer.invoke('tasks.enqueue.v1', input) as ReturnType<DesktopApi['enqueueTask']>,
   cancelTask: (taskId) =>
     ipcRenderer.invoke('tasks.cancel.v1', taskId) as ReturnType<DesktopApi['cancelTask']>,
+  deleteTasks: (input) => ipcRenderer.invoke('tasks.delete.v1', input) as ReturnType<DesktopApi['deleteTasks']>,
+  actOnTaskBatch: (input) => ipcRenderer.invoke('tasks.batch.action.v1', input) as ReturnType<DesktopApi['actOnTaskBatch']>,
   pauseTask: (taskId) =>
     ipcRenderer.invoke('tasks.pause.v1', taskId) as ReturnType<DesktopApi['pauseTask']>,
   resumeTask: (taskId) =>
     ipcRenderer.invoke('tasks.resume.v1', taskId) as ReturnType<DesktopApi['resumeTask']>,
   retryTask: (taskId) =>
     ipcRenderer.invoke('tasks.retry.v1', taskId) as ReturnType<DesktopApi['retryTask']>,
+  retryFailedTasks: () => ipcRenderer.invoke('tasks.retry-all-failed.v1') as ReturnType<DesktopApi['retryFailedTasks']>,
   moveQueuedTask: (input) =>
     ipcRenderer.invoke('tasks.move.v1', input) as ReturnType<DesktopApi['moveQueuedTask']>,
   retryFailedGenerationTasks: (input = {}) =>

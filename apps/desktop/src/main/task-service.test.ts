@@ -20,6 +20,133 @@ afterEach(async () => {
 });
 
 describe('persistent task service', () => {
+  it('deletes selected history and events, and keeps completed tasks when removing unfinished work', async () => {
+    const file = await databasePath();
+    const tasks = new TaskService(file);
+    try {
+      const input = { kind: 'analysis' as const, assetId: 'photo-1', payload: { providerProfileId: 'model-1', mode: 'full' } };
+      const completed = tasks.enqueue(input);
+      tasks.claimNext(['analysis']);
+      tasks.advance(completed.id, 'processing', 0.1);
+      tasks.advance(completed.id, 'downloading', 0.8);
+      tasks.advance(completed.id, 'saving', 0.9);
+      tasks.finish(completed.id, 'completed', { saved: true });
+      const queued = tasks.enqueue({ ...input, assetId: 'queued' });
+      const paused = tasks.enqueue({ ...input, assetId: 'paused' });
+      tasks.pause(paused.id);
+      const failed = tasks.enqueue({ ...input, assetId: 'failed' });
+      tasks.advance(failed.id, 'preparing', 0.01);
+      tasks.advance(failed.id, 'failed', 0, 'PROVIDER_HTTP_400');
+      const canceled = tasks.enqueue({ ...input, assetId: 'canceled' });
+      tasks.cancel(canceled.id);
+      const targets = tasks.deletionTargets({ scope: 'unfinished' });
+      expect(new Set(targets.map((task) => task.id))).toEqual(new Set([queued.id, paused.id, failed.id, canceled.id]));
+      expect(tasks.deleteTasks(targets.map((task) => task.id))).toHaveLength(4);
+      expect(tasks.list().map((task) => task.id)).toEqual([completed.id]);
+      const database = new DatabaseSync(file);
+      expect(database.prepare('SELECT COUNT(*) AS count FROM task_events WHERE task_id = ?').get(paused.id)).toEqual({ count: 0 });
+      database.close();
+      expect(tasks.deleteTasks([completed.id, completed.id, 'missing'])).toEqual([completed.id]);
+      expect(tasks.listPage({}).totalCount).toBe(0);
+    } finally { tasks.close(); }
+  });
+
+  it('deletes below the anchor in displayed batch order including unloaded tasks', async () => {
+    const tasks = new TaskService(await databasePath());
+    try {
+      const enqueue = (assetId: string, batchId: string) => tasks.enqueue({ kind: 'analysis', assetId, payload: { providerProfileId: 'model-1', mode: 'full', batchId } });
+      const a = enqueue('a', 'first');
+      const b = enqueue('b', 'second');
+      const c = enqueue('c', 'first');
+      const d = enqueue('d', 'third');
+      expect(tasks.deletionTargets({ scope: 'below', taskId: a.id, orderedTaskIds: [a.id, c.id, b.id] }).map((task) => task.id)).toEqual([c.id]);
+      expect(tasks.deletionTargets({ scope: 'below-batches', taskId: a.id, orderedTaskIds: [a.id, c.id, b.id] }).map((task) => task.id)).toEqual([b.id, d.id]);
+      expect(tasks.deletionTargets({ scope: 'batch', taskId: a.id }).map((task) => task.id)).toEqual([a.id, c.id]);
+      expect(tasks.deletionTargets({ scope: 'below', taskId: d.id }).map((task) => task.id)).toEqual([]);
+      expect(tasks.deletionTargets({ scope: 'task', taskId: b.id }).map((task) => task.id)).toEqual([b.id]);
+      expect(() => tasks.deletionTargets({ scope: 'below', taskId: '00000000-0000-4000-8000-000000000000' })).toThrow('TASK_NOT_FOUND');
+      expect(tasks.deletionTargets({ scope: 'all' })).toHaveLength(4);
+    } finally { tasks.close(); }
+  });
+
+  it('keeps separate submissions and returns every batch member across page boundaries', async () => {
+    const file = await databasePath();
+    let tasks = new TaskService(file);
+    const input = { kind: 'analysis' as const, assetId: 'photo-1', payload: { providerProfileId: 'model-1', mode: 'full', batchId: 'batch-a', locale: 'zh-CN' } };
+    const first = tasks.enqueue(input);
+    expect(tasks.enqueue(input).id).toBe(first.id);
+    tasks.enqueue({ ...input, assetId: 'photo-2' });
+    tasks.enqueue({ ...input, payload: { ...input.payload, batchId: 'batch-b' } });
+    tasks.claimNext(['analysis']);
+    tasks.advance(first.id, 'processing', 0.1);
+    tasks.advance(first.id, 'downloading', 0.8);
+    tasks.advance(first.id, 'saving', 0.9);
+    tasks.finish(first.id, 'completed', { analysisRevisionId: 'revision-1' });
+    tasks.close();
+    tasks = new TaskService(file);
+    try {
+      const page = tasks.listPage({ limit: 1, includeBatchMembers: true });
+      expect(page.totalCount).toBe(3);
+      expect(page.items).toHaveLength(3);
+      expect(tasks.listBatch('analysis', 'batch-a')).toHaveLength(2);
+      expect(tasks.listBatch('analysis', 'batch-b')).toHaveLength(1);
+      expect(page.items.find((task) => task.id === first.id)?.status).toBe('completed');
+      expect(page.nextCursor).not.toBeNull();
+    } finally { tasks.close(); }
+  });
+  it('isolates types and submissions while preserving generation groups when resized', async () => {
+    const tasks = new TaskService(await databasePath());
+    try {
+      const submissionId = 'e221f0c9-1452-4291-97ff-8b0fe98c8738';
+      const base = { providerProfileId: '08f00b2a-c2ef-43c8-aea7-6ebec183bd17', submissionId,
+        batchId: '19d42fac-a42a-405a-8a82-b67154f259a3', prompt: 'generate', resultIndex: 1 };
+      const generation = tasks.enqueue({ kind: 'generation', assetId: 'photo-1', payload: base });
+      const analysis = tasks.enqueue({ kind: 'analysis', assetId: 'photo-1', payload: { submissionId } });
+      expect(tasks.enqueue({ kind: 'analysis', assetId: 'photo-1', payload: { submissionId: 'another-submission' } }).id).not.toBe(analysis.id);
+      expect(tasks.listBatch('generation', submissionId).map((task) => task.id)).toEqual([generation.id]);
+      const resized = tasks.resizeQueuedGenerationBatch({ batchId: base.batchId, assetId: 'photo-1', count: 3 });
+      expect(resized.every((task) => task.payload.submissionId === submissionId)).toBe(true);
+      expect(tasks.listBatch('generation', submissionId)).toHaveLength(3);
+      expect(tasks.listBatch('analysis', submissionId)).toHaveLength(1);
+      for (const kind of ['agent', 'export', 'collection-analysis'] as const) {
+        const task = tasks.enqueue({ kind, assetId: null, payload: {} });
+        expect(task.payload.submissionId).toEqual(expect.any(String));
+        expect(tasks.listBatch(kind, String(task.payload.submissionId))).toHaveLength(1);
+      }
+    } finally { tasks.close(); }
+  });
+
+  it('persists measured progress without adding invalid state transitions or overwriting canceled tasks', async () => {
+    const tasks = new TaskService(await databasePath());
+    try {
+      const task = tasks.enqueue({ kind: 'export', assetId: null, payload: {} });
+      tasks.claimNext(['export']);
+      tasks.advance(task.id, 'processing', 0.1);
+      tasks.reportProgress(task.id, 0.5, { succeeded: 1, failed: 0, total: 2 });
+      expect(tasks.find(task.id)).toMatchObject({ status: 'processing', progress: 0.5, result: { succeeded: 1, total: 2 } });
+      tasks.cancel(task.id);
+      tasks.reportProgress(task.id, 0.8, { succeeded: 2 });
+      expect(tasks.find(task.id)).toMatchObject({ status: 'canceled', result: { succeeded: 1, total: 2 } });
+    } finally { tasks.close(); }
+  });
+
+  it('reuses analysis work in flight but allows other photos, models, and later reruns', async () => {
+    const tasks = new TaskService(await databasePath());
+    try {
+      const input = { kind: 'analysis' as const, assetId: 'photo-1', payload: { providerProfileId: 'model-1', mode: 'full' } };
+      const first = tasks.enqueue(input);
+      expect(tasks.enqueue(input).id).toBe(first.id);
+      tasks.claimNext(['analysis']);
+      expect(tasks.enqueue(input).id).toBe(first.id);
+      expect(tasks.enqueue({ ...input, assetId: 'photo-2' }).id).not.toBe(first.id);
+      expect(tasks.enqueue({ ...input, payload: { ...input.payload, providerProfileId: 'model-2' } }).id).not.toBe(first.id);
+      tasks.cancel(first.id);
+      expect(tasks.enqueue(input).id).not.toBe(first.id);
+      const generation = { ...input, kind: 'generation' as const };
+      expect(tasks.enqueue(generation).id).not.toBe(tasks.enqueue(generation).id);
+    } finally { tasks.close(); }
+  });
+
   it('adds persisted task results to an existing task database', async () => {
     const file = await databasePath();
     const legacy = new DatabaseSync(file);
@@ -142,7 +269,8 @@ describe('persistent task service', () => {
     expect(tasks.cancel(task.id).status).toBe('canceled');
     const retried = tasks.retry(task.id);
     expect(retried.status).toBe('queued');
-    expect(retried.payload).toEqual({ prompt: 'clean' });
+    expect(retried.payload).toEqual(task.payload);
+    expect(retried.payload.submissionId).toEqual(expect.any(String));
     tasks.close();
   });
 
