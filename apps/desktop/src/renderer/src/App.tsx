@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ViewerToolbar } from './viewer-toolbar';
+import { FileWorkflowControl, FileWorkflowEditor } from './file-workflow-editor';
 import type {
   CatalogAsset,
   CatalogAlbum,
@@ -314,7 +315,9 @@ function mapCatalogAssets(assets: CatalogAsset[]): Photo[] {
     rating: asset.rating,
     favorite: asset.favorite,
     tags: asset.tags,
-    offline: asset.offline
+    offline: asset.offline,
+    ...(asset.workflow ? { workflow: asset.workflow } : {}),
+    ...(asset.workflowConflict ? { workflowConflict: true } : {})
   }));
 }
 
@@ -898,7 +901,8 @@ function Viewer({
   onOpenContextMenu,
   onClose,
   initialResultId,
-  onToolbarHostChange
+  onToolbarHostChange,
+  onWorkflowStageChange
 }: {
   photo: Photo;
   results: GenerationResult[];
@@ -915,6 +919,7 @@ function Viewer({
   onClose?: (() => void) | undefined;
   initialResultId?: string | null | undefined;
   onToolbarHostChange: (element: HTMLDivElement | null) => void;
+  onWorkflowStageChange?: ((photo: Photo) => void) | undefined;
 }): React.JSX.Element {
   const [compareMode, setCompareMode] = useState<CompareMode>('single');
   const [split, setSplit] = useState(52);
@@ -1051,7 +1056,7 @@ function Viewer({
         <div className="viewer-title">
           {onClose && <IconButton label="关闭看图" onClick={onClose}><ChevronLeft size={16} /></IconButton>}
           <span title={photo.fileName}>{photo.fileName}</span>
-          <i>{selectedResult ? `生成版本 ${selectedResult.version}` : isDemo ? '生成版本 2' : '原图'}</i>
+          <i>{selectedResult ? `生成版本 ${selectedResult.version}` : isDemo ? '生成版本 2' : photo.workflow?.members.find((member) => member.asset.id === photo.id)?.stageName ?? '原图'}</i>
         </div>
         <div
           className={`photo-canvas${compareMode === 'split' ? ' is-comparing' : ''}`}
@@ -1115,7 +1120,11 @@ function Viewer({
           {selectedResult && !isDemo && <span className="review-actions"><button type="button" aria-label="接受当前版本" className={selectedResult.reviewState === 'accepted' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'accepted')}>接受</button><button type="button" aria-label="标记为首选" className={selectedResult.reviewState === 'preferred' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'preferred')}><Star size={12} />首选</button><button type="button" aria-label="拒绝当前版本" className={selectedResult.reviewState === 'rejected' ? 'is-review-rejected' : ''} onClick={() => void onReview(selectedResult.id, 'rejected')}>拒绝</button></span>}
         </div>
         <div className="version-switcher" data-tool-group="versions">
-          <button className={!selectedResult && !isDemo ? 'is-current' : ''} type="button" title="按住 O 键可临时查看原图" onClick={() => setSelectedResultId(null)}>原图</button>
+          {photo.workflow && <select aria-label="流程阶段" title="按规则关联" value={photo.id} onChange={(event) => {
+            const member = photo.workflow!.members.find((item) => item.asset.id === event.target.value);
+            if (member) onWorkflowStageChange?.({ ...mapCatalogAssets([member.asset])[0]!, workflow: photo.workflow! });
+          }}>{photo.workflow.members.map((member, index) => <option key={member.asset.id} value={member.asset.id}>{member.stageName}{member.variant ? ` · ${member.variant}` : photo.workflow!.members.filter((item) => item.stageId === member.stageId).length > 1 ? ` · ${index + 1}` : ''} — {member.asset.fileName}{member.asset.offline ? '（离线）' : ''}</option>)}</select>}
+          <button className={!selectedResult && !isDemo ? 'is-current' : ''} type="button" title="按住 O 键可临时查看当前文件" onClick={() => setSelectedResultId(null)}>{photo.workflow ? '当前文件' : '原图'}</button>
           {isDemo ? <><button type="button">V1</button><button className="is-current" type="button">V2</button></> : [...results].reverse().map((result) => (
             <button className={`version-button${selectedResult?.id === result.id ? ' is-current' : ''}${result.reviewState === 'preferred' ? ' is-preferred' : result.reviewState === 'rejected' ? ' is-rejected' : ''}`} type="button" key={result.id} onClick={() => setSelectedResultId(result.id)} title={result.reviewState === 'preferred' ? '首选' : result.reviewState === 'accepted' ? '已接受' : result.reviewState === 'rejected' ? '已拒绝' : '未审阅'}>V{result.version}</button>
           ))}
@@ -1555,6 +1564,7 @@ function TaskBar({ panelVisibility, onTogglePanel, suspended, open, onToggle, on
 type LibraryWorkspaceProps = {
   active?: boolean;
   onCloseViewer?: () => void;
+  onWorkflowStageChange?: (photo: Photo) => void;
   initialResultId?: string | null;
   view: 'library' | 'viewer';
   onOpenViewer: (assetId: string) => void;
@@ -1697,7 +1707,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
   const selectButton = (photo: Photo) => <input className="catalog-list-select" type="checkbox" aria-label={`选择 ${photo.fileName}`} checked={selection.selectedIds.has(photo.id)} onClick={(event) => event.stopPropagation()} onChange={() => selectPhoto(photo, 'toggle')} />;
   const photoImage = (photo: Photo) => <span className="catalog-list-thumb">{photo.thumbnailSrc || photo.src ? <CatalogImage src={photo.thumbnailSrc ?? photo.src} alt="" /> : <Image size={18} />}</span>;
   const listRows = props.availablePhotos.map((photo) => <div className={`catalog-list-row${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}`} key={photo.id} data-asset-id={photo.id} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onDoubleClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>
-    {selectButton(photo)}{photoImage(photo)}<span className="catalog-list-name"><strong>{photo.fileName}</strong><small>{photo.format}</small></span><span>{photo.dimensions}</span><span>{photo.rating ? `${photo.rating} 星` : '未评分'}</span><span className="catalog-list-analysis">{viewMode === 'analysis' ? (photo.offline ? '文件离线，等待重新关联' : photo.rating >= 4 ? '建议保留，可作为精选' : '等待视觉识别与建议') : ''}</span><button className="quiet-button compact" type="button" onClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>打开</button>
+    {selectButton(photo)}{photoImage(photo)}<span className="catalog-list-name"><strong>{photo.fileName}</strong><small>{photo.format}{photo.workflow ? ` · ${photo.workflow.members.length} 版本` : photo.workflowConflict ? ' · 规则冲突' : ''}</small></span><span>{photo.dimensions}</span><span>{photo.rating ? `${photo.rating} 星` : '未评分'}</span><span className="catalog-list-analysis">{viewMode === 'analysis' ? (photo.offline ? '文件离线，等待重新关联' : photo.rating >= 4 ? '建议保留，可作为精选' : '等待视觉识别与建议') : ''}</span><button className="quiet-button compact" type="button" onClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>打开</button>
   </div>);
   return (
     <>
@@ -1705,6 +1715,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
         <header className="catalog-toolbar">
           <div className="result-summary"><strong>{collectionTitle(props)}</strong><span>{props.totalCount} 张照片</span></div>
           <div className="catalog-toolbar-actions">
+            {!props.isDemo && <FileWorkflowControl scope={{ folderId: props.selectedFolderId, albumId: props.selectedAlbumId }} folders={props.catalogFolders} scopeName={collectionTitle(props)} />}
             <div className="catalog-view-switcher" role="group" aria-label="图库视图"><button className={viewMode === 'list' ? 'is-active' : ''} type="button" aria-label="列表视图" title="列表视图" onClick={() => changeViewMode('list')}><ListFilter size={14} /></button><button className={viewMode === 'grid' ? 'is-active' : ''} type="button" aria-label="网格视图" title="网格视图" onClick={() => changeViewMode('grid')}><Grid2X2 size={14} /></button><button className={viewMode === 'analysis' ? 'is-active' : ''} type="button" aria-label="分析视图" title="分析视图" onClick={() => changeViewMode('analysis')}><WandSparkles size={14} /></button></div>
             <label className="sort-control"><select aria-label="图库排序" value={props.sortBy} onChange={(event) => props.onSortByChange(event.target.value as CatalogSort)}><option value="modifiedAt">拍摄时间</option><option value="fileName">文件名</option><option value="rating">评分</option></select><ChevronDown size={12} /></label>
             <button className={`quiet-button${props.favoriteOnly ? ' is-active' : ''}`} type="button" onClick={() => props.onFavoriteOnlyChange(!props.favoriteOnly)}><Star size={13} />仅首选</button>
@@ -1757,7 +1768,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
           }}>
             {props.availablePhotos.map((photo) => <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} draggable key={photo.id} onDragStart={(event) => { preparePhotoDrag(event, photo, selection); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>
               <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{photo.thumbnailSrc || photo.src ? <CatalogImage src={photo.thumbnailSrc ?? photo.src} /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
-              <span className="catalog-card-meta"><strong>{photo.fileName}</strong><small>{photo.format} · {photo.dimensions}</small>{photo.rating > 0 && <span aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}</span>
+              <span className="catalog-card-meta"><strong>{photo.fileName}</strong><small>{photo.format} · {photo.dimensions}{photo.workflow && <span title={`${photo.workflow.name} · 按规则关联`}> · {photo.workflow.members.length} 版本</span>}{photo.workflowConflict && <span title="多条流程规则同时匹配，已保留独立显示"> · 规则冲突</span>}</small>{photo.rating > 0 && <span aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}</span>
             </button>)}
             {props.hasMore && <button className="catalog-load-more" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? '加载中…' : '加载更多'}</button>}
             {marquee && <span className="selection-marquee" style={marquee} aria-hidden="true" />}
@@ -2389,7 +2400,7 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     <div className="workspace viewer-workspace">
       {view === 'library' ? <CatalogWorkspace {...props} onOpenPhotoContextMenu={(event, photo) => openPhotoContextMenu(event, photo)} /> :
       <main className="library-main" style={{ gridTemplateRows: `minmax(0, 1fr) 5px ${viewerLayout.filmstripHeight}px` }}>
-        <Viewer photo={selected} results={currentGenerationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRegenerate={regenerate} onReview={reviewResult} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} onOpenContextMenu={(event) => openPhotoContextMenu(event, selected, true)} onClose={props.onCloseViewer} initialResultId={props.initialResultId} onToolbarHostChange={setViewerToolbarHost} />
+        <Viewer photo={selected} results={currentGenerationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRegenerate={regenerate} onReview={reviewResult} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} onOpenContextMenu={(event) => openPhotoContextMenu(event, selected, true)} onClose={props.onCloseViewer} initialResultId={props.initialResultId} onToolbarHostChange={setViewerToolbarHost} onWorkflowStageChange={props.onWorkflowStageChange} />
         <PaneSplitter orientation="horizontal" value={viewerLayout.filmstripHeight} minimum={110} maximum={320} label="调整大图和胶片带高度" invert onChange={(value) => setViewerLayout('filmstripHeight', value)} />
         <Filmstrip toolbarHost={viewerToolbarHost} items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} onSelectionChange={setSelection} onFocusPhoto={(photo) => { setSelectedId(photo.id); onSelectedAssetChange(photo.id); }} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} onOpenContextMenu={(event, photo) => openPhotoContextMenu(event, photo)} />
       </main>}
@@ -2873,7 +2884,7 @@ function AiWorkflowPage({ photos: availablePhotos, selectedIds, focusId, workflo
 }
 
 function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (presets: ExportPreset[]) => void }): React.JSX.Element {
-  type SettingsSection = 'appearance' | 'models' | 'export' | 'storage' | 'tasks' | 'shortcuts' | 'privacy' | 'diagnostics';
+  type SettingsSection = 'appearance' | 'models' | 'workflow' | 'export' | 'storage' | 'tasks' | 'shortcuts' | 'privacy' | 'diagnostics';
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('models');
   const settingsContentRef = useRef<HTMLElement>(null);
   const providerNameRef = useRef<HTMLInputElement>(null);
@@ -3150,6 +3161,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
   return (
     <div className="settings-page">
       <aside className="settings-nav">
+        <button className={settingsSection === 'workflow' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('workflow')} aria-current={settingsSection === 'workflow' ? 'page' : undefined}><Layers3 size={14} />文件流程</button>
         <button className={settingsSection === 'appearance' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('appearance')} aria-current={settingsSection === 'appearance' ? 'page' : undefined}><SunMoon size={14} />外观</button>
         <button className={settingsSection === 'models' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('models')} aria-current={settingsSection === 'models' ? 'page' : undefined}><Bot size={14} />AI 模型</button>
         <button className={settingsSection === 'export' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('export')} aria-current={settingsSection === 'export' ? 'page' : undefined}><Download size={14} />图片导出</button>
@@ -3160,6 +3172,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
         <button className={settingsSection === 'diagnostics' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('diagnostics')} aria-current={settingsSection === 'diagnostics' ? 'page' : undefined}><ShieldCheck size={14} />诊断与维护</button>
       </aside>
       <main className="settings-content" ref={settingsContentRef}>
+        {settingsSection === 'workflow' && <FileWorkflowEditor scope={{ folderId: null, albumId: null }} folders={[]} scopeName="全局默认流程" />}
         {settingsSection === 'appearance' && <>
           <section className="settings-section storage-section"><div className="settings-heading"><div><h2>界面主题</h2><p>跟随系统会在系统外观变化时即时切换，不需要重启应用。</p></div><span><SunMoon size={14} />照片优先</span></div><div className="storage-options" aria-label="界面主题">{([['system', '跟随系统', '自动使用 macOS 或 Windows 当前外观。'], ['dark', '深色', '适合暗光环境和长时间看图。'], ['light', '浅色', '适合明亮环境和文档型工作流。']] as const).map(([value, label, description]) => <label className={theme === value ? 'is-selected' : ''} key={value}><input type="radio" name="theme" checked={theme === value} onChange={() => void saveTheme(value)} /><span><strong>{label}</strong><small>{description}</small></span><Check size={15} /></label>)}</div></section>
           <section className="settings-section storage-section"><div className="settings-heading"><div><h2>界面语言</h2><p>菜单和已适配的界面文字会即时切换，语言包设计支持后续扩展。</p></div><span><Command size={14} />i18n</span></div><div className="storage-options" aria-label="界面语言">{([['zh-CN', '简体中文', '中文界面和菜单。'], ['en-US', 'English', 'English interface and menus.']] as const).map(([value, label, description]) => <label className={locale === value ? 'is-selected' : ''} key={value}><input type="radio" name="locale" checked={locale === value} onChange={() => void saveLocale(value)} /><span><strong>{label}</strong><small>{description}</small></span><Check size={15} /></label>)}</div></section>
@@ -3732,6 +3745,7 @@ function TemplatePage(): React.JSX.Element {
 
 function InlinePhotoViewer({ workspace, photo, items, onPhotoChange, onClose, resultId }: { workspace: LibraryWorkspaceProps; photo: Photo; items: Photo[]; onPhotoChange: (photo: Photo) => void; onClose: () => void; resultId: string | null }): React.JSX.Element {
   const panelRef = useRef<HTMLElement>(null);
+  const displayItems = items.map((item) => photo.workflow && item.workflow?.id === photo.workflow.id ? photo : item);
   const [selection, setSelection] = useState<SelectionState>(() => ({ selectedIds: new Set([photo.id]), anchorId: photo.id, focusId: photo.id }));
   useEffect(() => { panelRef.current?.querySelector<HTMLElement>('.canvas-wrap')?.focus({ preventScroll: true }); }, []);
   return <section className="inline-photo-viewer" aria-label="看图" ref={panelRef} onKeyDown={(event) => {
@@ -3739,7 +3753,7 @@ function InlinePhotoViewer({ workspace, photo, items, onPhotoChange, onClose, re
     event.preventDefault();
     event.stopPropagation();
     onClose();
-  }}><LibraryWorkspace {...workspace} active view="viewer" availablePhotos={items} selectedAssetId={photo.id} selection={selection} onSelectionChange={setSelection} onSelectedAssetChange={(id) => { const next = items.find((item) => item.id === id); if (next) onPhotoChange(next); }} totalCount={items.length} hasMore={false} onCloseViewer={onClose} initialResultId={resultId} /></section>;
+  }}><LibraryWorkspace {...workspace} active view="viewer" availablePhotos={displayItems} selectedAssetId={photo.id} selection={selection} onSelectionChange={setSelection} onSelectedAssetChange={(id) => { const next = displayItems.find((item) => item.id === id); if (next) onPhotoChange(next); }} onWorkflowStageChange={(next) => { setSelection({ selectedIds: new Set([next.id]), anchorId: next.id, focusId: next.id }); onPhotoChange(next); }} totalCount={items.length} hasMore={false} onCloseViewer={onClose} initialResultId={resultId} /></section>;
 }
 
 export function App(): React.JSX.Element {
@@ -3809,6 +3823,16 @@ export function App(): React.JSX.Element {
   const [viewerPhoto, setViewerPhoto] = useState<Photo | null>(null);
   const [viewerPhotos, setViewerPhotos] = useState<Photo[]>([]);
   const [viewerResultId, setViewerResultId] = useState<string | null>(null);
+  useEffect(() => {
+    const refreshed = new Map(catalogPhotos.filter((photo) => photo.workflow).map((photo) => [photo.workflow!.id, photo]));
+    setViewerPhotos((current) => current.map((photo) => photo.workflow ? refreshed.get(photo.workflow.id) ?? photo : photo));
+    setViewerPhoto((current) => {
+      if (!current?.workflow) return current;
+      const updated = refreshed.get(current.workflow.id);
+      const member = updated?.workflow?.members.find((item) => item.asset.id === current.id);
+      return member ? { ...mapCatalogAssets([member.asset])[0]!, workflow: updated!.workflow! } : current;
+    });
+  }, [catalogPhotos]);
   const viewerRequest = useRef(0);
   const openViewerRef = useRef<(assetId: string, assetIds?: string[]) => void>(() => undefined);
   const viewerOrigin = useRef<{ focus: HTMLElement | null; drawerOpen: boolean } | null>(null);
@@ -3945,6 +3969,8 @@ export function App(): React.JSX.Element {
       setCatalogTotal(page.totalCount);
       setNextCursor(page.nextCursor);
       setCatalogReady(true);
+    } catch (error) {
+      if (request === catalogRequest.current) setNavigationNotice(error instanceof Error ? error.message : '无法加载图库');
     } finally {
       if (request === catalogRequest.current) setLoadingMore(false);
     }
@@ -3954,6 +3980,8 @@ export function App(): React.JSX.Element {
     if (!sessionReady) return;
     void refreshCatalog();
   }, [refreshCatalog, sessionReady]);
+
+  useEffect(() => window.desktopApi.onCatalogChanged(() => { void refreshCatalog(); }), [refreshCatalog]);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setSearchQuery(searchDraft.trim()), 250);
@@ -4140,7 +4168,7 @@ export function App(): React.JSX.Element {
     ?? availablePhotos.find((photo) => photo.id === selectedAssetId)
     ?? availablePhotos[0];
   const contextSelectedIds = useMemo(() => viewerPhoto ? new Set([viewerPhoto.id]) : sharedSelection.selectedIds, [viewerPhoto, sharedSelection.selectedIds]);
-  const contextPhotos = useMemo(() => viewerPhoto ? [...viewerPhotos, ...availablePhotos.filter((photo) => !viewerPhotos.some((item) => item.id === photo.id))] : availablePhotos, [viewerPhoto, viewerPhotos, availablePhotos]);
+  const contextPhotos = useMemo(() => viewerPhoto ? [viewerPhoto, ...viewerPhotos.filter((photo) => photo.id !== viewerPhoto.id), ...availablePhotos.filter((photo) => photo.id !== viewerPhoto.id && !viewerPhotos.some((item) => item.id === photo.id))] : availablePhotos, [viewerPhoto, viewerPhotos, availablePhotos]);
   const addAssetsToWorkflow = useCallback((assetIds: string[]) => {
     const validIds = assetIds.filter((id) => contextPhotos.some((photo) => photo.id === id));
     if (validIds.length === 0) return;

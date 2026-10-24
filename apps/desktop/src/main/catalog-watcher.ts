@@ -17,6 +17,7 @@ export class CatalogWatcher {
   readonly #watchFactory: WatchFactory;
   readonly #debounceMs: number;
   readonly #retryMs: number;
+  readonly #onChanged: () => void;
   readonly #watchers = new Map<string, WatchHandle>();
   readonly #folders = new Set<string>();
   #debounceTimer: NodeJS.Timeout | null = null;
@@ -29,12 +30,13 @@ export class CatalogWatcher {
 
   constructor(
     catalog: CatalogReconciler,
-    options: { watchFactory?: WatchFactory; debounceMs?: number; retryMs?: number } = {}
+    options: { watchFactory?: WatchFactory; debounceMs?: number; retryMs?: number; onChanged?: () => void } = {}
   ) {
     this.#catalog = catalog;
     this.#watchFactory = options.watchFactory ?? defaultWatchFactory;
     this.#debounceMs = options.debounceMs ?? 750;
     this.#retryMs = options.retryMs ?? 30_000;
+    this.#onChanged = options.onChanged ?? (() => undefined);
   }
 
   watchFolders(folders: readonly string[]): void {
@@ -63,6 +65,10 @@ export class CatalogWatcher {
     this.#debounceTimer = null;
     this.#retryTimer = null;
     this.#dirty = false;
+  }
+
+  refresh(): void {
+    this.#scheduleReconciliation();
   }
 
   getStats(): { watchedFolders: number; activeWatchers: number; watchFailures: number; reconciliationFailures: number } {
@@ -111,7 +117,7 @@ export class CatalogWatcher {
     try {
       while (this.#dirty) {
         this.#dirty = false;
-        await this.#catalog.reconcileImportedFolders().catch(() => {
+        await this.#catalog.reconcileImportedFolders().then(() => this.#onChanged()).catch(() => {
           this.#reconciliationFailures += 1;
         });
       }

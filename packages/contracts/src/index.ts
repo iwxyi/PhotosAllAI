@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import type { FileWorkflowConfig, FileWorkflowScope } from './file-workflow';
+export * from './file-workflow';
 
 export const appInfoSchema = z.object({
   name: z.string(),
@@ -202,7 +204,7 @@ export type CatalogTag = z.infer<typeof catalogTagSchema>;
 export const deleteCatalogTagInputSchema = z.string().uuid();
 export type DeleteCatalogTagInput = z.input<typeof deleteCatalogTagInputSchema>;
 
-export const catalogAssetSchema = z.object({
+const catalogAssetBaseSchema = z.object({
   id: z.string(),
   folderId: z.string(),
   fileName: z.string(),
@@ -215,6 +217,19 @@ export const catalogAssetSchema = z.object({
   tags: z.array(catalogTagSchema.omit({ assetCount: true })),
   thumbnailUrl: z.string(),
   previewUrl: z.string()
+});
+
+export const fileWorkflowGroupSchema = z.object({
+  id: z.string(), key: z.string(), name: z.string(),
+  members: z.array(z.object({ stageId: z.string(), stageName: z.string(), variant: z.string(), asset: catalogAssetBaseSchema }))
+});
+export type FileWorkflowGroup = z.infer<typeof fileWorkflowGroupSchema>;
+export const fileWorkflowStatusSchema = z.object({
+  enabled: z.boolean(), matched: z.number(), unmatched: z.number(), conflicts: z.number()
+});
+export const catalogAssetSchema = catalogAssetBaseSchema.extend({
+  workflow: fileWorkflowGroupSchema.optional(),
+  workflowConflict: z.boolean().optional()
 });
 
 export type CatalogAsset = z.infer<typeof catalogAssetSchema>;
@@ -235,6 +250,7 @@ export const listCatalogAssetsInputSchema = z.object({
   favoriteOnly: z.boolean().default(false),
   sortBy: z.enum(['modifiedAt', 'fileName', 'rating']).default('modifiedAt'),
   query: z.string().max(500).default(''),
+  workflow: z.boolean().default(true),
   cursor: catalogAssetCursorSchema.nullable().default(null),
   limit: z.number().int().min(1).max(500).default(200)
 });
@@ -244,7 +260,8 @@ export type ListCatalogAssetsInput = z.input<typeof listCatalogAssetsInputSchema
 export const catalogAssetPageSchema = z.object({
   items: z.array(catalogAssetSchema),
   totalCount: z.number().int().nonnegative(),
-  nextCursor: catalogAssetCursorSchema.nullable()
+  nextCursor: catalogAssetCursorSchema.nullable(),
+  workflowStatus: fileWorkflowStatusSchema.optional()
 });
 
 export type CatalogAssetPage = z.infer<typeof catalogAssetPageSchema>;
@@ -1017,6 +1034,10 @@ export type ImageCacheStats = z.infer<typeof imageCacheStatsSchema>;
 export const pruneImageCacheInputSchema = z.object({ maxBytes: z.number().int().nonnegative().max(100 * 1024 * 1024 * 1024) });
 
 export interface DesktopApi {
+  getFileWorkflowConfig(): Promise<FileWorkflowConfig>;
+  saveFileWorkflowConfig(input: FileWorkflowConfig): Promise<FileWorkflowConfig>;
+  previewFileWorkflow(input: FileWorkflowScope & { config: FileWorkflowConfig }): Promise<CatalogAssetPage>;
+  onCatalogChanged(listener: () => void): () => void;
   onMenuCommand(listener: (command: MenuCommand) => void): () => void;
   updateMenuState(state: MenuState): void;
   getAppInfo(): Promise<AppInfo>;

@@ -2,6 +2,14 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { DesktopApi, MenuCommand } from '@photoallisai/contracts';
 
 const api: DesktopApi = {
+  getFileWorkflowConfig: () => ipcRenderer.invoke('file-workflow.config.get.v1') as ReturnType<DesktopApi['getFileWorkflowConfig']>,
+  saveFileWorkflowConfig: (input) => ipcRenderer.invoke('file-workflow.config.save.v1', input) as ReturnType<DesktopApi['saveFileWorkflowConfig']>,
+  previewFileWorkflow: (input) => ipcRenderer.invoke('file-workflow.preview.v1', input) as ReturnType<DesktopApi['previewFileWorkflow']>,
+  onCatalogChanged: (listener) => {
+    const handler = () => listener();
+    ipcRenderer.on('catalog.changed.v1', handler);
+    return () => ipcRenderer.removeListener('catalog.changed.v1', handler);
+  },
   onMenuCommand: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, command: MenuCommand) => listener(command);
     ipcRenderer.on('menu.command.v1', handler);

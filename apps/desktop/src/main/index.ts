@@ -7,6 +7,8 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, safeStorage, 
 import {
   appInfoSchema,
   appSettingsSchema,
+  fileWorkflowConfigSchema,
+  previewFileWorkflowInputSchema,
   diagnosticSnapshotSchema,
   diagnosticExportResultSchema,
   databaseBackupResultSchema,
@@ -88,6 +90,7 @@ import { toRendererTask } from './task-sanitizer';
 import { TemplateService } from './template-service';
 import { WorkspaceService } from './workspace-service';
 import { AppSettingsService } from './app-settings-service';
+import { FileWorkflowService } from './file-workflow-service';
 import { DatabaseBackupService } from './database-backup-service';
 import { LibraryBackupService } from './library-backup-service';
 import { DatabaseMigrationService } from './database-migration-service';
@@ -101,6 +104,7 @@ import { getWindowChromeOptions } from './window-chrome';
 const APP_ORIGIN = 'app://photoallisai';
 const APPLICATION_SCHEMA_VERSION = 4;
 let catalog: CatalogService;
+let fileWorkflows: FileWorkflowService;
 let catalogWatcher: CatalogWatcher;
 let imageCache: ImageCacheService;
 let providers: ProviderService;
@@ -272,6 +276,16 @@ async function relocatePortableAfterFileOperation(
 }
 
 function registerIpc(): void {
+  ipcMain.handle('file-workflow.config.get.v1', () => fileWorkflows.get());
+  ipcMain.handle('file-workflow.config.save.v1', async (_event, input: unknown) => {
+    const saved = await fileWorkflows.save(fileWorkflowConfigSchema.parse(input));
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1');
+    return saved;
+  });
+  ipcMain.handle('file-workflow.preview.v1', (_event, input: unknown) => {
+    const parsed = previewFileWorkflowInputSchema.parse(input);
+    return fileWorkflows.page({ folderId: parsed.folderId, albumId: parsed.albumId, limit: 100 }, parsed.config);
+  });
   ipcMain.on('menu.state.update.v1', (_event, input: unknown) => {
     try {
       menuState = menuStateSchema.parse(input);
@@ -390,7 +404,7 @@ function registerIpc(): void {
 
   ipcMain.handle('catalog.assets.list.v1', () => catalog.listAssets());
   ipcMain.handle('catalog.assets.page.v1', (_event, input: unknown) =>
-    catalog.listAssetPage(listCatalogAssetsInputSchema.parse(input))
+    fileWorkflows.page(listCatalogAssetsInputSchema.parse(input))
   );
   ipcMain.handle('catalog.folders.list.v1', () => catalog.listFolders());
   ipcMain.handle('catalog.tags.list.v1', () => catalog.listTags());
@@ -780,6 +794,8 @@ function createWindow(): BrowserWindow {
     return { action: 'deny' };
   });
 
+  window.on('focus', () => catalogWatcher?.refresh());
+
   window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
     console.error(`[renderer] failed to load ${validatedURL}: ${errorCode} ${errorDescription}`);
     if (!window.isDestroyed()) {
@@ -862,8 +878,11 @@ app.whenReady().then(async () => {
   appLocale = initialAppSettings.locale;
   databaseBackup = new DatabaseBackupService(databasePath);
   catalog = new CatalogService(databasePath);
+  fileWorkflows = new FileWorkflowService(join(app.getPath('userData'), 'settings', 'file-workflows.json'), catalog);
   await catalog.reconcileImportedFolders();
-  catalogWatcher = new CatalogWatcher(catalog);
+  catalogWatcher = new CatalogWatcher(catalog, { onChanged: () => {
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1');
+  } });
   catalogWatcher.watchFolders(catalog.listFolderPaths());
   fileOperations = new FileOperationService(databasePath, undefined, {
     trashItem: (filePath) => shell.trashItem(filePath)

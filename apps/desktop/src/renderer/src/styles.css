@@ -766,3 +766,29 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
   .task-table-row .task-kind, .task-table-row .task-row-actions { grid-column: 1 / -1; }
   .task-row-actions { flex-wrap: wrap; }
 }
+/* Folder workflows share the gallery toolbar and viewer instead of opening tabs. */
+.file-workflow-dialog { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow: auto; background: var(--surface-1); border: 1px solid var(--line-strong); border-radius: 6px; box-shadow: 0 16px 56px #0006; }
+.file-workflow-editor { min-width: 0; display: flex; flex-direction: column; gap: 14px; padding: 20px; color: var(--text); }
+.file-workflow-editor > header, .file-workflow-editor > footer, .workflow-preset-actions, .workflow-step-actions { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.file-workflow-editor > header > strong { flex: 1; overflow-wrap: anywhere; }
+.file-workflow-editor button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 30px; padding: 5px 9px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); background: var(--surface-2); }
+.file-workflow-editor button:disabled { opacity: .45; }
+.file-workflow-editor input:not([type="checkbox"]), .file-workflow-editor select, .file-workflow-editor textarea { width: 100%; min-width: 0; border: 1px solid var(--line-strong); border-radius: 4px; padding: 7px 9px; color: var(--text); background: var(--surface-2); }
+.file-workflow-editor textarea { resize: vertical; font-family: monospace; overflow-wrap: anywhere; }
+.file-workflow-editor .workflow-field { display: grid; gap: 6px; min-width: 0; font-size: 12px; }
+.workflow-preset-actions > select { flex: 1; width: auto; min-width: 120px; }
+.workflow-preset-editor { min-width: 0; margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 8px; }
+.workflow-step { border-bottom: 1px solid var(--line); }
+.workflow-step > summary { padding: 10px 0; font-size: 13px; }
+.workflow-step-fields { display: grid; gap: 10px; padding: 6px 0 14px; }
+.workflow-step-actions > label { flex: 1; display: flex; gap: 6px; align-items: center; font-size: 12px; }
+.file-workflow-editor > footer { border-top: 1px solid var(--line); padding-top: 12px; }
+.file-workflow-editor > footer > span { flex: 1; min-width: 120px; overflow-wrap: anywhere; font-size: 12px; }
+.workflow-match-preview { min-width: 0; display: grid; gap: 5px; font-size: 12px; }
+.workflow-match-preview > details { border-bottom: 1px solid var(--line); }
+.workflow-match-preview summary { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 6px 0; }
+.workflow-match-preview summary img { width: 48px; height: 40px; object-fit: contain; }
+.workflow-match-preview summary > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.workflow-match-preview small { color: var(--muted); }
+.workflow-preview-member { display: grid; grid-template-columns: minmax(80px, 1fr) minmax(0, 3fr); gap: 8px; padding: 6px 0 6px 58px; overflow-wrap: anywhere; }
+.version-switcher select[aria-label="流程阶段"] { max-width: 240px; min-width: 80px; }

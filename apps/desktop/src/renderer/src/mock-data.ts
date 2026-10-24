@@ -1,4 +1,8 @@
+import type { FileWorkflowGroup } from '@photoallisai/contracts';
+
 export type Photo = {
+  workflow?: FileWorkflowGroup;
+  workflowConflict?: boolean;
   id: string;
   folderId?: string;
   fileName: string;

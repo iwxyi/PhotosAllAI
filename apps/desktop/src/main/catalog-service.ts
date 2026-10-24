@@ -41,7 +41,7 @@ import {
 import { normalizeSearchText, tokenizeSearchText } from './search-index';
 
 const SUPPORTED_EXTENSIONS = new Set([
-  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif',
+  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif', '.tif', '.tiff',
   '.dng', '.cr2', '.cr3', '.nef', '.nrw', '.arw', '.raf', '.rw2', '.orf', '.pef'
 ]);
 
@@ -406,6 +406,20 @@ export class CatalogService {
       totalCount: count.value,
       nextCursor: hasMore && last ? { modifiedAt: last.modified_at, id: last.id, ...(sortValue === undefined ? {} : { sortValue }) } : null
     });
+  }
+
+  workflowFileLocations(): Map<string, { rootId: string; relativePath: string; ancestors: { id: string; relativePath: string }[] }> {
+    const rows = this.#database.prepare(`SELECT a.id, a.folder_id, a.path, f.path AS root_path FROM assets a JOIN folders f ON f.id = a.folder_id WHERE a.removed_at IS NULL AND f.removed_at IS NULL`).all() as { id: string; folder_id: string; path: string; root_path: string }[];
+    return new Map(rows.map((row) => {
+      const relativePath = path.relative(row.root_path, row.path);
+      const ancestors = [{ id: row.folder_id, relativePath: '' }];
+      let directory = path.dirname(relativePath);
+      while (directory !== '.' && directory && !directory.startsWith(`..${path.sep}`)) {
+        ancestors.push({ id: stableDirectoryId(row.folder_id, directory), relativePath: directory.split(path.sep).join('/') });
+        directory = path.dirname(directory);
+      }
+      return [row.id, { rootId: row.folder_id, relativePath: relativePath.split(path.sep).join('/'), ancestors }];
+    }));
   }
 
   listFolders(): CatalogFolder[] {
