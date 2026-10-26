@@ -5,12 +5,18 @@ export type Photo = {
   workflowConflict?: boolean;
   id: string;
   folderId?: string;
+  modifiedAt?: number;
+  sizeBytes?: number;
   fileName: string;
   src: string;
+  originalSrc?: string;
+  temporary?: boolean;
   thumbnailSrc?: string;
   format: string;
   dimensions: string;
   rating: number;
+  labelColor?: 'red' | 'yellow' | 'green' | 'blue' | 'purple' | null;
+  flag?: 'picked' | 'rejected' | 'unflagged';
   favorite?: boolean;
   tags?: { id: string; name: string }[];
   offline?: boolean;

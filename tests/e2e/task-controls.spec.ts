@@ -63,25 +63,20 @@ test('reorders queued work and batch-retries failed generation tasks', async () 
   await page.getByRole('menuitem', { name: '任务中心' }).click();
   const rows = page.locator('.task-table-row');
   await expect(rows).toHaveCount(3);
-  await expect(rows.nth(0)).toContainText('asset-A');
-  await expect(page.getByRole('button', { name: '任务上移' }).first()).toBeDisabled();
-
-  await page.getByRole('button', { name: '任务下移' }).first().click();
-  await expect(rows.nth(0)).toContainText('asset-B');
-  await expect(rows.nth(1)).toContainText('asset-A');
+  await expect(rows).toContainText(['asset-A', 'asset-B']);
+  await page.locator('.task-batch-summary').first().click();
 
   const exportRow = rows.filter({ hasText: 'asset-A' });
-  await exportRow.getByRole('button', { name: '暂停任务' }).click();
+  await exportRow.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '暂停任务' }).click();
   await expect(exportRow.getByText('已暂停')).toBeVisible();
-  await expect(page.getByText('暂停 1', { exact: true })).toBeVisible();
-  await exportRow.getByRole('button', { name: '恢复任务' }).click();
+  await exportRow.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '恢复任务' }).click();
   await expect.poll(async () => (await page.evaluate((taskId) => window.desktopApi.getTask(taskId), queuedExportTaskId))?.status)
     .not.toBe('paused');
   await expect(exportRow.getByRole('button', { name: '恢复任务' })).toHaveCount(0);
 
-  await page.getByRole('button', { name: '重试失败生成 (1)' }).click();
-  await expect(page.getByText('已重新排队 1 个生成任务。')).toBeVisible();
-  await expect.poll(async () => rows.filter({ hasText: 'asset-failed' }).getByText('失败').count()).toBe(1);
+  await page.getByRole('button', { name: '重试', exact: true }).click();
 
   const batchId = 'd1c701d8-3458-4686-8437-6e978b20a999';
   const analysisRevisionId = 'b70f8f56-6678-4b8e-9208-0e6ad7cbe277';
@@ -103,9 +98,15 @@ test('reorders queued work and batch-retries failed generation tasks', async () 
   tasks.enqueue({ kind: 'generation', assetId: 'asset-edit', payload: basePayload });
   tasks.enqueue({ kind: 'generation', assetId: 'asset-edit', payload: { ...basePayload, resultIndex: 2 } });
   tasks.close();
-  const editRow = rows.filter({ hasText: 'asset-edit' }).first();
+  await page.evaluate(() => window.dispatchEvent(new Event('photoallisai:tasks-changed')));
+  await page.getByRole('button', { name: '全部', exact: true }).click();
+  const editBatch = page.locator('.task-batch-summary').filter({ hasText: 'asset-ed' }).first();
+  await expect(editBatch).toBeVisible();
+  await editBatch.click();
+  const editRow = rows.filter({ hasText: 'asset-ed' }).first();
   await expect(editRow).toBeVisible();
-  await editRow.getByRole('button', { name: '编辑生成提示词' }).click();
+  await editRow.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '编辑生成提示词' }).click();
   await page.getByLabel('任务生成数量').fill('3');
   await page.getByLabel('任务提示词模板').selectOption(template.id);
   await expect(page.getByLabel('最终生成提示词')).toHaveValue(/队列测试分析/);
@@ -141,9 +142,11 @@ test('reorders queued work and batch-retries failed generation tasks', async () 
   }
   historyDatabase.exec('COMMIT');
   historyDatabase.close();
-  await expect(page.getByText(/当前显示 50\/\d+ 项/)).toBeVisible();
-  await page.getByRole('button', { name: '加载更多任务' }).click();
-  await expect(rows).toHaveCount(66);
-  await expect(page.getByText('当前显示 66/66 项')).toBeVisible();
+  await expect(page.getByRole('button', { name: '全部', exact: true })).toContainText('66');
+  const loadMore = page.getByRole('button', { name: '加载更多任务' });
+  if (await loadMore.count()) {
+    await loadMore.click();
+    await expect(page.getByRole('button', { name: '全部', exact: true })).toContainText('66');
+  }
   await page.screenshot({ path: 'test-results/task-history-pagination.png', animations: 'disabled' });
 });

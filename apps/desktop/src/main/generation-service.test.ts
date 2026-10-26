@@ -25,7 +25,9 @@ async function fixture(
   responseBody: (origin: string) => unknown,
   imageDownload?: Buffer,
   publishTemporaryFile?: ConstructorParameters<typeof GenerationService>[5],
-  moveFile?: ConstructorParameters<typeof GenerationService>[6]
+  moveFile?: ConstructorParameters<typeof GenerationService>[6],
+  providerKind: ProviderProfile['kind'] = 'nanobanana-compatible',
+  onRequest?: (url: string | undefined, body: string) => void
 ): Promise<{ service: GenerationService; directory: string; sourcePath: string; setSourcePath: (value: string) => void }> {
   const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-generation-'));
   temporaryDirectories.push(directory);
@@ -44,8 +46,13 @@ async function fixture(
       response.end(imageDownload);
       return;
     }
-    response.writeHead(200, { 'content-type': 'application/json' });
-    response.end(JSON.stringify(responseBody(origin)));
+    const chunks: Buffer[] = [];
+    request.on('data', (chunk: Buffer) => chunks.push(chunk));
+    request.on('end', () => {
+      onRequest?.(request.url, Buffer.concat(chunks).toString('utf8'));
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(responseBody(origin)));
+    });
   });
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -55,7 +62,7 @@ async function fixture(
   const profile: ProviderProfile = {
     id: providerId,
     name: 'Generator',
-    kind: 'nanobanana-compatible',
+    kind: providerKind,
     purpose: 'generation',
     baseUrl: `http://127.0.0.1:${address.port}/v1`,
     modelId: 'image-model',
@@ -88,6 +95,29 @@ function payload(resultIndex = 1) {
 }
 
 describe('managed generation results', () => {
+  it('calls ACE Data Nano Banana edit API with the source image and downloads image_url output', async () => {
+    let requestPath: string | undefined;
+    let requestBody = '';
+    const { service, directory } = await fixture(
+      (origin) => ({ success: true, data: [{ image_url: `${origin}/result.png` }] }),
+      png,
+      undefined,
+      undefined,
+      'acedata-nano-banana',
+      (url, body) => { requestPath = url; requestBody = body; }
+    );
+
+    const result = await service.generate('asset-1', payload());
+
+    expect(requestPath).toBe('/v1/nano-banana/images');
+    expect(JSON.parse(requestBody)).toMatchObject({
+      action: 'edit', model: 'image-model', prompt: 'Remove background pedestrians', count: 1,
+      image_urls: [`data:image/jpeg;base64,${Buffer.from('bounded-preview').toString('base64')}`]
+    });
+    expect(await readFile(path.join(directory, 'managed', 'generated', 'as', 'asset-1', batchId, result.fileName))).toEqual(png);
+    service.close();
+  });
+
   it('persists base64 output with a versioned filename and manifest', async () => {
     const { service, directory, sourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
 

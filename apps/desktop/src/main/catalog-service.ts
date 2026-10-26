@@ -41,7 +41,7 @@ import {
 import { normalizeSearchText, tokenizeSearchText } from './search-index';
 
 const SUPPORTED_EXTENSIONS = new Set([
-  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif', '.tif', '.tiff',
+  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif', '.bmp', '.ico', '.heic', '.heif', '.tif', '.tiff',
   '.dng', '.cr2', '.cr3', '.nef', '.nrw', '.arw', '.raf', '.rw2', '.orf', '.pef'
 ]);
 
@@ -58,7 +58,9 @@ type AssetRow = {
   size_bytes: number;
   modified_at: number;
   rating: number;
+  label_color: 'red' | 'yellow' | 'green' | 'blue' | 'purple' | null;
   favorite: number;
+  flag: 'picked' | 'rejected' | 'unflagged';
   offline_at: number | null;
   content_hash: string | null;
 };
@@ -262,6 +264,24 @@ export class CatalogService {
         COMMIT;
       `);
     }
+    const labelColorVersion = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (labelColorVersion.user_version < 10) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE assets ADD COLUMN label_color TEXT CHECK(label_color IS NULL OR label_color IN ('red', 'yellow', 'green', 'blue', 'purple'));
+        PRAGMA user_version = 10;
+        COMMIT;
+      `);
+    }
+    const flagVersion = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (flagVersion.user_version < 11) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE assets ADD COLUMN flag TEXT NOT NULL DEFAULT 'unflagged' CHECK(flag IN ('picked', 'rejected', 'unflagged'));
+        PRAGMA user_version = 11;
+        COMMIT;
+      `);
+    }
   }
 
   close(): void {
@@ -272,7 +292,7 @@ export class CatalogService {
     const safeLimit = Math.max(1, Math.min(limit, 1_000));
     const rows = this.#database
       .prepare(`
-        SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, favorite, offline_at
+        SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, label_color, flag, favorite, offline_at
         FROM assets WHERE removed_at IS NULL
         ORDER BY modified_at DESC, id ASC
         LIMIT ?
@@ -340,6 +360,51 @@ export class CatalogService {
         : '0');
     }
     if (input.favoriteOnly) baseConditions.push('favorite = 1');
+    if (input.folderIds.length) {
+      const directories: string[] = [];
+      for (const id of input.folderIds) {
+        const directory = this.#resolveDirectory(id);
+        if (!directory) continue;
+        if (!directory.relativePath) {
+          directories.push('folder_id = ?');
+          baseValues.push(directory.rootId);
+        } else {
+          directories.push("(folder_id = ? AND path LIKE ? ESCAPE '\\')");
+          baseValues.push(directory.rootId, `${escapeLike(path.join(directory.rootPath, directory.relativePath) + path.sep)}%`);
+        }
+      }
+      baseConditions.push(directories.length ? `(${directories.join(' OR ')})` : '0');
+    }
+    if (input.dateFrom !== null) {
+      baseConditions.push('modified_at >= ?');
+      baseValues.push(input.dateFrom);
+    }
+    if (input.dateTo !== null) {
+      baseConditions.push('modified_at < ?');
+      baseValues.push(input.dateTo);
+    }
+    if (input.months.length) {
+      baseConditions.push(`strftime('%Y-%m', modified_at / 1000, 'unixepoch', 'localtime') IN (${input.months.map(() => '?').join(', ')})`);
+      baseValues.push(...input.months);
+    }
+    if (input.formats.length) {
+      baseConditions.push(`UPPER(SUBSTR(extension, 2)) IN (${input.formats.map(() => '?').join(', ')})`);
+      baseValues.push(...input.formats.map((format) => format.toUpperCase()));
+    }
+    if (input.minimumRating !== null) {
+      const operator = input.ratingOperator === 'eq' ? '=' : input.ratingOperator === 'lte' ? '<=' : '>=';
+      baseConditions.push(`rating ${operator} ?`);
+      baseValues.push(input.minimumRating);
+    }
+    if (input.flags.length) {
+      baseConditions.push(`flag IN (${input.flags.map(() => '?').join(', ')})`);
+      baseValues.push(...input.flags);
+    }
+    if (input.colors.length) {
+      baseConditions.push(`label_color IN (${input.colors.map(() => '?').join(', ')})`);
+      baseValues.push(...input.colors);
+    }
+
     const query = input.query.trim();
     if (query) {
       const tokens = tokenizeSearchText(query);
@@ -362,27 +427,29 @@ export class CatalogService {
     }
     const conditions = [...baseConditions];
     const values = [...baseValues];
+    const direction = input.sortDirection ?? (input.sortBy === 'fileName' ? 'asc' : 'desc');
+    const comparison = direction === 'asc' ? '>' : '<';
     if (input.cursor) {
       if (input.sortBy === 'fileName') {
-        conditions.push('(file_name COLLATE NOCASE > ? OR (file_name COLLATE NOCASE = ? AND id > ?))');
+        conditions.push(`(file_name COLLATE NOCASE ${comparison} ? OR (file_name COLLATE NOCASE = ? AND id > ?))`);
         values.push(typeof input.cursor.sortValue === 'string' ? input.cursor.sortValue : '', typeof input.cursor.sortValue === 'string' ? input.cursor.sortValue : '', input.cursor.id);
       } else if (input.sortBy === 'rating') {
-        conditions.push('(rating < ? OR (rating = ? AND id > ?))');
+        conditions.push(`(rating ${comparison} ? OR (rating = ? AND id > ?))`);
         const rating = typeof input.cursor.sortValue === 'number' ? input.cursor.sortValue : 0;
         values.push(rating, rating, input.cursor.id);
       } else {
-        conditions.push('(modified_at < ? OR (modified_at = ? AND id > ?))');
+        conditions.push(`(modified_at ${comparison} ? OR (modified_at = ? AND id > ?))`);
         values.push(input.cursor.modifiedAt, input.cursor.modifiedAt, input.cursor.id);
       }
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const orderBy = input.sortBy === 'fileName'
-      ? 'file_name COLLATE NOCASE ASC, id ASC'
+      ? `file_name COLLATE NOCASE ${direction}, id ASC`
       : input.sortBy === 'rating'
-        ? 'rating DESC, id ASC'
-        : 'modified_at DESC, id ASC';
+        ? `rating ${direction}, id ASC`
+        : `modified_at ${direction}, id ASC`;
     const rows = this.#database.prepare(`
-      SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, favorite, offline_at
+      SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, label_color, flag, favorite, offline_at
       FROM assets ${where}
       ORDER BY ${orderBy}
       LIMIT ?
@@ -893,14 +960,22 @@ export class CatalogService {
     const input = updateCatalogMetadataInputSchema.parse(rawInput);
     const uniqueIds = [...new Set(input.assetIds)];
     const assignments: string[] = [];
-    const values: (number | string)[] = [];
+    const values: (number | string | null)[] = [];
     if (input.rating !== undefined) {
       assignments.push('rating = ?');
       values.push(input.rating);
     }
+    if (input.labelColor !== undefined) {
+      assignments.push('label_color = ?');
+      values.push(input.labelColor);
+    }
     if (input.favorite !== undefined) {
       assignments.push('favorite = ?');
       values.push(input.favorite ? 1 : 0);
+    }
+    if (input.flag !== undefined) {
+      assignments.push('flag = ?');
+      values.push(input.flag);
     }
     const placeholders = uniqueIds.map(() => '?').join(', ');
     this.#database.exec('BEGIN IMMEDIATE');
@@ -915,7 +990,7 @@ export class CatalogService {
       throw error;
     }
     const rows = this.#database.prepare(`
-      SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, favorite, offline_at
+      SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, label_color, flag, favorite, offline_at
       FROM assets WHERE id IN (${placeholders}) ORDER BY modified_at DESC, id ASC
     `).all(...uniqueIds) as AssetRow[];
     return this.#toAssets(rows);
@@ -1182,18 +1257,27 @@ export class CatalogService {
       tags.push({ id: tag.id, name: tag.name });
       tagsByAsset.set(tag.asset_id, tags);
     }
-    return rows.map((row) => this.#toAsset(row, tagsByAsset.get(row.id) ?? []));
+    const roots = this.#database.prepare('SELECT id, path FROM folders').all() as { id: string; path: string }[];
+    const rootPaths = new Map(roots.map((root) => [root.id, root.path]));
+    return rows.map((row) => {
+      const rootPath = rootPaths.get(row.folder_id);
+      const relative = rootPath ? path.relative(rootPath, path.dirname(row.path)) : '';
+      return this.#toAsset(row, tagsByAsset.get(row.id) ?? [], relative && relative !== '.' ? stableDirectoryId(row.folder_id, relative) : row.folder_id);
+    });
   }
 
-  #toAsset(row: AssetRow, tags: { id: string; name: string }[]): CatalogAsset {
+  #toAsset(row: AssetRow, tags: { id: string; name: string }[], directoryId: string): CatalogAsset {
     return catalogAssetSchema.parse({
       id: row.id,
       folderId: row.folder_id,
+      directoryId,
       fileName: row.file_name,
       format: row.extension.slice(1).toUpperCase(),
       sizeBytes: row.size_bytes,
       modifiedAt: row.modified_at,
       rating: row.rating,
+      labelColor: row.label_color,
+      flag: row.flag,
       favorite: row.favorite === 1,
       offline: row.offline_at !== null,
       tags,

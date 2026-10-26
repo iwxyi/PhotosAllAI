@@ -1,7 +1,18 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { DesktopApi, MenuCommand } from '@photoallisai/contracts';
 
 const api: DesktopApi = {
+  getFileDetails: (id) => ipcRenderer.invoke('image.details.v1', id),
+  openAssetExternally: (id) => ipcRenderer.invoke('image.open-external.v1', id),
+  linkImageDirectory: (id) => ipcRenderer.invoke('image.link-directory.v1', id),
+  openImages: (paths) => ipcRenderer.invoke('image.open.v1', paths),
+  takePendingOpenImages: () => ipcRenderer.invoke('image.pending.v1'),
+  onOpenImages: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, session: Parameters<typeof listener>[0]) => listener(session);
+    ipcRenderer.on('image.opened.v1', handler);
+    return () => ipcRenderer.removeListener('image.opened.v1', handler);
+  },
+  getDroppedFilePaths: (files) => files.map((file) => webUtils.getPathForFile(file)).filter(Boolean),
   getFileWorkflowConfig: () => ipcRenderer.invoke('file-workflow.config.get.v1') as ReturnType<DesktopApi['getFileWorkflowConfig']>,
   saveFileWorkflowConfig: (input) => ipcRenderer.invoke('file-workflow.config.save.v1', input) as ReturnType<DesktopApi['saveFileWorkflowConfig']>,
   previewFileWorkflow: (input) => ipcRenderer.invoke('file-workflow.preview.v1', input) as ReturnType<DesktopApi['previewFileWorkflow']>,

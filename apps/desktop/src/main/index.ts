@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { stat } from 'node:fs/promises';
+import { dirname, extname, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, safeStorage, shell, type MenuItemConstructorOptions } from 'electron';
@@ -71,9 +72,11 @@ import {
   workspaceSessionSchema,
   menuStateSchema
 } from '@photoallisai/contracts';
-import type { AppSettings, MenuCommand, MenuState } from '@photoallisai/contracts';
+import { fileDetailsSchema, quickViewSessionSchema } from '@photoallisai/contracts';
+import type { AppSettings, MenuCommand, MenuState, QuickViewSession } from '@photoallisai/contracts';
 
-import { CatalogService } from './catalog-service';
+import { CatalogService, isSupportedImage } from './catalog-service';
+import { DIRECT_IMAGE_EXTENSIONS, ImageFileService } from './image-file-service';
 import { CatalogWatcher } from './catalog-watcher';
 import { AnalysisService } from './analysis-service';
 import { ImageCacheService, type ImageVariant } from './image-cache-service';
@@ -107,6 +110,10 @@ let catalog: CatalogService;
 let fileWorkflows: FileWorkflowService;
 let catalogWatcher: CatalogWatcher;
 let imageCache: ImageCacheService;
+let imageFiles: ImageFileService;
+let pendingOpenPaths: string[] = [];
+let pendingOpenSession: QuickViewSession | null = null;
+let openingImages = Promise.resolve();
 let providers: ProviderService;
 let tasks: TaskService;
 let templates: TemplateService;
@@ -151,6 +158,32 @@ function sendMenuCommand(command: MenuCommand): void {
   mainWindow.webContents.send('menu.command.v1', command);
 }
 
+function validateImageId(id: unknown): string {
+  if (typeof id !== 'string' || !/^[0-9a-f-]{20,40}$/iu.test(id)) throw new Error('INVALID_ASSET_ID');
+  return id;
+}
+
+function reportOpenFailure(error: unknown): void {
+  dialog.showErrorBox('无法打开图片', error instanceof Error ? error.message : String(error));
+}
+
+async function openImagePaths(paths: string[], notify = true): Promise<QuickViewSession> {
+  const operation = openingImages.then(() => imageFiles.open(paths));
+  openingImages = operation.then(() => undefined, () => undefined);
+  const session = quickViewSessionSchema.parse(await operation);
+  if (notify) {
+    pendingOpenSession = session;
+    showMainWindow();
+    mainWindow?.webContents.send('image.opened.v1', session);
+  }
+  return session;
+}
+
+async function openImageDialog(notify = true): Promise<QuickViewSession | null> {
+  const selection = await dialog.showOpenDialog({ title: appLocale === 'en-US' ? 'Open Images' : '打开图片', properties: ['openFile', 'multiSelections'], filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'bmp', 'ico', 'heic', 'heif', 'tif', 'tiff', 'dng', 'cr2', 'cr3', 'nef', 'nrw', 'arw', 'raf', 'rw2', 'orf', 'pef'] }] });
+  return selection.canceled ? null : openImagePaths(selection.filePaths, notify);
+}
+
 function commandItem(label: string, command: MenuCommand, options: Partial<MenuItemConstructorOptions> = {}): MenuItemConstructorOptions {
   return { label, click: () => sendMenuCommand(command), ...options };
 }
@@ -163,6 +196,7 @@ function buildApplicationMenu(): void {
     ...(process.platform === 'darwin' ? [{ role: 'appMenu' as const }] : []),
     {
       label: text.file, submenu: [
+        { label: appLocale === 'en-US' ? 'Open Images…' : '打开图片…', accelerator: 'CmdOrCtrl+O', click: () => { void openImageDialog().catch(reportOpenFailure); } },
         commandItem(text.openLibrary, 'open-library', { accelerator: 'CmdOrCtrl+Shift+L' }),
         commandItem(text.addFolder, 'import-folders', { accelerator: 'CmdOrCtrl+Shift+O' }),
         commandItem(text.closeWorkspace, 'close-workspace', { enabled: menuState.activeTab !== 'library', accelerator: 'CmdOrCtrl+W' }),
@@ -276,6 +310,26 @@ async function relocatePortableAfterFileOperation(
 }
 
 function registerIpc(): void {
+  ipcMain.handle('image.details.v1', async (_event, id: unknown) => fileDetailsSchema.parse(await imageFiles.details(validateImageId(id))));
+  ipcMain.handle('image.open-external.v1', async (_event, id: unknown) => {
+    const source = imageFiles.resolve(validateImageId(id));
+    if (!source || !existsSync(source)) throw new Error('图片文件已移动或不可访问');
+    const error = await shell.openPath(source);
+    if (error) throw new Error(error);
+  });
+  ipcMain.handle('image.link-directory.v1', async (_event, id: unknown) => {
+    const source = imageFiles.resolve(validateImageId(id));
+    if (!source || !existsSync(source)) throw new Error('图片文件已移动或不可访问');
+    await catalog.importFolders([dirname(source)]);
+    catalogWatcher.watchFolders(catalog.listFolderPaths());
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1');
+  });
+  ipcMain.handle('image.open.v1', async (_event, paths: unknown) => {
+    if (paths === undefined) return openImageDialog(false);
+    if (!Array.isArray(paths) || paths.length === 0 || paths.length > 1000 || !paths.every((item) => typeof item === 'string' && isAbsolute(item) && !item.includes('\0'))) throw new Error('INVALID_IMAGE_PATHS');
+    return openImagePaths(paths, false);
+  });
+  ipcMain.handle('image.pending.v1', () => { const session = pendingOpenSession; pendingOpenSession = null; return session; });
   ipcMain.handle('file-workflow.config.get.v1', () => fileWorkflows.get());
   ipcMain.handle('file-workflow.config.save.v1', async (_event, input: unknown) => {
     const saved = await fileWorkflows.save(fileWorkflowConfigSchema.parse(input));
@@ -423,9 +477,11 @@ function registerIpc(): void {
   ipcMain.handle('catalog.album.assets.update.v1', (_event, input: unknown) =>
     catalogAlbumSchema.parse(catalog.updateAlbumAssets(updateCatalogAlbumAssetsInputSchema.parse(input)))
   );
-  ipcMain.handle('catalog.metadata.update.v1', (_event, input: unknown) =>
-    catalog.updateMetadata(updateCatalogMetadataInputSchema.parse(input))
-  );
+  ipcMain.handle('catalog.metadata.update.v1', (_event, input: unknown) => {
+    const updated = catalog.updateMetadata(updateCatalogMetadataInputSchema.parse(input));
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1');
+    return updated;
+  });
   ipcMain.handle('catalog.tags.update.v1', (_event, input: unknown) =>
     catalog.updateTags(updateCatalogTagsInputSchema.parse(input))
   );
@@ -555,9 +611,9 @@ function registerIpc(): void {
   ipcMain.handle('catalog.asset.reveal.v1', (_event, input: unknown) => {
     const assetId = String(input);
     if (!/^[0-9a-f-]{20,40}$/iu.test(assetId)) throw new Error('INVALID_ASSET_ID');
-    const source = catalog.resolveAssetFile(assetId);
-    if (!source || !existsSync(source.path)) return false;
-    shell.showItemInFolder(source.path);
+    const source = imageFiles.resolve(assetId);
+    if (!source || !existsSync(source)) return false;
+    shell.showItemInFolder(source);
     return true;
   });
 
@@ -853,7 +909,19 @@ function showMainWindow(): void {
 }
 
 // Register before async startup so Dock and second-instance events are never lost.
-app.on('second-instance', showMainWindow);
+app.on('open-file', (event, file) => {
+  event.preventDefault();
+  if (startupReady) void openImagePaths([file]).catch(reportOpenFailure);
+  else pendingOpenPaths.push(file);
+});
+app.on('second-instance', (_event, argv) => {
+  showMainWindow();
+  const paths = argv.filter((arg) => isAbsolute(arg) && isSupportedImage(arg));
+  if (paths.length) {
+    if (startupReady) void openImagePaths(paths).catch(reportOpenFailure);
+    else pendingOpenPaths.push(...paths);
+  }
+});
 app.on('activate', showMainWindow);
 
 app.whenReady().then(async () => {
@@ -878,6 +946,7 @@ app.whenReady().then(async () => {
   appLocale = initialAppSettings.locale;
   databaseBackup = new DatabaseBackupService(databasePath);
   catalog = new CatalogService(databasePath);
+  imageFiles = new ImageFileService(catalog);
   fileWorkflows = new FileWorkflowService(join(app.getPath('userData'), 'settings', 'file-workflows.json'), catalog);
   await catalog.reconcileImportedFolders();
   catalogWatcher = new CatalogWatcher(catalog, { onChanged: () => {
@@ -976,13 +1045,22 @@ app.whenReady().then(async () => {
 
   protocol.handle('photoasset', async (request) => {
     const url = new URL(request.url);
-    if (url.host !== 'thumbnail' && url.host !== 'preview') {
+    if (!['thumbnail', 'preview', 'original', 'temporary', 'temporary-thumbnail'].includes(url.host)) {
       return new Response('Not found', { status: 404 });
     }
     const assetId = url.pathname.slice(1);
     if (!/^[0-9a-f-]{20,40}$/i.test(assetId)) return new Response('Invalid asset', { status: 400 });
 
     try {
+      if (url.host === 'original' || url.host === 'temporary' || url.host === 'temporary-thumbnail') {
+        const source = imageFiles.resolve(assetId);
+        if (!source) return new Response('Not found', { status: 404 });
+        if (url.host !== 'temporary-thumbnail' && DIRECT_IMAGE_EXTENSIONS.has(extname(source).toLowerCase())) return net.fetch(pathToFileURL(source).toString());
+        if (url.host === 'original') return new Response('Original decoding unavailable', { status: 415 });
+        const metadata = await stat(source);
+        const preview = await imageCache.getOrCreate(assetId, url.host === 'temporary-thumbnail' ? 'thumbnail' : 'preview', { path: source, modifiedAt: metadata.mtimeMs, sizeBytes: metadata.size });
+        return preview ? net.fetch(pathToFileURL(preview).toString()) : new Response('Preview unavailable', { status: 422 });
+      }
       const imagePath = await imageCache.getOrCreate(assetId, url.host as ImageVariant);
       if (!imagePath) return new Response('Not found', { status: 404 });
       return net.fetch(pathToFileURL(imagePath).toString());
@@ -1006,6 +1084,9 @@ app.whenReady().then(async () => {
   startupReady = true;
   showMainWindow();
   buildApplicationMenu();
+  const startupPaths = [...pendingOpenPaths, ...process.argv.filter((arg) => isAbsolute(arg) && isSupportedImage(arg))];
+  pendingOpenPaths = [];
+  if (startupPaths.length) void openImagePaths([...new Set(startupPaths)]).catch(reportOpenFailure);
 }).catch((error: unknown) => {
   const failure = createStartupFailureDialog(error);
   dialog.showErrorBox(failure.title, failure.content);

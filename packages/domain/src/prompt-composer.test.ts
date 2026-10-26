@@ -29,6 +29,13 @@ const analysis: AnalysisResult = {
 };
 
 describe('generation prompt composer', () => {
+  it('renders a user prompt and template without requiring visual analysis', () => {
+    const prompt = composeGenerationPrompt({
+      templateBody: '{{user_instruction}}\n{{analysis.summary}}\n{{analysis.generative_actions}}\n{{catalog.subjects}}',
+      userInstruction: '转换为水彩风，保留人物身份'
+    });
+    expect(prompt).toBe('转换为水彩风，保留人物身份');
+  });
   it('includes enabled AI actions and deduplicated preservation rules', () => {
     const prompt = composeGenerationPrompt({
       templateBody: '{{analysis.summary}}\n{{analysis.generative_actions}}\n主体：{{catalog.subjects}}\n{{user_instruction}}\n必须保留：\n{{preservation_rules}}',

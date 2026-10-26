@@ -2,16 +2,19 @@ import { Children, isValidElement, useEffect, useRef, useState, type ReactNode }
 import { createPortal } from 'react-dom';
 import { ArrowDown, ArrowUp, GripVertical, Plus, RotateCcw, X } from 'lucide-react';
 
-const labels: Record<string, string> = { compare: '对比', zoom: '缩放', review: '版本审阅', versions: '版本切换', export: '生成与导出', library: '胶片带工具' };
+const labels: Record<string, string> = { compare: '对比', zoom: '缩放', versions: '版本切换', library: '胶片带工具' };
 const storageKey = 'photoallisai.viewer-toolbar.v1';
 type Entry = { id: string; visible: boolean };
-const defaults = (): Entry[] => ['compare', 'zoom', 'review', 'versions', 'export', 'spacer-default', 'library'].map((id) => ({ id, visible: true }));
+const defaultOrder = ['versions', 'zoom', 'compare', 'spacer-default', 'library'];
+const legacyOrder = ['compare', 'zoom', 'review', 'versions', 'export', 'spacer-default', 'library'];
+const defaults = (): Entry[] => defaultOrder.map((id) => ({ id, visible: true }));
 const isSpacer = (id: string) => id.startsWith('spacer-');
 
 function loadLayout(): Entry[] {
   try {
     const saved: unknown = JSON.parse(localStorage.getItem(storageKey) ?? 'null');
     if (!Array.isArray(saved)) return defaults();
+    if (saved.length === legacyOrder.length && saved.every((entry, index) => entry?.id === legacyOrder[index] && entry.visible === true)) return defaults();
     const seen = new Set<string>();
     const entries = saved.filter((item): item is Entry => {
       if (!item || typeof item.id !== 'string' || typeof item.visible !== 'boolean' || seen.has(item.id) || (!labels[item.id] && !isSpacer(item.id))) return false;
@@ -67,7 +70,7 @@ export function ViewerToolbar({ children }: { children: ReactNode }): React.JSX.
       previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       setPosition({ x: Math.max(8, Math.min(event.clientX, window.innerWidth - 304)), y: Math.max(8, Math.min(event.clientY - 350, window.innerHeight - 440)) });
     }}>
-      {layout.map((entry) => <div key={entry.id} data-toolbar-item={entry.id} hidden={!entry.visible} className={isSpacer(entry.id) ? 'viewer-toolbar-spacer' : 'viewer-toolbar-group'}>{groups.get(entry.id)}</div>)}
+      {layout.filter((entry) => isSpacer(entry.id) || groups.has(entry.id)).map((entry) => <div key={entry.id} data-toolbar-item={entry.id} hidden={!entry.visible} className={isSpacer(entry.id) ? 'viewer-toolbar-spacer' : 'viewer-toolbar-group'}>{groups.get(entry.id)}</div>)}
     </div>
     {position && createPortal(<div className="toolbar-customize-backdrop" onPointerDown={(event) => { if (event.target === event.currentTarget) setPosition(null); }}>
       <div className="toolbar-customize" role="dialog" aria-modal="true" aria-label="自定义看图工具栏" tabIndex={-1} ref={dialogRef} style={{ left: position.x, top: position.y }} onKeyDown={(event) => {

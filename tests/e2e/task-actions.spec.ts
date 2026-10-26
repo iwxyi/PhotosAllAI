@@ -20,7 +20,7 @@ test('batch and image menus have separate scopes and running batch deletion requ
   const b = makeTask('b', 'first');
   const c = makeTask('c', 'first');
   const d = makeTask('d', 'second');
-  const e = makeTask('e', 'second');
+  makeTask('e', 'second');
   const f = makeTask('f', 'third');
   service.close();
   const database = new DatabaseSync(databasePath);

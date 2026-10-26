@@ -1,9 +1,15 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ViewerToolbar } from './viewer-toolbar';
+import { CatalogBrowseControls } from './catalog-browse-controls';
+import { emptyBrowseFilters, groupCatalogPhotos, metadataDimensions, type BrowseFilters } from './catalog-browse';
+import { ViewerZoomControl } from './viewer-zoom-control';
+import { actualPixelZoom, boundPan, zoomAround } from './viewer-geometry';
 import { FileWorkflowControl, FileWorkflowEditor } from './file-workflow-editor';
 import type {
   CatalogAsset,
+  FileDetails,
+  QuickViewSession,
   CatalogAlbum,
   CatalogSmartCollection,
   CatalogAssetCursor,
@@ -35,12 +41,13 @@ import type {
 import { analysisResultSchema, collectionAnalysisReportSchema, generationResultSchema, agentTaskResultSchema } from '@photoallisai/contracts';
 import { groupTaskBatches, batchProgress } from './task-batches';
 import { TaskActions, TaskClearButton, TaskBatchButtons, TASKS_CHANGED_EVENT } from './task-actions';
-import { computeHorizontalWindow, composeGenerationPrompt, pickExportResults, selectAll, updateSelection, type ExportSelectionMode, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
+import { composeGenerationPrompt, pickExportResults, selectAll, updateSelection, type ExportSelectionMode, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
 import { getLocale, setLocale, t, useLocale, type Locale } from './i18n';
 import {
   Aperture,
-  ArrowDown,
+  Flag,
   ArrowUp,
+  ArrowDown,
   Bot,
   Check,
   ChevronDown,
@@ -49,8 +56,10 @@ import {
   CircleAlert,
   Clock3,
   Columns2,
+  PanelsTopLeft,
   Command,
   Copy,
+  ExternalLink,
   Download,
   FilePenLine,
   Folder,
@@ -63,6 +72,7 @@ import {
   Heart,
   History,
   Image,
+  LoaderCircle,
   Info,
   KeyRound,
   Layers3,
@@ -70,8 +80,6 @@ import {
   ListFilter,
   Maximize2,
   PanelBottomOpen,
-  Pause,
-  Play,
   Plus,
   Search,
   Server,
@@ -91,7 +99,7 @@ import {
 } from 'lucide-react';
 
 import { photos, type Photo } from './mock-data';
-import { analysisFailureMessage, fileOperationFailureMessage } from './error-messages';
+import { analysisFailureMessage, generationFailureMessage, fileOperationFailureMessage } from './error-messages';
 
 const THEME_CHANGE_EVENT = 'photoallisai-theme-change';
 const OPEN_TASK_DRAWER_EVENT = 'photoallisai-open-task-drawer';
@@ -99,6 +107,7 @@ const OPERATION_NOTICE_EVENT = 'photoallisai-operation-notice';
 const E2E_DEMO_MODE = new URLSearchParams(window.location.search).get('e2e-demo') === '1';
 const DECODED_IMAGE_SOURCES = new Set<string>();
 const IMAGE_ASPECT_RATIOS = new Map<string, number>();
+const VIEWER_IMAGE_PRELOADS = new Map<string, HTMLImageElement>();
 const FILE_MANAGER_LABEL = navigator.userAgent.includes('Mac') ? '在访达中显示' : '在文件资源管理器中显示';
 const DEFAULT_GENERATION_TEMPLATE_BODY = [
   '请基于原图进行专业且写实的修图。',
@@ -176,7 +185,7 @@ function loadViewerLayout(): ViewerLayout {
     return {
       leftWidth: clamp(Number(saved.leftWidth) || DEFAULT_VIEWER_LAYOUT.leftWidth, 160, 420),
       rightWidth: clamp(Number(saved.rightWidth) || DEFAULT_VIEWER_LAYOUT.rightWidth, 240, 520),
-      filmstripHeight: clamp(Number(saved.filmstripHeight) || DEFAULT_VIEWER_LAYOUT.filmstripHeight, 110, 320)
+      filmstripHeight: clamp(Number(saved.filmstripHeight) || DEFAULT_VIEWER_LAYOUT.filmstripHeight, 72, 320)
     };
   } catch {
     return DEFAULT_VIEWER_LAYOUT;
@@ -186,7 +195,7 @@ function loadViewerLayout(): ViewerLayout {
 function useViewerLayout(): [ViewerLayout, (key: keyof ViewerLayout, value: number) => void] {
   const [layout, setLayout] = useState<ViewerLayout>(loadViewerLayout);
   const update = useCallback((key: keyof ViewerLayout, value: number) => {
-    const limits = key === 'leftWidth' ? [160, 420] : key === 'rightWidth' ? [240, 520] : [110, 320];
+    const limits = key === 'leftWidth' ? [160, 420] : key === 'rightWidth' ? [240, 520] : [72, 320];
     setLayout((current) => {
       const next = { ...current, [key]: clamp(Math.round(value), limits[0]!, limits[1]!) };
       window.localStorage.setItem(VIEWER_LAYOUT_KEY, JSON.stringify(next));
@@ -245,12 +254,15 @@ function PaneSplitter({ orientation, value, minimum, maximum, label, onChange, i
 function BufferedPreviewImage({ src, alt, className, onReady }: { src: string; alt: string; className: string; onReady?: (image: HTMLImageElement) => void }): React.JSX.Element {
   const [displayed, setDisplayed] = useState({ src, alt });
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [showLoading, setShowLoading] = useState(false);
   const [ready, setReady] = useState(() => DECODED_IMAGE_SOURCES.has(src));
+  const onReadyRef = useRef(onReady);
+  useLayoutEffect(() => { onReadyRef.current = onReady; }, [onReady]);
   useEffect(() => {
     if (!src || src === displayed.src || src === failedSrc) return;
     let active = true;
-    setLoading(true);
+    setShowLoading(false);
+    const indicatorTimer = window.setTimeout(() => { if (active) setShowLoading(true); }, 1_100);
     const image = new window.Image();
     image.onload = async () => {
       try {
@@ -259,34 +271,70 @@ function BufferedPreviewImage({ src, alt, className, onReady }: { src: string; a
         // onload already proved the image is usable; decode can reject for cached images.
       }
       if (!active) return;
+      DECODED_IMAGE_SOURCES.add(src);
+      if (image.naturalHeight > 0) IMAGE_ASPECT_RATIOS.set(src, image.naturalWidth / image.naturalHeight);
+      onReadyRef.current?.(image);
       setDisplayed({ src, alt });
       setFailedSrc(null);
-      setLoading(false);
+      window.clearTimeout(indicatorTimer);
+      setShowLoading(false);
       setReady(true);
-      DECODED_IMAGE_SOURCES.add(src);
-      onReady?.(image);
     };
     image.onerror = () => {
       if (!active) return;
-      setDisplayed({ src: '', alt });
       setFailedSrc(src);
-      setLoading(false);
-      setReady(false);
+      window.clearTimeout(indicatorTimer);
+      setShowLoading(false);
     };
     image.src = src;
-    return () => { active = false; };
-  }, [alt, displayed.src, failedSrc, onReady, src]);
-  return <>{displayed.src ? <img className={`${className} buffered-image${ready ? ' is-ready' : ''}`} src={displayed.src} alt={displayed.alt} onLoad={(event) => { DECODED_IMAGE_SOURCES.add(displayed.src); if (event.currentTarget.naturalHeight > 0) IMAGE_ASPECT_RATIOS.set(displayed.src, event.currentTarget.naturalWidth / event.currentTarget.naturalHeight); setReady(true); onReady?.(event.currentTarget); }} /> : null}{loading && <span className="preview-loading" aria-label="正在载入下一张照片"><span className="working-pulse" /></span>}</>;
+    return () => { active = false; window.clearTimeout(indicatorTimer); };
+  }, [alt, displayed.src, failedSrc, src]);
+  return <>{displayed.src ? <img className={`${className} buffered-image${ready ? ' is-ready' : ''}`} src={displayed.src} alt={displayed.alt} onLoad={(event) => { DECODED_IMAGE_SOURCES.add(displayed.src); if (event.currentTarget.naturalHeight > 0) IMAGE_ASPECT_RATIOS.set(displayed.src, event.currentTarget.naturalWidth / event.currentTarget.naturalHeight); setReady(true); onReadyRef.current?.(event.currentTarget); }} /> : null}{showLoading && <span className="preview-loading" aria-label="正在载入下一张照片"><span className="working-pulse" /></span>}</>;
 }
 
-function CatalogImage({ src, alt = '' }: { src: string; alt?: string }): React.JSX.Element {
+function CatalogImage({ src, alt = '', onAspectRatio }: { src: string; alt?: string; onAspectRatio?: (ratio: number) => void }): React.JSX.Element {
   const [readySrc, setReadySrc] = useState<string | null>(null);
-  return <img className={readySrc === src ? 'is-ready' : ''} src={src} alt={alt} onLoad={() => setReadySrc(src)} onError={(event) => { event.currentTarget.style.display = 'none'; }} />;
+  return <img className={readySrc === src ? 'is-ready' : ''} src={src} alt={alt} onLoad={(event) => { setReadySrc(src); const image = event.currentTarget; if (image.naturalHeight > 0) onAspectRatio?.(image.naturalWidth / image.naturalHeight); }} onError={(event) => { event.currentTarget.style.display = 'none'; }} />;
 }
 
 type CompareMode = 'single' | 'split';
 type CatalogSort = 'modifiedAt' | 'fileName' | 'rating';
-type CatalogViewMode = 'list' | 'grid' | 'analysis';
+type CatalogViewMode = 'list' | 'grid' | 'masonry';
+const photoColorNames: Record<NonNullable<Photo['labelColor']>, string> = { red: '红色', yellow: '黄色', green: '绿色', blue: '蓝色', purple: '紫色' };
+const photoColorName = (color: Photo['labelColor']): string => color ? photoColorNames[color] : '无';
+function ContextMenuSurface({ children, style, ...props }: React.HTMLAttributes<HTMLDivElement>): React.JSX.Element {
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const position = () => {
+      const bounds = element.getBoundingClientRect();
+      element.style.left = `${Math.max(8, Math.min(Number(style?.left) || 8, window.innerWidth - bounds.width - 8))}px`;
+      element.style.top = `${Math.max(8, Math.min(Number(style?.top) || 8, window.innerHeight - bounds.height - 8))}px`;
+    };
+    position();
+    const observer = new ResizeObserver(position);
+    observer.observe(element);
+    window.addEventListener('resize', position);
+    return () => { observer.disconnect(); window.removeEventListener('resize', position); };
+  }, [style?.left, style?.top]);
+  return createPortal(<div {...props} ref={ref} style={{ ...style, zIndex: 1100, maxHeight: 'calc(100vh - 16px)', overflowY: 'auto' }}>{children}</div>, document.body);
+}
+
+function PhotoFlag({ photo }: { photo: Photo }): React.JSX.Element | null {
+  if (!photo.flag || photo.flag === 'unflagged') return null;
+  return <span className={`photo-flag-badge is-${photo.flag}`} aria-label={photo.flag === 'picked' ? '留用' : '排除'}><Flag size={12} fill="currentColor" />{photo.flag === 'rejected' && <X size={9} />}</span>;
+}
+const catalogColumns = [
+  { id: 'thumbnail', label: '缩略图', width: '58px' },
+  { id: 'name', label: '文件', width: 'minmax(160px, 1fr)' },
+  { id: 'format', label: '格式', width: '70px' },
+  { id: 'rating', label: '评分', width: '70px' },
+  { id: 'tags', label: '标签', width: '160px' },
+  { id: 'analysis', label: '分析', width: '260px' },
+  { id: 'suggestions', label: '建议', width: '260px' }
+] as const;
+type CatalogColumn = typeof catalogColumns[number]['id'];
 
 const tabs: { id: Exclude<WorkspaceTab, `task:${string}`>; label: string; icon: typeof Image }[] = [
   { id: 'library', label: '图库', icon: LibraryBig },
@@ -306,13 +354,18 @@ const demoFolders = [
 function mapCatalogAssets(assets: CatalogAsset[]): Photo[] {
   return assets.map((asset) => ({
     id: asset.id,
-    folderId: asset.folderId,
+    folderId: asset.directoryId ?? asset.folderId,
+    modifiedAt: asset.modifiedAt,
+    sizeBytes: asset.sizeBytes,
     fileName: asset.fileName,
     src: asset.previewUrl,
+    ...(['JPG', 'JPEG', 'PNG', 'WEBP', 'GIF', 'AVIF', 'BMP', 'ICO'].includes(asset.format.toUpperCase()) ? { originalSrc: asset.previewUrl.replace('://preview/', '://original/') } : {}),
     thumbnailSrc: asset.thumbnailUrl,
     format: asset.format,
     dimensions: `${(asset.sizeBytes / 1_048_576).toFixed(1)} MB`,
     rating: asset.rating,
+    labelColor: asset.labelColor,
+    flag: asset.flag,
     favorite: asset.favorite,
     tags: asset.tags,
     offline: asset.offline,
@@ -593,7 +646,7 @@ function Sidebar({
           </button>
           <button className={`nav-row${selectedSmartCollection === 'favorites' ? ' is-active' : ''}`} type="button" onClick={() => onSelectSmartCollection(selectedSmartCollection === 'favorites' ? null : 'favorites')}>
             <Star size={15} />
-            <span>首选</span>
+            <span>收藏</span>
             <span className="row-count">{favoriteCount}</span>
           </button>
         </nav>
@@ -727,8 +780,75 @@ function Sidebar({
   );
 }
 
+type FilmstripMenuOptions = {
+  display: { flags: boolean; ratings: boolean; names: boolean };
+  onDisplayChange: (key: 'flags' | 'ratings' | 'names') => void;
+  viewMode: 'filmstrip' | 'grid';
+  onViewModeChange: (mode: 'filmstrip' | 'grid') => void;
+  sortBy: CatalogSort;
+  onSortByChange: (value: CatalogSort) => void;
+  temporary: boolean;
+};
+
+function FilmstripMenu({ options, onClose }: { options: FilmstripMenuOptions; onClose: () => void }): React.JSX.Element {
+  return <>
+    <span className="folder-menu-separator" />
+    {(['flags', 'ratings', 'names'] as const).map((key) => <button type="button" role="menuitemcheckbox" aria-checked={options.display[key]} key={key} onClick={() => { options.onDisplayChange(key); onClose(); }}><span className="menu-check-slot">{options.display[key] && <Check size={13} />}</span><span>{key === 'flags' ? '显示旗标' : key === 'ratings' ? '显示星级' : '显示文件名'}</span></button>)}
+    <span className="folder-menu-separator" />
+    <div className="folder-menu-title">胶片布局</div>
+    {(['filmstrip', 'grid'] as const).map((mode) => <button type="button" role="menuitemradio" aria-checked={options.viewMode === mode} key={mode} onClick={() => { options.onViewModeChange(mode); onClose(); }}>{mode === 'filmstrip' ? <GalleryHorizontalEnd size={14} /> : <Grid2X2 size={14} />}<span>{mode === 'filmstrip' ? '横向胶片' : '网格'}</span>{options.viewMode === mode && <Check size={13} />}</button>)}
+    {!options.temporary && <label className="filmstrip-menu-sort">排序<select aria-label="胶片排序" value={options.sortBy} onChange={(event) => { options.onSortByChange(event.target.value as CatalogSort); onClose(); }}><option value="modifiedAt">修改时间</option><option value="fileName">文件名</option><option value="rating">评分</option></select></label>}
+  </>;
+}
+
+type PhotoFilters = BrowseFilters & {
+  minimumRating: number | null;
+  ratingOperator: 'eq' | 'gte' | 'lte';
+  flags: NonNullable<Photo['flag']>[];
+  colors: NonNullable<Photo['labelColor']>[];
+};
+const emptyPhotoFilters: PhotoFilters = { ...emptyBrowseFilters, minimumRating: null, ratingOperator: 'gte', flags: [], colors: [] };
+
+function PhotoFilterBar({ leading, onReset, compact = false, scope, search, setSearch, minimumRating, setMinimumRating, ratingOperator, setRatingOperator, flags, setFlags, colors, setColors, onlyFavorites, setOnlyFavorites, favoriteOnly, onFavoriteOnlyChange, temporary = false }: {
+  leading?: React.ReactNode;
+  onReset?: (() => void) | undefined;
+  compact?: boolean;
+  scope: string;
+  search: string;
+  setSearch: (value: string) => void;
+  minimumRating: number | null;
+  setMinimumRating: React.Dispatch<React.SetStateAction<number | null>>;
+  ratingOperator: PhotoFilters['ratingOperator'];
+  setRatingOperator: (value: PhotoFilters['ratingOperator']) => void;
+  flags: PhotoFilters['flags'];
+  setFlags: React.Dispatch<React.SetStateAction<PhotoFilters['flags']>>;
+  colors: PhotoFilters['colors'];
+  setColors: React.Dispatch<React.SetStateAction<PhotoFilters['colors']>>;
+  onlyFavorites: boolean;
+  setOnlyFavorites: (value: boolean) => void;
+  favoriteOnly: boolean;
+  onFavoriteOnlyChange: (value: boolean) => void;
+  temporary?: boolean;
+}): React.JSX.Element {
+  const [searchOpen, setSearchOpen] = useState(false);
+  const filtered = Boolean(search.trim() || minimumRating !== null || flags.length || colors.length || onlyFavorites || favoriteOnly);
+  return (<div className={`filmstrip-filter-bar${leading ? ' has-grouping' : ''}${compact ? ' is-inline' : ''}`} role="group" aria-label={scope + "过滤条件"}>
+        {leading}
+        <div className="photo-filter-controls">
+        {!compact || searchOpen || search ? <input autoFocus={compact} aria-label={"筛选" + scope + "文件名"} placeholder="文件名" value={search} onChange={(event) => setSearch(event.target.value)} onBlur={() => { if (!search.trim()) setSearchOpen(false); }} /> : <button type="button" aria-label={"筛选" + scope + "文件名"} title="筛选文件名" onClick={() => setSearchOpen(true)}><Search size={13} /></button>}
+        {!temporary && <>
+          <div className="filmstrip-filter-stars" role="group" aria-label={scope + "星级筛选"}><select aria-label="星级筛选条件" value={ratingOperator} onChange={(event) => setRatingOperator(event.target.value as typeof ratingOperator)}><option value="eq">＝</option><option value="gte">≥</option><option value="lte">≤</option></select>{[1, 2, 3, 4, 5].map((rating) => <button type="button" key={rating} aria-label={`${ratingOperator === 'eq' ? '等于' : ratingOperator === 'lte' ? '至多' : '至少'} ${rating} 星`} title={`${rating} 星，再次点击取消`} aria-pressed={minimumRating === rating} className={(minimumRating ?? 0) >= rating ? 'is-filled' : ''} onClick={() => setMinimumRating((current) => current === rating ? null : rating)}><Star size={13} fill={(minimumRating ?? 0) >= rating ? 'currentColor' : 'none'} /></button>)}</div>
+          <div className="filmstrip-filter-colors" role="group" aria-label="筛选旗标">{(['picked', 'rejected', 'unflagged'] as const).map((flag) => <button type="button" key={flag} aria-label={`筛选${flag === 'picked' ? '留用' : flag === 'rejected' ? '排除' : '无旗标'}`} title={flag === 'picked' ? '留用 (P)' : flag === 'rejected' ? '排除 (X)' : '无旗标 (U)'} aria-pressed={flags.includes(flag)} className={flags.includes(flag) ? 'is-active' : ''} onClick={() => setFlags((current) => current.includes(flag) ? current.filter((value) => value !== flag) : [...current, flag])}>{flag === 'rejected' ? <span className="photo-flag-cross"><Flag size={13} fill="currentColor" /><X size={9} /></span> : <Flag size={13} fill={flag === 'picked' ? 'currentColor' : 'none'} />}</button>)}</div>
+          <div className="filmstrip-filter-colors" role="group" aria-label="筛选颜色">{(['red', 'yellow', 'green', 'blue', 'purple'] as const).map((color) => <button type="button" key={color} aria-label={`筛选${photoColorName(color)}标签`} aria-pressed={colors.includes(color)} className={colors.includes(color) ? 'is-active' : ''} onClick={() => setColors((current) => current.includes(color) ? current.filter((value) => value !== color) : [...current, color])}><i className={`photo-color-swatch is-${color}`} /></button>)}</div>
+          <button className={onlyFavorites || favoriteOnly ? 'is-active' : ''} type="button" aria-label="仅显示收藏照片" aria-pressed={onlyFavorites || favoriteOnly} title="仅显示收藏照片" onClick={() => { if (favoriteOnly) onFavoriteOnlyChange(false); setOnlyFavorites(!(onlyFavorites || favoriteOnly)); }}><Heart size={13} /></button>
+        </>}
+        <IconButton label={"重置" + scope + "过滤器"} disabled={!filtered && (!onReset || Boolean(leading))} onClick={() => { setSearchOpen(false); setSearch(''); setMinimumRating(null); setFlags([]); setColors([]); setOnlyFavorites(false); if (favoriteOnly) onFavoriteOnlyChange(false); if (!leading) onReset?.(); }}><RotateCcw size={13} /></IconButton>
+        </div>
+      </div>);
+}
+
 function Filmstrip({
-  items,
+  items: sourceItems,
   selected,
   selection,
   onSelect,
@@ -744,6 +864,7 @@ function Filmstrip({
   hasMore,
   loading,
   onLoadMore,
+  onVisibleIdsChange,
   onOpenContextMenu
 }: {
   items: Photo[];
@@ -762,14 +883,55 @@ function Filmstrip({
   hasMore: boolean;
   loading: boolean;
   onLoadMore: () => void;
-  onOpenContextMenu: (event: React.MouseEvent, photo: Photo) => void;
+  onVisibleIdsChange: React.Dispatch<React.SetStateAction<string[] | null>>;
+  onOpenContextMenu: (event: React.MouseEvent, photo: Photo, options?: FilmstripMenuOptions) => void;
 }): React.JSX.Element {
   const viewportRef = useRef<HTMLDivElement>(null);
-  const [viewport, setViewport] = useState({ width: 0, scrollLeft: 0 });
+  const [viewport, setViewport] = useState({ width: 0, height: 100, scrollLeft: 0 });
+  const [ratios, setRatios] = useState<Record<string, number>>({});
 
   const [viewMode, setViewMode] = useState<'filmstrip' | 'grid'>('filmstrip');
+  const [display, setDisplay] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('photoallisai.filmstrip-display') ?? '{}');
+      return { flags: saved.flags !== false, ratings: saved.ratings !== false, names: saved.names === true };
+    } catch { return { flags: true, ratings: true, names: false }; }
+  });
+  const changeDisplay = (key: 'flags' | 'ratings' | 'names') => setDisplay((current) => {
+    const next = { ...current, [key]: !current[key] };
+    try { localStorage.setItem('photoallisai.filmstrip-display', JSON.stringify(next)); } catch { /* restricted storage */ }
+    return next;
+  });
+  const [search, setSearch] = useState('');
+  const [minimumRating, setMinimumRating] = useState<number | null>(null);
+  const [ratingOperator, setRatingOperator] = useState<'eq' | 'gte' | 'lte'>('gte');
+  const [flags, setFlags] = useState<NonNullable<Photo['flag']>[]>([]);
+  const [colors, setColors] = useState<NonNullable<Photo['labelColor']>[]>([]);
+  const [onlyFavorites, setOnlyFavorites] = useState(false);
+  const filtered = Boolean(search.trim() || minimumRating !== null || flags.length || colors.length || onlyFavorites || favoriteOnly);
+  const items = useMemo(() => sourceItems.filter((photo) => (!search.trim() || photo.fileName.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())) && (minimumRating === null || (ratingOperator === 'eq' ? photo.rating === minimumRating : ratingOperator === 'lte' ? photo.rating <= minimumRating : photo.rating >= minimumRating)) && (!flags.length || flags.includes(photo.flag ?? 'unflagged')) && (!colors.length || (photo.labelColor && colors.includes(photo.labelColor))) && (!(onlyFavorites || favoriteOnly) || photo.favorite)), [sourceItems, search, minimumRating, ratingOperator, flags, colors, onlyFavorites, favoriteOnly]);
+  useEffect(() => {
+    const ids = items.map((photo) => photo.id);
+    onVisibleIdsChange((current) => current?.length === ids.length && current.every((id, index) => id === ids[index]) ? current : ids);
+  }, [items, onVisibleIdsChange]);
+  const menuOptions: FilmstripMenuOptions = { display, onDisplayChange: changeDisplay, viewMode, onViewModeChange: setViewMode, sortBy, onSortByChange, temporary: Boolean(selected.temporary) };
+  const metadataHeight = (display.names ? 20 : 0) + (display.ratings ? 16 : 0);
   const itemSize = 137;
-  const virtual = computeHorizontalWindow(items.length, itemSize, viewport.width, viewport.scrollLeft, 4);
+  const layout = useMemo(() => {
+    let left = 0;
+    const positions = items.map((photo) => {
+      const src = photo.thumbnailSrc ?? photo.src;
+      const ratio = ratios[src] ?? IMAGE_ASPECT_RATIOS.get(src) ?? 1.5;
+      const width = Math.max(14, Math.max(1, viewport.height - 14 - metadataHeight) * ratio + 14);
+      const position = { left, width };
+      left += width + 7;
+      return position;
+    });
+    return { positions, totalSize: left };
+  }, [items, ratios, viewport.height, metadataHeight]);
+  const firstVisible = layout.positions.findIndex((position) => position.left + position.width >= viewport.scrollLeft - viewport.width);
+  const lastVisible = layout.positions.findIndex((position) => position.left > viewport.scrollLeft + viewport.width * 2);
+  const virtual = { start: Math.max(0, firstVisible), end: lastVisible < 0 ? items.length : lastVisible, totalSize: layout.totalSize };
   const visibleItems = items.slice(virtual.start, virtual.end);
 
   useEffect(() => {
@@ -783,42 +945,46 @@ function Filmstrip({
   useEffect(() => {
     const element = viewportRef.current;
     if (!element) return;
-    const updateWidth = () => setViewport((current) => ({ ...current, width: element.clientWidth }));
+    const updateWidth = () => {
+      const style = getComputedStyle(element);
+      setViewport((current) => ({ ...current, width: element.clientWidth, height: Math.max(1, element.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)) }));
+    };
     updateWidth();
     const observer = new ResizeObserver(updateWidth);
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
+  }, [viewMode]);
 
   useEffect(() => {
     const element = viewportRef.current;
     const index = items.findIndex((photo) => photo.id === selected.id);
     if (!element || index < 0) return;
     if (viewMode === 'filmstrip') {
-      const left = index * itemSize;
-      if (left < element.scrollLeft || left + itemSize > element.scrollLeft + element.clientWidth) {
-        element.scrollTo({ left: Math.max(0, left - (element.clientWidth - itemSize) / 2), behavior: 'smooth' });
+      const { left, width } = layout.positions[index]!;
+      if (left < element.scrollLeft || left + width > element.scrollLeft + element.clientWidth - 20) {
+        element.scrollTo({ left: Math.max(0, left - (element.clientWidth - width) / 2), behavior: 'instant' });
       }
     } else {
       window.setTimeout(() => element.querySelector<HTMLElement>(`[data-asset-id="${selected.id}"]`)?.scrollIntoView({ block: 'nearest' }), 0);
     }
-  }, [items, selected.id, viewMode]);
+  }, [items, selected.id, viewMode, layout, viewport.width]);
 
   return (
-    <section className="filmstrip-region">
-      {toolbarHost && createPortal(<div className="filmstrip-toolbar">
-        <span className="filmstrip-count" title={collectionName}>{totalCount} 张</span>
-        <div className="filmstrip-tools">
-          <IconButton label="仅显示首选照片" active={favoriteOnly} pressed={favoriteOnly} onClick={() => onFavoriteOnlyChange(!favoriteOnly)}><ListFilter size={14} /></IconButton>
-          <label className="sort-control"><select aria-label="图库排序" value={sortBy} onChange={(event) => onSortByChange(event.target.value as CatalogSort)}><option value="modifiedAt">拍摄时间</option><option value="fileName">文件名</option><option value="rating">评分</option></select><ChevronDown size={12} /></label>
-          <div className="segmented-control">
-            <button className={viewMode === 'filmstrip' ? 'is-active' : ''} type="button" aria-label="胶片视图" aria-pressed={viewMode === 'filmstrip'} onClick={() => setViewMode('filmstrip')}><GalleryHorizontalEnd size={14} /></button>
-            <button className={viewMode === 'grid' ? 'is-active' : ''} type="button" aria-label="网格视图" aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}><Grid2X2 size={14} /></button>
-          </div>
-        </div>
+    <section className="filmstrip-region" onContextMenu={(event) => {
+      if (event.target instanceof Element && event.target.closest('.viewer-footer')) return;
+      event.preventDefault();
+      onOpenContextMenu(event, selected, menuOptions);
+    }}>
+      {toolbarHost && createPortal(<div className="filmstrip-toolbar" onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        toolbarHost.closest('.viewer-footer')?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: event.clientX, clientY: event.clientY }));
+      }}>
+        <span className="filmstrip-count" title={filtered ? `${collectionName} · 已加载 ${sourceItems.length} / ${totalCount} 张` : collectionName}>{filtered ? `${items.length} / ${sourceItems.length}` : totalCount} 张</span>
+        <PhotoFilterBar compact scope="胶片" search={search} setSearch={setSearch} minimumRating={minimumRating} setMinimumRating={setMinimumRating} ratingOperator={ratingOperator} setRatingOperator={setRatingOperator} flags={flags} setFlags={setFlags} colors={colors} setColors={setColors} onlyFavorites={onlyFavorites} setOnlyFavorites={setOnlyFavorites} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} temporary={Boolean(selected.temporary)} />
       </div>, toolbarHost)}
       <div className={`filmstrip${viewMode === 'grid' ? ' is-grid' : ''}`} role="listbox" aria-label="照片" aria-multiselectable="true" tabIndex={0} ref={viewportRef} onKeyDown={(event) => {
-        const focusIndex = Math.max(0, items.findIndex((photo) => photo.id === (selection.focusId ?? selected.id)));
+        const focusIndex = items.findIndex((photo) => photo.id === (selection.focusId ?? selected.id));
         if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
           event.preventDefault();
           onSelectionChange(selectAll(items.map((photo) => photo.id)));
@@ -826,7 +992,7 @@ function Filmstrip({
         }
         if ((event.metaKey || event.ctrlKey) && event.code === 'Space') {
           event.preventDefault();
-          const photo = items[focusIndex];
+          const photo = items[Math.max(0, focusIndex)];
           if (photo) onSelectionChange((current) => updateSelection(current, items.map((item) => item.id), photo.id, 'toggle'));
           return;
         }
@@ -835,7 +1001,7 @@ function Filmstrip({
         event.stopPropagation();
         const columns = viewMode === 'grid' ? Math.max(1, Math.floor((viewportRef.current?.clientWidth ?? itemSize) / itemSize)) : 1;
         const delta = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : event.key === 'ArrowUp' ? -columns : columns;
-        const nextPhoto = items[clamp(focusIndex + delta, 0, items.length - 1)]!;
+        const nextPhoto = items[clamp(focusIndex < 0 ? (delta < 0 ? items.length - 1 : 0) : focusIndex + delta, 0, items.length - 1)]!;
         if (event.metaKey || event.ctrlKey) {
           onSelectionChange((current) => ({ ...current, focusId: nextPhoto.id }));
         } else {
@@ -848,7 +1014,7 @@ function Filmstrip({
         setViewport((current) => ({ ...current, scrollLeft: element.scrollLeft }));
         if (hasMore && !loading && (viewMode === 'grid' ? element.scrollTop + element.clientHeight >= element.scrollHeight - 220 : element.scrollLeft + element.clientWidth >= element.scrollWidth - itemSize * 3)) onLoadMore();
       }}>
-        <div className="filmstrip-track" style={viewMode === 'grid' ? undefined : { width: virtual.totalSize + (hasMore ? itemSize : 0) }}>
+        <div className={`filmstrip-track${items.length === 0 ? ' is-empty' : ''}`} style={viewMode === 'grid' ? undefined : { width: items.length === 0 ? '100%' : virtual.totalSize + (hasMore ? itemSize : 0) }}>
         {(viewMode === 'grid' ? items : visibleItems).map((photo, visibleIndex) => {
           const index = viewMode === 'grid' ? visibleIndex : virtual.start + visibleIndex;
           return (
@@ -856,12 +1022,14 @@ function Filmstrip({
             className={`thumb${selected.id === photo.id ? ' is-selected' : ''}${selection.selectedIds.has(photo.id) ? ' is-chosen' : ''}${photo.offline ? ' is-offline' : ''}`}
             key={photo.id}
             data-asset-id={photo.id}
-            style={viewMode === 'grid' ? undefined : { left: index * itemSize }}
+            data-label-color={photo.labelColor ?? undefined}
+            aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined}
+            style={{ ...(viewMode === 'grid' ? {} : layout.positions[index]), '--thumb-metadata-height': `${metadataHeight}px` } as React.CSSProperties}
             onClick={(event) => onSelect(
               photo,
               event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace'
             )}
-            onContextMenu={(event) => onOpenContextMenu(event, photo)}
+            onContextMenu={(event) => { event.stopPropagation(); onOpenContextMenu(event, photo, menuOptions); }}
             draggable
             aria-grabbed={selection.selectedIds.has(photo.id)}
             onDragStart={(event) => { preparePhotoDrag(event, photo, selection); }}
@@ -870,16 +1038,17 @@ function Filmstrip({
             type="button"
           >
             <span className="raw-placeholder"><Image size={22} /><small>{photo.format}</small></span>
-            {photo.thumbnailSrc || photo.src ? <CatalogImage src={photo.thumbnailSrc ?? photo.src} /> : null}
+            {photo.thumbnailSrc || photo.src ? <CatalogImage src={photo.thumbnailSrc ?? photo.src} onAspectRatio={(ratio) => { const src = photo.thumbnailSrc ?? photo.src; IMAGE_ASPECT_RATIOS.set(src, ratio); setRatios((current) => current[src] === ratio ? current : { ...current, [src]: ratio }); }} /> : null}
             <span className="thumb-index">{index + 1}</span>
             {photo.status && <i className={`status-dot status-${photo.status}`} />}
             {photo.offline && <i className="offline-badge">离线</i>}
-            {selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={11} /></span>}
-            <span className="thumb-name">{photo.fileName}</span>
+            <span className="thumb-metadata">{display.names && <span className="thumb-name">{photo.fileName}</span>}{display.ratings && <span className="thumb-rating" aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star size={9} key={index} fill="currentColor" />)}</span>}</span>
+            {display.flags && <PhotoFlag photo={photo} />}
           </button>
           );
         })}
-        {hasMore && <button className="filmstrip-more" type="button" style={viewMode === 'grid' ? undefined : { left: items.length * itemSize }} onClick={onLoadMore} disabled={loading}>{loading ? '加载中' : '更多'}</button>}
+        {items.length === 0 && <span className="filmstrip-empty">没有符合条件的照片</span>}
+        {hasMore && <button className="filmstrip-more" type="button" style={viewMode === 'grid' ? undefined : { left: layout.totalSize }} onClick={onLoadMore} disabled={loading}>{loading ? '加载中' : '更多'}</button>}
         </div>
       </div>
     </section>
@@ -890,14 +1059,8 @@ function Viewer({
   photo,
   results,
   isDemo,
-  exportPresets,
-  selectedExportPresetId,
   trackedExportNotice,
-  onExportPresetChange,
-  onExport,
-  onRegenerate,
   onReview,
-  onRevealResult,
   onOpenContextMenu,
   onClose,
   initialResultId,
@@ -907,15 +1070,9 @@ function Viewer({
   photo: Photo;
   results: GenerationResult[];
   isDemo: boolean;
-  exportPresets: ExportPreset[];
-  selectedExportPresetId: string | null;
   trackedExportNotice: string;
-  onExportPresetChange: (presetId: string | null) => void;
-  onExport: (resultIds: string[], presetId?: string | null) => Promise<string>;
-  onRegenerate: (result: GenerationResult) => Promise<string>;
   onReview: (resultId: string, reviewState: GenerationResult['reviewState']) => Promise<void>;
-  onRevealResult: (resultId: string) => void;
-  onOpenContextMenu: (event: React.MouseEvent) => void;
+  onOpenContextMenu: (event: React.MouseEvent, resultId: string | null) => void;
   onClose?: (() => void) | undefined;
   initialResultId?: string | null | undefined;
   onToolbarHostChange: (element: HTMLDivElement | null) => void;
@@ -925,24 +1082,54 @@ function Viewer({
   const [split, setSplit] = useState(52);
   const [showOriginal, setShowOriginal] = useState(false);
   const [selectedResultId, setSelectedResultId] = useState<string | null>(results[0]?.id ?? null);
-  const [exportNotice, setExportNotice] = useState('');
   const [zoom, setZoom] = useState(1);
+  const rememberedZoomRef = useRef(Number(localStorage.getItem('photoallisai.viewer-double-click-percent')) || 100);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const panOriginRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const wheelEndTimerRef = useRef<number | undefined>(undefined);
   const [imageAspectRatio, setImageAspectRatio] = useState(() => photo.src ? IMAGE_ASPECT_RATIOS.get(photo.src) ?? 3 / 2 : 3 / 2);
   const [fittedSize, setFittedSize] = useState({ width: 0, height: 0 });
+  const [naturalWidth, setNaturalWidth] = useState(0);
+  const [background, setBackground] = useState<'neutral' | 'checker' | 'light' | 'dark'>(() => {
+    const saved = localStorage.getItem('photoallisai.viewer-background');
+    return saved === 'checker' || saved === 'light' || saved === 'dark' ? saved : 'neutral';
+  });
+  const [fitMode, setFitMode] = useState<'fit' | 'actual' | 'width' | 'custom'>('fit');
+  const [viewerNotice, setViewerNotice] = useState('');
   const canvasWrapRef = useRef<HTMLDivElement>(null);
   const latestResultId = results[0]?.id ?? null;
   const initialSelectionId = initialResultId === undefined ? latestResultId : results.find((result) => result.id === initialResultId)?.id ?? null;
   const selectedResult = selectedResultId ? results.find((result) => result.id === selectedResultId) : undefined;
   const generatedSource = isDemo ? photo.src : selectedResult?.resultUrl;
+  const activeSource = generatedSource && !showOriginal ? generatedSource : photo.originalSrc ?? photo.src;
+  const sourceSizes = useRef(new Map<string, { width: number; height: number }>());
+  const canCompare = Boolean(generatedSource);
+  const pixelZoom = actualPixelZoom(naturalWidth, fittedSize.width, window.devicePixelRatio);
+  const maxZoom = Math.max(8, pixelZoom * 8);
+  const minZoom = Math.min(.05, pixelZoom / 10);
+  const zoomPercent = naturalWidth && fittedSize.width ? Math.round(zoom / pixelZoom * 100) : 100;
+  useEffect(() => {
+    if (fitMode === 'fit' || zoom <= 1.001 || !naturalWidth || !fittedSize.width) return;
+    const percent = zoom / pixelZoom * 100;
+    rememberedZoomRef.current = percent;
+    localStorage.setItem('photoallisai.viewer-double-click-percent', String(percent));
+  }, [zoom, pixelZoom, naturalWidth, fittedSize.width, fitMode]);
+  const setViewMode = useCallback((mode: 'fit' | 'actual' | 'width') => {
+    setFitMode(mode);
+    setPan({ x: 0, y: 0 });
+  }, []);
+
+  useEffect(() => {
+    if (fitMode === 'fit') setZoom(1);
+    else if (fitMode === 'actual') setZoom(pixelZoom);
+    else if (fitMode === 'width') setZoom(canvasWrapRef.current ? canvasWrapRef.current.clientWidth / Math.max(1, fittedSize.width) : 1);
+  }, [fitMode, fittedSize.width, fittedSize.height, pixelZoom]);
 
   useEffect(() => {
     setSelectedResultId(initialSelectionId);
     setZoom(1);
+    setFitMode('fit');
     setPan({ x: 0, y: 0 });
-    if (photo.src) setImageAspectRatio(IMAGE_ASPECT_RATIOS.get(photo.src) ?? 3 / 2);
   }, [photo.id, photo.src, initialSelectionId]);
 
   useLayoutEffect(() => {
@@ -977,24 +1164,24 @@ function Viewer({
   useEffect(() => {
     const onMenuCommand = (event: Event) => {
       const command = (event as CustomEvent<MenuCommand>).detail;
-      if (command === 'fit-image' || command === 'zoom-100') {
-        setZoom(1);
-        setPan({ x: 0, y: 0 });
-      } else if (command === 'toggle-original') {
+      if (command === 'fit-image') setViewMode('fit');
+      else if (command === 'zoom-100') setViewMode('actual');
+      else if (command === 'toggle-original') {
         setShowOriginal((current) => !current);
       }
     };
     window.addEventListener('photoallisai:menu-command', onMenuCommand);
     return () => window.removeEventListener('photoallisai:menu-command', onMenuCommand);
-  }, []);
+  }, [setViewMode]);
 
   useEffect(() => () => {
     if (wheelEndTimerRef.current !== undefined) window.clearTimeout(wheelEndTimerRef.current);
   }, []);
 
   const adjustZoom = (factor: number) => {
+    setFitMode('custom');
     setZoom((current) => {
-      const next = Math.min(4, Math.max(0.25, Math.round(current * factor * 100) / 100));
+      const next = clamp(current * factor, minZoom, maxZoom);
       if (next <= 1) setPan({ x: 0, y: 0 });
       return next;
     });
@@ -1002,20 +1189,31 @@ function Viewer({
   const constrainPan = useCallback((nextPan: { x: number; y: number }, nextZoom: number) => {
     const container = canvasWrapRef.current;
     if (!container || nextZoom <= 1) return { x: 0, y: 0 };
-    const maxX = Math.max(0, (fittedSize.width * nextZoom - Math.max(1, container.clientWidth)) / 2);
-    const maxY = Math.max(0, (fittedSize.height * nextZoom - Math.max(1, container.clientHeight)) / 2);
-    return { x: clamp(nextPan.x, -maxX, maxX), y: clamp(nextPan.y, -maxY, maxY) };
-  }, [fittedSize.height, fittedSize.width]);
-  const captureAspectRatio = useCallback((image: HTMLImageElement) => {
+    return boundPan(nextPan, nextZoom, fittedSize, { width: container.clientWidth, height: container.clientHeight });
+  }, [fittedSize]);
+  const captureAspectRatio = (source: string, image: HTMLImageElement) => {
+    if (image.src !== new URL(source, window.location.href).href) return;
     if (image.naturalWidth > 0 && image.naturalHeight > 0) {
-      setImageAspectRatio(image.naturalWidth / image.naturalHeight);
+      sourceSizes.current.set(source, { width: image.naturalWidth, height: image.naturalHeight });
+      if (source === activeSource) {
+        const ratio = image.naturalWidth / image.naturalHeight;
+        setImageAspectRatio(ratio);
+        setNaturalWidth(image.naturalWidth);
+        const container = canvasWrapRef.current;
+        if (container) {
+          const availableWidth = Math.max(1, container.clientWidth);
+          const availableHeight = Math.max(1, container.clientHeight);
+          const width = Math.min(availableWidth, availableHeight * ratio);
+          setFittedSize({ width, height: width / ratio });
+        }
+      }
     }
-  }, []);
+  };
 
   return (
-    <section className="viewer">
+    <section className="viewer" data-label-color={photo.labelColor ?? undefined}>
 
-      <div className={`canvas-wrap${zoom > 1 ? ' is-zoomed' : ''}`} tabIndex={0} ref={canvasWrapRef} onContextMenu={onOpenContextMenu} onWheel={(event) => {
+      <div className={`canvas-wrap background-${background}${zoom > 1 ? ' is-zoomed' : ''}`} tabIndex={0} ref={canvasWrapRef} onContextMenu={(event) => onOpenContextMenu(event, selectedResult?.id ?? null)} onWheel={(event) => {
         const container = event.currentTarget;
         container.classList.add('is-gesturing');
         if (wheelEndTimerRef.current !== undefined) window.clearTimeout(wheelEndTimerRef.current);
@@ -1025,17 +1223,27 @@ function Viewer({
           const rect = container.getBoundingClientRect();
           const pointer = { x: event.clientX - (rect.left + rect.width / 2), y: event.clientY - (rect.top + rect.height / 2) };
           const normalizedDelta = event.deltaY * (event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 80 : 1);
+          setFitMode('custom');
           setZoom((current) => {
-            const next = clamp(current * Math.exp(-normalizedDelta * 0.0025), 0.25, 4);
-            const ratio = next / current;
-            setPan((currentPan) => constrainPan({ x: pointer.x - (pointer.x - currentPan.x) * ratio, y: pointer.y - (pointer.y - currentPan.y) * ratio }, next));
+            const next = clamp(current * Math.exp(-normalizedDelta * 0.0025), minZoom, maxZoom);
+            setPan((currentPan) => constrainPan(zoomAround(currentPan, pointer, current, next), next));
             return next;
           });
         } else if (zoom > 1) {
           event.preventDefault();
           setPan((current) => constrainPan({ x: current.x - event.deltaX, y: current.y - event.deltaY }, zoom));
         }
-      }} onPointerDown={(event) => {
+      }} onDoubleClick={(event) => {
+            if (event.target instanceof Element && event.target.closest('input, button')) return;
+            if (zoom > 1.001) { setViewMode('fit'); return; }
+            const rect = canvasWrapRef.current!.getBoundingClientRect();
+            const pointer = { x: event.clientX - rect.left - rect.width / 2, y: event.clientY - rect.top - rect.height / 2 };
+            const next = clamp(Math.max(1.5, rememberedZoomRef.current / 100 * pixelZoom), minZoom, maxZoom);
+            setFitMode('custom');
+            setPan(zoomAround(pan, pointer, zoom, next));
+            setZoom(next);
+          }} onPointerDown={(event) => {
+        if (event.target instanceof Element && event.target.closest('button, input, select, [role="slider"]')) return;
         if (event.button === 0) event.currentTarget.focus({ preventScroll: true });
         if (zoom <= 1 || event.button !== 0) return;
         event.currentTarget.setPointerCapture(event.pointerId);
@@ -1056,24 +1264,25 @@ function Viewer({
         <div className="viewer-title">
           {onClose && <IconButton label="关闭看图" onClick={onClose}><ChevronLeft size={16} /></IconButton>}
           <span title={photo.fileName}>{photo.fileName}</span>
+          <PhotoFlag photo={photo} />
           <i>{selectedResult ? `生成版本 ${selectedResult.version}` : isDemo ? '生成版本 2' : photo.workflow?.members.find((member) => member.asset.id === photo.id)?.stageName ?? '原图'}</i>
         </div>
         <div
-          className={`photo-canvas${compareMode === 'split' ? ' is-comparing' : ''}`}
-          style={{ width: fittedSize.width, height: fittedSize.height, transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})` }}
-          onDoubleClick={() => { setPan({ x: 0, y: 0 }); setZoom((current) => current === 1 ? 2 : 1); }}
+          className={`photo-canvas${canCompare && compareMode === 'split' ? ' is-comparing' : ''}`}
+          style={{ width: fittedSize.width, height: fittedSize.height, visibility: fittedSize.height > 0 ? 'visible' : 'hidden', transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})` }}
+
         >
           <div className="preview-unavailable"><Image size={36} /><strong>预览暂不可用</strong><span>图像服务将在后台生成屏幕预览</span></div>
-          {photo.src ? <BufferedPreviewImage className="base-image" src={photo.src} alt={photo.fileName} onReady={captureAspectRatio} /> : null}
+          {photo.src ? <BufferedPreviewImage className="base-image" src={photo.originalSrc ?? photo.src} alt={photo.fileName} onReady={(image) => captureAspectRatio(photo.originalSrc ?? photo.src, image)} /> : null}
           {generatedSource && !showOriginal && (
             <div
               className="generated-layer"
               style={compareMode === 'split' ? { clipPath: `inset(0 ${100 - split}% 0 0)` } : undefined}
             >
-              <BufferedPreviewImage className="generated-image" src={generatedSource} alt="AI 生成版本" onReady={(image) => { if (!photo.src) captureAspectRatio(image); }} />
+              <BufferedPreviewImage className="generated-image" src={generatedSource} alt="AI 生成版本" onReady={(image) => captureAspectRatio(generatedSource, image)} />
             </div>
           )}
-          {compareMode === 'split' && (
+          {canCompare && compareMode === 'split' && (
             <>
               <input
                 className="compare-input"
@@ -1090,9 +1299,15 @@ function Viewer({
             </>
           )}
         </div>
+      {selectedResult && !isDemo && <div className="viewer-review-overlay" role="group" aria-label="当前版本审阅" onPointerDown={(event) => event.stopPropagation()}>
+        <button type="button" title="接受当前版本" aria-label="接受当前版本" aria-pressed={selectedResult.reviewState === 'accepted'} onClick={() => void onReview(selectedResult.id, 'accepted')}><Check size={15} /></button>
+        <button type="button" title="标记为首选" aria-label="标记为首选" aria-pressed={selectedResult.reviewState === 'preferred'} onClick={() => void onReview(selectedResult.id, 'preferred')}><Star size={15} fill={selectedResult.reviewState === 'preferred' ? 'currentColor' : 'none'} /></button>
+        <button type="button" title="拒绝当前版本" aria-label="拒绝当前版本" aria-pressed={selectedResult.reviewState === 'rejected'} onClick={() => void onReview(selectedResult.id, 'rejected')}><X size={15} /></button>
+      </div>}
+      {(trackedExportNotice || viewerNotice) && <span className="viewer-operation-notice" role="status">{trackedExportNotice || viewerNotice}</span>}
       </div>
       <ViewerToolbar>
-        <div className="viewer-actions" data-tool-group="compare">
+        {(results.length > 0 || isDemo) && <div className="viewer-actions" data-tool-group="compare">
           <div className="segmented-control labeled">
             <button
               className={compareMode === 'single' ? 'is-active' : ''}
@@ -1103,23 +1318,36 @@ function Viewer({
             </button>
             <button
               className={compareMode === 'split' ? 'is-active' : ''}
+              disabled={!canCompare}
               onClick={() => setCompareMode('split')}
               type="button"
             >
               <Columns2 size={13} /> 对比
             </button>
           </div>
-        </div>
+        </div>}
         <div className="viewer-actions" data-tool-group="zoom">
-          <IconButton label="缩小" disabled={zoom <= 0.25} onClick={() => adjustZoom(0.8)}><ZoomOut size={15} /></IconButton>
-          <span className="zoom-value" aria-live="polite">{Math.round(zoom * 100)}%</span>
-          <IconButton label="放大" disabled={zoom >= 4} onClick={() => adjustZoom(1.25)}><ZoomIn size={15} /></IconButton>
-          <IconButton label="适应窗口" active={zoom === 1} pressed={zoom === 1} onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}><Maximize2 size={15} /></IconButton>
+          <IconButton label="缩小" disabled={zoom <= minZoom} onClick={() => adjustZoom(0.8)}><ZoomOut size={15} /></IconButton>
+          <ViewerZoomControl percent={zoomPercent} title={photo.originalSrc || selectedResult ? '缩放比例：100% 为实际像素' : '当前为解码预览，100% 按预览像素计算'} onZoom={(percent) => {
+            setFitMode('custom');
+            setZoom(Math.max(minZoom, Math.min(maxZoom, percent / 100 * pixelZoom)));
+            setPan({ x: 0, y: 0 });
+          }} onCommand={(value) => {
+            if (value === 'fit') setViewMode('fit');
+            else if (value === 'width') setViewMode('width');
+            else if (value === 'fullscreen') {
+              const operation = document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+              void operation.catch(() => setViewerNotice('无法切换全屏，请使用系统窗口的全屏按钮'));
+            } else if (value.startsWith('background:')) {
+              const next = value.slice(11) as typeof background;
+              setBackground(next);
+              localStorage.setItem('photoallisai.viewer-background', next);
+            }
+          }} />
+          <IconButton label="放大" disabled={zoom >= maxZoom} onClick={() => adjustZoom(1.25)}><ZoomIn size={15} /></IconButton>
+          <IconButton label="适应窗口" active={fitMode === 'fit'} pressed={fitMode === 'fit'} onClick={() => setViewMode('fit')}><Maximize2 size={15} /></IconButton>
         </div>
-        <div className="viewer-actions" data-tool-group="review">
-          {selectedResult && !isDemo && <span className="review-actions"><button type="button" aria-label="接受当前版本" className={selectedResult.reviewState === 'accepted' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'accepted')}>接受</button><button type="button" aria-label="标记为首选" className={selectedResult.reviewState === 'preferred' ? 'is-review-active' : ''} onClick={() => void onReview(selectedResult.id, 'preferred')}><Star size={12} />首选</button><button type="button" aria-label="拒绝当前版本" className={selectedResult.reviewState === 'rejected' ? 'is-review-rejected' : ''} onClick={() => void onReview(selectedResult.id, 'rejected')}>拒绝</button></span>}
-        </div>
-        <div className="version-switcher" data-tool-group="versions">
+        {(photo.workflow || results.length > 0 || isDemo) && <div className="version-switcher" data-tool-group="versions">
           {photo.workflow && <select aria-label="流程阶段" title="按规则关联" value={photo.id} onChange={(event) => {
             const member = photo.workflow!.members.find((item) => item.asset.id === event.target.value);
             if (member) onWorkflowStageChange?.({ ...mapCatalogAssets([member.asset])[0]!, workflow: photo.workflow! });
@@ -1128,43 +1356,15 @@ function Viewer({
           {isDemo ? <><button type="button">V1</button><button className="is-current" type="button">V2</button></> : [...results].reverse().map((result) => (
             <button className={`version-button${selectedResult?.id === result.id ? ' is-current' : ''}${result.reviewState === 'preferred' ? ' is-preferred' : result.reviewState === 'rejected' ? ' is-rejected' : ''}`} type="button" key={result.id} onClick={() => setSelectedResultId(result.id)} title={result.reviewState === 'preferred' ? '首选' : result.reviewState === 'accepted' ? '已接受' : result.reviewState === 'rejected' ? '已拒绝' : '未审阅'}>V{result.version}</button>
           ))}
-        </div>
-        <div className="version-switcher" data-tool-group="export">
-          <button type="button" title="按当前方案再次生成" aria-label="按当前方案再次生成" disabled={!selectedResult || isDemo} onClick={() => {
-            if (!selectedResult) return;
-            void onRegenerate(selectedResult).then(setExportNotice);
-          }}><RotateCcw size={13} /></button>
-          <select aria-label="导出预设" value={selectedExportPresetId ?? ''} onChange={(event) => onExportPresetChange(event.target.value || null)}>
-            <option value="">默认命名</option>
-            {exportPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
-          </select>
-          <button type="button" title="导出当前版本" aria-label="导出当前版本" disabled={!selectedResult || isDemo} onClick={() => {
-            if (!selectedResult) return;
-            void onExport([selectedResult.id], selectedExportPresetId).then(setExportNotice);
-          }}><Download size={13} /></button>
-          <button type="button" title="在文件管理器中显示生成版本" aria-label="在文件管理器中显示生成版本" disabled={!selectedResult || isDemo} onClick={() => { if (selectedResult) onRevealResult(selectedResult.id); }}><FolderOpen size={13} /></button>
-          {(trackedExportNotice || exportNotice) && <em className="viewer-notice" role="status">{trackedExportNotice || exportNotice}</em>}
-        </div>
+        </div>}
         <div className="viewer-library-tools" data-tool-group="library" ref={onToolbarHostChange} />
       </ViewerToolbar>
     </section>
   );
 }
 
-function WorkflowCommonSettings({ templates, rules, onRulesChange, templateId, onTemplateChange, onOpenTemplates, showTemplatesButton = false }: { templates: PromptTemplate[]; rules: WorkflowRule[]; onRulesChange: React.Dispatch<React.SetStateAction<WorkflowRule[]>>; templateId: string; onTemplateChange: (id: string) => void; onOpenTemplates: () => void; showTemplatesButton?: boolean }): React.JSX.Element {
-  return <section className="inspector-section workflow-inspector-settings">
-    <div className="inspector-heading"><span>工作流通用设置</span></div>
-    <label className="workflow-field"><span>批次默认模板</span><select aria-label="工作流批次默认模板" value={templateId} onChange={(event) => onTemplateChange(event.target.value)}><option value="">默认分层模板</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></label>
-    <div className="workflow-inspector-rule-heading">通用规则</div>
-    {rules.map((rule) => <label className="workflow-rule" key={rule.id}><input type="checkbox" checked={rule.enabled} aria-label={`启用 ${rule.text}`} onChange={() => onRulesChange((items) => items.map((item) => item.id === rule.id ? { ...item, enabled: !item.enabled } : item))} /><input aria-label={`编辑规则 ${rule.text}`} value={rule.text} onChange={(event) => onRulesChange((items) => items.map((item) => item.id === rule.id ? { ...item, text: event.target.value } : item))} /></label>)}
-    <div className="workflow-inspector-actions"><button className="quiet-button compact" type="button" onClick={() => onRulesChange((items) => [...items, { id: crypto.randomUUID(), text: '', enabled: true }])}><Plus size={12} />添加规则</button>{showTemplatesButton && <button className="quiet-button compact" type="button" onClick={onOpenTemplates}>模板库</button>}</div>
-  </section>;
-}
-
 function AiPanel({
   photo,
-  results,
-  trashedResults,
   revision,
   isDemo,
   notice,
@@ -1172,21 +1372,11 @@ function AiPanel({
   analyzing,
   analysisTaskStatus,
   analysisErrorCode,
-  generationProfiles,
-  templates,
-  onOpenTemplates,
-  onGenerate,
-  onTrashResult,
-  onRestoreResult,
   onAddToWorkflow,
   onOpenBatch,
   workflowQueueCount,
   workflowPosition,
-  selectionCount,
-  workflowRules,
-  onWorkflowRulesChange,
-  workflowTemplateId,
-  onWorkflowTemplateChange
+  selectionCount
 }: {
   photo: Photo;
   results: GenerationResult[];
@@ -1221,34 +1411,36 @@ function AiPanel({
   const analysisSyncing = analysisTaskStatus === 'completed' && !result;
   const analysisPending = analysisQueued || analysisRunning || analysisSyncing;
   const score = isDemo ? 86 : result ? Math.round(result.quality.overallScore) : '--';
+  const scoreLevel = typeof score !== 'number' ? undefined : score >= 85 ? 'excellent' : score >= 70 ? 'good' : score >= 50 ? 'fair' : 'poor';
+  const scoreHint = scoreLevel === 'excellent' ? '优秀 · 85–100 分' : scoreLevel === 'good' ? '良好 · 70–84 分' : scoreLevel === 'fair' ? '一般 · 50–69 分' : scoreLevel === 'poor' ? '需改善 · 0–49 分' : '尚无评分';
   const summary = isDemo ? '自然光人像' : result?.summary ?? (analysisRunning ? '正在视觉分析' : analysisQueued ? '已加入分析队列' : analysisSyncing ? '正在载入分析结果' : analysisTaskStatus === 'failed' ? '视觉分析失败' : '等待视觉分析');
-  const description = isDemo ? '主体清晰，背景存在干扰元素' : result?.catalog.shortDescription;
 
   return (
     <div className="ai-panel-content">
-        <header className="ai-selection-scope"><span>{selectionCount > 1 ? '当前选择' : '当前图片'}</span><strong>{selectionCount > 1 ? `${selectionCount} 张图片` : photo.fileName}</strong></header>
+        <header className="ai-selection-scope"><strong>{selectionCount > 1 ? `${selectionCount} 张图片` : photo.fileName}</strong></header>
         <section className="ai-purpose-card" aria-label="视觉分析">
-        <header className="ai-purpose-heading"><Search size={15} /><strong>视觉分析</strong><span>识别与建议</span></header>
         {selectionCount > 1 && <p className="ai-current-preview">当前查看：{photo.fileName}</p>}
         <div className="analysis-head">
-          <div className="analysis-score"><span>AI</span><strong>{score}</strong></div>
-          <div className="analysis-head-content"><strong>{summary}</strong>{description && <p>{description}</p>}</div>
-          <span className="confidence">{isDemo ? '分析完成' : analysisRunning ? '分析中' : analysisQueued ? '队列中' : analysisSyncing ? '同步中' : analysisTaskStatus === 'failed' ? '失败' : result ? '分析完成' : '未分析'}</span>
-          {!isDemo && <div className="analysis-head-actions"><button className="analysis-primary-action" type="button" onClick={onAnalyze} disabled={analyzing || (selectionCount === 1 && analysisPending)}>{analyzing ? '正在提交…' : selectionCount > 1 ? `分析选中的 ${selectionCount} 张` : analysisRunning ? '正在分析' : analysisQueued ? '等待分析' : analysisSyncing ? '正在同步' : result ? '重新分析本图' : '分析本图'}</button></div>}
+          <div className="analysis-meta">
+          <div className="analysis-score" data-level={scoreLevel}><span>AI 评分</span><strong title={scoreHint} aria-label={`AI 评分：${score}，${scoreHint}`}>{score}</strong></div>
+          <IconButton label={analyzing ? '正在提交' : selectionCount > 1 ? `分析选中的 ${selectionCount} 张` : analysisRunning ? '正在分析' : analysisQueued ? '等待分析' : analysisSyncing ? '正在同步' : isDemo || result ? '重新分析本图' : '分析本图'} onClick={onAnalyze} disabled={isDemo || analyzing || (selectionCount === 1 && analysisPending)}><RefreshCw size={14} className={analyzing || analysisRunning || analysisSyncing ? 'is-spinning' : undefined} /></IconButton>
+          </div>
+          <div className="analysis-head-content"><strong>{summary}</strong></div>
           {!isDemo && notice && <p className="analysis-notice" aria-live="polite">{notice}</p>}
           {!isDemo && analysisTaskStatus === 'failed' && <AnalysisFailure code={analysisErrorCode} />}
         </div>
 
-        {(isDemo || result) && <div className="inspector-section">
-          <div className="inspector-heading"><span>本图分析结果</span><span className="ai-result-file" title={photo.fileName}>{photo.fileName}</span></div>
+        {(isDemo || result) && <details className="analysis-details" key={photo.id}>
+          <summary><ChevronRight size={14} /><span>详细分析</span></summary>
+          <div className="analysis-details-content">
           <p className="analysis-copy">{isDemo ? '柔和侧光塑造了自然肤色。建议保留浅景深和发丝细节，同时清理右后方路人并轻微提亮面部。' : result?.report}</p>
-          {isDemo ? <><div className="issue-row"><i className="severity high" /><span>背景路人分散注意力</span><em>严重</em></div><div className="issue-row"><i className="severity medium" /><span>面部中间调略暗</span><em>中等</em></div></> : result?.quality.issues.map((issue) => <div className="issue-row" key={`${issue.type}-${issue.description}`}><i className={`severity ${issue.severity >= 0.7 ? 'high' : 'medium'}`} /><span>{issue.description}</span><em>{Math.round(issue.confidence * 100)}%</em></div>)}
-        </div>}
+          {isDemo ? <><div className="issue-row"><i className="severity high" /><span>背景路人分散注意力</span><em>严重</em></div><div className="issue-row"><i className="severity medium" /><span>面部中间调略暗</span><em>中等</em></div></> : result?.quality.issues.map((issue) => <div className="issue-row" key={`${issue.type}-${issue.description}`}><i className={`severity ${issue.severity >= 0.7 ? 'high' : 'medium'}`} /><span>{issue.description}</span><em title="识别置信度">{Math.round(issue.confidence * 100)}%</em></div>)}
+          </div>
+        </details>}
         </section>
         <section className="ai-purpose-card ai-batch-destination" aria-label="批量修图">
-          <header className="ai-purpose-heading"><Image size={15} /><strong>批量修图</strong><span>{workflowQueueCount} 张图片</span></header>
+          <header className="ai-purpose-heading"><Image size={15} /><strong>批量修图</strong><span>{workflowQueueCount} 张图片</span><IconButton label="打开批量修图" onClick={onOpenBatch}><ChevronRight size={14} /></IconButton></header>
           <button className="secondary-action compact" type="button" onClick={onAddToWorkflow}><Plus size={14} />{selectionCount > 1 ? `添加选中的 ${selectionCount} 张到批量修图` : '添加本图到批量修图'}</button>
-          <button className="quiet-button compact" type="button" onClick={onOpenBatch}>打开批量修图<ChevronRight size={13} /></button>
           {workflowPosition !== null && <small>本图已在修图列表中</small>}
         </section>
     </div>
@@ -1268,8 +1460,7 @@ function GlobalAiPanel({
   workflowRules,
   onWorkflowRulesChange,
   workflowTemplateId,
-  onWorkflowTemplateChange,
-  onOpenAgent
+  onWorkflowTemplateChange
 }: {
   photo: Photo | undefined;
   selectedIds: ReadonlySet<string>;
@@ -1315,7 +1506,7 @@ function GlobalAiPanel({
   }, [isDemo, workspaceTab]);
 
   useEffect(() => {
-    if (isDemo || !photo) {
+    if (isDemo || !photo || photo.temporary) {
       setRevision(undefined);
       setResults([]);
       setTrashedResults([]);
@@ -1340,8 +1531,13 @@ function GlobalAiPanel({
   }, [isDemo, photo, refreshVersion]);
 
   if (!photo) {
-    return <div className="ai-panel-content"><section className="ai-purpose-card"><header className="ai-purpose-heading"><Search size={15} /><strong>视觉分析</strong></header><p className="ai-empty-selection">选择图片以查看内容识别与修改建议</p></section><section className="ai-purpose-card ai-batch-destination"><header className="ai-purpose-heading"><Image size={15} /><strong>批量修图</strong><span>{workflowAssetIds.length} 张图片</span></header><button className="quiet-button compact" type="button" onClick={onOpenBatch}>打开批量修图<ChevronRight size={13} /></button></section></div>;
+    return <div className="ai-panel-content"><section className="ai-purpose-card"><p className="ai-empty-selection">未选择图片</p></section><section className="ai-purpose-card ai-batch-destination"><header className="ai-purpose-heading"><Image size={15} /><strong>批量修图</strong><span>{workflowAssetIds.length} 张图片</span><IconButton label="打开批量修图" onClick={onOpenBatch}><ChevronRight size={14} /></IconButton></header></section></div>;
   }
+
+  if (photo.temporary) return <div className="ai-panel-content"><section className="ai-purpose-card"><button className="secondary-action" type="button" disabled={analyzing} onClick={() => {
+    setAnalyzing(true);
+    void window.desktopApi.linkImageDirectory(photo.id).then(() => setNotice('已关联所在文件夹，可在图库中选择图片进行分析与批量修图。')).catch((error: unknown) => setNotice(error instanceof Error ? error.message : '关联失败')).finally(() => setAnalyzing(false));
+  }}><FolderInput size={14} />关联所在文件夹</button>{notice && <p role="status">{notice}</p>}</section></div>;
 
   const targetIds = selectedIds.size > 0 && (workspaceTab !== 'workflow' || selectedIds.has(photo.id)) ? [...selectedIds] : [photo.id];
   const analyze = async () => {
@@ -1387,25 +1583,48 @@ function GlobalAiPanel({
   return <AiPanel photo={photo} results={results} trashedResults={trashedResults} revision={revision} isDemo={isDemo} notice={notice} onAnalyze={() => void analyze()} analyzing={analyzing} analysisTaskStatus={latestAnalysisTask?.status} analysisErrorCode={latestAnalysisTask?.errorCode ?? null} generationProfiles={profiles.filter((item) => item.purpose === 'generation' && item.enabled)} templates={templates} onOpenTemplates={onOpenTemplates} onGenerate={generate} onTrashResult={trash} onRestoreResult={restore} onOpenBatch={onOpenBatch} onAddToWorkflow={() => onAddAssetsToWorkflow(targetIds)} workflowQueueCount={workflowAssetIds.length} workflowPosition={workflowIndex >= 0 ? workflowIndex + 1 : null} selectionCount={targetIds.length} workflowRules={workflowRules} onWorkflowRulesChange={onWorkflowRulesChange} workflowTemplateId={workflowTemplateId} onWorkflowTemplateChange={onWorkflowTemplateChange} />;
 }
 
-function ActionToggle({ title, detail, risk, checked, onChange }: { title: string; detail: string; risk: string; checked: boolean; onChange: () => void }): React.JSX.Element {
-  return (
-    <button className="action-toggle" type="button" aria-pressed={checked} onClick={onChange}>
-      <span className={`check-box${checked ? ' is-checked' : ''}`}>{checked && <Check size={12} />}</span>
-      <span><strong>{title}</strong><small>{detail}</small></span>
-      <span className="risk-chip">{risk}</span>
-    </button>
-  );
-}
-
 function InspectorInfo({ photo, revision }: { photo: Photo; revision: AnalysisRevision | undefined }): React.JSX.Element {
+  const [details, setDetails] = useState<{ id: string; data?: FileDetails; error?: string }>({ id: photo.id });
+  const [dimensions, setDimensions] = useState<{ id: string; width: number; height: number } | null>(null);
+  useEffect(() => {
+    let active = true;
+    void window.desktopApi.getFileDetails(photo.id).then((data) => { if (active) setDetails({ id: photo.id, data }); }, (error: unknown) => { if (active) setDetails({ id: photo.id, error: error instanceof Error ? error.message : '文件信息不可用' }); });
+    const image = new window.Image();
+    image.onload = () => { if (active) setDimensions({ id: photo.id, width: image.naturalWidth, height: image.naturalHeight }); };
+    image.src = photo.originalSrc ?? photo.src;
+    return () => { active = false; image.onload = null; };
+  }, [photo.id, photo.originalSrc, photo.src]);
+  const data = details.id === photo.id ? details.data : undefined;
+  const size = dimensions?.id === photo.id ? `${dimensions.width} × ${dimensions.height}` : data?.width && data.height ? `${data.width} × ${data.height}` : '—';
   const fields = [
     ['文件名', photo.fileName],
     ['格式', photo.format],
-    ['尺寸', photo.dimensions],
+    [photo.originalSrc ? '尺寸' : '预览尺寸', size],
+    ...(data ? [['文件大小', formatStorageBytes(data.sizeBytes)], ['修改时间', new Date(data.modifiedAt).toLocaleString()], ['位置', data.path]] : []),
     ['评分', `${photo.rating} / 5`],
-    ['AI 状态', revision ? '已分析' : '未分析']
+    ...(revision ? [['AI 状态', '已分析']] : [])
   ];
-  return <div className="inspector-info"><section className="inspector-section"><div className="inspector-heading"><span>文件信息</span></div><div className="metadata-list">{fields.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div></section><section className="inspector-section"><div className="inspector-heading"><span>用户标签</span><span className="section-count">{photo.tags?.length ?? 0} 个</span></div>{photo.tags?.length ? <div className="metadata-tags">{photo.tags.map((tag) => <span key={tag.id}>{tag.name}</span>)}</div> : <div className="inline-empty">尚未添加标签</div>}</section>{revision && <section className="inspector-section"><div className="inspector-heading"><span>AI 编目</span></div><p className="analysis-copy">{revision.result.catalog.shortDescription}</p></section>}</div>;
+  const shooting = data ? [['相机', data.camera], ['镜头', data.lens], ['拍摄时间', data.takenAt ? new Date(data.takenAt).toLocaleString() : undefined], ['快门', data.exposure], ['光圈', data.aperture ? `f/${data.aperture}` : undefined], ['ISO', data.iso?.toString()], ['焦距', data.focalLength ? `${data.focalLength} mm` : undefined]].filter(([, value]) => value) : [];
+  return <div className="inspector-info"><section className="inspector-section"><div className="inspector-heading"><span>文件信息</span>{data && <IconButton label="复制文件路径" onClick={() => { void navigator.clipboard.writeText(data.path).catch(() => window.dispatchEvent(new CustomEvent(OPERATION_NOTICE_EVENT, { detail: '无法复制文件路径，请检查剪贴板权限' }))); }}><Copy size={13} /></IconButton>}</div><div className="metadata-list">{fields.map(([label, value]) => <div key={label}><span>{label}</span><strong title={value}>{value}</strong></div>)}</div>{details.id === photo.id && details.error && !E2E_DEMO_MODE && <p className="inline-error">{details.error}</p>}</section>{shooting.length > 0 && <details className="inspector-section metadata-shooting"><summary>拍摄信息</summary><div className="metadata-list">{shooting.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div></details>}<section className="inspector-section"><div className="inspector-heading"><span>用户标签</span><span className="section-count">{photo.tags?.length ?? 0} 个</span></div>{photo.tags?.length ? <div className="metadata-tags">{photo.tags.map((tag) => <span key={tag.id}>{tag.name}</span>)}</div> : <div className="inline-empty">尚未添加标签</div>}</section>{revision && <section className="inspector-section"><div className="inspector-heading"><span>AI 编目</span></div><p className="analysis-copy">{revision.result.catalog.shortDescription}</p></section>}</div>;
+}
+
+function GlobalDetailsPanel({ photo }: { photo: Photo }): React.JSX.Element {
+  const [state, setState] = useState<{ id: string; revision?: AnalysisRevision | undefined; results: GenerationResult[]; trashed: TrashedGenerationResult[]; error?: string }>({ id: photo.id, results: [], trashed: [] });
+  const [refresh, setRefresh] = useState(0);
+  useEffect(() => {
+    let active = true;
+    if (photo.temporary) return;
+    const load = () => {
+      void Promise.all([window.desktopApi.listAnalysisRevisions(photo.id), window.desktopApi.listGenerationResults(photo.id), window.desktopApi.listTrashedGenerationResults(photo.id)])
+        .then(([revisions, results, trashed]) => { if (active) setState({ id: photo.id, revision: revisions[0], results, trashed }); })
+        .catch((error: unknown) => { if (active) setState({ id: photo.id, results: [], trashed: [], error: error instanceof Error ? error.message : '无法读取版本' }); });
+    };
+    load();
+    const timer = window.setInterval(load, 3000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [photo.id, photo.temporary, refresh]);
+  const current = state.id === photo.id && !photo.temporary ? state : undefined;
+  return <div className="inspector-details"><InspectorInfo photo={photo} revision={current?.revision} />{current?.error && <p className="inline-error">{current.error}</p>}{current && (current.results.length > 0 || current.trashed.length > 0) && <InspectorVersions results={current.results} trashedResults={current.trashed} onTrashResult={async (id) => { await window.desktopApi.trashGenerationResult({ resultId: id }); setRefresh((value) => value + 1); }} onRestoreResult={async (id) => { await window.desktopApi.restoreGenerationResult({ resultId: id }); setRefresh((value) => value + 1); }} />}</div>;
 }
 
 function InspectorVersions({ results, trashedResults, onTrashResult, onRestoreResult }: { results: GenerationResult[]; trashedResults: TrashedGenerationResult[]; onTrashResult: (resultId: string) => Promise<void>; onRestoreResult: (resultId: string) => Promise<void> }): React.JSX.Element {
@@ -1451,7 +1670,7 @@ function TaskAnalysisResult({ task }: { task: PersistedTask }): React.JSX.Elemen
       if (active) setLegacyResult(revision?.result ?? null);
     }).catch(() => undefined);
     return () => { active = false; };
-  }, [task.id, task.status, task.assetId, task.createdAt, task.updatedAt, task.payload.providerProfileId, task.result]);
+  }, [task.id, task.kind, task.status, task.assetId, task.createdAt, task.updatedAt, task.payload.providerProfileId, task.result]);
   if (task.kind !== 'analysis' || task.status !== 'completed') return null;
   const result = parsed.success ? parsed.data : legacyResult;
   if (!result) return <div className="task-analysis-result">本次任务未保存可查看的分析结果</div>;
@@ -1461,7 +1680,7 @@ function TaskAnalysisResult({ task }: { task: PersistedTask }): React.JSX.Elemen
 function TaskOutput({ task, photos }: { task: PersistedTask; photos: Photo[] }): React.JSX.Element | null {
   if (task.kind === 'generation') {
     const generated = generationResultSchema.safeParse(task.result?.generation);
-    return <details className="task-analysis-result"><summary>生成详情</summary><div className="task-analysis-report">{generated.success && <figure className="task-generated-result"><img src={generated.data.resultUrl} alt={generated.data.fileName} loading="lazy" /><figcaption>{generated.data.fileName}</figcaption></figure>}<p className="task-prompt-text">{typeof task.payload.prompt === 'string' ? task.payload.prompt : '未保存提示词'}</p></div></details>;
+    return <details className="task-analysis-result"><summary>生成详情</summary><div className="task-analysis-report">{generated.success && <figure className="task-generated-result" data-label-color={photos.find((photo) => photo.id === task.assetId)?.labelColor ?? undefined}><img src={generated.data.resultUrl} alt={generated.data.fileName} loading="lazy" /><figcaption>{generated.data.fileName}</figcaption></figure>}<p className="task-prompt-text">{typeof task.payload.prompt === 'string' ? task.payload.prompt : '未保存提示词'}</p></div></details>;
   }
   if (task.kind === 'collection-analysis') {
     const report = collectionAnalysisReportSchema.safeParse(task.result);
@@ -1477,9 +1696,11 @@ function TaskOutput({ task, photos }: { task: PersistedTask; photos: Photo[] }):
   return null;
 }
 
-function useTaskPhotos(tasks: PersistedTask[], providedPhotos: Photo[]): Photo[] {
+function useAssetPhotos(assetIds: string[], providedPhotos: Photo[]): Photo[] {
   const [resolved, setResolved] = useState<Photo[]>([]);
-  const missingIds = [...new Set(tasks.flatMap((task) => task.assetId ? [task.assetId] : []))]
+  const [revision, setRevision] = useState(0);
+  useEffect(() => window.desktopApi.onCatalogChanged(() => setRevision((current) => current + 1)), []);
+  const missingIds = [...new Set(assetIds)]
     .filter((id) => !providedPhotos.some((photo) => photo.id === id)).sort();
   const missingKey = JSON.stringify(missingIds);
   useEffect(() => {
@@ -1494,13 +1715,17 @@ function useTaskPhotos(tasks: PersistedTask[], providedPhotos: Photo[]): Photo[]
       if (active) setResolved(loaded);
     })().catch(() => { if (active) setResolved([]); });
     return () => { active = false; };
-  }, [missingKey]);
+  }, [missingKey, revision]);
   return [...providedPhotos, ...resolved.filter((photo) => !providedPhotos.some((item) => item.id === photo.id))];
+}
+
+function useTaskPhotos(tasks: PersistedTask[], providedPhotos: Photo[]): Photo[] {
+  return useAssetPhotos(tasks.flatMap((task) => task.assetId ? [task.assetId] : []), providedPhotos);
 }
 
 function TaskBatchGroup({ tasks, photos: providedPhotos, children, onOpenViewer: openViewer, expanded = false, expandRequest = 0, compact = false }: { tasks: PersistedTask[]; photos: Photo[]; children?: React.ReactNode; onOpenViewer?: (assetId: string, assetIds?: string[]) => void; expanded?: boolean; expandRequest?: number; compact?: boolean }): React.JSX.Element {
   const photos = useTaskPhotos(tasks, providedPhotos);
-  const onOpenViewer = openViewer ? (assetId: string) => openViewer(assetId, tasks.flatMap((task) => task.assetId ? [task.assetId] : [])) : undefined;
+  const onOpenViewer = useMemo(() => openViewer ? (assetId: string) => openViewer(assetId, tasks.flatMap((task) => task.assetId ? [task.assetId] : [])) : undefined, [openViewer, tasks]);
   const detailRef = useRef<HTMLDetailsElement>(null);
   useEffect(() => {
     const element = detailRef.current;
@@ -1522,7 +1747,7 @@ function TaskBatchGroup({ tasks, photos: providedPhotos, children, onOpenViewer:
   const first = tasks[0]!;
   const title = `${taskLabels[first.kind]} · ${new Date(Math.min(...tasks.map((task) => task.createdAt))).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
   const summary = <><ChevronRight size={14} /><TaskKindIcon kind={first.kind} /><span className="task-batch-heading"><strong>{title}</strong><small>{taskImageName(first, photos)}{tasks.length > 1 ? ` 等 ${stats.total} 项` : ` · ${stats.total} 项`}</small></span><span className="task-batch-counts"><span>成功 {stats.completed}</span>{(!compact || stats.active > 0) && <span>处理中 {stats.active}</span>}{(!compact || stats.queued > 0) && <span>等待 {stats.queued}</span>}{stats.paused > 0 && <span>暂停 {stats.paused}</span>}{(!compact || stats.failed > 0) && <span className={stats.failed > 0 ? 'failed-count' : ''}>失败 {stats.failed}</span>}{stats.canceled > 0 && <span>取消 {stats.canceled}</span>}</span><progress aria-label="批次进度" max={Math.max(stats.total, 1)} value={stats.settled} /></>;
-  return <details ref={detailRef} className={`task-batch-group${compact ? ' is-compact' : ''}`}><summary className="task-batch-summary" data-task-batch={first.id}>{summary}<TaskBatchButtons tasks={tasks} /></summary><div className="task-batch-members">{children ?? tasks.map((task) => { const photo = photos.find((item) => item.id === task.assetId); return <div className="task-batch-member" key={task.id}><div className="task-row task-activity-row" data-task-id={task.id}><button className="task-member-preview" type="button" disabled={!photo || !onOpenViewer} onClick={() => { if (photo && onOpenViewer) onOpenViewer(photo.id); }} aria-label={photo ? `预览 ${photo.fileName}` : '任务图片预览'}>{(photo?.thumbnailSrc || photo?.src) ? <img src={photo.thumbnailSrc || photo.src} alt={photo.fileName} /> : <TaskKindIcon kind={task.kind} />}</button><span className="task-title"><strong>{taskImageName(task, photos)}</strong><small>{taskScope(task)}</small></span><span className={`task-state state-${task.status}`}>{taskStage(task)}</span></div>{task.status === 'failed' && ((task.kind === 'analysis' || task.kind === 'collection-analysis') ? <AnalysisFailure code={task.errorCode} taskId={task.id} className="task-analysis-failure" /> : <div className="task-analysis-failure" role="alert">{task.kind === 'export' ? exportFailureMessage(task.errorCode ?? '') : '任务执行失败'} <code>{task.errorCode}</code></div>)}<TaskAnalysisResult task={task} /><TaskOutput task={task} photos={photos} />{task.kind === 'export' && task.result && <div className="task-analysis-result">成功 {Number(task.result.succeeded) || 0} · 失败 {Number(task.result.failed) || 0}{exportTaskReport(task)?.files.map((file) => <p key={file.resultId}>{file.fileName}</p>)}{exportTaskReport(task)?.failures.map((failure) => <p key={failure.resultId}>{exportFailureMessage(failure.errorCode)} · {failure.errorCode}</p>)}</div>}</div>; })}</div></details>;
+  return <details ref={detailRef} className={`task-batch-group${compact ? ' is-compact' : ''}`}><summary className="task-batch-summary" data-task-batch={first.id}>{summary}<TaskBatchButtons tasks={tasks} /></summary><div className="task-batch-members">{children ?? tasks.map((task) => { const photo = photos.find((item) => item.id === task.assetId); return <div className="task-batch-member" key={task.id}><div className="task-row task-activity-row" data-task-id={task.id}><button className="task-member-preview" data-label-color={photo?.labelColor ?? undefined} type="button" disabled={!photo || !onOpenViewer} onClick={() => { if (photo && onOpenViewer) onOpenViewer(photo.id); }} aria-label={photo ? `预览 ${photo.fileName}` : '任务图片预览'}>{(photo?.thumbnailSrc || photo?.src) ? <img src={photo.thumbnailSrc || photo.src} alt={photo.fileName} /> : <TaskKindIcon kind={task.kind} />}</button><span className="task-title"><strong>{taskImageName(task, photos)}</strong><small>{taskScope(task)}</small></span><span className={`task-state state-${task.status}`}>{taskStage(task)}</span></div>{task.status === 'failed' && ((task.kind === 'analysis' || task.kind === 'collection-analysis') ? <AnalysisFailure code={task.errorCode} taskId={task.id} className="task-analysis-failure" /> : <div className="task-analysis-failure" role="alert">{task.kind === 'export' ? exportFailureMessage(task.errorCode ?? '') : '任务执行失败'} <code>{task.errorCode}</code></div>)}<TaskAnalysisResult task={task} /><TaskOutput task={task} photos={photos} />{task.kind === 'export' && task.result && <div className="task-analysis-result">成功 {Number(task.result.succeeded) || 0} · 失败 {Number(task.result.failed) || 0}{exportTaskReport(task)?.files.map((file) => <p key={file.resultId}>{file.fileName}</p>)}{exportTaskReport(task)?.failures.map((failure) => <p key={failure.resultId}>{exportFailureMessage(failure.errorCode)} · {failure.errorCode}</p>)}</div>}</div>; })}</div></details>;
 }
 
 function TaskBar({ panelVisibility, onTogglePanel, suspended, open, onToggle, onOpenTaskCenter, onOpenViewer: openViewer, tasks, counts, photos }: { panelVisibility: { left: boolean; right: boolean }; onTogglePanel: (side: 'left' | 'right') => void; suspended: boolean; open: boolean; onToggle: () => void; onOpenTaskCenter: () => void; onOpenViewer: (assetId: string, assetIds?: string[]) => void; tasks: PersistedTask[] | null; counts?: Pick<TaskPage, 'activeCount' | 'queuedCount' | 'failedCount' | 'pausedCount'>; photos: Photo[] }): React.JSX.Element {
@@ -1580,6 +1805,12 @@ type LibraryWorkspaceProps = {
   selectedSmartCollection: CatalogSmartCollection['id'] | null;
   selectedTagId: string | null;
   totalCount: number;
+  filterSearch: string;
+  photoFilters: PhotoFilters;
+  onPhotoFiltersChange: React.Dispatch<React.SetStateAction<PhotoFilters>>;
+  sortDirection: 'asc' | 'desc' | undefined;
+  onSortDirectionChange: (direction: 'asc' | 'desc') => void;
+  onSearchChange: (value: string) => void;
   favoriteOnly: boolean;
   onFavoriteOnlyChange: (value: boolean) => void;
   sortBy: CatalogSort;
@@ -1633,7 +1864,7 @@ function collectionTitle(props: Pick<LibraryWorkspaceProps, 'catalogFolders' | '
   if (props.selectedAlbumId) return props.catalogAlbums.find((album) => album.id === props.selectedAlbumId)?.name ?? '相册';
   if (props.selectedSmartCollection) {
     return props.selectedSmartCollection === 'recent' ? '最近 30 天'
-      : props.selectedSmartCollection === 'favorites' ? '首选照片'
+      : props.selectedSmartCollection === 'favorites' ? '收藏照片'
         : props.selectedSmartCollection === 'unrated' ? '未评分'
           : props.selectedSmartCollection === 'unanalyzed' ? '等待 AI 分析'
             : props.selectedSmartCollection === 'to-review' ? '待审阅' : '已生成';
@@ -1642,15 +1873,132 @@ function collectionTitle(props: Pick<LibraryWorkspaceProps, 'catalogFolders' | '
 }
 
 function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetId: string) => void; onOpenPhotoContextMenu?: (event: React.MouseEvent, photo: Photo) => void }): React.JSX.Element {
+  const [filtersOpen, setFiltersOpen] = useState(() => { try { return localStorage.getItem('photoallisai.catalog-filters-open') === 'true'; } catch { return false; } });
+  const { minimumRating, ratingOperator, flags, colors } = props.photoFilters;
+  const filtered = Boolean(props.searchQuery.trim() || minimumRating !== null || flags.length || colors.length || props.favoriteOnly);
+  const [groupDetails, setGroupDetails] = useState<Record<string, { modifiedAt: number | undefined; data: FileDetails | null }>>({});
+  const detailRequests = useRef(new Set<string>());
+  const needsDetails = props.photoFilters.groupBy.some((dimension) => metadataDimensions.has(dimension));
+  const missingDetails = needsDetails && !props.isDemo ? props.availablePhotos.filter((photo) => !groupDetails[photo.id] || groupDetails[photo.id]?.modifiedAt !== photo.modifiedAt) : [];
+  useEffect(() => {
+    if (!needsDetails || props.isDemo) return;
+    const missing = props.availablePhotos.filter((photo) => (!groupDetails[photo.id] || groupDetails[photo.id]?.modifiedAt !== photo.modifiedAt) && !detailRequests.current.has(photo.id));
+    if (!missing.length) return;
+    let active = true;
+    const load = async () => {
+      for (let index = 0; active && index < missing.length; index += 6) {
+        const batch = missing.slice(index, index + 6);
+        batch.forEach((photo) => detailRequests.current.add(photo.id));
+        const results = await Promise.all(batch.map(async (photo) => {
+          const data = await window.desktopApi.getFileDetails(photo.id).catch(() => null);
+          return [photo.id, { modifiedAt: photo.modifiedAt, data }] as const;
+        }));
+        batch.forEach((photo) => detailRequests.current.delete(photo.id));
+        if (active) setGroupDetails((current) => ({ ...current, ...Object.fromEntries(results) }));
+      }
+    };
+    void load();
+    return () => { active = false; };
+  }, [needsDetails, props.isDemo, props.availablePhotos, groupDetails]);
+  const metadata = useMemo(() => Object.fromEntries(props.availablePhotos.flatMap((photo) => {
+    const entry = groupDetails[photo.id];
+    return entry && entry.modifiedAt === photo.modifiedAt ? [[photo.id, entry.data]] : [];
+  })) as Record<string, FileDetails | null>, [groupDetails, props.availablePhotos]);
+  const photoGroups = useMemo(() => groupCatalogPhotos(props.availablePhotos, props.photoFilters.groupBy, props.catalogFolders, props.photoFilters.groupOrder, metadata), [props.availablePhotos, props.photoFilters.groupBy, props.photoFilters.groupOrder, props.catalogFolders, metadata]);
+  const grouped = props.photoFilters.groupBy.length > 0;
+  const setFilter = <K extends keyof PhotoFilters>(key: K, value: React.SetStateAction<PhotoFilters[K]>) => {
+    props.onPhotoFiltersChange((current) => ({ ...current, [key]: typeof value === 'function' ? (value as (old: PhotoFilters[K]) => PhotoFilters[K])(current[key]) : value }));
+  };
   const selection = props.selection;
   const setSelection = props.onSelectionChange;
   const gridRef = useRef<HTMLElement>(null);
   const marqueeOriginRef = useRef<{ x: number; y: number; additive: boolean; initialIds: Set<string> } | null>(null);
   const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [viewMode, setViewMode] = useState<CatalogViewMode>(() => {
-    try { return (window.localStorage.getItem('photoallisai.catalog-view-mode') as CatalogViewMode) || 'grid'; } catch { return 'grid'; }
+    try { const saved = window.localStorage.getItem('photoallisai.catalog-view-mode'); return saved === 'analysis' ? 'list' : saved === 'list' || saved === 'masonry' ? saved : 'grid'; } catch { return 'grid'; }
   });
-  const orderedIds = useMemo(() => props.availablePhotos.map((photo) => photo.id), [props.availablePhotos]);
+  const [visibleColumns, setVisibleColumns] = useState<CatalogColumn[]>(() => {
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem('photoallisai.catalog-columns') ?? 'null');
+      if (Array.isArray(saved)) return ['name', ...catalogColumns.filter((column) => column.id !== 'name' && saved.includes(column.id)).map((column) => column.id)];
+      if (localStorage.getItem('photoallisai.catalog-view-mode') === 'analysis') return ['thumbnail', 'name', 'rating', 'analysis', 'suggestions'];
+    } catch { /* restricted storage */ }
+    return ['thumbnail', 'name', 'rating'];
+  });
+  const [columnMenu, setColumnMenu] = useState<{ x: number; y: number } | null>(null);
+  const [cardWidth, setCardWidth] = useState(155);
+  const [thumbnailSize, setThumbnailSize] = useState(() => {
+    try { const saved = Number(localStorage.getItem('photoallisai.thumbnail-size')); return saved > 0 ? clamp(saved, 100, 420) : 155; } catch { return 155; }
+  });
+  const zoomAnchor = useRef<{ id: string; top: number } | null>(null);
+  const [listAnalyses, setListAnalyses] = useState<Record<string, AnalysisResult | null>>({});
+  const analysisColumnsVisible = viewMode === 'list' && (visibleColumns.includes('analysis') || visibleColumns.includes('suggestions'));
+  useEffect(() => {
+    if (!analysisColumnsVisible || props.isDemo) return;
+    let active = true;
+    const load = async () => {
+      for (let index = 0; active && index < props.availablePhotos.length; index += 4) {
+        const results = await Promise.all(props.availablePhotos.slice(index, index + 4).map(async (photo) => {
+          try { return [photo.id, (await window.desktopApi.listAnalysisRevisions(photo.id))[0]?.result ?? null] as const; }
+          catch { return [photo.id, null] as const; }
+        }));
+        if (active) setListAnalyses((current) => ({ ...current, ...Object.fromEntries(results) }));
+      }
+    };
+    void load();
+    window.addEventListener(TASKS_CHANGED_EVENT, load);
+    return () => { active = false; window.removeEventListener(TASKS_CHANGED_EVENT, load); };
+  }, [analysisColumnsVisible, props.availablePhotos, props.isDemo]);
+  useEffect(() => {
+    if (!columnMenu) return;
+    const close = () => setColumnMenu(null);
+    const keydown = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.stopPropagation(); close(); } };
+    window.addEventListener('pointerdown', close);
+    window.addEventListener('keydown', keydown, true);
+    window.addEventListener('resize', close);
+    return () => { window.removeEventListener('pointerdown', close); window.removeEventListener('keydown', keydown, true); window.removeEventListener('resize', close); };
+  }, [columnMenu]);
+  useEffect(() => {
+    const grid = gridRef.current;
+    if (!grid || viewMode === 'list') return;
+    const wheel = (event: WheelEvent) => {
+      // Chromium exposes trackpad pinch gestures as Ctrl+wheel events.
+      if (!event.ctrlKey || event.deltaY === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const card = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('.catalog-card');
+      if (card?.dataset.assetId) zoomAnchor.current = { id: card.dataset.assetId, top: card.getBoundingClientRect().top };
+      const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? grid.clientHeight : 1);
+      setThumbnailSize((current) => clamp(current * Math.exp(-clamp(delta, -200, 200) * .002), 100, 420));
+    };
+    grid.addEventListener('wheel', wheel, { passive: false });
+    return () => grid.removeEventListener('wheel', wheel);
+  }, [viewMode, props.availablePhotos.length]);
+  useEffect(() => { try { localStorage.setItem('photoallisai.thumbnail-size', String(thumbnailSize)); } catch { /* restricted storage */ } }, [thumbnailSize]);
+  useLayoutEffect(() => {
+    const grid = gridRef.current;
+    const anchor = zoomAnchor.current;
+    if (grid && anchor) {
+      const card = [...grid.querySelectorAll<HTMLElement>('.catalog-card')].find((item) => item.dataset.assetId === anchor.id);
+      if (card) grid.scrollTop += card.getBoundingClientRect().top - anchor.top;
+    }
+    const frame = requestAnimationFrame(() => { zoomAnchor.current = null; });
+    return () => cancelAnimationFrame(frame);
+  }, [thumbnailSize, cardWidth]);
+  const [aspectRatios, setAspectRatios] = useState<Record<string, number>>({});
+  useLayoutEffect(() => {
+    const grid = gridRef.current;
+    if (!grid || viewMode !== 'masonry') return;
+    const measure = () => {
+      const card = grid.querySelector<HTMLElement>('.catalog-card');
+      if (card) setCardWidth(card.getBoundingClientRect().width);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(grid);
+    return () => observer.disconnect();
+  }, [viewMode, props.availablePhotos.length, thumbnailSize, grouped]);
+  const orderedIds = useMemo(() => photoGroups.flatMap((group) => group.items.map((photo) => photo.id)), [photoGroups]);
   const selectedPhoto = props.availablePhotos.find((photo) => selection.focusId === photo.id) ?? null;
 
   useEffect(() => {
@@ -1677,10 +2025,25 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
     event.preventDefault();
     const cards = [...event.currentTarget.querySelectorAll<HTMLElement>('.catalog-card')];
     const currentIndex = Math.max(0, orderedIds.indexOf(selection.focusId ?? orderedIds[0]!));
-    const firstTop = cards[0]?.offsetTop;
-    const columns = Math.max(1, cards.filter((card) => card.offsetTop === firstTop).length);
+    const columns = Math.max(1, cards.filter((card) => card.getBoundingClientRect().top === cards[0]?.getBoundingClientRect().top).length);
     const delta = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : event.key === 'ArrowUp' ? -columns : columns;
-    const targetIndex = clamp(currentIndex + delta, 0, orderedIds.length - 1);
+    let targetIndex = clamp(currentIndex + delta, 0, orderedIds.length - 1);
+    if ((viewMode === 'masonry' || grouped) && cards[currentIndex]) {
+      const current = cards[currentIndex]!.getBoundingClientRect();
+      const horizontal = event.key === 'ArrowLeft' || event.key === 'ArrowRight';
+      const direction = event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 1;
+      let bestDistance = Infinity;
+      targetIndex = currentIndex;
+      cards.forEach((card, index) => {
+        const rect = card.getBoundingClientRect();
+        const dx = rect.left + rect.width / 2 - (current.left + current.width / 2);
+        const dy = rect.top + rect.height / 2 - (current.top + current.height / 2);
+        const primary = horizontal ? dx : dy;
+        const cross = horizontal ? dy : dx;
+        const distance = Math.abs(primary) + Math.abs(cross) * 2;
+        if (primary * direction > 1 && distance < bestDistance) { bestDistance = distance; targetIndex = index; }
+      });
+    }
     const targetId = orderedIds[targetIndex]!;
     let next: SelectionState;
     if (event.shiftKey) {
@@ -1706,33 +2069,49 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
   const someVisibleSelected = orderedIds.some((id) => selection.selectedIds.has(id));
   const selectButton = (photo: Photo) => <input className="catalog-list-select" type="checkbox" aria-label={`选择 ${photo.fileName}`} checked={selection.selectedIds.has(photo.id)} onClick={(event) => event.stopPropagation()} onChange={() => selectPhoto(photo, 'toggle')} />;
   const photoImage = (photo: Photo) => <span className="catalog-list-thumb">{photo.thumbnailSrc || photo.src ? <CatalogImage src={photo.thumbnailSrc ?? photo.src} alt="" /> : <Image size={18} />}</span>;
-  const listRows = props.availablePhotos.map((photo) => <div className={`catalog-list-row${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}`} key={photo.id} data-asset-id={photo.id} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onDoubleClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>
-    {selectButton(photo)}{photoImage(photo)}<span className="catalog-list-name"><strong>{photo.fileName}</strong><small>{photo.format}{photo.workflow ? ` · ${photo.workflow.members.length} 版本` : photo.workflowConflict ? ' · 规则冲突' : ''}</small></span><span>{photo.dimensions}</span><span>{photo.rating ? `${photo.rating} 星` : '未评分'}</span><span className="catalog-list-analysis">{viewMode === 'analysis' ? (photo.offline ? '文件离线，等待重新关联' : photo.rating >= 4 ? '建议保留，可作为精选' : '等待视觉识别与建议') : ''}</span><button className="quiet-button compact" type="button" onClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>打开</button>
-  </div>);
+  const columns = catalogColumns.filter((column) => visibleColumns.includes(column.id));
+  const listStyle = { gridTemplateColumns: `24px ${columns.map((column) => column.width).join(' ')}` };
+  const field = (photo: Photo, id: CatalogColumn): React.ReactNode => {
+    const analysis = listAnalyses[photo.id];
+    switch (id) {
+      case 'thumbnail': return photoImage(photo);
+      case 'name': return <span className="catalog-list-name"><strong><PhotoFlag photo={photo} />{photo.fileName}</strong>{photo.workflow && <small>{photo.workflow.members.length} 版本</small>}{photo.workflowConflict && <small>规则冲突</small>}</span>;
+      case 'format': return photo.format;
+      case 'rating': return <span className="catalog-rating-cell">{photo.rating ? <>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={11} fill="currentColor" />)}</> : '—'}</span>;
+      case 'tags': return photo.tags?.map((tag) => tag.name).join('、') || '—';
+      case 'analysis': return analysis?.summary ?? (photo.offline ? '文件离线' : '暂无分析');
+      case 'suggestions': return analysis ? [...analysis.adjustments.global, ...analysis.adjustments.local].map((item) => item.reason).join('；') || analysis.generationRecommendation.reason || '—' : '—';
+    }
+  };
+  const listRows = photoGroups.flatMap((group) => [...(grouped ? [<header className="catalog-group-heading" key={`group:${group.key}`}><strong>{group.title}</strong><span title="当前已加载的照片数量">{group.items.length} 张</span></header>] : []), ...group.items.map((photo) => <div className={`catalog-list-row${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}`} style={listStyle} role="option" aria-selected={selection.selectedIds.has(photo.id)} tabIndex={0} key={photo.id} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onKeyDown={(event) => { if (event.key === 'Enter') props.onOpenViewer(photo.id); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onDoubleClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>
+    {selectButton(photo)}{columns.map((column) => <span className={`catalog-list-cell catalog-list-cell-${column.id}`} key={column.id}>{field(photo, column.id)}</span>)}
+  </div>)]);
   return (
     <>
-      <main className="catalog-main">
+      <main className={`catalog-main${filtersOpen ? ' has-filters' : ''}`}>
         <header className="catalog-toolbar">
-          <div className="result-summary"><strong>{collectionTitle(props)}</strong><span>{props.totalCount} 张照片</span></div>
           <div className="catalog-toolbar-actions">
             {!props.isDemo && <FileWorkflowControl scope={{ folderId: props.selectedFolderId, albumId: props.selectedAlbumId }} folders={props.catalogFolders} scopeName={collectionTitle(props)} />}
-            <div className="catalog-view-switcher" role="group" aria-label="图库视图"><button className={viewMode === 'list' ? 'is-active' : ''} type="button" aria-label="列表视图" title="列表视图" onClick={() => changeViewMode('list')}><ListFilter size={14} /></button><button className={viewMode === 'grid' ? 'is-active' : ''} type="button" aria-label="网格视图" title="网格视图" onClick={() => changeViewMode('grid')}><Grid2X2 size={14} /></button><button className={viewMode === 'analysis' ? 'is-active' : ''} type="button" aria-label="分析视图" title="分析视图" onClick={() => changeViewMode('analysis')}><WandSparkles size={14} /></button></div>
-            <label className="sort-control"><select aria-label="图库排序" value={props.sortBy} onChange={(event) => props.onSortByChange(event.target.value as CatalogSort)}><option value="modifiedAt">拍摄时间</option><option value="fileName">文件名</option><option value="rating">评分</option></select><ChevronDown size={12} /></label>
-            <button className={`quiet-button${props.favoriteOnly ? ' is-active' : ''}`} type="button" onClick={() => props.onFavoriteOnlyChange(!props.favoriteOnly)}><Star size={13} />仅首选</button>
+            <div className="catalog-view-switcher" role="group" aria-label="图库视图">
+              {([{ mode: 'list', label: '列表视图', icon: ListFilter }, { mode: 'grid', label: '网格视图', icon: Grid2X2 }, { mode: 'masonry', label: '瀑布流视图', icon: PanelsTopLeft }] as const).map(({ mode, label, icon: Icon }) => <button key={mode} className={viewMode === mode ? 'is-active' : ''} type="button" aria-label={label} title={label} aria-pressed={viewMode === mode} onClick={() => changeViewMode(mode)}><Icon size={14} /></button>)}
+            </div>
+            <div className="sort-control"><select aria-label="图库排序" value={props.sortBy} onChange={(event) => props.onSortByChange(event.target.value as CatalogSort)}><option value="modifiedAt">修改时间</option><option value="fileName">文件名</option><option value="rating">评分</option></select><button type="button" aria-label={`图库排序：${(props.sortDirection ?? (props.sortBy === 'fileName' ? 'asc' : 'desc')) === 'asc' ? '正序' : '逆序'}，点击切换`} title="切换排序方向" onClick={() => props.onSortDirectionChange((props.sortDirection ?? (props.sortBy === 'fileName' ? 'asc' : 'desc')) === 'asc' ? 'desc' : 'asc')}>{(props.sortDirection ?? (props.sortBy === 'fileName' ? 'asc' : 'desc')) === 'asc' ? <ArrowUp size={13} /> : <ArrowDown size={13} />}</button></div>
+            <span className={filtered ? 'filmstrip-filter-toggle is-filtering' : 'filmstrip-filter-toggle'}><button type="button" aria-label="图库过滤器" title={filtered ? '图库过滤器（已启用）' : '图库过滤器'} aria-expanded={filtersOpen} onClick={() => setFiltersOpen((open) => { try { localStorage.setItem('photoallisai.catalog-filters-open', String(!open)); } catch { /* restricted storage */ } return !open; })}><ListFilter size={14} /></button></span>
           </div>
         </header>
+        {filtersOpen && <PhotoFilterBar scope="图库" leading={<CatalogBrowseControls value={props.photoFilters} onChange={(next) => props.onPhotoFiltersChange((current) => ({ ...current, ...next }))} pending={missingDetails.length + (needsDetails ? Math.max(0, props.totalCount - props.availablePhotos.length) : 0)} total={props.totalCount} />} onReset={filtered || grouped ? () => props.onPhotoFiltersChange(emptyPhotoFilters) : undefined} search={props.filterSearch} setSearch={props.onSearchChange} minimumRating={minimumRating} setMinimumRating={(value) => setFilter('minimumRating', value)} ratingOperator={ratingOperator} setRatingOperator={(value) => setFilter('ratingOperator', value)} flags={flags} setFlags={(value) => setFilter('flags', value)} colors={colors} setColors={(value) => setFilter('colors', value)} onlyFavorites={false} setOnlyFavorites={props.onFavoriteOnlyChange} favoriteOnly={props.favoriteOnly} onFavoriteOnlyChange={props.onFavoriteOnlyChange} />}
         {props.availablePhotos.length === 0 ? (
           <section className="catalog-empty">
             {props.catalogFolders.length === 0 ? <FolderOpen size={34} /> : <Search size={34} />}
-            <h2>{props.catalogFolders.length === 0 ? '添加照片文件夹' : props.searchQuery ? '没有匹配的照片' : '此集合为空'}</h2>
+            <h2>{filtered ? '没有匹配的照片' : props.catalogFolders.length === 0 ? '添加照片文件夹' : '此集合为空'}</h2>
             <p>{props.catalogFolders.length === 0 ? '不会复制或修改原图，只建立本地索引。' : '请选择其他目录或调整筛选条件。'}</p>
             {props.catalogFolders.length === 0 && <button className="primary-action compact" type="button" onClick={() => void props.onImportFolders()}><Plus size={14} />选择文件夹</button>}
           </section>
-        ) : viewMode !== 'grid' ? (
-          <section className={`catalog-list-view catalog-list-view-${viewMode}`} role="listbox" ref={gridRef} tabIndex={0} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a' && !(event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]'))) { event.preventDefault(); setSelection(selectAll(orderedIds)); } }} aria-label={viewMode === 'analysis' ? '图库分析视图' : '图库列表视图'}><div className="catalog-list-header"><input className="catalog-list-select" type="checkbox" aria-label="全选当前列表" title="全选当前列表" checked={allVisibleSelected} ref={(element) => { if (element) element.indeterminate = someVisibleSelected && !allVisibleSelected; }} onChange={() => setSelection(allVisibleSelected ? { selectedIds: new Set(), anchorId: null, focusId: null } : selectAll(orderedIds))} /><span>缩略图</span><span>文件</span><span>大小</span><span>评分</span><span>{viewMode === 'analysis' ? '分析与建议' : '操作'}</span><span /></div>{listRows}{props.hasMore && <button className="catalog-load-more" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? '加载中…' : '加载更多'}</button>}</section>
+        ) : viewMode === 'list' ? (
+          <section className="catalog-list-view" role="listbox" aria-multiselectable="true" ref={gridRef} tabIndex={0} onScroll={() => setColumnMenu(null)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a' && !(event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]'))) { event.preventDefault(); setSelection(selectAll(orderedIds)); } }} aria-label="图库列表视图"><div className="catalog-list-header" style={listStyle} onContextMenu={(event) => { event.preventDefault(); setColumnMenu({ x: event.clientX, y: event.clientY }); }}><input className="catalog-list-select" type="checkbox" aria-label="全选当前列表" title="全选当前列表" checked={allVisibleSelected} ref={(element) => { if (element) element.indeterminate = someVisibleSelected && !allVisibleSelected; }} onChange={() => setSelection(allVisibleSelected ? { selectedIds: new Set(), anchorId: null, focusId: null } : selectAll(orderedIds))} />{columns.map((column) => <span key={column.id}>{column.label}</span>)}</div>{listRows}{props.hasMore && <button className="catalog-load-more" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? '加载中…' : '加载更多'}</button>}</section>
         ) : (
-          <section className="catalog-grid" role="listbox" aria-label="图库照片" ref={gridRef} tabIndex={0} onPointerDown={(event) => {
-            if (event.button !== 0 || event.target !== event.currentTarget) return;
+          <section className={`catalog-grid${viewMode === 'masonry' ? ' catalog-masonry' : ''}${grouped ? ' is-grouped' : ''}`} style={{ '--thumbnail-size': `${thumbnailSize}px`, '--thumbnail-height': `${Math.round(thumbnailSize * 112 / 155)}px` } as React.CSSProperties} role="listbox" aria-label="图库照片" aria-multiselectable="true" ref={gridRef} tabIndex={0} onPointerDown={(event) => {
+            if (event.button !== 0 || (event.target !== event.currentTarget && !(event.target instanceof Element && event.target.classList.contains('catalog-group-grid')))) return;
             event.currentTarget.setPointerCapture(event.pointerId);
             marqueeOriginRef.current = { x: event.clientX, y: event.clientY, additive: event.metaKey || event.ctrlKey || event.shiftKey, initialIds: new Set(selection.selectedIds) };
             setMarquee({ left: event.clientX, top: event.clientY, width: 0, height: 0 });
@@ -1766,15 +2145,30 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
             if (event.key === 'Enter' && selectedPhoto) props.onOpenViewer(selectedPhoto.id);
             moveGridFocus(event);
           }}>
-            {props.availablePhotos.map((photo) => <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} draggable key={photo.id} onDragStart={(event) => { preparePhotoDrag(event, photo, selection); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>
-              <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{photo.thumbnailSrc || photo.src ? <CatalogImage src={photo.thumbnailSrc ?? photo.src} /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
-              <span className="catalog-card-meta"><strong>{photo.fileName}</strong><small>{photo.format} · {photo.dimensions}{photo.workflow && <span title={`${photo.workflow.name} · 按规则关联`}> · {photo.workflow.members.length} 版本</span>}{photo.workflowConflict && <span title="多条流程规则同时匹配，已保留独立显示"> · 规则冲突</span>}</small>{photo.rating > 0 && <span aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}</span>
-            </button>)}
+            {photoGroups.flatMap((group) => {
+              const cards = group.items.map((photo) => {
+                const metadataHeight = 24 + 19 * (Number(photo.rating > 0) + Number(Boolean(photo.workflow)) + Number(Boolean(photo.workflowConflict)));
+                return <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} style={viewMode === 'masonry' ? { gridRowEnd: `span ${Math.ceil(cardWidth / (aspectRatios[photo.thumbnailSrc ?? photo.src] ?? 1.5) + metadataHeight + 10)}` } : undefined} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable key={photo.id} onDragStart={(event) => { preparePhotoDrag(event, photo, selection); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>
+              <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{photo.thumbnailSrc || photo.src ? <CatalogImage src={photo.thumbnailSrc ?? photo.src} onAspectRatio={(ratio) => { const src = photo.thumbnailSrc ?? photo.src; setAspectRatios((current) => current[src] === ratio ? current : { ...current, [src]: ratio }); }} /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
+              <span className="catalog-photo-badges"><PhotoFlag photo={photo} /></span>
+              <span className="catalog-card-meta"><strong>{photo.fileName}</strong>{photo.rating > 0 && <span className="catalog-card-rating" aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}{photo.workflow && <small title={`${photo.workflow.name} · 按规则关联`}>{photo.workflow.members.length} 版本</small>}{photo.workflowConflict && <small title="多条流程规则同时匹配，已保留独立显示">规则冲突</small>}</span>
+            </button>;
+              });
+              // Keep cards under the same parent so grouping preserves decoded images and focus.
+              return grouped ? [<header className="catalog-photo-group catalog-group-heading" key={`group:${group.key}`}><strong>{group.title}</strong><span title="当前已加载的照片数量">{group.items.length} 张</span></header>, ...cards] : cards;
+            })}
             {props.hasMore && <button className="catalog-load-more" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? '加载中…' : '加载更多'}</button>}
             {marquee && <span className="selection-marquee" style={marquee} aria-hidden="true" />}
           </section>
         )}
       </main>
+      {columnMenu && <div className="folder-context-menu catalog-column-menu" role="menu" aria-label="显示字段" style={{ left: Math.max(8, Math.min(columnMenu.x, window.innerWidth - 220)), top: Math.max(8, Math.min(columnMenu.y, window.innerHeight - 280)) }} onPointerDown={(event) => event.stopPropagation()}>
+        {catalogColumns.map((column) => <button type="button" role="menuitemcheckbox" aria-checked={visibleColumns.includes(column.id)} disabled={column.id === 'name'} key={column.id} onClick={() => {
+          const next = visibleColumns.includes(column.id) ? visibleColumns.filter((id) => id !== column.id) : [...visibleColumns, column.id];
+          setVisibleColumns(next);
+          try { localStorage.setItem('photoallisai.catalog-columns', JSON.stringify(next)); } catch { /* restricted storage */ }
+        }}><span className="catalog-column-check">{visibleColumns.includes(column.id) && <Check size={14} />}</span>{column.label}</button>)}
+      </div>}
     </>
   );
 }
@@ -1806,11 +2200,11 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     selection,
     onSelectionChange,
     onRefreshCatalog,
-    onAddAssetsToWorkflow,
     onAddAssetsToAgent,
     onAddAssetsToBatch
   } = props;
   const [viewerToolbarHost, setViewerToolbarHost] = useState<HTMLDivElement | null>(null);
+  const [filmstripVisibleIds, setFilmstripVisibleIds] = useState<string[] | null>(null);
   const [operationNotice, setOperationNotice] = useState('');
   const [viewerLayout, setViewerLayout] = useViewerLayout();
   const initialSelectedId = availablePhotos.some((photo) => photo.id === selectedAssetId)
@@ -1843,7 +2237,7 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
   const [removalMode, setRemovalMode] = useState<'remove' | 'trash' | null>(null);
   const [removalBusy, setRemovalBusy] = useState(false);
   const [albumTargetId, setAlbumTargetId] = useState('');
-  const [photoContextMenu, setPhotoContextMenu] = useState<{ x: number; y: number } | null>(null);
+  const [photoContextMenu, setPhotoContextMenu] = useState<{ x: number; y: number; filmstrip?: FilmstripMenuOptions | undefined; resultId?: string | null | undefined } | null>(null);
   const [selectedExportPresetId, setSelectedExportPresetId] = useState<string | null>(exportPresets[0]?.id ?? null);
   const [exportSelectionMode, setExportSelectionMode] = useState<ExportSelectionMode>('preferred-or-latest');
   const [trackedExport, setTrackedExport] = useState<{ taskId: string; notice: string; surface: 'viewer' | 'operation' } | null>(null);
@@ -1852,13 +2246,38 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
   const selected = availablePhotos.find((photo) => photo.id === selectedAssetId) ?? availablePhotos.find((photo) => photo.id === selectedId) ?? availablePhotos[0]!;
   const currentAnalysisRevision = analysisAssetId === selected.id ? analysisRevision : undefined;
   const currentGenerationResults = generationAssetId === selected.id ? generationResults : [];
-  const orderedIds = useMemo(() => availablePhotos.map((photo) => photo.id), [availablePhotos]);
+  const orderedIds = useMemo(() => {
+    const ids = availablePhotos.map((photo) => photo.id);
+    return view === 'viewer' && filmstripVisibleIds ? ids.filter((id) => filmstripVisibleIds.includes(id)) : ids;
+  }, [availablePhotos, filmstripVisibleIds, view]);
+  useEffect(() => {
+    if (view !== 'viewer') return;
+    const currentIndex = orderedIds.indexOf(selected.id);
+    const adjacent = [orderedIds[currentIndex - 1], orderedIds[currentIndex + 1]].map((id) => availablePhotos.find((photo) => photo.id === id));
+    for (const photo of adjacent) {
+      const src = photo?.src;
+      if (!src || DECODED_IMAGE_SOURCES.has(src) || VIEWER_IMAGE_PRELOADS.has(src)) continue;
+      const image = new window.Image();
+      image.decoding = 'async';
+      image.src = src;
+      VIEWER_IMAGE_PRELOADS.set(src, image);
+      void image.decode().then(() => {
+        DECODED_IMAGE_SOURCES.add(src);
+        if (image.naturalHeight > 0) IMAGE_ASPECT_RATIOS.set(src, image.naturalWidth / image.naturalHeight);
+      }).catch(() => VIEWER_IMAGE_PRELOADS.delete(src));
+    }
+    while (VIEWER_IMAGE_PRELOADS.size > 4) {
+      const oldest = VIEWER_IMAGE_PRELOADS.keys().next().value;
+      if (!oldest) break;
+      VIEWER_IMAGE_PRELOADS.delete(oldest);
+    }
+  }, [availablePhotos, orderedIds, selected.id, view]);
   const collectionName = selectedFolderId
     ? catalogFolders.find((folder) => folder.id === selectedFolderId)?.name ?? '文件夹'
     : selectedAlbumId
       ? catalogAlbums.find((album) => album.id === selectedAlbumId)?.name ?? '相册'
       : selectedSmartCollection
-        ? selectedSmartCollection === 'recent' ? '最近 30 天' : selectedSmartCollection === 'favorites' ? '首选照片' : selectedSmartCollection === 'unrated' ? '未评分' : selectedSmartCollection === 'unanalyzed' ? '等待 AI 分析' : selectedSmartCollection === 'to-review' ? '待审阅' : '已生成'
+        ? selectedSmartCollection === 'recent' ? '最近 30 天' : selectedSmartCollection === 'favorites' ? '收藏照片' : selectedSmartCollection === 'unrated' ? '未评分' : selectedSmartCollection === 'unanalyzed' ? '等待 AI 分析' : selectedSmartCollection === 'to-review' ? '待审阅' : '已生成'
         : isDemo ? '2026 人像作品' : searchQuery ? `搜索：${searchQuery}` : '所有照片';
 
   useEffect(() => {
@@ -1892,18 +2311,29 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
         if (!target.closest('.filmstrip, .catalog-grid, .catalog-list-view')) return;
         event.preventDefault();
         setSelection(selectAll(orderedIds));
+      } else if (!isDemo && !event.metaKey && !event.ctrlKey && !event.altKey && /^[pxu]$/i.test(event.key)) {
+        event.preventDefault();
+        const flag = event.key.toLowerCase() === 'p' ? 'picked' : event.key.toLowerCase() === 'x' ? 'rejected' : 'unflagged';
+        const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+        void window.desktopApi.updateCatalogMetadata({ assetIds, flag }).then(() => onRefreshCatalog());
       } else if (!isDemo && !event.metaKey && !event.ctrlKey && !event.altKey && /^[0-5]$/.test(event.key)) {
         const target = event.target;
         if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
         event.preventDefault();
         const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
-        void window.desktopApi.updateCatalogMetadata({ assetIds, rating: Number(event.key) }).then(onRefreshCatalog);
+        void window.desktopApi.updateCatalogMetadata({ assetIds, rating: Number(event.key) }).then(() => onRefreshCatalog());
+      } else if (!isDemo && !event.metaKey && !event.ctrlKey && !event.altKey && /^[6-9]$/.test(event.key)) {
+        const colors = ['red', 'yellow', 'green', 'blue'] as const;
+        const color = colors[Number(event.key) - 6]!;
+        event.preventDefault();
+        const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+        void window.desktopApi.updateCatalogMetadata({ assetIds, labelColor: color }).then(() => onRefreshCatalog());
       } else if (view === 'viewer' && !event.metaKey && !event.ctrlKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
         const target = event.target;
         if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement || (target instanceof Element && (target.closest('.filmstrip') || target.closest('[role="slider"]')))) return;
         event.preventDefault();
-        const currentIndex = Math.max(0, orderedIds.indexOf(selected.id));
-        const nextId = orderedIds[clamp(currentIndex + (event.key === 'ArrowLeft' ? -1 : 1), 0, orderedIds.length - 1)];
+        const currentIndex = orderedIds.indexOf(selected.id);
+        const nextId = orderedIds[clamp(currentIndex < 0 ? (event.key === 'ArrowLeft' ? orderedIds.length - 1 : 0) : currentIndex + (event.key === 'ArrowLeft' ? -1 : 1), 0, orderedIds.length - 1)];
         const nextPhoto = availablePhotos.find((photo) => photo.id === nextId);
         if (!nextPhoto || nextPhoto.id === selected.id) return;
         setSelectedId(nextPhoto.id);
@@ -2024,14 +2454,14 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     setSelection((current) => updateSelection(current, orderedIds, photo.id, intent));
   };
 
-  const openPhotoContextMenu = (event: React.MouseEvent, photo: Photo, forceSingle = false) => {
+  const openPhotoContextMenu = (event: React.MouseEvent, photo: Photo, forceSingle = false, filmstrip?: FilmstripMenuOptions, resultId?: string | null) => {
     event.preventDefault();
     if (forceSingle || !selection.selectedIds.has(photo.id)) {
       setSelection({ selectedIds: new Set([photo.id]), anchorId: photo.id, focusId: photo.id });
     }
     setSelectedId(photo.id);
     onSelectedAssetChange(photo.id);
-    setPhotoContextMenu({ x: event.clientX, y: event.clientY });
+    setPhotoContextMenu({ x: event.clientX, y: event.clientY, filmstrip, resultId });
   };
 
   useEffect(() => {
@@ -2064,6 +2494,13 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     if (isDemo) return;
     const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
     await window.desktopApi.updateCatalogMetadata({ assetIds, rating });
+    await onRefreshCatalog();
+  };
+
+  const setLabelColor = async (labelColor: Photo['labelColor']) => {
+    if (isDemo) return;
+    const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+    await window.desktopApi.updateCatalogMetadata({ assetIds, labelColor });
     await onRefreshCatalog();
   };
 
@@ -2400,27 +2837,40 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     <div className="workspace viewer-workspace">
       {view === 'library' ? <CatalogWorkspace {...props} onOpenPhotoContextMenu={(event, photo) => openPhotoContextMenu(event, photo)} /> :
       <main className="library-main" style={{ gridTemplateRows: `minmax(0, 1fr) 5px ${viewerLayout.filmstripHeight}px` }}>
-        <Viewer photo={selected} results={currentGenerationResults} isDemo={isDemo} exportPresets={exportPresets} selectedExportPresetId={selectedExportPresetId} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onExportPresetChange={setSelectedExportPresetId} onExport={exportResults} onRegenerate={regenerate} onReview={reviewResult} onRevealResult={(resultId) => void window.desktopApi.revealGenerationResult(resultId)} onOpenContextMenu={(event) => openPhotoContextMenu(event, selected, true)} onClose={props.onCloseViewer} initialResultId={props.initialResultId} onToolbarHostChange={setViewerToolbarHost} onWorkflowStageChange={props.onWorkflowStageChange} />
-        <PaneSplitter orientation="horizontal" value={viewerLayout.filmstripHeight} minimum={110} maximum={320} label="调整大图和胶片带高度" invert onChange={(value) => setViewerLayout('filmstripHeight', value)} />
-        <Filmstrip toolbarHost={viewerToolbarHost} items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} onSelectionChange={setSelection} onFocusPhoto={(photo) => { setSelectedId(photo.id); onSelectedAssetChange(photo.id); }} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} onOpenContextMenu={(event, photo) => openPhotoContextMenu(event, photo)} />
+        <Viewer photo={selected} results={currentGenerationResults} isDemo={isDemo} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onReview={reviewResult} onOpenContextMenu={(event, resultId) => openPhotoContextMenu(event, selected, true, undefined, resultId)} onClose={props.onCloseViewer} initialResultId={props.initialResultId} onToolbarHostChange={setViewerToolbarHost} onWorkflowStageChange={props.onWorkflowStageChange} />
+        <PaneSplitter orientation="horizontal" value={viewerLayout.filmstripHeight} minimum={72} maximum={320} label="调整大图和胶片带高度" invert onChange={(value) => setViewerLayout('filmstripHeight', value)} />
+        <Filmstrip toolbarHost={viewerToolbarHost} items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} onSelectionChange={setSelection} onFocusPhoto={(photo) => { setSelectedId(photo.id); onSelectedAssetChange(photo.id); }} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} onVisibleIdsChange={setFilmstripVisibleIds} onOpenContextMenu={(event, photo, options) => openPhotoContextMenu(event, photo, false, options)} />
       </main>}
-      {photoContextMenu && <div className="folder-context-menu photo-context-menu" role="menu" aria-label={`照片菜单 ${selection.selectedIds.size} 张`} style={{ left: Math.min(photoContextMenu.x, Math.max(8, window.innerWidth - 244)), top: Math.min(photoContextMenu.y, Math.max(8, window.innerHeight - 530)) }} onPointerDown={(event) => event.stopPropagation()}>
+      {photoContextMenu && <ContextMenuSurface className="folder-context-menu photo-context-menu" role="menu" aria-label={`照片菜单 ${selection.selectedIds.size} 张`} style={{ left: Math.min(photoContextMenu.x, Math.max(8, window.innerWidth - 244)), top: Math.min(photoContextMenu.y, Math.max(8, window.innerHeight - 530)) }} onPointerDown={(event) => event.stopPropagation()}>
+        {!isDemo && selection.selectedIds.size === 1 && <><button type="button" role="menuitem" onClick={() => { void window.desktopApi.openAssetExternally(selected.id).catch((error: unknown) => setOperationNotice(error instanceof Error ? error.message : '无法打开文件')); setPhotoContextMenu(null); }}><Image size={14} /><span>用默认应用打开</span></button><button type="button" role="menuitem" onClick={() => { void window.desktopApi.getFileDetails(selected.id).then((details) => navigator.clipboard.writeText(details.path)).catch(() => setOperationNotice('无法复制文件路径')); setPhotoContextMenu(null); }}><Copy size={14} /><span>复制文件路径</span></button></>}
         <div className="folder-menu-title"><Image size={14} /><span>{selection.selectedIds.size > 1 ? `${selection.selectedIds.size} 张照片` : selected.fileName}</span></div>
         <div className="photo-menu-rating"><span>评分</span><button type="button" aria-label="清除评分" onClick={() => { void rateSelection(0); setPhotoContextMenu(null); }}>0</button>{[1, 2, 3, 4, 5].map((rating) => <button type="button" aria-label={`${rating} 星`} key={rating} onClick={() => { void rateSelection(rating); setPhotoContextMenu(null); }}><Star size={12} fill={rating <= selected.rating && selection.selectedIds.size === 1 ? 'currentColor' : 'none'} /></button>)}</div>
-        <button type="button" role="menuitem" onClick={() => { void favoriteSelection(![...selection.selectedIds].every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite)); setPhotoContextMenu(null); }}><Heart size={14} /><span>{[...selection.selectedIds].every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite) ? '取消首选' : '标记为首选'}</span></button>
+        {!isDemo && <div className="photo-menu-flags" role="group" aria-label="设置旗标"><span>旗标</span>{(['picked', 'rejected', 'unflagged'] as const).map((flag, index) => <button type="button" key={flag} title={`${['留用', '排除', '无旗标'][index]} (${['P', 'X', 'U'][index]})`} aria-label={['留用', '排除', '无旗标'][index]} aria-pressed={selection.selectedIds.size <= 1 && (selected.flag ?? 'unflagged') === flag} onClick={() => { void window.desktopApi.updateCatalogMetadata({ assetIds: selection.selectedIds.size ? [...selection.selectedIds] : [selected.id], flag }).then(() => onRefreshCatalog()); setPhotoContextMenu(null); }}><span className="photo-flag-cross"><Flag size={15} fill={flag === 'unflagged' ? 'none' : 'currentColor'} />{flag === 'rejected' && <X size={10} />}</span></button>)}</div>}
+        <div className="photo-menu-labels" role="group" aria-label="颜色标签">{(['red', 'yellow', 'green', 'blue', 'purple'] as const).map((id, index) => {
+          const active = (selection.selectedIds.size ? [...selection.selectedIds] : [selected.id]).every((assetId) => availablePhotos.find((photo) => photo.id === assetId)?.labelColor === id);
+          return <button className={active ? 'is-active' : ''} key={id} type="button" title={`${photoColorName(id)}标签${index < 4 ? ` (${index + 6})` : ''}`} aria-label={`${photoColorName(id)}标签`} aria-pressed={active} onClick={() => { void setLabelColor(id); setPhotoContextMenu(null); }}><i className={`photo-color-swatch is-${id}`} /></button>;
+        })}<button type="button" aria-label="清除颜色标签" title="清除颜色标签" onClick={() => { void setLabelColor(null); setPhotoContextMenu(null); }}><X size={13} /></button></div>
+        <button type="button" role="menuitem" onClick={() => { void favoriteSelection(![...selection.selectedIds].every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite)); setPhotoContextMenu(null); }}><Heart size={14} /><span>{[...selection.selectedIds].every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite) ? '取消收藏' : '添加到收藏'}</span></button>
         <button type="button" role="menuitem" onClick={() => { setTagEditorOpen(true); setPhotoContextMenu(null); }}><Tags size={14} /><span>添加标签…</span></button>
         <span className="folder-menu-separator" />
         <button type="button" role="menuitem" onClick={() => { void analyzeSelection(); setPhotoContextMenu(null); }}><Sparkles size={14} /><span>AI 分析{selection.selectedIds.size > 1 ? ` ${selection.selectedIds.size} 张` : ''}</span></button>
         <button type="button" role="menuitem" onClick={() => { onAddAssetsToAgent?.(selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id]); setPhotoContextMenu(null); }}><Bot size={14} /><span>加入 Agent 批处理{selection.selectedIds.size > 1 ? `（${selection.selectedIds.size} 张）` : ''}</span></button>
         <button type="button" role="menuitem" onClick={() => { onAddAssetsToBatch?.(selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id]); setPhotoContextMenu(null); }}><Sparkles size={14} /><span>加入 AI 批量修图{selection.selectedIds.size > 1 ? `（${selection.selectedIds.size} 张）` : ''}</span></button>
-        <button type="button" role="menuitem" disabled={generationProfiles.length === 0} onClick={() => { void generateSelection({ providerProfileId: generationProfiles[0]!.id, template: null, count: 1, instruction: '', disabledActionIds: new Set() }); setPhotoContextMenu(null); }}><WandSparkles size={14} /><span>按默认方案生成</span></button>
-        <div className="photo-menu-export-options"><select aria-label="导出版本范围" value={exportSelectionMode} onChange={(event) => setExportSelectionMode(event.target.value as ExportSelectionMode)}><option value="preferred-or-latest">每张首选 / 最新版本</option><option value="accepted">所有已接受版本</option><option value="all">所有生成版本</option></select><select aria-label="右键菜单导出预设" value={selectedExportPresetId ?? ''} onChange={(event) => setSelectedExportPresetId(event.target.value || null)}><option value="">默认命名</option>{exportPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select></div>
-        <button type="button" role="menuitem" onClick={() => { void exportLatestSelection(); setPhotoContextMenu(null); }}><Download size={14} /><span>导出 AI 版本…</span></button>
+        {!photoContextMenu.resultId && <button type="button" role="menuitem" disabled={generationProfiles.length === 0} onClick={() => { void generateSelection({ providerProfileId: generationProfiles[0]!.id, template: null, count: 1, instruction: '', disabledActionIds: new Set() }); setPhotoContextMenu(null); }}><WandSparkles size={14} /><span>按默认方案生成</span></button>}
+        <div className="photo-menu-export-options">{!photoContextMenu.resultId && <select aria-label="导出版本范围" value={exportSelectionMode} onChange={(event) => setExportSelectionMode(event.target.value as ExportSelectionMode)}><option value="preferred-or-latest">每张首选 / 最新版本</option><option value="accepted">所有已接受版本</option><option value="all">所有生成版本</option></select>}<select aria-label="右键菜单导出预设" value={selectedExportPresetId ?? ''} onChange={(event) => setSelectedExportPresetId(event.target.value || null)}><option value="">保留文件名 · 原格式</option>{exportPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select></div>
+        {photoContextMenu.resultId && <>
+          <div className="folder-menu-title">生成版本 V{currentGenerationResults.find((result) => result.id === photoContextMenu.resultId)?.version}</div>
+          <button type="button" role="menuitem" onClick={() => { void exportResults([photoContextMenu.resultId!]); setPhotoContextMenu(null); }}><Download size={14} /><span>导出当前版本…</span></button>
+          <button type="button" role="menuitem" onClick={() => { const result = currentGenerationResults.find((item) => item.id === photoContextMenu.resultId); if (result) void regenerate(result).then(setOperationNotice).catch(() => setOperationNotice('无法再次生成，请检查模型配置。')); setPhotoContextMenu(null); }}><RotateCcw size={14} /><span>按当前方案再次生成</span></button>
+          <button type="button" role="menuitem" onClick={() => { void window.desktopApi.revealGenerationResult(photoContextMenu.resultId!).catch(() => setOperationNotice('无法打开生成文件位置。')); setPhotoContextMenu(null); }}><FolderOpen size={14} /><span>在文件管理器中显示生成版本</span></button>
+        </>}
+        {!photoContextMenu.resultId && <button type="button" role="menuitem" onClick={() => { void exportLatestSelection(); setPhotoContextMenu(null); }}><Download size={14} /><span>导出 AI 版本…</span></button>}
+        {photoContextMenu.filmstrip && <FilmstripMenu options={photoContextMenu.filmstrip} onClose={() => setPhotoContextMenu(null)} />}
         {!isDemo && <><span className="folder-menu-separator" />{selection.selectedIds.size === 1 && <button type="button" role="menuitem" onClick={() => { void window.desktopApi.revealCatalogAsset(selected.id); setPhotoContextMenu(null); }}><FolderOpen size={14} /><span>{FILE_MANAGER_LABEL}</span></button>}<button type="button" role="menuitem" onClick={() => { if (selection.selectedIds.size > 1) setBatchRenameDialogOpen(true); else openRenameDialog(); setPhotoContextMenu(null); }}><FilePenLine size={14} /><span>{selection.selectedIds.size > 1 ? '批量重命名…' : '重命名…'}</span></button><button type="button" role="menuitem" onClick={() => { void openFolderDialog('copy'); setPhotoContextMenu(null); }}><Copy size={14} /><span>复制到文件夹…</span></button><button type="button" role="menuitem" onClick={() => { void openFolderDialog('move'); setPhotoContextMenu(null); }}><FolderInput size={14} /><span>移动到文件夹…</span></button></>}
         {!isDemo && catalogAlbums.length > 0 && <div className="photo-menu-album"><FolderHeart size={14} /><select aria-label="加入相册" value={albumTargetId} onChange={(event) => setAlbumTargetId(event.target.value)}><option value="">加入相册…</option>{catalogAlbums.map((album) => <option key={album.id} value={album.id}>{album.name}</option>)}</select><button type="button" disabled={!albumTargetId} onClick={() => { void updateAlbumMembership('add', albumTargetId); setPhotoContextMenu(null); }}>加入</button></div>}
         {!isDemo && selectedAlbumId && <button type="button" role="menuitem" onClick={() => { void updateAlbumMembership('remove'); setPhotoContextMenu(null); }}><FolderHeart size={14} /><span>从当前相册移出</span></button>}
         {!isDemo && <><span className="folder-menu-separator" /><button type="button" role="menuitem" onClick={() => { setRemovalMode('remove'); setPhotoContextMenu(null); }}><LibraryBig size={14} /><span>从图库移除…</span></button><button className="is-danger" type="button" role="menuitem" onClick={() => { setRemovalMode('trash'); setPhotoContextMenu(null); }}><Trash2 size={14} /><span>移到系统回收站…</span></button></>}
-      </div>}
+      </ContextMenuSurface>}
       {tagEditorOpen && <form className="tag-editor-popover" onSubmit={(event) => { event.preventDefault(); void addTags(); }}><label><span>添加标签</span><input autoFocus value={tagDraft} onChange={(event) => setTagDraft(event.target.value)} placeholder="人像, 夜景" /></label><button className="primary-action compact" type="submit">应用</button><IconButton label="关闭标签编辑器" onClick={() => setTagEditorOpen(false)}><X size={13} /></IconButton></form>}
       {moveDialogOpen && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !moveBusy) setMoveDialogOpen(false); }}>
@@ -2478,7 +2928,6 @@ const emptyProviderForm: SaveProviderProfileInput = {
 
 type WorkflowStage = 'analysis' | 'collection' | 'optimization' | 'prompt' | 'generation' | 'review';
 type WorkflowRule = { id: string; text: string; enabled: boolean };
-type AgentPlan = { summary: string; steps: string[]; requestedCount: number | undefined; style: string | undefined; outputFolder: string | undefined };
 type WorkflowAssetMeta = { id: string; fileName: string; src: string; thumbnailSrc?: string; format: string };
 type CollectionReport = { summary: string; groups: string[][]; keep: string[]; review: string[]; recommendations: string[] };
 type WorkflowDraft = {
@@ -2501,23 +2950,6 @@ const DEFAULT_WORKFLOW_RULES: WorkflowRule[] = [
   { id: 'scene', text: '不改变主要场景和关键物体', enabled: true }
 ];
 
-function buildAgentPlan(instruction: string, photoCount: number): AgentPlan {
-  const text = instruction.trim();
-  const countMatch = text.match(/(?:最好看|选|选择|保留|挑选)\s*(?:的)?\s*(\d+)\s*张/);
-  const requestedCount = countMatch ? clamp(Number(countMatch[1]), 1, Math.max(photoCount, 1)) : undefined;
-  const style = /动漫|anime|二次元/i.test(text) ? '动漫风' : /电影|cinematic/i.test(text) ? '电影感' : undefined;
-  const folderMatch = text.match(/(?:存到|保存到|输出到|目录下的)\s*[“”"']?([^，。,\.\s]+)[“”"']?文件夹/);
-  const outputFolder = folderMatch?.[1];
-  const steps = [
-    /糊|模糊|相似|重复/.test(text) ? '识别并移除模糊或高度相似的照片候选' : '分析照片质量、构图和主体表现',
-    requestedCount ? `按视觉质量挑选 ${requestedCount} 张并设置为 2 星` : '按视觉质量分组并设置评分',
-    /9\s*张|三颗|3\s*星/.test(text) ? '从精选结果中挑选最佳 9 张并设置为 3 星' : '为重点照片生成修图任务',
-    style ? `应用${style}风格并保留主体身份与构图` : '按整体提示词执行 AI 修图',
-    outputFolder ? `将结果输出到“${outputFolder}”文件夹` : '保留在应用管理的生成结果中'
-  ];
-  return { summary: text || '请描述你希望 Agent 如何筛选、评分和修图照片。', steps, requestedCount, style, outputFolder };
-}
-
 function loadWorkflowDraft(): WorkflowDraft {
   const fallback: WorkflowDraft = { workflowAssetIds: [], workflowAssetMeta: {}, stage: 'analysis', templateId: '', generationCount: 1, globalRules: DEFAULT_WORKFLOW_RULES, itemRules: {}, itemTemplateIds: {}, itemGenerationCounts: {}, collectionReport: null };
   try {
@@ -2539,30 +2971,6 @@ function loadWorkflowDraft(): WorkflowDraft {
   } catch {
     return fallback;
   }
-}
-
-function AgentBatchPage({ photos: availablePhotos, selectedIds, focusId, onOpenBatch }: { photos: Photo[]; selectedIds: ReadonlySet<string>; focusId: string | null; onOpenBatch: () => void }): React.JSX.Element {
-  const [instruction, setInstruction] = useState('');
-  const [running, setRunning] = useState(false);
-  const [expanded, setExpanded] = useState<number | null>(null);
-  const [notice, setNotice] = useState('');
-  const [steps, setSteps] = useState<string[]>([]);
-  const selectedPhotos = availablePhotos.filter((photo) => selectedIds.has(photo.id));
-  const focused = availablePhotos.find((photo) => photo.id === focusId);
-  const start = () => {
-    const sourceCount = selectedPhotos.length;
-    const nextSteps = [`已接收 ${sourceCount} 张照片${focused ? `，焦点为 ${focused.fileName}` : ''}`, 'Agent 正在根据目标动态选择工具', '等待任务回执后显示实际影响范围'];
-    setSteps(nextSteps);
-    setExpanded(null);
-    setRunning(true);
-    setNotice('已创建 Agent 批处理计划，执行前会展示影响范围。');
-  };
-  return <main className="agent-page">
-    <header className="agent-page-header"><div><span className="workflow-agent-kicker"><Bot size={14} />Agent 批处理</span><h1>描述目标，交给 Agent 处理</h1><p>Agent 会使用当前选择上下文，并在每一步提供可展开的处理依据。</p></div><div className="agent-context-badge"><strong>{selectedPhotos.length}</strong><span>张当前选择</span></div></header>
-    <section className="agent-input-section"><div className="agent-context-line"><span>输入范围</span><strong>{selectedPhotos.length ? `当前选择的 ${selectedPhotos.length} 张照片` : '尚未选择照片'}</strong>{focused && <em>焦点：{focused.fileName}</em>}</div><textarea aria-label="Agent 批处理指令" value={instruction} onChange={(event) => setInstruction(event.target.value)} placeholder="例如：处理选中图片，找出最清晰的照片，加上精选标签并导出。" /><div className="agent-input-footer"><span>支持整理、筛选、评分、标签、修图、导出等批处理任务</span><button className="primary-action" type="button" disabled={!instruction.trim() || selectedPhotos.length === 0 || running} onClick={start}><Sparkles size={15} />{running ? '处理中…' : '开始处理'}</button></div></section>
-    {notice && <p className="agent-notice" role="status">{notice}</p>}
-    {steps.length > 0 && <section className="agent-steps-section"><div className="agent-section-heading"><div><span>处理详情</span><h2>Agent 执行记录</h2></div><button className="quiet-button compact" type="button" onClick={onOpenBatch}><WandSparkles size={12} />转到 AI 批量修图</button></div>{steps.map((step, index) => <article className={`agent-step-row${expanded === index ? ' is-expanded' : ''}`} key={step}><button type="button" onClick={() => setExpanded(expanded === index ? null : index)}><span className="agent-step-index">{index + 1}</span><span><strong>{step}</strong><small>{expanded === index ? '已展开详细信息' : '点击查看处理依据'}</small></span><ChevronDown size={14} /></button>{expanded === index && <div className="agent-step-detail">当前步骤会记录输入资源、判断依据、受影响的照片和执行结果。完成真实任务后，这里将显示逐项文件与模型响应摘要。</div>}</article>)}</section>}
-  </main>;
 }
 
 function AgentDockPanel({ selectedIds, photos, onClose, onOpenBatch, onCollapse, onMove }: { selectedIds: ReadonlySet<string>; photos: Photo[]; onClose: () => void; onOpenBatch: () => void; onCollapse: () => void; onMove: () => void }): React.JSX.Element {
@@ -2659,30 +3067,23 @@ function AgentDockPanel({ selectedIds, photos, onClose, onOpenBatch, onCollapse,
   </aside>;
 }
 
-function BatchEditSidebar({ selectedIds, photos, onOpenTemplates }: { selectedIds: ReadonlySet<string>; photos: Photo[]; onOpenTemplates: () => void }): React.JSX.Element {
-  const selected = photos.filter((photo) => selectedIds.has(photo.id));
-  const [prompt, setPrompt] = useState('');
-  return <aside className="tool-sidebar batch-sidebar"><header className="tool-sidebar-header"><Sparkles size={15} /><div><strong>AI 批量修图</strong><span>模板驱动生成</span></div></header><div className="tool-sidebar-scroll"><section className="tool-sidebar-section"><div className="tool-sidebar-label">当前照片</div><div className="tool-sidebar-count"><strong>{selected.length}</strong><span>张照片</span></div></section><section className="tool-sidebar-section"><div className="tool-sidebar-label">批次整体提示词</div><textarea aria-label="批次整体提示词" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder="描述这一批照片的共同修图要求" /></section><section className="tool-sidebar-section"><div className="tool-sidebar-label">模板</div><button className="quiet-button compact tool-sidebar-wide-button" type="button" onClick={onOpenTemplates}><WandSparkles size={12} />从模板库选择</button></section><section className="tool-sidebar-section tool-sidebar-muted"><p>每张照片的单独提示词和最终 Prompt 在批量修图工作区中编辑。</p></section></div><footer className="tool-sidebar-footer"><button className="primary-action compact" type="button" disabled={selected.length === 0}>开始批量修图</button></footer></aside>;
-}
-
-function AiWorkflowPage({ photos: availablePhotos, selectedIds, focusId, workflowAssetIds, workflowAssetMeta, tasks, globalRules, onGlobalRulesChange, templateId, onAddAssets, onRemoveAsset, onMoveAsset, onClearAssets, onOpenTasks, onFocusAsset, onOpenViewer }: { photos: Photo[]; selectedIds: ReadonlySet<string>; focusId: string | null; workflowAssetIds: string[]; workflowAssetMeta: Record<string, WorkflowAssetMeta>; tasks: PersistedTask[]; globalRules: WorkflowRule[]; onGlobalRulesChange: React.Dispatch<React.SetStateAction<WorkflowRule[]>>; templateId: string; onAddAssets: (ids: string[]) => void; onRemoveAsset: (id: string) => void; onMoveAsset: (id: string, direction: -1 | 1) => void; onClearAssets: () => void; onOpenTasks: () => void; onFocusAsset: (id: string) => void; onOpenViewer: (assetId: string, assetIds?: string[], resultId?: string | null) => void }): React.JSX.Element {
+function AiWorkflowPage({ photos: availablePhotos, selectedIds, focusId, workflowAssetIds, workflowAssetMeta, tasks, globalRules, onGlobalRulesChange, templateId, onAddAssets, onRemoveAsset, onMoveAsset: _onMoveAsset, onClearAssets, onOpenTasks: _onOpenTasks, onFocusAsset, onOpenViewer }: { photos: Photo[]; selectedIds: ReadonlySet<string>; focusId: string | null; workflowAssetIds: string[]; workflowAssetMeta: Record<string, WorkflowAssetMeta>; tasks: PersistedTask[]; globalRules: WorkflowRule[]; onGlobalRulesChange: React.Dispatch<React.SetStateAction<WorkflowRule[]>>; templateId: string; onAddAssets: (ids: string[]) => void; onRemoveAsset: (id: string) => void; onMoveAsset: (id: string, direction: -1 | 1) => void; onClearAssets: () => void; onOpenTasks: () => void; onFocusAsset: (id: string) => void; onOpenViewer: (assetId: string, assetIds?: string[], resultId?: string | null) => void }): React.JSX.Element {
   const initialDraft = useMemo(loadWorkflowDraft, []);
   const [stage, setStage] = useState<WorkflowStage>(initialDraft.stage);
   const [revisions, setRevisions] = useState<Record<string, AnalysisRevision | undefined>>({});
   const revisionPollOffset = useRef(0);
   const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
+  const [generationProfileId, setGenerationProfileId] = useState('');
   const [templates, setTemplates] = useState<PromptTemplate[]>([]);
   const [storageMode, setStorageMode] = useState<AppSettings['generationStorageMode']>('managed');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
-  const [collectionReport, setCollectionReport] = useState<CollectionReport | null>(initialDraft.collectionReport);
+  const [collectionReport] = useState<CollectionReport | null>(initialDraft.collectionReport);
   const [generationCount, setGenerationCount] = useState(initialDraft.generationCount);
-  const [itemTemplateIds, setItemTemplateIds] = useState<Record<string, string>>(initialDraft.itemTemplateIds);
+  const [itemTemplateIds] = useState<Record<string, string>>(initialDraft.itemTemplateIds);
   const [itemGenerationCounts, setItemGenerationCounts] = useState<Record<string, number>>(initialDraft.itemGenerationCounts);
   const [localFocusId, setLocalFocusId] = useState<string | null>(focusId);
   const [itemRules, setItemRules] = useState<Record<string, WorkflowRule[]>>(initialDraft.itemRules);
-  const [agentInstruction, setAgentInstruction] = useState('');
-  const [agentPlan, setAgentPlan] = useState<AgentPlan | null>(null);
   const ids = workflowAssetIds;
   const idsKey = ids.join('|');
   const analysisTasks = useMemo(() => {
@@ -2691,19 +3092,67 @@ function AiWorkflowPage({ photos: availablePhotos, selectedIds, focusId, workflo
     return latest;
   }, [tasks]);
   const completedKey = ids.map((id) => analysisTasks.get(id)?.status === 'completed' ? analysisTasks.get(id)?.id : '').join('|');
+  const resolvedPhotos = useAssetPhotos(ids, availablePhotos);
   const workflowPhotos = ids.map((id) => {
-    const visible = availablePhotos.find((photo) => photo.id === id);
+    const visible = resolvedPhotos.find((photo) => photo.id === id);
     if (visible) return visible;
     const saved = workflowAssetMeta[id];
     return saved ? { ...saved, dimensions: '', rating: 0 } : null;
   }).filter((photo): photo is Photo => Boolean(photo));
   const currentId = focusId && ids.includes(focusId) ? focusId : workflowPhotos[0]?.id ?? null;
   const effectiveCurrentId = localFocusId && ids.includes(localFocusId) ? localFocusId : currentId;
-  const currentPhoto = effectiveCurrentId ? workflowPhotos.find((photo) => photo.id === effectiveCurrentId) ?? null : null;
-  const currentRevision = effectiveCurrentId ? revisions[effectiveCurrentId] : undefined;
   const [generationResults, setGenerationResults] = useState<Record<string, GenerationResult[]>>({});
   const [bestResultIds, setBestResultIds] = useState<Record<string, string>>({});
   const [batchContextMenu, setBatchContextMenu] = useState<{ x: number; y: number; assetId: string; resultId?: string } | null>(null);
+  const submitting = useRef(false);
+  const [submissionId, setSubmissionId] = useState(() => window.localStorage.getItem(`${WORKFLOW_DRAFT_KEY}.submission`) ?? '');
+  const [submissionTasks, setSubmissionTasks] = useState<PersistedTask[]>([]);
+  const generationTasks = useMemo(() => {
+    const merged = new Map(tasks.filter((task) => task.kind === 'generation').map((task) => [task.id, task]));
+    for (const task of submissionTasks) {
+      if (!merged.has(task.id) || merged.get(task.id)!.updatedAt <= task.updatedAt) merged.set(task.id, task);
+    }
+    return [...merged.values()].sort((a, b) => b.createdAt - a.createdAt);
+  }, [tasks, submissionTasks]);
+  const latestGenerationTasks = (assetId: string) => {
+    const assetTasks = generationTasks.filter((task) => task.assetId === assetId);
+    const latest = assetTasks[0];
+    return latest ? assetTasks.filter((task) => (task.payload.submissionId ?? task.payload.batchId) === (latest.payload.submissionId ?? latest.payload.batchId)) : [];
+  };
+  const isUnfinished = (task: PersistedTask) => !['completed', 'failed', 'canceled'].includes(task.status);
+  const generationActive = generationTasks.some((task) => ids.includes(task.assetId ?? '') && isUnfinished(task));
+  const batchCompleted = submissionTasks.filter((task) => task.status === 'completed').length;
+  const batchFailed = submissionTasks.filter((task) => task.status === 'failed').length;
+  const batchCanceled = submissionTasks.filter((task) => task.status === 'canceled').length;
+  const batchQueued = submissionTasks.filter((task) => task.status === 'queued' || task.status === 'draft').length;
+  const batchRunning = submissionTasks.filter((task) => isUnfinished(task) && !['queued', 'draft', 'paused'].includes(task.status)).length;
+  const batchPaused = submissionTasks.filter((task) => task.status === 'paused').length;
+
+  useEffect(() => {
+    if (submissionId) return;
+    const latest = tasks.filter((task) => task.kind === 'generation' && ids.includes(task.assetId ?? '')).sort((a, b) => b.createdAt - a.createdAt)[0];
+    const batch = latest?.payload.submissionId ?? latest?.payload.batchId;
+    if (typeof batch === 'string') setSubmissionId(batch);
+  }, [ids, submissionId, tasks]);
+
+  useEffect(() => {
+    if (!submissionId) return;
+    window.localStorage.setItem(`${WORKFLOW_DRAFT_KEY}.submission`, submissionId);
+    let active = true;
+    let pending = false;
+    const refresh = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const items = await window.desktopApi.listTaskBatch({ kind: 'generation', batchId: submissionId });
+        if (active) setSubmissionTasks(items);
+      } catch { if (active) setNotice('生成进度暂时无法更新，正在重试。可在任务中心查看。'); }
+      finally { pending = false; }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 1_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [submissionId]);
 
   useEffect(() => {
     void Promise.all([window.desktopApi.listProviderProfiles(), window.desktopApi.listPromptTemplates(), window.desktopApi.getAppSettings()]).then(([items, savedTemplates, settings]) => {
@@ -2726,7 +3175,7 @@ function AiWorkflowPage({ photos: availablePhotos, selectedIds, focusId, workflo
       if (active) setGenerationResults(Object.fromEntries(entries));
     }).catch(() => undefined);
     return () => { active = false; };
-  }, [ids, idsKey, tasks]);
+  }, [ids, idsKey, tasks, submissionTasks]);
   useEffect(() => {
     if (ids.length === 0) return;
     let active = true;
@@ -2746,22 +3195,15 @@ function AiWorkflowPage({ photos: availablePhotos, selectedIds, focusId, workflo
   }, [ids, idsKey, revisions]);
   useEffect(() => { if (focusId && ids.includes(focusId)) setLocalFocusId(focusId); }, [focusId, ids, idsKey]);
   useEffect(() => {
-    if (!effectiveCurrentId || !currentRevision) return;
-    setItemRules((current) => current[effectiveCurrentId] ? current : {
-      ...current,
-      [effectiveCurrentId]: currentRevision.result.generativeActions.map((action) => ({ id: action.id, text: `${action.target}：${action.instruction}`, enabled: action.enabled }))
-    });
-  }, [effectiveCurrentId, currentRevision]);
-  useEffect(() => {
-    const timeout = window.setTimeout(() => window.localStorage.setItem(WORKFLOW_DRAFT_KEY, JSON.stringify({ workflowAssetIds, workflowAssetMeta, stage, templateId, generationCount, globalRules, itemRules, itemTemplateIds, itemGenerationCounts, collectionReport, agentInstruction, agentPlan })), 300);
+    const timeout = window.setTimeout(() => window.localStorage.setItem(WORKFLOW_DRAFT_KEY, JSON.stringify({ workflowAssetIds, workflowAssetMeta, stage, templateId, generationCount, globalRules, itemRules, itemTemplateIds, itemGenerationCounts, collectionReport })), 300);
     return () => window.clearTimeout(timeout);
-  }, [agentInstruction, agentPlan, collectionReport, generationCount, globalRules, itemGenerationCounts, itemRules, itemTemplateIds, stage, templateId, workflowAssetIds, workflowAssetMeta]);
+  }, [collectionReport, generationCount, globalRules, itemGenerationCounts, itemRules, itemTemplateIds, stage, templateId, workflowAssetIds, workflowAssetMeta]);
   useEffect(() => {
     try { window.localStorage.setItem(`${WORKFLOW_DRAFT_KEY}.best-results`, JSON.stringify(bestResultIds)); } catch { /* draft remains usable in memory */ }
   }, [bestResultIds]);
 
   const analyze = async () => {
-    const profile = profiles.find((item) => item.purpose === 'vision' && item.enabled);
+    const profile = profiles.find((item) => item.purpose === 'vision' && item.enabled && item.isDefault) ?? profiles.find((item) => item.purpose === 'vision' && item.enabled);
     if (!profile) { setNotice('请先在设置中配置并启用视觉分析模型。'); return; }
     if (ids.length === 0) { setNotice('请先从图库或看图加入照片到处理队列。'); return; }
     setBusy(true); setNotice('正在加入视觉分析队列…');
@@ -2771,113 +3213,78 @@ function AiWorkflowPage({ photos: availablePhotos, selectedIds, focusId, workflo
         await window.desktopApi.enqueueTask({ kind: 'analysis', assetId, payload: { providerProfileId: profile.id, mode: 'full', batchId, locale: getLocale() } });
       }
       setNotice(`已加入 ${ids.length} 张照片的分析任务。`); setStage('optimization');
-    } finally { setBusy(false); }
+    } catch (error) { setNotice(`加入视觉分析队列失败：${error instanceof Error ? error.message : String(error)}`); }
+    finally { setBusy(false); }
   };
-  const planAgent = () => {
-    const plan = buildAgentPlan(agentInstruction, workflowPhotos.length);
-    setAgentPlan(plan);
-    if (plan.style && !globalRules.some((rule) => rule.text.includes(plan.style!))) {
-      setNotice(`已生成 Agent 计划：将应用${plan.style}风格。`);
-    } else {
-      setNotice('已生成 Agent 执行计划，请确认后开始。');
-    }
+  const retryGeneration = async (failed: PersistedTask[]) => {
+    if (submitting.current || failed.length === 0) return;
+    submitting.current = true;
+    setBusy(true);
+    try {
+      for (const task of failed) {
+        const updated = await window.desktopApi.retryTask(task.id);
+        setSubmissionTasks((current) => current.map((item) => item.id === task.id ? updated : item));
+      }
+      const batch = failed[0]!.payload.submissionId ?? failed[0]!.payload.batchId;
+      if (typeof batch === 'string') setSubmissionId(batch);
+      setNotice(`已重新排队 ${failed.length} 个失败版本，成功版本保留。`);
+    } catch (error) { setNotice(`重试失败：${error instanceof Error ? error.message : String(error)}`); }
+    finally { submitting.current = false; setBusy(false); }
   };
-  const applyAgentPlan = () => {
-    const plan = agentPlan ?? buildAgentPlan(agentInstruction, workflowPhotos.length);
-    setAgentPlan(plan);
-    const additions = [
-      /糊|模糊/.test(agentInstruction) ? '排除模糊、失焦或严重曝光异常的照片' : '',
-      /相似|重复/.test(agentInstruction) ? '删除或跳过高度相似的重复照片' : '',
-      plan.style ? `整体风格：${plan.style}` : '',
-      plan.outputFolder ? `输出目录：${plan.outputFolder}` : ''
-    ].filter(Boolean);
-    if (additions.length) onGlobalRulesChange((current) => [...current.filter((rule) => !additions.some((item) => rule.text === item)), ...additions.map((text) => ({ id: crypto.randomUUID(), text, enabled: true }))]);
-    if (plan.requestedCount) setGenerationCount(1);
-    setStage('analysis');
-    setNotice('Agent 计划已应用到工作流。请检查整体提示词与逐图提示词后执行。');
-  };
-  const generate = async () => {
-    const profile = profiles.find((item) => item.purpose === 'generation' && item.enabled);
+  const generate = async (onlyAssetId?: string) => {
+    if (submitting.current) return;
+    const profile = profiles.find((item) => item.purpose === 'generation' && item.enabled && item.id === generationProfileId) ?? profiles.find((item) => item.purpose === 'generation' && item.enabled && item.isDefault) ?? profiles.find((item) => item.purpose === 'generation' && item.enabled);
     if (!profile) { setNotice('请先在设置中配置并启用图片生成模型。'); return; }
-    const usable = ids.map((assetId) => ({ assetId, revision: revisions[assetId] })).filter((item): item is { assetId: string; revision: AnalysisRevision } => Boolean(item.revision));
-    if (usable.length === 0) { setNotice('请先完成视觉分析，再生成提示词和图片。'); setStage('analysis'); return; }
+    const usable = ids.filter((id) => (!onlyAssetId || id === onlyAssetId) && !generationTasks.some((task) => task.assetId === id && isUnfinished(task))).map((assetId) => ({ assetId, revision: revisions[assetId] }));
+    if (usable.length === 0) { setNotice('这些图片已有生成任务，请等待完成后再生成。'); return; }
+    submitting.current = true;
     setBusy(true); setNotice('正在创建提示词并加入生图队列…');
+    let submittedCount = 0;
     try {
       const submissionId = crypto.randomUUID();
+      setSubmissionTasks([]);
+      setSubmissionId(submissionId);
       for (const { assetId, revision } of usable) {
         const selectedTemplateId = itemTemplateIds[assetId] || templateId;
         const template = templates.find((item) => item.id === selectedTemplateId) ?? null;
         const enabled = (itemRules[assetId] ?? []).filter((item) => item.enabled).map((item) => item.text);
         const rules = globalRules.filter((item) => item.enabled).map((item) => item.text);
-        const prompt = composeGenerationPrompt({ templateBody: template?.body ?? DEFAULT_GENERATION_TEMPLATE_BODY, analysis: { ...revision.result, generativeActions: revision.result.generativeActions.filter((action) => enabled.some((item) => item.startsWith(`${action.target}：`))) }, userInstruction: [...rules, ...enabled].join('\n') });
+        const prompt = composeGenerationPrompt({ templateBody: template?.body ?? '{{user_instruction}}', analysis: revision ? { ...revision.result, generativeActions: revision.result.generativeActions.filter((action) => enabled.some((item) => item.startsWith(`${action.target}：`))) } : undefined, userInstruction: [...rules, ...enabled].join('\n') });
+        if (!prompt.trim()) throw new Error('请填写批次提示词、本图提示词或选择模板。');
         const batchId = crypto.randomUUID();
         const count = itemGenerationCounts[assetId] ?? generationCount;
-        for (let resultIndex = 1; resultIndex <= count; resultIndex += 1) await window.desktopApi.enqueueTask({ kind: 'generation', assetId, payload: { providerProfileId: profile.id, batchId, submissionId, prompt, templateId: template?.id ?? null, templateVersion: template?.version ?? null, resultIndex, storageMode, analysisRevisionId: revision.id, disabledActionIds: revision.result.generativeActions.filter((action) => !enabled.some((item) => item.startsWith(`${action.target}：`))).map((action) => action.id), userInstruction: [...rules, ...enabled].join('\n') } });
+        for (let resultIndex = 1; resultIndex <= count; resultIndex += 1) {
+          const task = await window.desktopApi.enqueueTask({ kind: 'generation', assetId, payload: { providerProfileId: profile.id, batchId, submissionId, prompt, templateId: template?.id ?? null, templateVersion: template?.version ?? null, resultIndex, storageMode, ...(revision ? { analysisRevisionId: revision.id } : {}), disabledActionIds: revision?.result.generativeActions.filter((action) => !enabled.some((item) => item.startsWith(`${action.target}：`))).map((action) => action.id) ?? [], userInstruction: [...rules, ...enabled].join('\n') } });
+          submittedCount += 1;
+          setSubmissionTasks((current) => [...current.filter((item) => item.id !== task.id), task]);
+        }
       }
       const taskCount = usable.reduce((sum, item) => sum + (itemGenerationCounts[item.assetId] ?? generationCount), 0);
       setNotice(`已将 ${usable.length} 张照片、共 ${taskCount} 个版本加入生图队列。`); setStage('review');
-    } finally { setBusy(false); }
-  };
-  const analyzeCollection = async () => {
-    const analyzed = workflowPhotos.map((photo) => ({ photo, revision: revisions[photo.id] })).filter((item): item is { photo: Photo; revision: AnalysisRevision } => Boolean(item.revision));
-    if (analyzed.length < 2) { setNotice('处理队列中至少完成两张照片的视觉识别后，才能进行相册横向分析。'); return; }
-    const profile = profiles.find((item) => item.purpose === 'vision' && item.enabled);
-    if (!profile) { setNotice('请先在设置中配置并启用视觉分析模型。'); return; }
-    setBusy(true);
-    setNotice('相册分析已加入任务队列。');
-    try {
-      const task = await window.desktopApi.enqueueTask({ kind: 'collection-analysis', assetId: null, payload: { providerProfileId: profile.id, assetIds: analyzed.map((item) => item.photo.id) } });
-      let completed: PersistedTask | null = task;
-      while (completed && !['completed', 'failed', 'canceled'].includes(completed.status)) {
-        await new Promise((resolve) => window.setTimeout(resolve, 500));
-        completed = await window.desktopApi.getTask(task.id);
-      }
-      if (!completed || completed.status !== 'completed') throw new Error(completed?.errorCode ?? 'COLLECTION_ANALYSIS_FAILED');
-      const report = collectionAnalysisReportSchema.parse(completed.result);
-      const names = new Map(workflowPhotos.map((photo) => [photo.id, photo.fileName]));
-      setCollectionReport({
-        summary: report.summary,
-        groups: report.groups.map((group) => group.assetIds.map((id) => names.get(id) ?? id)),
-        keep: report.keepAssetIds.map((id) => names.get(id) ?? id),
-        review: report.reviewAssetIds.map((id) => names.get(id) ?? id),
-        recommendations: report.recommendations
-      });
-      setNotice(`已完成 ${analyzed.length} 张照片的相册分析。`);
-    } catch {
-      setNotice('相册分析失败，请在任务中心查看错误并重试。');
-    } finally {
-      setBusy(false);
-    }
+    } catch (error) { setNotice(`已提交 ${submittedCount} 个生成任务；${error instanceof Error ? error.message : String(error)}`); }
+    finally { submitting.current = false; setBusy(false); }
   };
   return <main className="ai-workflow-page batch-workspace" onFocusCapture={(event) => { const target = (event.target as HTMLElement).closest<HTMLElement>('[data-workflow-asset-id]'); const id = target?.dataset.workflowAssetId; if (id) { setLocalFocusId(id); onFocusAsset(id); } }}>
     <div className="workflow-body">
       <section className="workflow-main">
-        <section className="batch-prompt-card"><div><span>批次整体提示词</span></div><textarea aria-label="批次整体提示词" value={globalRules.filter((item) => item.enabled).map((item) => item.text).join('\n')} onChange={(event) => onGlobalRulesChange([{ id: 'batch-prompt', text: event.target.value, enabled: true }])} placeholder="描述所有照片共有的修图要求" /></section>
-        <div className="batch-queue-toolbar"><strong>处理队列 <span>{workflowPhotos.length} 张</span></strong><div className="batch-queue-toolbar-actions"><label><span>默认生成</span><input aria-label="默认生成数量" type="number" min="1" max="8" value={generationCount} onChange={(event) => setGenerationCount(clamp(Number(event.target.value) || 1, 1, 8))} /></label><button className="quiet-button compact" type="button" disabled={busy || workflowPhotos.length === 0} onClick={() => void analyze()}><Sparkles size={12} />识别</button><button className="primary-action compact" type="button" disabled={busy || workflowPhotos.length === 0} onClick={() => void generate()}><WandSparkles size={12} />生成全部</button><button className="quiet-button compact" type="button" onClick={onOpenTasks}><Clock3 size={12} />任务</button><button className="quiet-button compact" type="button" disabled={selectedIds.size === 0} onClick={() => onAddAssets([...selectedIds])}><Plus size={12} /></button><button className="quiet-button compact" type="button" disabled={workflowAssetIds.length === 0} onClick={onClearAssets}><X size={12} /></button></div></div>
-        {stage === 'analysis' && <div className="workflow-analysis">
-          <div className="workflow-analysis-counts"><span>已识别 {workflowPhotos.filter((photo) => revisions[photo.id]).length}</span><span>处理中 {workflowPhotos.filter((photo) => !revisions[photo.id] && analysisTasks.get(photo.id) && !['failed', 'canceled', 'completed'].includes(analysisTasks.get(photo.id)!.status)).length}</span><span>待识别 {workflowPhotos.filter((photo) => !revisions[photo.id] && !analysisTasks.has(photo.id)).length}</span></div>
-        </div>}
-        {workflowPhotos.length === 0 ? <div className="workflow-empty">从图库或看图将照片加入处理队列</div> : <div className="batch-queue-list">{workflowPhotos.map((photo, index) => {
+        <section className="batch-prompt-card"><div><span>批次整体提示词</span><label className="batch-model-choice"><select aria-label="本批生成模型" value={generationProfileId || (profiles.find((item) => item.purpose === 'generation' && item.enabled && item.isDefault) ?? profiles.find((item) => item.purpose === 'generation' && item.enabled))?.id || ''} onChange={(event) => setGenerationProfileId(event.target.value)}>{!profiles.some((item) => item.purpose === 'generation' && item.enabled) && <option value="">尚未配置生成模型</option>}{profiles.filter((item) => item.purpose === 'generation' && item.enabled).map((item) => <option key={item.id} value={item.id}>{item.name}{item.isDefault ? ' · 默认' : ''}</option>)}</select></label></div><textarea aria-label="批次整体提示词" value={globalRules.filter((item) => item.enabled).map((item) => item.text).join('\n')} onChange={(event) => onGlobalRulesChange([{ id: 'batch-prompt', text: event.target.value, enabled: true }])} placeholder="描述所有照片共有的修图要求" /></section>
+        <div className="batch-queue-toolbar"><strong>处理队列 <span>{workflowPhotos.length} 张 · {ids.reduce((sum, id) => sum + (itemGenerationCounts[id] ?? generationCount), 0)} 个版本</span></strong><div className="batch-queue-toolbar-actions"><label><span>每图生成</span><input aria-label="默认生成数量" type="number" min="1" max="8" value={generationCount} onChange={(event) => setGenerationCount(clamp(Number(event.target.value) || 1, 1, 8))} /></label><button className="quiet-button compact" type="button" disabled={busy || workflowPhotos.length === 0} onClick={() => void analyze()}><Sparkles size={12} />视觉分析</button><button className="primary-action compact" type="button" disabled={busy || generationActive || workflowPhotos.length === 0} onClick={() => void generate()}><WandSparkles size={12} />{busy ? '正在提交…' : generationActive ? '生成中…' : '生成全部'}</button><button className="quiet-button compact" type="button" aria-label="加入选中图片" title="加入选中图片" disabled={selectedIds.size === 0} onClick={() => onAddAssets([...selectedIds])}><Plus size={12} /></button><button className="quiet-button compact" type="button" aria-label="清空处理列表" title="清空处理列表（后台任务继续运行）" disabled={workflowAssetIds.length === 0} onClick={onClearAssets}><X size={12} /></button></div></div>
+        {notice && <p className="workflow-notice" role="status">{notice}</p>}
+        {submissionTasks.length > 0 && <section className="batch-generation-progress" aria-label="本批生成进度" aria-live="polite"><div><strong>{batchRunning || batchQueued || batchPaused || busy ? '本批生成' : batchFailed ? '本批已结束' : batchCanceled ? '本批已取消' : '本批已完成'}</strong><span>成功 {batchCompleted} / {submissionTasks.length} 个版本</span>{batchRunning > 0 && <span>生成中 {batchRunning}</span>}{batchQueued > 0 && <span>排队 {batchQueued}</span>}{batchPaused > 0 && <span>已暂停 {batchPaused}</span>}{batchFailed > 0 && <span className="batch-generation-error">失败 {batchFailed}</span>}{batchCanceled > 0 && <span>取消 {batchCanceled}</span>}{batchFailed > 0 && <button className="quiet-button compact" type="button" disabled={busy || batchRunning > 0 || batchQueued > 0 || batchPaused > 0} onClick={() => void retryGeneration(submissionTasks.filter((task) => task.status === 'failed'))}>重试失败</button>}</div><progress aria-label="本批已结束版本" value={batchCompleted + batchFailed + batchCanceled} max={submissionTasks.length} /></section>}
+        {workflowPhotos.length === 0 ? <div className="workflow-empty">从图库或看图将照片加入处理队列</div> : <div className="batch-queue-list">{workflowPhotos.map((photo) => {
             const result = revisions[photo.id]?.result;
             const task = analysisTasks.get(photo.id);
-            const state = task?.status === 'failed' ? <AnalysisFailure code={task.errorCode} taskId={task.id} /> : result ? '已识别' : task?.status === 'canceled' ? '已取消' : task?.status === 'queued' ? '排队中' : task ? task.status === 'completed' ? '读取结果中' : '识别中' : '待识别';
+            const imageTasks = latestGenerationTasks(photo.id);
+            const completed = imageTasks.filter((item) => item.status === 'completed').length;
+            const failed = imageTasks.filter((item) => item.status === 'failed');
+            const active = imageTasks.find((item) => isUnfinished(item) && !['queued', 'draft', 'paused'].includes(item.status));
+            const pending = imageTasks.filter(isUnfinished);
+            const state = imageTasks.length ? `${active ? taskStage(active) : pending.length ? pending.every((item) => item.status === 'paused') ? '已暂停' : '等待生成' : failed.length ? '生成失败' : imageTasks.every((item) => item.status === 'canceled') ? '已取消' : '生成完成'} · ${completed}/${imageTasks.length}` : task && isUnfinished(task) ? '视觉分析中' : '待生成';
             const candidates = generationResults[photo.id] ?? [];
-            return <article className={`batch-queue-item${photo.id === effectiveCurrentId ? ' is-active' : ''}`} data-workflow-asset-id={photo.id} key={photo.id} onClick={() => { setLocalFocusId(photo.id); onFocusAsset(photo.id); }} onContextMenu={(event) => { event.preventDefault(); setLocalFocusId(photo.id); onFocusAsset(photo.id); setBatchContextMenu({ x: event.clientX, y: event.clientY, assetId: photo.id }); }}><div className="batch-queue-source" onDoubleClick={() => onOpenViewer(photo.id, workflowAssetIds)}><span className="batch-queue-original">{photo.thumbnailSrc || photo.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" /> : <Image size={20} />}<small>原图</small></span><span className="batch-queue-file"><strong>{photo.fileName}</strong><em>{state}</em></span></div><div className="batch-queue-editor"><label><span>本图提示词</span><textarea value={(itemRules[photo.id] ?? []).filter((rule) => rule.enabled).map((rule) => rule.text).join('\n')} onClick={(event) => event.stopPropagation()} onChange={(event) => setItemRules((current) => ({ ...current, [photo.id]: [{ id: `prompt-${photo.id}`, text: event.target.value, enabled: true }] }))} placeholder="覆盖批次提示词，描述这张图的独立要求" /></label><label><span>生成数量</span><input type="number" min="1" max="8" value={itemGenerationCounts[photo.id] ?? generationCount} onClick={(event) => event.stopPropagation()} onChange={(event) => setItemGenerationCounts((current) => ({ ...current, [photo.id]: clamp(Number(event.target.value) || 1, 1, 8) }))} /></label></div><div className="batch-queue-candidates">{candidates.slice(0, 8).map((candidate) => <button className={`batch-candidate${bestResultIds[photo.id] === candidate.id || candidate.reviewState === 'preferred' ? ' is-best' : ''}`} type="button" key={candidate.id} title="单击设为最佳，双击打开大图" onClick={(event) => { event.stopPropagation(); setBestResultIds((current) => ({ ...current, [photo.id]: candidate.id })); void window.desktopApi.updateGenerationResultReview({ resultId: candidate.id, reviewState: 'preferred' }); }} onDoubleClick={(event) => { event.stopPropagation(); onOpenViewer(photo.id, workflowAssetIds, candidate.id); }}><img src={candidate.resultUrl} alt={`生成候选 ${candidate.version}`} /><small>{bestResultIds[photo.id] === candidate.id || candidate.reviewState === 'preferred' ? '最佳' : `V${candidate.version}`}</small></button>)}</div><div className="batch-queue-meta"><span>{result?.catalog.shortDescription ?? result?.summary ?? '尚未生成视觉分析结果'}</span><div><button type="button" aria-label={`重试 ${photo.fileName}`} onClick={(event) => { event.stopPropagation(); setLocalFocusId(photo.id); onFocusAsset(photo.id); void generate(); }}><RotateCcw size={12} /></button><button type="button" aria-label={`移除 ${photo.fileName}`} onClick={(event) => { event.stopPropagation(); onRemoveAsset(photo.id); }}><X size={12} /></button></div></div></article>;
-            /* legacy analysis details remain available below the compact batch row */
-            /* <button className="workflow-analysis-select" type="button" onClick={() => { setLocalFocusId(photo.id); onFocusAsset(photo.id); }}>
-              <span className="workflow-analysis-thumb">{photo.thumbnailSrc || photo.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" /> : <Image size={20} />}</span>
-              <span className="workflow-analysis-content"><span className="workflow-analysis-title"><strong>{photo.fileName}</strong><em>{state}</em>{result && <b>{Math.round(result.quality.overallScore)} 分</b>}</span><span className="workflow-analysis-description">{result?.catalog.shortDescription ?? result?.summary ?? (task?.status === 'failed' ? '识别失败，可在任务中心重试' : '')}</span>{result && <span className="workflow-analysis-issues">{result.quality.issues.length ? result.quality.issues.slice(0, 3).map((issue) => issue.description).join(' · ') : '未发现明显问题'}{result.quality.issues.length > 3 ? ` · 另有 ${result.quality.issues.length - 3} 项` : ''}</span>}</span>
-            </button><span className="workflow-asset-actions"><button type="button" aria-label={`上移 ${photo.fileName}`} disabled={index === 0} onClick={() => onMoveAsset(photo.id, -1)}><ArrowUp size={13} /></button><button type="button" aria-label={`下移 ${photo.fileName}`} disabled={index === workflowPhotos.length - 1} onClick={() => onMoveAsset(photo.id, 1)}><ArrowDown size={13} /></button><button type="button" aria-label={`移除 ${photo.fileName}`} onClick={() => onRemoveAsset(photo.id)}><X size={13} /></button></span></div>;
-            })}</div> */
+            return <article className={`batch-queue-item${photo.id === effectiveCurrentId ? ' is-active' : ''}`} data-workflow-asset-id={photo.id} key={photo.id} onClick={() => { setLocalFocusId(photo.id); onFocusAsset(photo.id); }} onContextMenu={(event) => { event.preventDefault(); setLocalFocusId(photo.id); onFocusAsset(photo.id); setBatchContextMenu({ x: event.clientX, y: event.clientY, assetId: photo.id }); }}><div className="batch-queue-source" onDoubleClick={() => onOpenViewer(photo.id, workflowAssetIds)}><span className="batch-queue-original" data-label-color={photo.labelColor ?? undefined}>{photo.thumbnailSrc || photo.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" /> : <Image size={20} />}<small>原图</small></span><span className="batch-queue-file"><strong>{photo.fileName}</strong><em>{active && <LoaderCircle size={12} className="batch-generation-spinner" />}{state}</em>{imageTasks.length > 0 && <progress aria-label={`${photo.fileName} 已结束版本`} value={imageTasks.filter((item) => !isUnfinished(item)).length} max={imageTasks.length} />}</span></div><div className="batch-queue-editor"><label><span>本图提示词</span><textarea value={(itemRules[photo.id] ?? []).filter((rule) => rule.enabled).map((rule) => rule.text).join('\n')} onClick={(event) => event.stopPropagation()} onChange={(event) => setItemRules((current) => ({ ...current, [photo.id]: [{ id: `prompt-${photo.id}`, text: event.target.value, enabled: true }] }))} placeholder="补充这张图片的独立要求" /></label><label><span>生成数量</span><input type="number" min="1" max="8" value={itemGenerationCounts[photo.id] ?? generationCount} onClick={(event) => event.stopPropagation()} onChange={(event) => setItemGenerationCounts((current) => ({ ...current, [photo.id]: clamp(Number(event.target.value) || 1, 1, 8) }))} /></label></div><div className="batch-queue-candidates">{candidates.slice(0, 8).map((candidate) => <button data-label-color={photo.labelColor ?? undefined} className={`batch-candidate${bestResultIds[photo.id] === candidate.id || candidate.reviewState === 'preferred' ? ' is-best' : ''}`} type="button" key={candidate.id} title="单击设为最佳，双击打开大图" onClick={(event) => { event.stopPropagation(); setBestResultIds((current) => ({ ...current, [photo.id]: candidate.id })); void window.desktopApi.updateGenerationResultReview({ resultId: candidate.id, reviewState: 'preferred' }); }} onDoubleClick={(event) => { event.stopPropagation(); onOpenViewer(photo.id, workflowAssetIds, candidate.id); }}><img src={candidate.resultUrl} alt={`生成候选 ${candidate.version}`} /><small>{bestResultIds[photo.id] === candidate.id || candidate.reviewState === 'preferred' ? '最佳' : `V${candidate.version}`}</small></button>)}</div><div className="batch-queue-meta"><span>{failed.length > 0 ? <span className="batch-generation-error" role="alert">{failed.length} 个版本失败 · {generationFailureMessage(failed[0]!.errorCode)} <code>{failed[0]!.errorCode}</code> <button type="button" aria-label="复制生成错误" title="复制生成错误" onClick={(event) => { event.stopPropagation(); void navigator.clipboard.writeText(failed.map((item) => `图片：${photo.fileName}\n错误码：${item.errorCode ?? '未知错误'}\n任务 ID：${item.id}`).join('\n\n')); }}><Copy size={13} /></button></span> : result?.catalog.shortDescription ?? ''}</span><div><button type="button" aria-label={`${failed.length ? '重试失败版本' : '再次生成'} ${photo.fileName}`} title={failed.length ? '仅重试失败版本' : '再次生成'} disabled={busy || pending.length > 0} onClick={(event) => { event.stopPropagation(); setLocalFocusId(photo.id); onFocusAsset(photo.id); void (failed.length ? retryGeneration(failed) : generate(photo.id)); }}><RotateCcw size={12} /></button><button type="button" aria-label={`移除 ${photo.fileName}`} onClick={(event) => { event.stopPropagation(); onRemoveAsset(photo.id); }}><X size={12} /></button></div></div></article>;
+
           })}</div>}
-        {batchContextMenu && <div className="batch-context-menu" role="menu" style={{ left: Math.min(batchContextMenu.x, window.innerWidth - 220), top: Math.min(batchContextMenu.y, window.innerHeight - 180) }} onPointerDown={(event) => event.stopPropagation()}><button type="button" onClick={() => { setNotice(`已准备重试 ${workflowPhotos.find((item) => item.id === batchContextMenu.assetId)?.fileName ?? '当前图片'}。`); setBatchContextMenu(null); }}><RotateCcw size={13} />单独重试</button><button type="button" onClick={() => { void window.desktopApi.revealCatalogAsset(batchContextMenu.assetId); setBatchContextMenu(null); }}><FolderOpen size={13} />打开原图位置</button>{batchContextMenu.resultId && <button type="button" onClick={() => { void window.desktopApi.revealGenerationResult(batchContextMenu.resultId!); setBatchContextMenu(null); }}><FolderOpen size={13} />打开生成图位置</button>}<button type="button" onClick={() => setBatchContextMenu(null)}>取消</button></div>}
-        {stage === 'analysis' && currentRevision && <section className="workflow-analysis-detail"><h3>{currentPhoto?.fileName}</h3><p>{currentRevision.result.report}</p><button className="quiet-button compact" type="button" onClick={() => setStage('optimization')}>查看优化建议 <ChevronRight size={13} /></button></section>}
-        {stage === 'collection' && <div className="workflow-info-card"><h3>相册整体分析</h3>{collectionReport ? <><p>{collectionReport.summary}</p><div className="workflow-summary-grid"><article><strong>{collectionReport.groups.length}</strong><span>相似候选组</span></article><article><strong>{collectionReport.keep.length}</strong><span>推荐保留</span></article><article><strong>{collectionReport.review.length}</strong><span>建议审阅</span></article></div>{collectionReport.groups.map((group, index) => <p className="workflow-report-row" key={index}><strong>相似组 {index + 1}</strong>{group.join('、')}</p>)}{collectionReport.recommendations.map((item, index) => <p className="workflow-report-row" key={`recommendation-${index}`}>{item}</p>)}</> : <span className="workflow-muted">尚无分析结果</span>}</div>}
-        {(stage === 'optimization' || stage === 'prompt') && (currentRevision ? <div className="workflow-info-card"><h3>{currentPhoto?.fileName}</h3><p>{currentRevision.result.summary}</p><div className="workflow-rule-list">{(itemRules[effectiveCurrentId!] ?? []).map((rule) => <label className="workflow-rule" key={rule.id}><input type="checkbox" checked={rule.enabled} onChange={() => setItemRules((current) => ({ ...current, [effectiveCurrentId!]: (current[effectiveCurrentId!] ?? []).map((item) => item.id === rule.id ? { ...item, enabled: !item.enabled } : item) }))} /><input value={rule.text} onChange={(event) => setItemRules((current) => ({ ...current, [effectiveCurrentId!]: (current[effectiveCurrentId!] ?? []).map((item) => item.id === rule.id ? { ...item, text: event.target.value } : item) }))} /></label>)}</div></div> : workflowPhotos.length > 0 && <p className="workflow-muted workflow-inline-empty">选择已识别照片以查看优化建议</p>)}
-        {stage === 'prompt' && <div className="workflow-info-card"><h3>当前照片模板</h3>{effectiveCurrentId && <label className="workflow-field"><span>专用模板</span><select value={itemTemplateIds[effectiveCurrentId] ?? ''} onChange={(event) => setItemTemplateIds((current) => ({ ...current, [effectiveCurrentId]: event.target.value }))}><option value="">继承批次默认模板</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select></label>}<pre className="workflow-prompt-preview">{[...globalRules.filter((item) => item.enabled).map((item) => item.text), ...(effectiveCurrentId ? (itemRules[effectiveCurrentId] ?? []).filter((item) => item.enabled).map((item) => item.text) : [])].join('\n')}</pre></div>}
-        {stage === 'generation' && <div className="workflow-info-card"><h3>生成数量</h3><label className="workflow-number-field"><span>批次默认</span><input aria-label="批次默认生成数量" type="number" min="1" max="8" value={generationCount} onChange={(event) => setGenerationCount(clamp(Number(event.target.value) || 1, 1, 8))} /></label>{effectiveCurrentId && <label className="workflow-number-field"><span>当前图片</span><input aria-label="当前图片生成数量" type="number" min="1" max="8" value={itemGenerationCounts[effectiveCurrentId] ?? generationCount} onChange={(event) => setItemGenerationCounts((current) => ({ ...current, [effectiveCurrentId]: clamp(Number(event.target.value) || 1, 1, 8) }))} /></label>}<div className="workflow-generation-summary">{ids.reduce((sum, assetId) => sum + (itemGenerationCounts[assetId] ?? generationCount), 0)} 个任务</div></div>}
-        {stage === 'review' && <div className="workflow-info-card"><h3>结果审阅</h3><button className="secondary-action compact" type="button" onClick={onOpenTasks}><Clock3 size={13} />查看任务状态</button></div>}
-        {notice && <p className="workflow-notice" role="status">{notice}</p>}
+        {batchContextMenu && <div className="batch-context-menu" role="menu" style={{ left: Math.min(batchContextMenu.x, window.innerWidth - 220), top: Math.min(batchContextMenu.y, window.innerHeight - 180) }} onPointerDown={(event) => event.stopPropagation()}><button type="button" onClick={() => { void generate(batchContextMenu.assetId); setBatchContextMenu(null); }}><RotateCcw size={13} />再次生成</button><button type="button" onClick={() => { void window.desktopApi.revealCatalogAsset(batchContextMenu.assetId); setBatchContextMenu(null); }}><FolderOpen size={13} />打开原图位置</button>{batchContextMenu.resultId && <button type="button" onClick={() => { void window.desktopApi.revealGenerationResult(batchContextMenu.resultId!); setBatchContextMenu(null); }}><FolderOpen size={13} />打开生成图位置</button>}<button type="button" onClick={() => setBatchContextMenu(null)}>取消</button></div>}
       </section>
     </div>
   </main>;
@@ -3174,13 +3581,13 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
       <main className="settings-content" ref={settingsContentRef}>
         {settingsSection === 'workflow' && <FileWorkflowEditor scope={{ folderId: null, albumId: null }} folders={[]} scopeName="全局默认流程" />}
         {settingsSection === 'appearance' && <>
-          <section className="settings-section storage-section"><div className="settings-heading"><div><h2>界面主题</h2><p>跟随系统会在系统外观变化时即时切换，不需要重启应用。</p></div><span><SunMoon size={14} />照片优先</span></div><div className="storage-options" aria-label="界面主题">{([['system', '跟随系统', '自动使用 macOS 或 Windows 当前外观。'], ['dark', '深色', '适合暗光环境和长时间看图。'], ['light', '浅色', '适合明亮环境和文档型工作流。']] as const).map(([value, label, description]) => <label className={theme === value ? 'is-selected' : ''} key={value}><input type="radio" name="theme" checked={theme === value} onChange={() => void saveTheme(value)} /><span><strong>{label}</strong><small>{description}</small></span><Check size={15} /></label>)}</div></section>
-          <section className="settings-section storage-section"><div className="settings-heading"><div><h2>界面语言</h2><p>菜单和已适配的界面文字会即时切换，语言包设计支持后续扩展。</p></div><span><Command size={14} />i18n</span></div><div className="storage-options" aria-label="界面语言">{([['zh-CN', '简体中文', '中文界面和菜单。'], ['en-US', 'English', 'English interface and menus.']] as const).map(([value, label, description]) => <label className={locale === value ? 'is-selected' : ''} key={value}><input type="radio" name="locale" checked={locale === value} onChange={() => void saveLocale(value)} /><span><strong>{label}</strong><small>{description}</small></span><Check size={15} /></label>)}</div></section>
+          <section className="settings-section storage-section"><div className="settings-heading"><h2>界面主题</h2></div><div className="storage-options appearance-options" aria-label="界面主题">{([['system', '跟随系统'], ['dark', '深色'], ['light', '浅色']] as const).map(([value, label]) => <label className={theme === value ? 'is-selected' : ''} key={value}><input type="radio" name="theme" checked={theme === value} onChange={() => void saveTheme(value)} /><span><strong>{label}</strong></span></label>)}</div></section>
+          <section className="settings-section storage-section"><div className="settings-heading"><h2>界面语言</h2></div><div className="storage-options appearance-options" aria-label="界面语言">{([['zh-CN', '简体中文'], ['en-US', 'English']] as const).map(([value, label]) => <label className={locale === value ? 'is-selected' : ''} key={value}><input type="radio" name="locale" checked={locale === value} onChange={() => void saveLocale(value)} /><span><strong>{label}</strong></span></label>)}</div></section>
         </>}
         {settingsSection === 'models' && <>
         <section className="provider-layout">
           <div className="provider-list">
-            <div className="provider-list-head"><div><strong>已配置服务</strong><span>{profiles.length}</span></div><button className="primary-action compact" type="button" disabled={busy !== null} onClick={() => { setForm({ ...emptyProviderForm }); setCustomHeadersText('{}'); setProviderDeleteCandidate(null); setMessage(''); providerNameRef.current?.focus(); }}><Plus size={14} />添加服务</button></div>
+            <div className="provider-list-head"><div><strong>已配置服务</strong><span>{profiles.length}</span></div><div className="provider-add-actions"><button className="secondary-action compact" type="button" disabled={busy !== null} onClick={() => { setForm({ ...emptyProviderForm, name: 'ACE Nano Banana', kind: 'acedata-nano-banana', purpose: 'generation', baseUrl: 'https://api.acedata.cloud', modelId: 'nano-banana-pro' }); setCustomHeadersText('{}'); setProviderDeleteCandidate(null); setMessage(''); providerNameRef.current?.focus(); }}><Plus size={14} />ACE Nano Banana</button><button className="primary-action compact" type="button" disabled={busy !== null} onClick={() => { setForm({ ...emptyProviderForm }); setCustomHeadersText('{}'); setProviderDeleteCandidate(null); setMessage(''); providerNameRef.current?.focus(); }}><Plus size={14} />添加服务</button></div></div>
             {profiles.length === 0 ? (
               <div className="provider-empty"><Server size={25} /><strong>尚未配置模型</strong></div>
             ) : profiles.map((profile) => (
@@ -3207,11 +3614,11 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
           <form className="provider-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
             <div className="form-title"><span className="provider-icon"><Plus size={16} /></span><div><strong>{form.id ? '编辑模型配置' : '添加模型配置'}</strong><small>所有字段均保存在本机</small></div></div>
             <div className="form-grid two-columns">
-              <label><span>用途</span><select value={form.purpose} onChange={(event) => patchForm('purpose', event.target.value as SaveProviderProfileInput['purpose'])}><option value="vision">视觉分析模型</option><option value="generation">图片生成模型</option></select></label>
-              <label><span>接口类型</span><select value={form.kind} onChange={(event) => patchForm('kind', event.target.value as SaveProviderProfileInput['kind'])}><option value="openai-compatible">OpenAI Compatible</option><option value="nanobanana-compatible">NanoBanana Compatible</option></select></label>
+              <label><span>用途</span><select value={form.purpose} onChange={(event) => patchForm('purpose', event.target.value as SaveProviderProfileInput['purpose'])}><option value="vision" disabled={form.kind === 'acedata-nano-banana'}>视觉分析模型</option><option value="generation">图片生成模型</option></select></label>
+              <label><span>接口类型</span><select value={form.kind} onChange={(event) => { const kind = event.target.value as SaveProviderProfileInput['kind']; patchForm('kind', kind); if (kind === 'acedata-nano-banana') { setForm((current) => ({ ...current, kind, purpose: 'generation', baseUrl: current.baseUrl || 'https://api.acedata.cloud', modelId: current.modelId || 'nano-banana-pro' })); } }}><option value="openai-compatible">OpenAI Compatible</option><option value="nanobanana-compatible">NanoBanana Compatible</option><option value="acedata-nano-banana">ACE Data · Nano Banana</option></select></label>
             </div>
             <label><span>配置名称</span><input ref={providerNameRef} required maxLength={80} placeholder="例如：视觉分析 · 主服务" value={form.name} onChange={(event) => patchForm('name', event.target.value)} /></label>
-            <label><span>Base URL</span><input required type="url" placeholder="https://api.example.com/v1" value={form.baseUrl} onChange={(event) => patchForm('baseUrl', event.target.value)} /><small>远程地址必须使用 HTTPS；本地开发服务可使用 localhost HTTP。</small></label>
+            <label><span>Base URL</span><input required type="url" placeholder={form.kind === 'acedata-nano-banana' ? 'https://api.acedata.cloud' : 'https://api.example.com/v1'} value={form.baseUrl} onChange={(event) => patchForm('baseUrl', event.target.value)} /><small>{form.kind === 'acedata-nano-banana' ? 'ACE Data Nano Banana 专用接口；程序会调用 /nano-banana/images。' : '远程地址必须使用 HTTPS；本地开发服务可使用 localhost HTTP。'}</small></label>
             <label><span>Model ID</span><input required placeholder="模型标识" value={form.modelId} onChange={(event) => patchForm('modelId', event.target.value)} /></label>
             <div className="form-grid two-columns">
               <label><span>请求超时</span><select aria-label="模型请求超时" value={form.requestTimeoutMs} onChange={(event) => patchForm('requestTimeoutMs', Number(event.target.value))}><option value={30_000}>30 秒</option><option value={60_000}>60 秒</option><option value={120_000}>2 分钟</option><option value={300_000}>5 分钟</option><option value={600_000}>10 分钟</option></select></label>
@@ -3227,14 +3634,14 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
         </section>
         </>}
         {settingsSection === 'export' && <section className="settings-section export-presets-section">
-          <div className="settings-heading"><div><h2>导出预设</h2><p>保存格式、尺寸、JPEG 质量和命名策略；原格式导出不会重新编码。</p></div><span><Download size={14} />受管结果可随时导出</span></div>
+          <div className="settings-heading"><div><h2>导出预设</h2><p>原格式导出不会重新编码。</p></div></div>
           <div className="preset-row"><input aria-label="导出预设名称" placeholder="例如：客户交付" value={presetName} onChange={(event) => { setPresetName(event.target.value); setPresetMessage(''); }} /><select aria-label="导出格式" value={presetFormat} onChange={(event) => setPresetFormat(event.target.value as ExportPreset['format'])}><option value="jpeg">JPEG</option><option value="png">PNG</option><option value="original">原格式</option></select><input aria-label="JPEG 质量" type="number" min="1" max="100" disabled={presetFormat !== 'jpeg'} value={presetQuality} onChange={(event) => setPresetQuality(Number(event.target.value))} /><select aria-label="导出尺寸" value={presetMaxDimension ?? ''} onChange={(event) => setPresetMaxDimension(event.target.value ? Number(event.target.value) : null)}><option value="">原始尺寸</option><option value="2048">长边 2048px</option><option value="3840">长边 3840px</option><option value="6000">长边 6000px</option></select><button className="primary-action compact" type="button" disabled={!presetName.trim()} onClick={async () => { try { const saved = await window.desktopApi.saveExportPreset({ name: presetName.trim(), format: presetFormat, quality: presetQuality, maxDimension: presetMaxDimension, conflictPolicy: 'auto-rename', namingPattern: '{name}_{version}' }); setPresets((current) => { const next = [...current.filter((item) => item.id !== saved.id), saved]; onExportPresetsChange(next); return next; }); setPresetName(''); setPresetMessage('预设已保存'); } catch { setPresetMessage('名称已存在或保存失败'); } }}>保存预设</button></div>
           <div className="preset-list">{presets.length === 0 ? <small>暂无导出预设</small> : presets.map((preset) => <div className="preset-item" key={preset.id}><span><strong>{preset.name}</strong><small>{preset.format === 'original' ? '原格式' : preset.format.toUpperCase()}{preset.format === 'jpeg' ? ` · 质量 ${preset.quality}` : ''}{preset.maxDimension ? ` · 长边 ${preset.maxDimension}px` : ''} · {preset.conflictPolicy === 'skip' ? '跳过同名' : '自动编号'}</small></span><button type="button" aria-label={`删除导出预设 ${preset.name}`} onClick={async () => { await window.desktopApi.deleteExportPreset(preset.id); setPresets((current) => { const next = current.filter((item) => item.id !== preset.id); onExportPresetsChange(next); return next; }); }}>删除</button></div>)}</div>
           {presetMessage && <div className="form-feedback" role="status">{presetMessage}</div>}
         </section>}
         {settingsSection === 'storage' && <>
         <section className="settings-section storage-section">
-          <div className="settings-heading"><div><h2>生成结果存储</h2><p>原图始终保持不变。策略会写入每个任务，重试和导出时可追溯。</p></div><span><Folder size={14} />不会覆盖原图</span></div>
+          <div className="settings-heading"><div><h2>生成结果存储</h2><p>仅作用于新任务，不会覆盖原图。</p></div></div>
           <div className="storage-options" aria-label="生成结果存储策略">
             <label className={generationStorageMode === 'managed' ? 'is-selected' : ''}><input type="radio" name="generation-storage" checked={generationStorageMode === 'managed'} disabled={storageBusy} onChange={() => void saveStorageMode('managed')} /><span><strong>集中受管（默认）</strong><small>保存到应用图库的 generated 目录，适合统一管理和批量导出。</small></span><Check size={15} /></label>
             <label className={generationStorageMode === 'portable' ? 'is-selected' : ''}><input type="radio" name="generation-storage" checked={generationStorageMode === 'portable'} disabled={storageBusy} onChange={() => void saveStorageMode('portable')} /><span><strong>原图旁便携目录</strong><small>在原图目录创建 _PhotoAllIsAI，不扫描回图库，也不会自动回退。</small></span><Check size={15} /></label>
@@ -3255,24 +3662,24 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
           <div className="form-feedback" role="status">{trashMessage}</div>
         </section>
         <section className="settings-section backup-section">
-          <div className="settings-heading"><div><h2>图库备份</h2><p>数据库快照适合快速灾备；完整备份还包含集中受管的生成结果和逐文件校验清单，均不包含 API Key。</p></div><span><ShieldCheck size={14} />一致性快照</span></div>
+          <div className="settings-heading"><div><h2>图库备份</h2><p>完整备份包含数据库和受管生成结果，不包含 API Key。</p></div></div>
           <div className="cache-actions"><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void backupDatabase()}>{backupBusy ? '备份中…' : '仅备份数据库'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void backupCompleteLibrary()}>{libraryBackupBusy ? '备份中…' : '完整图库备份'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void verifyCompleteLibraryBackup()}>{backupVerifyBusy ? '验证中…' : '验证备份包'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void restoreCompleteLibraryBackup()}>{restoreBusy ? '准备恢复…' : '从完整备份恢复'}</button><span role="status">{backupMessage || '恢复会保留当前图库副本；原图与便携结果不在备份包内。'}</span></div>
         </section>
         </>}
         {settingsSection === 'tasks' && <section className="settings-section settings-info-section">
-          <div className="settings-heading"><div><h2>队列执行</h2><p>生成任务默认串行执行，保证显存和网络占用可预测。</p></div><span><Clock3 size={14} />持久化队列</span></div>
+          <div className="settings-heading"><h2>队列执行</h2></div>
           <div className="settings-info-grid"><article><strong>并发策略</strong><span>图片分析与生成按队列顺序执行，等待中的任务可在任务中心调整。</span></article><article><strong>失败恢复</strong><span>失败任务保留错误状态和重试次数，不会覆盖已完成版本。</span></article><article><strong>取消边界</strong><span>取消只作用于尚未提交结果的任务，已落盘版本继续保留。</span></article></div>
         </section>}
         {settingsSection === 'shortcuts' && <section className="settings-section settings-info-section">
-          <div className="settings-heading"><div><h2>工作流快捷键</h2><p>快捷键仅在图库焦点区域生效，输入框和对话框不会抢夺按键。</p></div><span><Command size={14} />键盘友好</span></div>
-          <div className="shortcut-list"><span><kbd>⌘ / Ctrl</kbd><strong>+</strong><kbd>A</kbd><em>选择当前列表全部照片</em></span><span><kbd>0–5</kbd><em>设置选中照片评分</em></span><span><kbd>Shift</kbd><strong>+</strong><em>范围选择</em></span><span><kbd>⌘ / Ctrl</kbd><strong>+</strong><em>点击追加选择</em></span></div>
+          <div className="settings-heading"><h2>快捷键</h2></div>
+          <div className="shortcut-list"><span><kbd>⌘ / Ctrl</kbd><strong>+</strong><kbd>A</kbd><em>选择当前列表全部照片</em></span><span><kbd>0–5</kbd><em>设置选中照片星级</em></span><span><kbd>6–9</kbd><em>设置红、黄、绿、蓝颜色标签</em></span><span><kbd>Shift</kbd><strong>+</strong><em>范围选择</em></span><span><kbd>⌘ / Ctrl</kbd><strong>+</strong><em>点击追加选择</em></span></div>
         </section>}
         {settingsSection === 'privacy' && <section className="settings-section settings-info-section">
-          <div className="settings-heading"><div><h2>数据边界</h2><p>应用默认在本机管理图库和派生数据，只有执行 AI 任务时才向用户配置的服务发送图片。</p></div><span><ShieldCheck size={14} />不提供默认服务</span></div>
+          <div className="settings-heading"><div><h2>数据边界</h2><p>图库保存在本机。执行 AI 任务时，图片会发送至所选模型服务。</p></div></div>
           <div className="settings-info-grid"><article><strong>凭据</strong><span>API Key 仅通过系统安全存储保存，不写入 SQLite、manifest 或诊断摘要。</span></article><article><strong>图片上传</strong><span>分析和生成使用缓存预览图发送，任务完成后服务端响应不会写入日志。</span></article><article><strong>诊断</strong><span>诊断摘要只包含版本、数量和缓存统计，不包含路径、密钥或图片内容。</span></article></div>
         </section>}
         {settingsSection === 'diagnostics' && <section className="settings-section diagnostics-section">
-          <div className="settings-heading"><div><h2>诊断摘要</h2><p>仅包含运行统计，不包含路径、密钥、图片内容或模型响应。</p></div><span><ShieldCheck size={14} />可安全提交给支持团队</span></div>
+          <div className="settings-heading"><div><h2>诊断摘要</h2><p>仅包含运行统计，不包含路径、密钥、图片内容或模型响应。</p></div></div>
           {diagnostics && <div className="diagnostic-health-strip"><span>自动备份：{diagnostics.startupRecovery.automaticBackup.status === 'completed' ? '已完成' : diagnostics.startupRecovery.automaticBackup.status === 'skipped' ? '已跳过' : diagnostics.startupRecovery.automaticBackup.status === 'failed' ? '失败' : '进行中'}</span><span>目录监听：{diagnostics.catalogWatcher.activeWatchers}/{diagnostics.catalogWatcher.watchedFolders}</span><span>监听失败：{diagnostics.catalogWatcher.watchFailures}</span><span>协调失败：{diagnostics.catalogWatcher.reconciliationFailures}</span></div>}
           {diagnostics && <div className="cache-actions"><button className="secondary-action compact" type="button" disabled={integrityBusy} onClick={() => void runIntegrityCheck()}><ShieldCheck size={13} />{integrityBusy ? '检查中…' : '重新检查图库'}</button><button className="secondary-action compact" type="button" onClick={() => void copyDiagnostics()}><Copy size={13} />复制脱敏摘要</button><button className="secondary-action compact" type="button" disabled={diagnosticBusy} onClick={() => void exportDiagnostics()}><Download size={13} />{diagnosticBusy ? '导出中…' : '导出诊断文件'}</button><span role="status">{diagnosticMessage}</span></div>}
           {diagnostics ? <div className="diagnostic-grid"><span>版本<strong>{diagnostics.appVersion}</strong></span><span>图库<strong>{diagnostics.catalog.assets} 张 · 离线 {diagnostics.catalog.offline}</strong></span><span className={`integrity-result is-${diagnostics.integrity.status}`}>完整性<strong>{diagnostics.integrity.status === 'healthy' ? '正常' : diagnostics.integrity.status === 'warning' ? '需关注' : '发现错误'}</strong><small>数据库 {diagnostics.integrity.databaseStatus === 'ok' ? '正常' : diagnostics.integrity.databaseStatus === 'corrupt' ? '损坏' : '无法读取'} · 活动缺失 {diagnostics.integrity.missingActiveFiles} · 孤立 {diagnostics.integrity.unexpectedGeneratedFiles + diagnostics.integrity.unexpectedTrashFiles} · 待恢复 {diagnostics.integrity.pendingGenerationWrites}（异常 {diagnostics.integrity.unsafeGenerationWriteIntents}）</small></span><span>启动恢复<strong>{diagnostics.startupRecovery.trashPurges.recovered + diagnostics.startupRecovery.fileOperations.resolved + diagnostics.startupRecovery.generationWrites.recovered} 项</strong><small>冲突 {diagnostics.startupRecovery.trashPurges.conflicts} · 失败 {diagnostics.startupRecovery.trashPurges.failed + diagnostics.startupRecovery.fileOperations.failed + diagnostics.startupRecovery.generationWrites.failed}</small></span><span>模型<strong>{diagnostics.providers.enabled}/{diagnostics.providers.total} 已启用</strong></span><span>缓存<strong>{(diagnostics.cache.bytes / 1_073_741_824).toFixed(2)} GiB</strong><small>命中 {diagnostics.cache.performance.hits} · 未命中 {diagnostics.cache.performance.misses}</small></span><span>解码<strong>{diagnostics.cache.performance.decodes} 次</strong><small>累计 {Math.round(diagnostics.cache.performance.decodeMsTotal)} ms</small></span><span>RAW 代理<strong>{diagnostics.cache.raw.imageMagick ? 'ImageMagick' : diagnostics.cache.raw.sips ? 'sips' : '未安装'}</strong><small>原生入口已启用；完整显影仍按发布计划推进</small></span></div> : <small>正在读取诊断摘要…</small>}
@@ -3573,7 +3980,7 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
           const reportOpen = expandedExportTaskId === task.id;
           return <Fragment key={task.id}>
           <div className="task-table-row" data-task-id={task.id}>
-            <span className="task-kind"><button className="task-member-preview task-table-preview" type="button" disabled={!photos.find((photo) => photo.id === task.assetId)} onClick={() => { if (task.assetId) onOpenViewer(task.assetId, batch.tasks.flatMap((item) => item.assetId ? [item.assetId] : [])); }} aria-label={`预览 ${taskImageName(task, photos)}`}>{(photos.find((photo) => photo.id === task.assetId)?.thumbnailSrc || photos.find((photo) => photo.id === task.assetId)?.src) ? <img className="task-item-thumbnail" src={photos.find((photo) => photo.id === task.assetId)!.thumbnailSrc || photos.find((photo) => photo.id === task.assetId)!.src} alt={taskImageName(task, photos)} /> : <TaskKindIcon kind={task.kind} />}</button><span><strong title={taskImageName(task, photos)}>{taskImageName(task, photos)}</strong><small>{taskLabels[task.kind]}</small></span></span>
+            <span className="task-kind"><button className="task-member-preview task-table-preview" data-label-color={photos.find((photo) => photo.id === task.assetId)?.labelColor ?? undefined} type="button" disabled={!photos.find((photo) => photo.id === task.assetId)} onClick={() => { if (task.assetId) onOpenViewer(task.assetId, batch.tasks.flatMap((item) => item.assetId ? [item.assetId] : [])); }} aria-label={`预览 ${taskImageName(task, photos)}`}>{(photos.find((photo) => photo.id === task.assetId)?.thumbnailSrc || photos.find((photo) => photo.id === task.assetId)?.src) ? <img className="task-item-thumbnail" src={photos.find((photo) => photo.id === task.assetId)!.thumbnailSrc || photos.find((photo) => photo.id === task.assetId)!.src} alt={taskImageName(task, photos)} /> : <TaskKindIcon kind={task.kind} />}</button><span><strong title={taskImageName(task, photos)}>{taskImageName(task, photos)}</strong><small>{taskLabels[task.kind]}</small></span></span>
             <span className="task-scope">{taskScope(task)}</span>
             <span className={`task-state state-${task.status}`}>{taskStage(task)}</span>
             <span>{task.attempt + 1}</span>
@@ -3729,12 +4136,12 @@ function TemplatePage(): React.JSX.Element {
           )}
         </section>
         <form className="template-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
-          <div className="template-editor-head"><div><strong>{form.id ? '编辑模板' : '创建模板'}</strong><small>保存修改会创建新版本</small></div><div className="template-editor-head-actions">{form.id && <button className="secondary-action compact" type="button" onClick={() => setPreviewTemplate(templateItems.find((template) => template.id === form.id) ?? null)}><Maximize2 size={13} />预览模板</button>}{form.id && <span>不可变版本</span>}</div></div>
+          <div className="template-editor-head"><div><strong>{form.id ? '编辑模板' : '创建模板'}</strong></div><div className="template-editor-head-actions">{form.id && <button className="secondary-action compact" type="button" onClick={() => setPreviewTemplate(templateItems.find((template) => template.id === form.id) ?? null)}><Maximize2 size={13} />预览模板</button>}</div></div>
           <label><span>模板名称</span><input required maxLength={120} value={form.name} placeholder="例如：自然人像 · 清洁背景" onChange={(event) => patchTemplate('name', event.target.value)} /></label>
           <div className="form-grid two-columns"><label><span>分类</span><select value={form.category} onChange={(event) => patchTemplate('category', event.target.value)}><option>人像</option><option>风光</option><option>商品</option><option>建筑</option><option>其他</option></select></label><label><span>示例图片</span><select value={form.exampleId} onChange={(event) => patchTemplate('exampleId', event.target.value as SavePromptTemplateInput['exampleId'])}><option value="portrait">人像示例</option><option value="street">街拍示例</option><option value="coast">海岸示例</option><option value="none">不使用示例</option></select></label></div>
           <label><span>简短描述</span><input maxLength={2_000} value={form.description} placeholder="说明适用场景和效果" onChange={(event) => patchTemplate('description', event.target.value)} /></label>
           <label className="template-body-field"><span>模板正文</span><textarea required value={form.body} onChange={(event) => patchTemplate('body', event.target.value)} /></label>
-          <div className="template-variables"><span>可用变量</span>{['analysis.summary', 'analysis.generative_actions', 'catalog.subjects', 'user_instruction', 'preservation_rules'].map((variable) => <code key={variable}>{`{{${variable}}}`}</code>)}</div>
+          <details className="template-variable-disclosure"><summary>可用变量</summary><div className="template-variables">{['analysis.summary', 'analysis.generative_actions', 'catalog.subjects', 'user_instruction', 'preservation_rules'].map((variable) => <code key={variable}>{`{{${variable}}}`}</code>)}</div></details>
           <div className="template-editor-footer"><span role="status">{message}</span>{form.id && <button className="danger-action compact" type="button" onClick={() => void archiveTemplate()}>{archiveCandidate === form.id ? '确认归档' : '归档模板'}</button>}<button className="primary-action compact" type="submit">{form.id ? '保存新版本' : '创建模板'}</button></div>
         </form>
       </div>
@@ -3749,11 +4156,63 @@ function InlinePhotoViewer({ workspace, photo, items, onPhotoChange, onClose, re
   const [selection, setSelection] = useState<SelectionState>(() => ({ selectedIds: new Set([photo.id]), anchorId: photo.id, focusId: photo.id }));
   useEffect(() => { panelRef.current?.querySelector<HTMLElement>('.canvas-wrap')?.focus({ preventScroll: true }); }, []);
   return <section className="inline-photo-viewer" aria-label="看图" ref={panelRef} onKeyDown={(event) => {
-    if (event.key !== 'Escape' || event.defaultPrevented || panelRef.current?.querySelector('[role="dialog"], [role="menu"], .tag-editor-popover')) return;
+    if (event.key !== 'Escape' || event.defaultPrevented || document.querySelector('[role="menu"]') || panelRef.current?.querySelector('[role="dialog"], .tag-editor-popover')) return;
+    if (document.fullscreenElement) { event.stopPropagation(); return; }
     event.preventDefault();
     event.stopPropagation();
     onClose();
   }}><LibraryWorkspace {...workspace} active view="viewer" availablePhotos={displayItems} selectedAssetId={photo.id} selection={selection} onSelectionChange={setSelection} onSelectedAssetChange={(id) => { const next = displayItems.find((item) => item.id === id); if (next) onPhotoChange(next); }} onWorkflowStageChange={(next) => { setSelection({ selectedIds: new Set([next.id]), anchorId: next.id, focusId: next.id }); onPhotoChange(next); }} totalCount={items.length} hasMore={false} onCloseViewer={onClose} initialResultId={resultId} /></section>;
+}
+
+function QuickPhotoViewer({ session, photo, onPhotoChange, onClose }: { session: QuickViewSession; photo: Photo; onPhotoChange: (photo: Photo) => void; onClose: () => void }): React.JSX.Element {
+  const items = useMemo(() => mapCatalogAssets(session.items).map((item) => ({ ...item, temporary: true })), [session]);
+  const [selection, setSelection] = useState<SelectionState>(() => ({ selectedIds: new Set([photo.id]), focusId: photo.id, anchorId: photo.id }));
+  const [toolbarHost, setToolbarHost] = useState<HTMLDivElement | null>(null);
+  const [visibleIds, setVisibleIds] = useState<string[] | null>(null);
+  const panel = useRef<HTMLElement>(null);
+  const [notice, setNotice] = useState('');
+  const [menu, setMenu] = useState<{ x: number; y: number; photo: Photo; filmstrip?: FilmstripMenuOptions | undefined } | null>(null);
+  useEffect(() => { panel.current?.querySelector<HTMLElement>('.canvas-wrap')?.focus(); }, []);
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(); } };
+    window.addEventListener('pointerdown', close);
+    window.addEventListener('keydown', key, true);
+    window.addEventListener('blur', close);
+    return () => { window.removeEventListener('pointerdown', close); window.removeEventListener('keydown', key, true); window.removeEventListener('blur', close); };
+  }, [menu]);
+  const openMenu = (event: React.MouseEvent, item: Photo, filmstrip?: FilmstripMenuOptions) => {
+    event.preventDefault();
+    setMenu({ x: Math.max(4, Math.min(event.clientX, window.innerWidth - 220)), y: Math.max(4, Math.min(event.clientY, window.innerHeight - (filmstrip ? 260 : 150))), photo: item, filmstrip });
+  };
+  const run = (action: () => Promise<unknown>) => {
+    setMenu(null);
+    void action().catch((error: unknown) => setNotice(error instanceof Error ? error.message : '文件操作失败'));
+  };
+  return <section className="inline-photo-viewer" aria-label="临时看图" ref={panel} onKeyDown={(event) => {
+    if (event.defaultPrevented || document.querySelector('[role="dialog"], [role="menu"]') || (event.target instanceof Element && event.target.closest('input, textarea, select'))) return;
+    if (event.key === 'Escape') { if (document.fullscreenElement) { event.stopPropagation(); return; } event.preventDefault(); event.stopPropagation(); onClose(); }
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      const visible = items.filter((item) => !visibleIds || visibleIds.includes(item.id));
+      const index = visible.findIndex((item) => item.id === photo.id);
+      const next = visible[clamp(index < 0 ? (event.key === 'ArrowRight' ? 0 : visible.length - 1) : index + (event.key === 'ArrowRight' ? 1 : -1), 0, visible.length - 1)];
+      if (next) { onPhotoChange(next); setSelection({ selectedIds: new Set([next.id]), focusId: next.id, anchorId: next.id }); }
+    }
+  }}>
+    <div className="quick-view-workspace">
+      <Viewer photo={photo} results={[]} isDemo={false} trackedExportNotice="" onReview={async () => undefined} onOpenContextMenu={(event) => openMenu(event, photo)} onClose={onClose} onToolbarHostChange={setToolbarHost} />
+      <Filmstrip items={items} selected={photo} selection={selection} onSelect={(next, intent) => { setSelection((current) => updateSelection(current, visibleIds ?? items.map((item) => item.id), next.id, intent)); onPhotoChange(next); }} onSelectionChange={setSelection} onFocusPhoto={onPhotoChange} collectionName={session.directory.split(/[/\\\\]/u).at(-1) ?? ''} toolbarHost={toolbarHost} totalCount={items.length} favoriteOnly={false} onFavoriteOnlyChange={() => undefined} sortBy="fileName" onSortByChange={() => undefined} hasMore={false} loading={false} onLoadMore={() => undefined} onVisibleIdsChange={setVisibleIds} onOpenContextMenu={openMenu} />
+      {menu && <ContextMenuSurface className="folder-context-menu" role="menu" aria-label="图片文件菜单" style={{ left: menu.x, top: menu.y }} onPointerDown={(event) => event.stopPropagation()}>
+        <button role="menuitem" type="button" onClick={() => run(() => window.desktopApi.openAssetExternally(menu.photo.id))}><ExternalLink size={14} />用默认应用打开</button>
+        <button role="menuitem" type="button" onClick={() => run(async () => { if (!await window.desktopApi.revealCatalogAsset(menu.photo.id)) throw new Error('图片文件不可访问'); })}><FolderOpen size={14} />{FILE_MANAGER_LABEL}</button>
+        <button role="menuitem" type="button" onClick={() => run(async () => { const details = await window.desktopApi.getFileDetails(menu.photo.id); await navigator.clipboard.writeText(details.path); })}><Copy size={14} />复制文件路径</button>
+        {menu.filmstrip && <FilmstripMenu options={menu.filmstrip} onClose={() => setMenu(null)} />}
+      </ContextMenuSurface>}
+      {notice && <div role="status" className="operation-toast">{notice}<button aria-label="关闭提示" type="button" onClick={() => setNotice('')}><X size={13} /></button></div>}
+    </div>
+  </section>;
 }
 
 export function App(): React.JSX.Element {
@@ -3800,7 +4259,6 @@ export function App(): React.JSX.Element {
     } catch { return { agentOpen: false, collapsed: false, order: ['agent', 'details'], split: 44 }; }
   });
   const [dockTab, setDockTab] = useInspectorTab();
-  const agentDockOpen = dockLayout.agentOpen && !dockLayout.collapsed;
   const saveDockLayout = (next: typeof dockLayout) => {
     setDockLayout(next);
     try { window.localStorage.setItem('photoallisai.dock-layout.v1', JSON.stringify(next)); } catch { /* in-memory layout remains available */ }
@@ -3821,17 +4279,49 @@ export function App(): React.JSX.Element {
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [viewerPhoto, setViewerPhoto] = useState<Photo | null>(null);
+  const [quickSession, setQuickSession] = useState<QuickViewSession | null>(null);
+  const [quickPhoto, setQuickPhoto] = useState<Photo | null>(null);
+  const acceptQuickSession = useCallback((session: QuickViewSession) => {
+    const photo = mapCatalogAssets(session.items).find((item) => item.id === session.selectedId);
+    if (!photo) return;
+    setQuickSession(session);
+    setQuickPhoto({ ...photo, temporary: true });
+    setViewerPhoto(null);
+    setTaskDrawerOpen(false);
+  }, []);
+  useEffect(() => {
+    const unsubscribe = window.desktopApi.onOpenImages(acceptQuickSession);
+    void window.desktopApi.takePendingOpenImages().then((session) => { if (session) acceptQuickSession(session); }).catch(() => undefined);
+    return unsubscribe;
+  }, [acceptQuickSession]);
   const [viewerPhotos, setViewerPhotos] = useState<Photo[]>([]);
   const [viewerResultId, setViewerResultId] = useState<string | null>(null);
+  const viewerAssetsRef = useRef<string[]>([]);
   useEffect(() => {
-    const refreshed = new Map(catalogPhotos.filter((photo) => photo.workflow).map((photo) => [photo.workflow!.id, photo]));
-    setViewerPhotos((current) => current.map((photo) => photo.workflow ? refreshed.get(photo.workflow.id) ?? photo : photo));
-    setViewerPhoto((current) => {
-      if (!current?.workflow) return current;
-      const updated = refreshed.get(current.workflow.id);
-      const member = updated?.workflow?.members.find((item) => item.asset.id === current.id);
-      return member ? { ...mapCatalogAssets([member.asset])[0]!, workflow: updated!.workflow! } : current;
-    });
+    viewerAssetsRef.current = viewerPhoto ? [...new Set([...viewerPhotos.map((photo) => photo.id), viewerPhoto.id])] : [];
+  }, [viewerPhoto, viewerPhotos]);
+  useEffect(() => {
+    const ids = viewerAssetsRef.current;
+    if (ids.length === 0) return;
+    let active = true;
+    // Viewer items may belong to a task or have left the current library filter.
+    void (async () => {
+      const updatedPhotos: Photo[] = [];
+      for (let offset = 0; offset < ids.length; offset += 500) {
+        const page = await window.desktopApi.listCatalogAssetPage({ assetIds: ids.slice(offset, offset + 500), limit: 500 });
+        if (!active) return;
+        updatedPhotos.push(...mapCatalogAssets(page.items));
+      }
+      const byId = new Map(updatedPhotos.map((photo) => [photo.id, photo]));
+      const workflows = new Map(catalogPhotos.filter((photo) => photo.workflow).map((photo) => [photo.workflow!.id, photo]));
+      const refresh = (photo: Photo): Photo => {
+        const workflow = photo.workflow ? workflows.get(photo.workflow.id)?.workflow ?? photo.workflow : undefined;
+        return { ...(byId.get(photo.id) ?? photo), ...(workflow ? { workflow } : {}) };
+      };
+      setViewerPhotos((current) => current.map(refresh));
+      setViewerPhoto((current) => current ? refresh(current) : null);
+    })().catch(() => undefined);
+    return () => { active = false; };
   }, [catalogPhotos]);
   const viewerRequest = useRef(0);
   const openViewerRef = useRef<(assetId: string, assetIds?: string[]) => void>(() => undefined);
@@ -3871,6 +4361,7 @@ export function App(): React.JSX.Element {
     if (!viewerPreloading && !viewerPhoto) return;
     const cancel = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented || document.querySelector('[role="dialog"], [role="menu"], .tag-editor-popover')) return;
+      if (document.fullscreenElement) return;
       event.preventDefault();
       closeViewer();
     };
@@ -3884,8 +4375,12 @@ export function App(): React.JSX.Element {
   const [searchDraft, setSearchDraft] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [favoriteOnly, setFavoriteOnly] = useState(false);
+  const [photoFilters, setPhotoFilters] = useState<PhotoFilters>(emptyPhotoFilters);
+  const catalogFilterInput = useMemo(() => ({ minimumRating: photoFilters.minimumRating, ratingOperator: photoFilters.ratingOperator, flags: photoFilters.flags, colors: photoFilters.colors }), [photoFilters.minimumRating, photoFilters.ratingOperator, photoFilters.flags, photoFilters.colors]);
   const [sortBy, setSortBy] = useState<CatalogSort>('modifiedAt');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc' | undefined>();
   const catalogRequest = useRef(0);
+  const groupAutoLoadFailed = useRef(false);
 
   useEffect(() => {
     let preference: AppSettings['theme'] = 'system';
@@ -3925,6 +4420,7 @@ export function App(): React.JSX.Element {
       setSelectedAssetId(session.library.selectedAssetId);
       setFavoriteOnly(session.library.favoriteOnly);
       setSortBy(session.library.sortBy);
+      setSortDirection(session.library.sortDirection);
       setSearchDraft(session.library.searchQuery);
       setSearchQuery(session.library.searchQuery);
       setSessionReady(true);
@@ -3938,20 +4434,21 @@ export function App(): React.JSX.Element {
       version: 2,
       openTabs,
       activeTab,
-      library: { selectedFolderId, selectedAlbumId, selectedSmartCollection, selectedTagId, selectedAssetId, favoriteOnly, sortBy, searchQuery: searchDraft.trim() }
+      library: { selectedFolderId, selectedAlbumId, selectedSmartCollection, selectedTagId, selectedAssetId, favoriteOnly, sortBy, ...(sortDirection ? { sortDirection } : {}), searchQuery: searchDraft.trim() }
     };
     const timeout = window.setTimeout(() => {
       void window.desktopApi.saveWorkspaceSession(session).catch(() => undefined);
     }, 400);
     return () => window.clearTimeout(timeout);
-  }, [activeTab, favoriteOnly, openTabs, searchDraft, selectedAlbumId, selectedAssetId, selectedFolderId, selectedSmartCollection, selectedTagId, sessionReady, sortBy]);
+  }, [activeTab, favoriteOnly, openTabs, searchDraft, selectedAlbumId, selectedAssetId, selectedFolderId, selectedSmartCollection, selectedTagId, sessionReady, sortBy, sortDirection]);
 
   const refreshCatalog = useCallback(async (folderId: string | null = selectedFolderId) => {
     const request = ++catalogRequest.current;
+    groupAutoLoadFailed.current = false;
     setLoadingMore(true);
     try {
       const [page, folders, tags, albums, smartCollections] = await Promise.all([
-        window.desktopApi.listCatalogAssetPage({ folderId, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: selectedSmartCollection, favoriteOnly, sortBy, query: searchQuery, cursor: null, limit: 200 }),
+        window.desktopApi.listCatalogAssetPage({ folderId, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: selectedSmartCollection, ...catalogFilterInput, favoriteOnly, sortBy, ...(sortDirection ? { sortDirection } : {}), query: searchQuery, cursor: null, limit: 200 }),
         window.desktopApi.listCatalogFolders(),
         window.desktopApi.listCatalogTags(),
         window.desktopApi.listCatalogAlbums(),
@@ -3974,7 +4471,7 @@ export function App(): React.JSX.Element {
     } finally {
       if (request === catalogRequest.current) setLoadingMore(false);
     }
-  }, [favoriteOnly, searchQuery, selectedAlbumId, selectedFolderId, selectedSmartCollection, selectedTagId, sortBy]);
+  }, [favoriteOnly, catalogFilterInput, searchQuery, selectedAlbumId, selectedFolderId, selectedSmartCollection, selectedTagId, sortBy, sortDirection]);
 
   useEffect(() => {
     if (!sessionReady) return;
@@ -4066,11 +4563,11 @@ export function App(): React.JSX.Element {
         const focused = document.activeElement;
         if (focused instanceof Element && !focused.closest('input, textarea, select, [contenteditable="true"]') && focused.closest('.filmstrip, .catalog-grid, .catalog-list-view')) setSharedSelection({ selectedIds: new Set(), anchorId: null, focusId: selectedAssetId });
       }
-      else if (command === 'close-workspace') { if (viewerPhoto || viewerPreloading) closeViewer(); else closeWorkspaceTab(activeTab); }
+      else if (command === 'close-workspace') { if (quickPhoto) { setQuickSession(null); setQuickPhoto(null); } else if (viewerPhoto || viewerPreloading) closeViewer(); else closeWorkspaceTab(activeTab); }
       else window.dispatchEvent(new CustomEvent('photoallisai:menu-command', { detail: command }));
     });
     return unsubscribe;
-  }, [activeTab, catalogPhotos, catalogReady, catalogTotal, closeViewer, closeWorkspaceTab, importFolders, openWorkspaceTab, refreshCatalog, selectedAssetId, viewerPhoto, viewerPreloading]);
+  }, [activeTab, catalogPhotos, catalogReady, catalogTotal, closeViewer, closeWorkspaceTab, importFolders, openWorkspaceTab, refreshCatalog, selectedAssetId, viewerPhoto, viewerPreloading, quickPhoto]);
 
   useEffect(() => {
     const handleWorkspaceShortcut = (event: KeyboardEvent) => {
@@ -4083,9 +4580,9 @@ export function App(): React.JSX.Element {
         }
         return;
       }
-      if (event.key.toLowerCase() === 'w' && (viewerPhoto || viewerPreloading || activeTab !== 'library')) {
+      if (event.key.toLowerCase() === 'w' && (quickPhoto || viewerPhoto || viewerPreloading || activeTab !== 'library')) {
         event.preventDefault();
-        if (viewerPhoto || viewerPreloading) closeViewer(); else closeWorkspaceTab(activeTab);
+        if (quickPhoto) { setQuickSession(null); setQuickPhoto(null); } else if (viewerPhoto || viewerPreloading) closeViewer(); else closeWorkspaceTab(activeTab);
       } else if (event.key === 'Tab') {
         event.preventDefault();
         const currentIndex = openTabs.indexOf(activeTab);
@@ -4096,9 +4593,9 @@ export function App(): React.JSX.Element {
     };
     window.addEventListener('keydown', handleWorkspaceShortcut);
     return () => window.removeEventListener('keydown', handleWorkspaceShortcut);
-  }, [activeTab, closeViewer, closeWorkspaceTab, openTabs, viewerPhoto, viewerPreloading]);
+  }, [activeTab, closeViewer, closeWorkspaceTab, openTabs, viewerPhoto, viewerPreloading, quickPhoto]);
 
-  const loadMoreCatalog = async () => {
+  const loadMoreCatalog = useCallback(async () => {
     if (!nextCursor || loadingMore) return;
     const request = ++catalogRequest.current;
     setLoadingMore(true);
@@ -4109,7 +4606,9 @@ export function App(): React.JSX.Element {
         albumId: selectedAlbumId,
         smartCollection: selectedSmartCollection,
         favoriteOnly,
+        ...catalogFilterInput,
         sortBy,
+        ...(sortDirection ? { sortDirection } : {}),
         query: searchQuery,
         cursor: nextCursor,
         limit: 200
@@ -4121,13 +4620,28 @@ export function App(): React.JSX.Element {
       });
       setCatalogTotal(page.totalCount);
       setNextCursor(page.nextCursor);
+      groupAutoLoadFailed.current = false;
+    } catch (error) {
+      groupAutoLoadFailed.current = true;
+      setNavigationNotice(error instanceof Error ? error.message : '无法继续加载分组照片');
     } finally {
       if (request === catalogRequest.current) setLoadingMore(false);
     }
-  };
+  }, [nextCursor, loadingMore, selectedFolderId, selectedTagId, selectedAlbumId, selectedSmartCollection, favoriteOnly, catalogFilterInput, sortBy, sortDirection, searchQuery]);
+
+  useEffect(() => {
+    if (photoFilters.groupBy.length && catalogReady && nextCursor && !loadingMore && !groupAutoLoadFailed.current) void loadMoreCatalog();
+  }, [photoFilters.groupBy, catalogReady, nextCursor, loadingMore, loadMoreCatalog]);
 
   const isDemo = E2E_DEMO_MODE && catalogReady && catalogTotal === 0 && catalogFolders.length === 0;
-  const availablePhotos = !catalogReady || isDemo ? photos : catalogPhotos;
+  const availablePhotos = useMemo(() => {
+    if (catalogReady && !isDemo) return catalogPhotos;
+    return photos.filter((photo) => (!searchQuery.trim() || photo.fileName.toLocaleLowerCase().includes(searchQuery.trim().toLocaleLowerCase()))
+      && (photoFilters.minimumRating === null || (photoFilters.ratingOperator === 'eq' ? photo.rating === photoFilters.minimumRating : photoFilters.ratingOperator === 'lte' ? photo.rating <= photoFilters.minimumRating : photo.rating >= photoFilters.minimumRating))
+      && (!photoFilters.flags.length || photoFilters.flags.includes(photo.flag ?? 'unflagged'))
+      && (!photoFilters.colors.length || (photo.labelColor && photoFilters.colors.includes(photo.labelColor)))
+      && (!favoriteOnly || photo.favorite));
+  }, [catalogReady, isDemo, catalogPhotos, searchQuery, photoFilters, favoriteOnly]);
   useEffect(() => {
     const open = () => setTaskDrawerOpen(true);
     window.addEventListener(OPEN_TASK_DRAWER_EVENT, open);
@@ -4163,12 +4677,12 @@ export function App(): React.JSX.Element {
       return changed ? next : current;
     });
   }, [availablePhotos, workflowAssetIds]);
-  const globalFocusPhoto = viewerPhoto ?? availablePhotos.find((photo) => photo.id === sharedSelection.focusId)
+  const globalFocusPhoto = quickPhoto ?? viewerPhoto ?? availablePhotos.find((photo) => photo.id === sharedSelection.focusId)
     ?? catalogPhotos.find((photo) => photo.id === sharedSelection.focusId)
     ?? availablePhotos.find((photo) => photo.id === selectedAssetId)
     ?? availablePhotos[0];
-  const contextSelectedIds = useMemo(() => viewerPhoto ? new Set([viewerPhoto.id]) : sharedSelection.selectedIds, [viewerPhoto, sharedSelection.selectedIds]);
-  const contextPhotos = useMemo(() => viewerPhoto ? [viewerPhoto, ...viewerPhotos.filter((photo) => photo.id !== viewerPhoto.id), ...availablePhotos.filter((photo) => photo.id !== viewerPhoto.id && !viewerPhotos.some((item) => item.id === photo.id))] : availablePhotos, [viewerPhoto, viewerPhotos, availablePhotos]);
+  const contextSelectedIds = useMemo(() => quickPhoto ? new Set<string>() : viewerPhoto ? new Set([viewerPhoto.id]) : sharedSelection.selectedIds, [quickPhoto, viewerPhoto, sharedSelection.selectedIds]);
+  const contextPhotos = useMemo(() => quickPhoto ? [] : viewerPhoto ? [viewerPhoto, ...viewerPhotos.filter((photo) => photo.id !== viewerPhoto.id), ...availablePhotos.filter((photo) => photo.id !== viewerPhoto.id && !viewerPhotos.some((item) => item.id === photo.id))] : availablePhotos, [quickPhoto, viewerPhoto, viewerPhotos, availablePhotos]);
   const addAssetsToWorkflow = useCallback((assetIds: string[]) => {
     const validIds = assetIds.filter((id) => contextPhotos.some((photo) => photo.id === id));
     if (validIds.length === 0) return;
@@ -4221,7 +4735,7 @@ export function App(): React.JSX.Element {
   }, [availablePhotos, catalogReady, selectedAssetId]);
   const workspaceProps: LibraryWorkspaceProps = {
     view: 'library',
-    active: !viewerPhoto,
+    active: !viewerPhoto && !quickPhoto,
     onOpenViewer: (assetId) => void openViewer(assetId),
     availablePhotos,
     catalogFolders,
@@ -4237,6 +4751,12 @@ export function App(): React.JSX.Element {
     selectedAssetId,
     selection: sharedSelection,
     totalCount: displayTotal,
+    filterSearch: searchDraft,
+    photoFilters,
+    onPhotoFiltersChange: setPhotoFilters,
+    sortDirection,
+    onSortDirectionChange: setSortDirection,
+    onSearchChange: setSearchDraft,
     favoriteOnly,
     sortBy,
     hasMore: nextCursor !== null,
@@ -4335,7 +4855,12 @@ export function App(): React.JSX.Element {
   };
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }} onDrop={(event) => {
+      if (!event.dataTransfer.files.length) return;
+      event.preventDefault();
+      const paths = window.desktopApi.getDroppedFilePaths([...event.dataTransfer.files]);
+      if (paths.length) void window.desktopApi.openImages(paths).then((session) => { if (session) acceptQuickSession(session); }).catch((error: unknown) => setNavigationNotice(error instanceof Error ? error.message : '无法打开图片'));
+    }}>
       <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
       {!sessionReady || !catalogReady ? <main className="workspace-loading"><span className="working-pulse" /><span>{sessionReady ? '正在读取图库' : '正在恢复工作区'}</span></main>
         : <div className="global-workspace-shell" style={{ gridTemplateColumns: `${panelVisibility.left ? globalLayout.leftWidth : 0}px ${panelVisibility.left ? 5 : 0}px minmax(0, 1fr) ${panelVisibility.right ? 5 : 0}px ${panelVisibility.right ? globalLayout.rightWidth : 0}px` }}>
@@ -4350,19 +4875,20 @@ export function App(): React.JSX.Element {
                     : <TemplatePage />}
               </div>
               {viewerPhoto && <InlinePhotoViewer workspace={workspaceProps} photo={viewerPhoto} items={viewerPhotos} onPhotoChange={(photo) => { setViewerPhoto(photo); setViewerResultId(null); }} onClose={closeViewer} resultId={viewerResultId} />}
+              {quickSession && quickPhoto && <QuickPhotoViewer key={quickSession.selectedId} session={quickSession} photo={quickPhoto} onPhotoChange={setQuickPhoto} onClose={() => { setQuickSession(null); setQuickPhoto(null); }} />}
               {viewerPreloading && <div className="viewer-preload-indicator" role="status"><span className="working-pulse" />正在准备预览</div>}
               </div>
               <div className="workspace-side-splitter" hidden={!panelVisibility.right}><PaneSplitter orientation="vertical" value={globalLayout.rightWidth} minimum={240} maximum={520} label="调整右侧 AI 面板宽度" invert onChange={(value) => setGlobalLayout('rightWidth', value)} /></div>
               <div hidden={!panelVisibility.right} className={`workspace-side-panel right-dock-stack${dockLayout.collapsed ? ' is-collapsed' : ''}`}>
                 <div className="inspector unified-dock">
                   <div className="inspector-tabs"><button className={dockTab === 'ai' ? 'is-active' : ''} type="button" onClick={() => { setDockTab('ai'); setAgentDockOpen(false); }}><Bot size={14} />AI</button><button className={dockTab === 'agent' ? 'is-active' : ''} type="button" onClick={() => { setDockTab('agent'); setAgentDockOpen(true); }}><Sparkles size={14} />Agent</button><button className={dockTab === 'details' ? 'is-active' : ''} type="button" onClick={() => { setDockTab('details'); setAgentDockOpen(false); }}><Info size={14} />详情</button></div>
-                  <div className="inspector-scroll">{dockTab === 'agent' ? <AgentDockPanel selectedIds={contextSelectedIds} photos={contextPhotos} onClose={() => { setDockTab('ai'); setAgentDockOpen(false); }} onOpenBatch={() => openWorkspaceTab('batch')} onCollapse={() => saveDockLayout({ ...dockLayout, collapsed: true })} onMove={() => saveDockLayout({ ...dockLayout, order: ['details', 'agent'] })} /> : dockTab === 'details' && globalFocusPhoto ? <div className="inspector-details"><InspectorInfo photo={globalFocusPhoto} revision={undefined} /><InspectorVersions results={[]} trashedResults={[]} onTrashResult={async () => undefined} onRestoreResult={async () => undefined} /></div> : <GlobalAiPanel onOpenBatch={() => openWorkspaceTab('batch')} photo={globalFocusPhoto} selectedIds={contextSelectedIds} isDemo={isDemo} workspaceTab={activeTab} onOpenTemplates={() => openWorkspaceTab('templates')} onAddAssetsToWorkflow={addAssetsToWorkflow} workflowAssetIds={workflowAssetIds} tasks={globalTasks} workflowRules={workflowRules} onWorkflowRulesChange={setWorkflowRules} workflowTemplateId={workflowTemplateId} onWorkflowTemplateChange={setWorkflowTemplateId} />}</div>
+                  <div className="inspector-scroll">{dockTab === 'agent' ? <AgentDockPanel selectedIds={contextSelectedIds} photos={contextPhotos} onClose={() => { setDockTab('ai'); setAgentDockOpen(false); }} onOpenBatch={() => openWorkspaceTab('batch')} onCollapse={() => saveDockLayout({ ...dockLayout, collapsed: true })} onMove={() => saveDockLayout({ ...dockLayout, order: ['details', 'agent'] })} /> : dockTab === 'details' && globalFocusPhoto ? <GlobalDetailsPanel photo={globalFocusPhoto} /> : <GlobalAiPanel onOpenBatch={() => openWorkspaceTab('batch')} photo={globalFocusPhoto} selectedIds={contextSelectedIds} isDemo={isDemo} workspaceTab={activeTab} onOpenTemplates={() => openWorkspaceTab('templates')} onAddAssetsToWorkflow={addAssetsToWorkflow} workflowAssetIds={workflowAssetIds} tasks={globalTasks} workflowRules={workflowRules} onWorkflowRulesChange={setWorkflowRules} workflowTemplateId={workflowTemplateId} onWorkflowTemplateChange={setWorkflowTemplateId} />}</div>
                 </div>
                 {dockLayout.collapsed && <button className="dock-restore" type="button" onClick={() => saveDockLayout({ ...dockLayout, collapsed: false })}>展开 Dock 面板</button>}
               </div>
               {navigationNotice && <div className="operation-toast global-navigation-notice" role="status">{navigationNotice}<button type="button" aria-label="关闭提示" onClick={() => setNavigationNotice('')}><X size={13} /></button></div>}
             </div>}
-      <TaskBar panelVisibility={panelVisibility} onTogglePanel={(side) => { panelsBeforeHide.current = null; setPanelVisibility((current) => ({ ...current, [side]: !current[side] })); }} suspended={Boolean(viewerPhoto)} open={taskDrawerOpen} onToggle={() => setTaskDrawerOpen((value) => !value)} onOpenTaskCenter={() => { setTaskDrawerOpen(false); openWorkspaceTab('tasks'); }} onOpenViewer={(assetId, assetIds) => void openViewer(assetId, assetIds)} tasks={isDemo ? null : globalTasks} counts={globalTaskCounts} photos={availablePhotos} />
+      <TaskBar panelVisibility={panelVisibility} onTogglePanel={(side) => { panelsBeforeHide.current = null; setPanelVisibility((current) => ({ ...current, [side]: !current[side] })); }} suspended={Boolean(viewerPhoto || quickPhoto)} open={taskDrawerOpen} onToggle={() => setTaskDrawerOpen((value) => !value)} onOpenTaskCenter={() => { setTaskDrawerOpen(false); openWorkspaceTab('tasks'); }} onOpenViewer={(assetId, assetIds) => void openViewer(assetId, assetIds)} tasks={isDemo ? null : globalTasks} counts={globalTaskCounts} photos={availablePhotos} />
     </div>
   );
 }

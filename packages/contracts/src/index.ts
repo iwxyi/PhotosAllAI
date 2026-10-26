@@ -162,6 +162,7 @@ export const workspaceSessionSchema = z.object({
     selectedAssetId: z.string().min(1).nullable(),
     favoriteOnly: z.boolean(),
     sortBy: z.enum(['modifiedAt', 'fileName', 'rating']),
+    sortDirection: z.enum(['asc', 'desc']).optional(),
     searchQuery: z.string().max(500)
   })
 }).refine((session) => session.openTabs.includes(session.activeTab), {
@@ -207,11 +208,14 @@ export type DeleteCatalogTagInput = z.input<typeof deleteCatalogTagInputSchema>;
 const catalogAssetBaseSchema = z.object({
   id: z.string(),
   folderId: z.string(),
+  directoryId: z.string().optional(),
   fileName: z.string(),
   format: z.string(),
   sizeBytes: z.number().nonnegative(),
   modifiedAt: z.number().nonnegative(),
   rating: z.number().int().min(0).max(5),
+  labelColor: z.enum(['red', 'yellow', 'green', 'blue', 'purple']).nullable().default(null),
+  flag: z.enum(['picked', 'rejected', 'unflagged']).default('unflagged'),
   favorite: z.boolean(),
   offline: z.boolean(),
   tags: z.array(catalogTagSchema.omit({ assetCount: true })),
@@ -234,6 +238,24 @@ export const catalogAssetSchema = catalogAssetBaseSchema.extend({
 
 export type CatalogAsset = z.infer<typeof catalogAssetSchema>;
 
+export const fileDetailsSchema = z.object({
+  path: z.string(), sizeBytes: z.number().nonnegative(), modifiedAt: z.number().nonnegative(),
+  width: z.number().positive().optional(), height: z.number().positive().optional(),
+  camera: z.string().optional(), lens: z.string().optional(), takenAt: z.string().optional(),
+  cameraMake: z.string().optional(), cameraModel: z.string().optional(),
+  lensMake: z.string().optional(), lensModel: z.string().optional(),
+  city: z.string().optional(), country: z.string().optional(),
+  exposure: z.string().optional(), aperture: z.number().positive().optional(),
+  exposureSeconds: z.number().positive().optional(),
+  iso: z.number().positive().optional(), focalLength: z.number().positive().optional(),
+  metadataWarning: z.string().optional()
+});
+export type FileDetails = z.infer<typeof fileDetailsSchema>;
+export const quickViewSessionSchema = z.object({
+  items: z.array(catalogAssetSchema), selectedId: z.string(), directory: z.string()
+});
+export type QuickViewSession = z.infer<typeof quickViewSessionSchema>;
+
 export const catalogAssetCursorSchema = z.object({
   modifiedAt: z.number().nonnegative(),
   id: z.string().min(1),
@@ -248,7 +270,17 @@ export const listCatalogAssetsInputSchema = z.object({
   albumId: z.string().uuid().nullable().default(null),
   smartCollection: z.enum(['recent', 'favorites', 'unrated', 'unanalyzed', 'generated', 'to-review']).nullable().default(null),
   favoriteOnly: z.boolean().default(false),
+  folderIds: z.array(z.string().min(1)).max(500).default([]),
+  dateFrom: z.number().nonnegative().nullable().default(null),
+  dateTo: z.number().nonnegative().nullable().default(null),
+  months: z.array(z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/u)).max(120).default([]),
+  formats: z.array(z.string().min(1).max(20)).max(50).default([]),
+  minimumRating: z.number().int().min(0).max(5).nullable().default(null),
+  ratingOperator: z.enum(['eq', 'gte', 'lte']).default('gte'),
+  flags: z.array(z.enum(['picked', 'rejected', 'unflagged'])).default([]),
+  colors: z.array(z.enum(['red', 'yellow', 'green', 'blue', 'purple'])).default([]),
   sortBy: z.enum(['modifiedAt', 'fileName', 'rating']).default('modifiedAt'),
+  sortDirection: z.enum(['asc', 'desc']).optional(),
   query: z.string().max(500).default(''),
   workflow: z.boolean().default(true),
   cursor: catalogAssetCursorSchema.nullable().default(null),
@@ -481,8 +513,10 @@ export type UndoFileOperationReport = z.infer<typeof undoFileOperationReportSche
 export const updateCatalogMetadataInputSchema = z.object({
   assetIds: z.array(z.string().min(1)).min(1).max(10_000),
   rating: z.number().int().min(0).max(5).optional(),
+  labelColor: z.enum(['red', 'yellow', 'green', 'blue', 'purple']).nullable().optional(),
+  flag: z.enum(['picked', 'rejected', 'unflagged']).optional(),
   favorite: z.boolean().optional()
-}).refine((input) => input.rating !== undefined || input.favorite !== undefined, {
+}).refine((input) => input.rating !== undefined || input.labelColor !== undefined || input.flag !== undefined || input.favorite !== undefined, {
   message: 'At least one metadata field is required'
 });
 
@@ -504,7 +538,7 @@ export const catalogSnapshotSchema = z.object({
 
 export type CatalogSnapshot = z.infer<typeof catalogSnapshotSchema>;
 
-export const providerKindSchema = z.enum(['openai-compatible', 'nanobanana-compatible']);
+export const providerKindSchema = z.enum(['openai-compatible', 'nanobanana-compatible', 'acedata-nano-banana']);
 export type ProviderKind = z.infer<typeof providerKindSchema>;
 
 export const providerPurposeSchema = z.enum(['vision', 'generation']);
@@ -1081,6 +1115,13 @@ export interface DesktopApi {
   revealCatalogFolder(folderId: string): Promise<boolean>;
   unregisterCatalogFolder(input: UnregisterCatalogFolderInput): Promise<UnregisterCatalogFolderReport>;
   revealCatalogAsset(assetId: string): Promise<boolean>;
+  getFileDetails(assetId: string): Promise<FileDetails>;
+  openAssetExternally(assetId: string): Promise<void>;
+  linkImageDirectory(assetId: string): Promise<void>;
+  openImages(paths?: string[]): Promise<QuickViewSession | null>;
+  takePendingOpenImages(): Promise<QuickViewSession | null>;
+  onOpenImages(listener: (session: QuickViewSession) => void): () => void;
+  getDroppedFilePaths(files: File[]): string[];
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;
   deleteProviderProfile(profileId: string): Promise<void>;

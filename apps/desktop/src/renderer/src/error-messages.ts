@@ -1,3 +1,18 @@
+export function generationFailureMessage(code: string | null | undefined): string {
+  switch (code) {
+    case 'PROVIDER_HTTP_400': return '生图请求被拒绝，请检查模型 ID、接口类型及提示词。';
+    case 'PROVIDER_HTTP_403': return '生图请求被拒绝，请检查权限或调整提示词与参考图。';
+    case 'PROVIDER_IMAGE_MISSING': return '接口没有返回生成图片，请重试或检查接口兼容性。';
+    case 'GENERATED_IMAGE_FORMAT_UNSUPPORTED': return '返回的文件不是支持的图片格式。';
+    case 'GENERATED_IMAGE_INVALID_SIZE': return '生成图片为空或超过大小限制。';
+    case 'PROVIDER_NOT_FOUND': return '生成模型配置不存在，请到设置中检查。';
+    case 'PROVIDER_RESPONSE_NOT_JSON': return '生图接口未返回有效 JSON，请检查接口地址及服务状态。';
+    default:
+      if (code?.startsWith('PROVIDER_HTTP_') || ['PROVIDER_REQUEST_TIMEOUT', 'PROVIDER_CONNECTION_FAILED', 'PROVIDER_CREDENTIAL_MISSING', 'PROVIDER_DISABLED'].includes(code ?? '')) return analysisFailureMessage(code);
+      return '生成失败，请复制错误信息或在任务中心查看详情。';
+  }
+}
+
 export function analysisFailureMessage(code: string | null | undefined): string {
   switch (code) {
     case 'TASK_DATA_INVALID': return '任务或分析数据格式不符合要求，请重新创建分析任务。';

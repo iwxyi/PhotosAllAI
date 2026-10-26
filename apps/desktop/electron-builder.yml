@@ -9,6 +9,10 @@ files:
   - package.json
 asar: true
 compression: maximum
+fileAssociations:
+  - ext: [jpg, jpeg, png, webp, gif, avif, bmp, ico, heic, heif, tif, tiff, dng, cr2, cr3, nef, nrw, arw, raf, rw2, orf, pef]
+    name: Image
+    role: Viewer
 mac:
   category: public.app-category.photography
   target:

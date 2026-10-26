@@ -824,16 +824,29 @@ async function requestGeneratedImage(
   inputImage: Buffer,
   signal?: AbortSignal
 ): Promise<Buffer> {
-  const response = await fetchBounded(`${provider.profile.baseUrl}/images/edits`, {
+  const aceData = provider.profile.kind === 'acedata-nano-banana';
+  const endpoint = aceData
+    ? `${provider.profile.baseUrl}/nano-banana/images`
+    : `${provider.profile.baseUrl}/images/edits`;
+  const body = aceData
+    ? {
+        action: 'edit',
+        model: provider.profile.modelId,
+        prompt,
+        image_urls: [`data:image/jpeg;base64,${inputImage.toString('base64')}`],
+        count: 1
+      }
+    : {
+        model: provider.profile.modelId,
+        prompt,
+        n: 1,
+        image: { mime_type: 'image/jpeg', data: inputImage.toString('base64') }
+      };
+  const response = await fetchBounded(endpoint, {
     method: 'POST',
     headers: createProviderRequestHeaders(provider.profile.customHeaders, provider.apiKey),
     redirect: 'error',
-    body: JSON.stringify({
-      model: provider.profile.modelId,
-      prompt,
-      n: 1,
-      image: { mime_type: 'image/jpeg', data: inputImage.toString('base64') }
-    })
+    body: JSON.stringify(body)
   }, {
     maxBytes: MAX_PROVIDER_RESPONSE_BYTES,
     timeoutMs: provider.profile.requestTimeoutMs ?? GENERATION_TIMEOUT_MS,
@@ -892,6 +905,7 @@ function extractImageCandidate(value: unknown): { base64?: string; url?: string 
       if (typeof candidate[field] === 'string') return { base64: candidate[field] };
     }
     if (typeof candidate.url === 'string') return { url: candidate.url };
+    if (typeof candidate.image_url === 'string') return { url: candidate.image_url };
   }
   return {};
 }

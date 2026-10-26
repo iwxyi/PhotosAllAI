@@ -3,7 +3,6 @@ import {
   agentTaskResultSchema,
   generationTaskPayloadSchema,
   type AgentTaskResult,
-  type CatalogAsset,
   type ProviderProfile
 } from '@photoallisai/contracts';
 

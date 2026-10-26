@@ -54,17 +54,18 @@ test.afterAll(async () => {
 
 test('unregisters a source folder without touching files and restores its catalog identity', async () => {
   await page.locator('.catalog-card').first().dblclick();
+  await page.keyboard.press('Escape');
   await page.getByRole('treeitem', { name: /source 1/ }).click();
-  await page.locator('.canvas-wrap').click({ button: 'right' });
+  await page.locator('.catalog-card').first().click({ button: 'right' });
   const photoMenu = page.getByRole('menu', { name: /照片菜单 1 张/ });
-  await expect(photoMenu.getByText('取消首选')).toBeVisible();
-  await photoMenu.getByRole('menuitem', { name: '取消首选' }).click();
+  await expect(photoMenu.getByText('取消收藏')).toBeVisible();
+  await photoMenu.getByRole('menuitem', { name: '取消收藏' }).click();
   await expect(page.getByRole('status')).toContainText('已取消收藏 1 张照片');
-  await expect(page.getByRole('button', { name: /首选 0/ })).toBeVisible();
-  await page.locator('.canvas-wrap').click({ button: 'right' });
-  await page.getByRole('menuitem', { name: '标记为首选' }).click();
+  await expect(page.getByRole('button', { name: /收藏 0/ })).toBeVisible();
+  await page.locator('.catalog-card').first().click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '添加到收藏' }).click();
   await expect(page.getByRole('status')).toContainText('已收藏 1 张照片');
-  await expect(page.getByRole('button', { name: /首选 1/ })).toBeVisible();
+  await expect(page.getByRole('button', { name: /收藏 1/ })).toBeVisible();
   await page.getByRole('treeitem', { name: /source 1/ }).click({ button: 'right' });
   await page.getByRole('menuitem', { name: /取消关联/ }).click();
   const dialog = page.getByRole('alertdialog', { name: '取消关联「source」？' });

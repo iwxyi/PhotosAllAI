@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, realpath, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -20,6 +20,40 @@ afterEach(async () => {
 });
 
 describe('catalog image discovery', () => {
+  it('combines folder, local date, month and format filters before counting and pagination', async () => {
+    const root = await createTemporaryDirectory();
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      const photoRoot = path.join(root, 'photos');
+      const january = new Date(2026, 0, 15, 12);
+      const february = new Date(2026, 1, 1, 0);
+      for (const [relative, date] of [['A/one.jpg', january], ['A/two.png', january], ['B/three.jpg', february], ['A/sub/four.jpg', january]] as const) {
+        const file = path.join(photoRoot, relative);
+        await mkdir(path.dirname(file), { recursive: true });
+        await writeFile(file, 'fixture');
+        await utimes(file, date, date);
+      }
+      await catalog.importFolders([photoRoot]);
+      const folders = catalog.listFolders();
+      const folderA = folders.find((folder) => folder.name === 'A')!;
+      const folderB = folders.find((folder) => folder.name === 'B')!;
+      expect(catalog.listAssetPage({ folderIds: [folderA.id] }).totalCount).toBe(3);
+      expect(catalog.listAssetPage({ folderIds: [folderA.id, folderB.id] }).totalCount).toBe(4);
+      expect(catalog.listAssetPage({ folderIds: ['missing'] }).totalCount).toBe(0);
+      expect(catalog.listAssetPage({ months: ['2026-01', '2026-02'], formats: ['jpg', 'PNG'] }).totalCount).toBe(4);
+      const filters = { folderIds: [folderA.id, folderB.id], dateFrom: new Date(2026, 0, 1).getTime(), dateTo: february.getTime(), months: ['2026-01'], formats: ['JPG'], sortBy: 'fileName' as const, limit: 1 };
+      const first = catalog.listAssetPage(filters);
+      expect(first.totalCount).toBe(2);
+      expect(first.items[0]?.fileName).toBe('four.jpg');
+      expect(first.items[0]?.directoryId).toBe(folders.find((folder) => folder.name === 'sub')?.id);
+      const next = catalog.listAssetPage({ ...filters, cursor: first.nextCursor });
+      expect(next.items[0]?.fileName).toBe('one.jpg');
+      expect(next.nextCursor).toBeNull();
+      expect(catalog.listAssetPage({ dateFrom: february.getTime(), months: ['2026-01'] }).totalCount).toBe(0);
+      expect(catalog.listAssetPage({ dateFrom: february.getTime() }).items[0]?.fileName).toBe('three.jpg');
+    } finally { catalog.close(); }
+  });
+
   it('recognizes supported extensions case-insensitively', () => {
     expect(isSupportedImage('portrait.JPG')).toBe(true);
     expect(isSupportedImage('camera.CR3')).toBe(true);
@@ -50,6 +84,15 @@ describe('catalog image discovery', () => {
     expect(catalog.listFolders()).toEqual([expect.objectContaining({ id: assets[0]?.folderId, name: 'photos', assetCount: 2, offlineCount: 0, parentId: null, rootId: assets[0]?.folderId, depth: 0, isRoot: true })]);
     const updated = catalog.updateMetadata({ assetIds: assets.map((asset) => asset.id), rating: 4 });
     expect(updated.every((asset) => asset.rating === 4)).toBe(true);
+    expect(catalog.updateMetadata({ assetIds: [assets[0]!.id], flag: 'picked' })[0]?.flag).toBe('picked');
+    expect(catalog.listAssets().find((asset) => asset.id === assets[0]!.id)?.flag).toBe('picked');
+    expect(catalog.updateMetadata({ assetIds: [assets[0]!.id], flag: 'rejected' })[0]?.flag).toBe('rejected');
+    expect(catalog.updateMetadata({ assetIds: [assets[0]!.id], flag: 'unflagged' })[0]?.flag).toBe('unflagged');
+    const labeled = catalog.updateMetadata({ assetIds: assets.map((asset) => asset.id), labelColor: 'green' });
+    expect(labeled.every((asset) => asset.labelColor === 'green')).toBe(true);
+    const cleared = catalog.updateMetadata({ assetIds: [assets[0]!.id], labelColor: null });
+    expect(cleared[0]?.labelColor).toBeNull();
+    expect(catalog.listAssets().find((asset) => asset.id === assets[1]!.id)?.labelColor).toBe('green');
     const firstPage = catalog.listAssetPage({ folderId: null, cursor: null, limit: 1 });
     const secondPage = catalog.listAssetPage({ folderId: null, cursor: firstPage.nextCursor, limit: 1 });
     expect(firstPage.totalCount).toBe(2);
@@ -67,6 +110,28 @@ describe('catalog image discovery', () => {
     expect(ratingPage.items[0]?.rating).toBe(5);
     const ratingSecondPage = catalog.listAssetPage({ folderId: null, sortBy: 'rating', cursor: ratingPage.nextCursor, limit: 1 });
     expect(ratingSecondPage.items[0]?.rating).toBe(1);
+    for (const sortBy of ['fileName', 'rating', 'modifiedAt'] as const) {
+      for (const sortDirection of ['asc', 'desc'] as const) {
+        const first = catalog.listAssetPage({ sortBy, sortDirection, limit: 1 });
+        const second = catalog.listAssetPage({ sortBy, sortDirection, cursor: first.nextCursor, limit: 1 });
+        const complete = catalog.listAssetPage({ sortBy, sortDirection, limit: 20 });
+        expect([...first.items, ...second.items].map((item) => item.id)).toEqual(complete.items.map((item) => item.id));
+        expect(new Set([...first.items, ...second.items].map((item) => item.id)).size).toBe(2);
+      }
+    }
+    expect(catalog.listAssetPage({ sortBy: 'fileName', sortDirection: 'desc' }).items[0]?.fileName).toBe('visible.jpg');
+    expect(catalog.listAssetPage({ sortBy: 'rating', sortDirection: 'asc' }).items[0]?.rating).toBe(1);
+    expect(catalog.listAssetPage({ minimumRating: 5, ratingOperator: 'gte' }).totalCount).toBe(1);
+    expect(catalog.listAssetPage({ minimumRating: 1, ratingOperator: 'eq' }).items[0]?.id).toBe(assets[0]!.id);
+    expect(catalog.listAssetPage({ minimumRating: 1, ratingOperator: 'lte' }).totalCount).toBe(1);
+    catalog.updateMetadata({ assetIds: [assets[1]!.id], flag: 'picked' });
+    const filteredPage = catalog.listAssetPage({ minimumRating: 4, flags: ['picked'], colors: ['green'], limit: 1 });
+    expect(filteredPage.totalCount).toBe(1);
+    expect(filteredPage.items[0]?.id).toBe(assets[1]!.id);
+    expect(catalog.listAssetPage({ flags: ['rejected'] }).totalCount).toBe(0);
+    expect(catalog.listAssetPage({ colors: ['red', 'green'] }).totalCount).toBe(1);
+    catalog.updateMetadata({ assetIds: [assets[1]!.id], flag: 'unflagged' });
+
     const database = new DatabaseSync(databasePath);
     const searchableId = assets.find((asset) => asset.fileName === 'visible.jpg')!.id;
     database.prepare('INSERT INTO asset_search (asset_id, normalized_content) VALUES (?, ?)')

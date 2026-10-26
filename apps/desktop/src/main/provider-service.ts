@@ -134,7 +134,9 @@ export class ProviderService {
     if (!credential) return connectionTestSchema.parse({ ok: false, message: '请先填写 API Key', latencyMs: 0 });
 
     const baseUrl = normalizeBaseUrl(input.baseUrl);
-    const endpoint = input.kind === 'openai-compatible' ? `${baseUrl}/models` : `${baseUrl}/models`;
+    const endpoint = input.kind === 'acedata-nano-banana'
+      ? `${baseUrl}/openai/models`
+      : `${baseUrl}/models`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10_000);
     const startedAt = performance.now();
@@ -164,7 +166,10 @@ export class ProviderService {
       if (!data || typeof data !== 'object' || !('data' in data) || !Array.isArray(data.data)) {
         return connectionTestSchema.parse({ ok: false, message: '服务未返回兼容的模型列表，请检查 API 地址与接口格式。', latencyMs });
       }
-      return connectionTestSchema.parse({ ok: true, message: '连接成功（模型列表可访问，图片分析能力需实际任务验证）', latencyMs });
+      const message = input.kind === 'acedata-nano-banana'
+        ? '连接成功（ACE Data 模型列表可访问；生图能力需通过实际任务验证）'
+        : '连接成功（模型列表可访问，图片分析能力需实际任务验证）';
+      return connectionTestSchema.parse({ ok: true, message, latencyMs });
     } catch (error) {
       const message = error instanceof Error && error.name === 'AbortError'
         ? '连接超时'

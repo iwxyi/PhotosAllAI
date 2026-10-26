@@ -34,6 +34,31 @@ afterEach(async () => {
 });
 
 describe('provider service', () => {
+  it('tests ACE Data Nano Banana through its model-list endpoint without starting generation', async () => {
+    let requestUrl = '';
+    let requestAuthorization = '';
+    const server = createServer((request, response) => {
+      requestUrl = request.url ?? '';
+      requestAuthorization = request.headers.authorization ?? '';
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ data: [{ id: 'nano-banana-pro' }] }));
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server unavailable');
+    const providers = await service();
+
+    const result = await providers.test({
+      name: 'ACE Nano Banana', kind: 'acedata-nano-banana', purpose: 'generation',
+      baseUrl: `http://127.0.0.1:${address.port}`, modelId: 'nano-banana-pro', apiKey: 'ace-token', enabled: true
+    });
+
+    expect(result.ok).toBe(true);
+    expect(requestUrl).toBe('/openai/models');
+    expect(requestAuthorization).toBe('Bearer ace-token');
+  });
+
   it('selects one enabled default per purpose and persists explicit replacements', async () => {
     const { providers, settingsPath } = await serviceWithPath();
     const base = { kind: 'openai-compatible' as const, purpose: 'vision' as const, baseUrl: 'https://example.com/v1', modelId: 'model', apiKey: 'test-key', enabled: true };

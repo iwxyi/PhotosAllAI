@@ -1,0 +1,98 @@
+import path from 'node:path';
+import { copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { _electron as electron, expect, test } from '@playwright/test';
+
+test('opens actual files temporarily, browses siblings, and measures physical pixels', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-professional-viewer-'));
+  const source = path.join(directory, 'photo2.jpg');
+  const fixture = path.resolve('apps/desktop/src/renderer/public/demo/portrait.jpg');
+  await copyFile(fixture, source);
+  await copyFile(fixture, path.join(directory, 'photo10.jpg'));
+  const app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js'), source], env: { ...process.env, PHOTOALLISAI_USER_DATA: path.join(directory, 'user-data') } });
+  try {
+    const page = await app.firstWindow();
+    const errors: string[] = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    const viewer = page.getByRole('region', { name: '临时看图', exact: true });
+    await expect(viewer).toBeVisible();
+    await expect(viewer.locator('.thumb')).toHaveCount(2);
+    await expect.poll(() => viewer.locator('.thumb').first().evaluate((element) => element.getBoundingClientRect().width)).toBeGreaterThan(55);
+    await expect.poll(() => viewer.locator('.thumb img').first().evaluate((element) => (element as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+    await expect(viewer.locator('.base-image')).toHaveClass(/is-ready/);
+    expect(await page.evaluate(() => window.desktopApi.listCatalogFolders())).toEqual([]);
+    await expect(viewer.locator('[data-tool-group="compare"]')).toHaveCount(0);
+    await expect(viewer.locator('[data-tool-group="export"]')).toHaveCount(0);
+    await viewer.getByRole('textbox', { name: '缩放比例', exact: true }).fill('100%');
+    await page.keyboard.press('Enter');
+    await expect(viewer.getByRole('textbox', { name: '缩放比例', exact: true })).toHaveValue('100%');
+    await expect.poll(() => viewer.evaluate((element) => {
+      const image = element.querySelector<HTMLImageElement>('.base-image')!;
+      return Math.abs(element.querySelector('.photo-canvas')!.getBoundingClientRect().width * devicePixelRatio - image.naturalWidth);
+    })).toBeLessThan(2);
+    await viewer.getByRole('button', { name: '适应窗口', exact: true }).click();
+    await viewer.getByRole('textbox', { name: '缩放比例', exact: true }).fill('400%');
+    await page.keyboard.press('Enter');
+    const canvas = viewer.locator('.photo-canvas');
+    const enlargedWidth = (await canvas.boundingBox())!.width;
+    await canvas.dblclick({ position: { x: enlargedWidth / 2, y: (await canvas.boundingBox())!.height / 2 } });
+    const fitBounds = (await canvas.boundingBox())!;
+    await expect(viewer.locator('.canvas-wrap')).not.toHaveClass(/is-zoomed/);
+    const point = { x: fitBounds.x + fitBounds.width * .6, y: fitBounds.y + fitBounds.height * .55 };
+    await page.mouse.dblclick(point.x, point.y);
+    await expect(viewer.getByRole('textbox', { name: '缩放比例', exact: true })).toHaveValue('400%');
+    const zoomedBounds = (await canvas.boundingBox())!;
+    expect(Math.abs((point.x - zoomedBounds.x) / zoomedBounds.width - .6)).toBeLessThan(.005);
+    expect(Math.abs((point.y - zoomedBounds.y) / zoomedBounds.height - .55)).toBeLessThan(.005);
+    await page.mouse.dblclick(point.x, point.y);
+    await expect(viewer.locator('.canvas-wrap')).not.toHaveClass(/is-zoomed/);
+    expect(Math.abs((await canvas.boundingBox())!.width - fitBounds.width)).toBeLessThan(1);
+    await page.mouse.dblclick(point.x, point.y);
+    await expect(viewer.getByRole('textbox', { name: '缩放比例', exact: true })).toHaveValue('400%');
+    await viewer.getByRole('button', { name: '关闭看图', exact: true }).click();
+    await expect(viewer).toHaveCount(0);
+    const reopened = await page.evaluate((file) => window.desktopApi.openImages([file]), source);
+    await app.evaluate(({ BrowserWindow }, session) => BrowserWindow.getAllWindows()[0]!.webContents.send('image.opened.v1', session), reopened);
+    await expect(viewer).toBeVisible();
+    await expect(viewer.locator('.base-image')).toHaveClass(/is-ready/);
+    await viewer.locator('.photo-canvas').dblclick();
+    await expect(viewer.getByRole('textbox', { name: '缩放比例', exact: true })).toHaveValue('400%');
+    await viewer.getByRole('button', { name: '适应窗口', exact: true }).click();
+    const options = viewer.getByRole('button', { name: '缩放与显示选项', exact: true });
+    await options.click();
+    await page.getByRole('menuitem', { name: '背景：透明棋盘格', exact: true }).click();
+    await expect(viewer.locator('.canvas-wrap')).toHaveClass(/background-checker/);
+    await options.click();
+    await page.getByRole('menuitem', { name: '适应宽度', exact: true }).click();
+    await expect.poll(() => viewer.evaluate((element) => Math.abs(element.querySelector('.canvas-wrap')!.clientWidth - element.querySelector('.photo-canvas')!.getBoundingClientRect().width))).toBeLessThan(2);
+    await viewer.locator('.canvas-wrap').click({ button: 'right' });
+    const menu = page.getByRole('menu', { name: '图片文件菜单' });
+    await expect(menu.getByRole('menuitem')).toHaveCount(3);
+    await page.keyboard.press('Escape');
+    await expect(menu).toHaveCount(0);
+    await expect(viewer).toBeVisible();
+    await viewer.locator('.canvas-wrap').focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(viewer.locator('.viewer-title')).toContainText('photo10.jpg');
+    await expect(viewer.locator('.thumb.is-selected')).toContainText('photo10.jpg');
+    await page.getByRole('button', { name: '详情', exact: true }).click();
+    await expect(page.locator('.inspector-scroll')).toContainText('photo10.jpg');
+    await expect(page.locator('.inspector-scroll')).toContainText('位置');
+    await expect.poll(() => page.locator('.metadata-list strong[title*="/"]').first().evaluate((element) => element.getBoundingClientRect().right <= element.closest('.inspector-scroll')!.getBoundingClientRect().right)).toBe(true);
+    for (const [width, height] of [[1440, 900], [1000, 600]]) {
+      await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0]!.setSize(size[0]!, size[1]!), [width!, height!]);
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await page.screenshot({ path: `test-results/professional-viewer-${width}.png` });
+    }
+    await viewer.locator('.canvas-wrap').focus();
+    await page.keyboard.press('Escape');
+    await expect(viewer).toHaveCount(0);
+    const session = await page.evaluate((file) => window.desktopApi.openImages([file]), source);
+    expect(session?.items).toHaveLength(2);
+    expect(await page.evaluate(() => window.desktopApi.listCatalogFolders())).toEqual([]);
+    expect(errors).toEqual([]);
+  } finally {
+    await app.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

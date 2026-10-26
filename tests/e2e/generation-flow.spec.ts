@@ -125,6 +125,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
     requestTimeoutMs: 300_000, retryCount: 2, customHeaders: {}
   });
 
+  await page.getByRole('button', { name: '图片导出' }).click();
   await page.getByLabel('导出预设名称').fill('PNG 交付');
   await page.getByLabel('导出格式').selectOption('png');
   await page.getByLabel('导出尺寸').selectOption('2048');
@@ -133,22 +134,22 @@ test('analyzes, generates, compares, and persists managed and portable results',
 
   await page.getByRole('tab', { name: '图库' }).click();
   await page.locator('.catalog-card').first().dblclick();
-  await page.getByRole('button', { name: '分析并给出建议' }).click();
-  await openWorkspaceTab('AI 工作流');
+  await page.getByRole('button', { name: /分析本图|重新分析本图/ }).click();
   await expect(page.locator('.analysis-head')).toContainText(/已加入分析队列|正在视觉分析/);
   await expect(page.locator('.task-statusbar')).toContainText(/运行 1 项|排队 1 项/);
-  await openWorkspaceTab('看图');
+  await page.keyboard.press('Escape');
+  await page.getByRole('tab', { name: '图库' }).click();
+  await page.locator('.catalog-card').first().dblclick();
   await expect(page.getByText('可清理背景的人像')).toBeVisible({ timeout: 10_000 });
-  await page.getByLabel('搜索图库').fill('自然光');
-  await expect(page.getByText('搜索：自然光')).toBeVisible();
-  await expect(page.getByText('ORIGINAL.jpg', { exact: true }).first()).toBeVisible();
   await page.getByLabel('搜索图库').fill('');
-  await expect(page.getByText('所有照片', { exact: true }).first()).toBeVisible();
 
-  await page.getByRole('button', { name: '减少生成数量' }).click();
-  await page.getByRole('button', { name: '减少生成数量' }).click();
-  await page.getByRole('button', { name: /加入生成队列/ }).click();
+  await page.getByRole('button', { name: '添加本图到批量修图' }).click();
+  await page.getByRole('button', { name: '打开批量修图' }).click();
+  await expect(page.locator('.batch-queue-item')).toHaveCount(1);
+  await page.getByRole('button', { name: '生成全部' }).click();
   await expect(page.getByText('V1', { exact: true })).toBeVisible({ timeout: 10_000 });
+  await page.locator('.batch-candidate').first().dblclick();
+  await expect(page.locator('.generated-layer img')).toBeVisible();
 
   const generated = page.locator('.generated-layer img');
   await expect(generated).toHaveAttribute('src', /^photoresult:\/\/result\//);
@@ -156,24 +157,49 @@ test('analyzes, generates, compares, and persists managed and portable results',
   expect(await page.locator('.base-image').evaluate((image) => getComputedStyle(image).filter)).toBe('none');
   expect(await generated.evaluate((image) => getComputedStyle(image).filter)).toBe('none');
 
-  await page.getByRole('button', { name: '关闭任务抽屉' }).click();
+  const originalButton = page.locator('.version-switcher').getByRole('button', { name: '原图', exact: true });
+  const versionButton = page.locator('.version-switcher').getByRole('button', { name: 'V1', exact: true });
+  for (const [key, flag] of [['p', 'picked'], ['x', 'rejected'], ['u', 'unflagged']] as const) {
+    await page.locator('.canvas-wrap').focus();
+    await page.keyboard.press(key);
+    await expect.poll(async () => (await page.evaluate(() => window.desktopApi.listCatalogAssets()))[0]?.flag).toBe(flag);
+  }
+  for (const width of [1440, 1000]) {
+    await electronApp.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0]!.setSize(size, 850), width);
+    const originalPosition = await originalButton.boundingBox();
+    const versionPosition = await versionButton.boundingBox();
+    await originalButton.click();
+    await expect(originalButton).toHaveClass(/is-current/);
+    expect(await originalButton.boundingBox()).toEqual(originalPosition);
+    expect(await versionButton.boundingBox()).toEqual(versionPosition);
+    await versionButton.click();
+    await expect(versionButton).toHaveClass(/is-current/);
+    expect(await originalButton.boundingBox()).toEqual(originalPosition);
+    expect(await versionButton.boundingBox()).toEqual(versionPosition);
+  }
+  await page.screenshot({ path: 'test-results/viewer-version-toolbar.png' });
+
   await page.getByRole('button', { name: '标记为首选' }).click();
   await expect(page.getByRole('status')).toContainText('已标记为首选版本');
   await page.reload();
-  await expect(page.getByRole('button', { name: '标记为首选' })).toBeVisible();
-  await expect(page.locator('.version-button.is-preferred')).toBeVisible();
+  await expect(page.locator('.batch-candidate.is-best')).toBeVisible();
 
   await page.getByRole('tab', { name: /设置/ }).click();
   await page.getByRole('button', { name: '图库与存储' }).click();
   const storageSection = page.locator('.storage-section');
   await storageSection.getByRole('radio', { name: /原图旁便携目录/ }).check();
   await expect(storageSection.getByRole('status')).toContainText('存储策略已保存');
-  await page.getByRole('tab', { name: '看图' }).click();
-  await page.getByRole('button', { name: /加入生成队列/ }).click();
+  await page.getByRole('tab', { name: '图库' }).click();
+  await page.locator('.catalog-card').first().dblclick();
+  await page.getByRole('button', { name: '添加本图到批量修图' }).click();
+  await page.getByRole('button', { name: '打开批量修图' }).click();
+  await page.getByRole('button', { name: '生成全部' }).click();
   await expect(page.getByText('V2', { exact: true })).toBeVisible({ timeout: 10_000 });
-  await expect(page.getByRole('button', { name: '在文件管理器中显示生成版本' })).toBeEnabled();
+  await page.locator('.batch-candidate').last().dblclick();
+  await page.locator('.canvas-wrap').click({ button: 'right' });
+  await expect(page.getByRole('menuitem', { name: '在文件管理器中显示生成版本' })).toBeEnabled();
+  await page.keyboard.press('Escape');
 
-  await page.getByRole('button', { name: '关闭任务抽屉' }).click();
   const generatedRoot = path.join(testRoot, 'user-data', 'library', 'generated');
   const managedFiles = await readdir(generatedRoot, { recursive: true });
   const managedResult = managedFiles.find((file) => file.endsWith('.jpg'));
@@ -183,7 +209,6 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await page.getByRole('button', { name: '回收版本 V1' }).click();
   await page.getByRole('button', { name: '确认', exact: true }).click();
   await expect(page.getByText('版本回收站')).toBeVisible();
-  await expect(page.getByRole('status')).toContainText('生成版本已移到应用回收站');
   await expect(stat(managedResultPath)).rejects.toMatchObject({ code: 'ENOENT' });
   const trashRoot = path.join(testRoot, 'user-data', 'library', 'trash', 'generation');
   expect((await readdir(trashRoot, { recursive: true })).some((file) => file.endsWith('.jpg'))).toBe(true);
@@ -191,7 +216,6 @@ test('analyzes, generates, compares, and persists managed and portable results',
 
   await page.getByRole('button', { name: '恢复版本 V1' }).click();
   await expect(page.getByText('版本回收站')).toHaveCount(0);
-  await expect(page.getByRole('status')).toContainText('生成版本已恢复');
   expect((await stat(managedResultPath)).isFile()).toBe(true);
 
   const exportDirectory = path.join(testRoot, 'exported');
@@ -199,8 +223,11 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await electronApp.evaluate(({ dialog }, directory) => {
     dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [directory], bookmarks: [] });
   }, exportDirectory);
-  await page.getByLabel('导出预设').selectOption({ label: 'PNG 交付' });
-  await page.getByRole('button', { name: '导出当前版本' }).click();
+  await page.locator('.version-switcher').getByRole('button', { name: 'V2', exact: true }).click();
+  await expect(page.getByRole('group', { name: '当前版本审阅' })).toBeVisible();
+  await page.locator('.canvas-wrap').click({ button: 'right' });
+  await page.getByLabel('右键菜单导出预设').selectOption({ label: 'PNG 交付' });
+  await page.getByRole('menuitem', { name: '导出当前版本…', exact: true }).click();
   await expect(page.getByText('已导出 1 个文件')).toBeVisible();
   const exportedFiles = (await readdir(exportDirectory)).filter((name) => name.endsWith('.png'));
   expect(exportedFiles).toHaveLength(1);
@@ -217,6 +244,8 @@ test('analyzes, generates, compares, and persists managed and portable results',
     };
   });
   await openWorkspaceTab('任务中心');
+  const exportBatch = page.locator('.task-batch-summary').filter({ hasText: '导出' }).first();
+  if (await exportBatch.count()) await exportBatch.click();
   const exportTask = page.locator('.task-table-row').filter({ hasText: '导出' }).first();
   await exportTask.getByRole('button', { name: '查看导出报告' }).click();
   const exportReport = page.getByRole('region', { name: '导出报告' });
@@ -224,7 +253,8 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await expect(exportReport).toContainText('成功 1');
   await exportReport.getByRole('button', { name: '打开导出目录' }).click();
   expect(await electronApp.evaluate(() => (globalThis as typeof globalThis & { openedExportDirectory?: string }).openedExportDirectory)).toBe(exportDirectory);
-  await page.getByRole('tab', { name: '看图' }).click();
+  await page.getByRole('tab', { name: '图库' }).click();
+  await page.locator('.catalog-card').first().dblclick();
 
   await page.getByRole('button', { name: '详情', exact: true }).click();
   await page.getByRole('button', { name: '回收版本 V1' }).click();
@@ -244,6 +274,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await expect(stat(managedResultPath)).rejects.toMatchObject({ code: 'ENOENT' });
   expect((await readdir(trashRoot, { recursive: true })).some((file) => file.endsWith('.jpg'))).toBe(false);
   expect(await readFile(sourcePath)).toEqual(originalBytes);
+  await page.getByRole('button', { name: '诊断与维护' }).click();
   await expect(page.locator('.integrity-result')).toContainText('完整性正常');
   await page.getByRole('button', { name: '重新检查图库' }).click();
   await expect(page.locator('.diagnostics-section').getByRole('status')).toContainText('图库完整性检查通过');

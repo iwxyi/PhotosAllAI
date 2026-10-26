@@ -147,8 +147,8 @@ export class ImageCacheService {
     return result;
   }
 
-  async getOrCreate(assetId: string, variant: ImageVariant): Promise<string | null> {
-    const source = this.#catalog.resolveAssetFile(assetId);
+  async getOrCreate(assetId: string, variant: ImageVariant, openedSource?: { path: string; modifiedAt: number; sizeBytes: number }): Promise<string | null> {
+    const source = openedSource ?? this.#catalog.resolveAssetFile(assetId);
     if (!source) return null;
 
     const specification = variants[variant];
