@@ -82,7 +82,8 @@ test('AI sidebar separates preparation from execution and task views show explic
       ipcMain.removeHandler('tasks.batch.v1');
       ipcMain.handle('tasks.batch.v1', (_event, input) => items.filter((task) => task.kind === input.kind && task.payload.submissionId === input.batchId));
     }, assets.map((asset) => asset.id));
-    await expect(page.locator('.task-status-batch')).toHaveCount(3);
+    await expect(page.locator('.task-status-batch')).toHaveCount(2);
+    await expect(page.getByRole('button', { name: '查看其余后台任务', exact: true })).toHaveText('+1');
     const tabCount = await page.getByRole('tab').count();
     await page.locator('.task-status-batch').first().click();
     const firstBatch = page.locator('.task-drawer .task-batch-group').first();
@@ -128,7 +129,7 @@ test('AI sidebar separates preparation from execution and task views show explic
     await expect(batch).not.toContainText('等待分析');
     await batch.getByRole('button', { name: '添加本图到批量修图', exact: true }).click();
     await expect(batch).toContainText('1 张图片');
-    await expect(page.locator('.task-statusbar')).toContainText('排队 2 项');
+    await expect(page.locator('.task-statusbar')).toContainText('批任务');
     await page.getByRole('tab', { name: '图库', exact: true }).click();
     await page.locator('.catalog-card').first().click();
     await page.locator('.catalog-card').nth(1).click({ modifiers: ['Shift'] });

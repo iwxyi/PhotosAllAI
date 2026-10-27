@@ -51,6 +51,7 @@ import {
   renameCatalogAssetReportSchema,
   relinkCatalogFolderResultSchema,
   renameCatalogFolderInputSchema,
+  createCatalogFolderInputSchema,
   renameCatalogFolderResultSchema,
   resizeQueuedGenerationBatchInputSchema,
   retryFailedGenerationTasksInputSchema,
@@ -591,6 +592,9 @@ function registerIpc(): void {
   ipcMain.handle('catalog.folder.rename.v1', async (_event, input: unknown) =>
     renameCatalogFolderResultSchema.parse(await catalog.renameFolder(renameCatalogFolderInputSchema.parse(input)))
   );
+  ipcMain.handle('catalog.folder.create.v1', async (_event, input: unknown) =>
+    renameCatalogFolderResultSchema.parse(await catalog.createFolder(createCatalogFolderInputSchema.parse(input)))
+  );
   ipcMain.handle('catalog.folder.move.v1', async (_event, input: unknown) => {
     const report = await catalog.moveFolder(moveCatalogFolderInputSchema.parse(input));
     await Promise.allSettled(report.relocations.map((item) => generation.relocatePortableResults(
@@ -955,7 +959,7 @@ app.whenReady().then(async () => {
   catalogWatcher.watchFolders(catalog.listFolderPaths());
   fileOperations = new FileOperationService(databasePath, undefined, {
     trashItem: (filePath) => shell.trashItem(filePath)
-  });
+  }, process.platform, catalog);
   tasks = new TaskService(databasePath);
   templates = new TemplateService(databasePath);
   imageCache = new ImageCacheService(

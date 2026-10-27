@@ -136,7 +136,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await page.locator('.catalog-card').first().dblclick();
   await page.getByRole('button', { name: /分析本图|重新分析本图/ }).click();
   await expect(page.locator('.analysis-head')).toContainText(/已加入分析队列|正在视觉分析/);
-  await expect(page.locator('.task-statusbar')).toContainText(/运行 1 项|排队 1 项/);
+  await expect(page.locator('.task-statusbar')).toContainText('批任务');
   await page.keyboard.press('Escape');
   await page.getByRole('tab', { name: '图库' }).click();
   await page.locator('.catalog-card').first().dblclick();

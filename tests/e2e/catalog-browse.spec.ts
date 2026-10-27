@@ -1,11 +1,23 @@
 import path from 'node:path';
 import { copyFile, mkdir, mkdtemp, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { _electron as electron, expect, test } from '@playwright/test';
+import { _electron as electron, expect, test, type Page } from '@playwright/test';
 import { CatalogService } from '../../apps/desktop/src/main/catalog-service';
 
 test('gallery dimensions group the complete folder with independent masonry sections', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'photo-browse-'));
+  const dragGroup = async (page: Page) => {
+    const source = (await page.getByRole('button', { name: '拖动排序分组层级月份', exact: true }).boundingBox())!;
+    const target = (await page.getByRole('button', { name: '拖动排序分组层级文件夹', exact: true }).boundingBox())!;
+    await page.mouse.move(source.x + 8, source.y + 12);
+    await page.mouse.down();
+    await page.mouse.move(source.x + 8, source.y + 4, { steps: 3 });
+    await expect(page.locator('.toolbar-customize-row.is-dragging')).toHaveCount(1);
+    await page.mouse.move(target.x + 8, target.y + 12, { steps: 12 });
+    await page.waitForTimeout(100);
+    await page.mouse.up();
+    await page.waitForTimeout(100);
+  };
   const userData = path.join(directory, 'user-data');
   await mkdir(path.join(userData, 'library'), { recursive: true });
   const catalog = new CatalogService(path.join(userData, 'library', 'catalog.sqlite'));
@@ -30,17 +42,26 @@ test('gallery dimensions group the complete folder with independent masonry sect
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
     await expect(page.locator('.catalog-card')).toHaveCount(6);
+    await expect(page.locator('[data-catalog-tool="title"]')).toContainText('所有照片');
+    await expect(page.locator('[data-catalog-tool="count"]')).toContainText('6 张');
+    await expect(page.locator('.catalog-photo-group')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '瀑布流视图', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.locator('[data-catalog-tool="sort"]')).toHaveCount(0);
+    await expect(page.locator('[data-catalog-tool="search"]')).toHaveCount(0);
+    await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
+    for (const name of ['排序', '分组:日期', '分组:文件夹']) await page.getByRole('checkbox', { name, exact: true }).check();
+    await page.keyboard.press('Escape');
     await page.getByLabel('图库排序', { exact: true }).selectOption('fileName');
     await expect(page.locator('.catalog-card-meta strong').first()).toHaveText('five.jpg');
     await page.getByRole('button', { name: '图库排序：正序，点击切换', exact: true }).click();
     await expect(page.locator('.catalog-card-meta strong').first()).toHaveText('two.png');
     await page.getByRole('button', { name: '图库排序：逆序，点击切换', exact: true }).click();
-    await page.getByRole('button', { name: '图库过滤器', exact: true }).click();
+    await expect(page.getByRole('button', { name: '图库过滤器', exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: '按日期分组', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '按文件夹分组', exact: true })).toBeVisible();
-    await page.getByRole('group', { name: '图库分组维度', exact: true }).click({ button: 'right' });
-    await page.getByRole('menuitemcheckbox', { name: '月份', exact: true }).click();
-    await page.getByRole('menuitemcheckbox', { name: '格式', exact: true }).click();
+    await page.getByRole('group', { name: '图库工具栏', exact: true }).click({ button: 'right' });
+    await page.getByRole('checkbox', { name: '分组:月份', exact: true }).click();
+    await page.getByRole('checkbox', { name: '分组:格式', exact: true }).click();
     await page.keyboard.press('Escape');
     await expect(page.locator('.catalog-card')).toHaveCount(6);
     await page.getByRole('button', { name: '瀑布流视图', exact: true }).click();
@@ -48,7 +69,16 @@ test('gallery dimensions group the complete folder with independent masonry sect
     await page.evaluate(() => {
       (window as unknown as { browseImages: Map<string, Element> }).browseImages = new Map([...document.querySelectorAll<HTMLElement>('.catalog-card')].map((card) => [card.dataset.assetId!, card.querySelector('img')!]));
     });
+    const groupButtons = page.locator('.catalog-facet > button:first-child');
+    const initialButtonOrder = await groupButtons.allTextContents();
+    const folderButton = page.getByRole('button', { name: '按文件夹分组', exact: true });
+    const folderPosition = await folderButton.boundingBox();
     await page.getByRole('button', { name: '按文件夹分组', exact: true }).click();
+    expect(await groupButtons.allTextContents()).toEqual(initialButtonOrder);
+    expect((await folderButton.boundingBox())?.x).toBe(folderPosition?.x);
+    const arrow = page.getByRole('button', { name: '文件夹：正序，点击切换' });
+    const labelBounds = await folderButton.locator('span').boundingBox();
+    expect((await arrow.boundingBox())!.x - (labelBounds!.x + labelBounds!.width)).toBeLessThanOrEqual(8);
     await expect(page.locator('.catalog-card')).toHaveCount(6);
     expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.catalog-card')].every((card) => (window as unknown as { browseImages: Map<string, Element> }).browseImages.get(card.dataset.assetId!) === card.querySelector('img')))).toBe(true);
     await page.getByRole('button', { name: '按文件夹分组', exact: true }).click();
@@ -58,16 +88,26 @@ test('gallery dimensions group the complete folder with independent masonry sect
     await expect(page.locator('.catalog-group-heading').first()).toContainText('photos / A');
     await page.getByRole('button', { name: '文件夹：正序，点击切换' }).click();
     await expect(page.locator('.catalog-group-heading').first()).toContainText('photos / B / sub');
+    await folderButton.click();
+    await folderButton.click();
+    await expect(page.getByRole('button', { name: '文件夹：逆序，点击切换' })).toBeVisible();
+    await expect(page.locator('.catalog-group-heading').first()).toContainText('photos / B / sub');
     await page.getByRole('button', { name: '文件夹：逆序，点击切换' }).click();
     await page.getByRole('button', { name: '按月份分组', exact: true }).click();
     await expect(page.locator('.catalog-card')).toHaveCount(6);
     await expect(page.locator('.catalog-photo-group')).toHaveCount(5);
-    await page.getByRole('button', { name: '配置图库分组字段', exact: true }).click();
-    await page.getByRole('button', { name: '上移月份', exact: true }).click();
+    const galleryOrder = await page.locator('.catalog-card').evaluateAll((cards) => cards.map((card) => card.getAttribute('data-asset-id')));
+    await page.locator('.catalog-card').first().dblclick();
+    const viewer = page.getByRole('region', { name: '看图', exact: true });
+    await expect(viewer).toBeVisible();
+    await expect.poll(() => viewer.locator('.filmstrip .thumb').evaluateAll((thumbs) => thumbs.map((thumb) => thumb.getAttribute('data-asset-id')))).toEqual(galleryOrder);
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
+    await dragGroup(page);
     await page.keyboard.press('Escape');
     await expect(page.locator('.catalog-group-heading').first()).toContainText('2026-02 · photos / B');
-    await page.getByRole('button', { name: '配置图库分组字段', exact: true }).click();
-    await page.getByRole('button', { name: '下移月份', exact: true }).click();
+    await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
+    await dragGroup(page);
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: '列表视图', exact: true }).click();
     await expect(page.locator('.catalog-list-row')).toHaveCount(6);
@@ -86,6 +126,12 @@ test('gallery dimensions group the complete folder with independent masonry sect
     await expect(page.locator('.catalog-photo-group')).toHaveCount(5);
     for (const [width, height] of [[1440, 900], [1000, 640]]) {
       await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0]!.setSize(size[0]!, size[1]!), [width!, height!]);
+      // Visit each section: distant groups intentionally defer image loading.
+      for (const card of await page.locator('.catalog-card').all()) {
+        await card.scrollIntoViewIfNeeded();
+        await expect(card.locator('img')).toHaveClass('is-ready');
+      }
+      await page.locator('.catalog-grid').evaluate((element) => { element.scrollTop = 0; });
       await expect.poll(() => page.locator('.catalog-grid').evaluate((element) => {
         const cards = [...element.querySelectorAll<HTMLElement>('.catalog-card')];
         const groups = [...element.querySelectorAll<HTMLElement>('.catalog-photo-group')];
@@ -109,28 +155,72 @@ test('gallery dimensions group the complete folder with independent masonry sect
     await expect(page.locator('.catalog-photo-group')).toHaveCount(6);
     await page.getByRole('button', { name: '按日期分组', exact: true }).click();
     await expect(page.locator('.catalog-card')).toHaveCount(6);
-    await page.getByRole('button', { name: '配置图库分组字段', exact: true }).click();
-    await page.getByRole('menuitemcheckbox', { name: '城市', exact: true }).click();
+    await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
+    await page.getByRole('checkbox', { name: '分组:城市', exact: true }).click();
     await page.getByRole('button', { name: 'EXIF', exact: true }).click();
-    await expect(page.getByRole('menuitemcheckbox', { name: '相机型号', exact: true })).toBeVisible();
-    await expect(page.getByRole('menuitemcheckbox', { name: '颜色标签', exact: true })).toHaveCount(1);
+    await expect(page.getByRole('checkbox', { name: '分组:相机型号', exact: true })).toBeVisible();
+    await expect(page.getByRole('checkbox', { name: '分组:颜色标签', exact: true })).toHaveCount(1);
     await expect(page.getByRole('button', { name: '更多', exact: true })).toHaveCount(0);
-    await expect.poll(() => page.getByRole('menu', { name: '显示分组字段' }).evaluate((element) => {
+    await expect.poll(() => page.getByRole('dialog', { name: '配置图库工具栏' }).evaluate((element) => {
       const rect = element.getBoundingClientRect();
       return rect.left >= 8 && rect.top >= 8 && rect.right <= innerWidth - 8 && rect.bottom <= innerHeight - 8;
     })).toBe(true);
     await page.screenshot({ path: 'test-results/catalog-group-menu.png', animations: 'disabled' });
-    await page.getByRole('menuitemcheckbox', { name: 'ISO 感光度', exact: true }).click();
+    await page.getByRole('checkbox', { name: '分组:ISO 感光度', exact: true }).click();
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: '按城市分组', exact: true }).click();
     await page.getByRole('button', { name: '按ISO 感光度分组', exact: true }).click();
     await expect(page.locator('.catalog-card')).toHaveCount(6);
     await expect(page.locator('.catalog-group-loading')).toHaveCount(0);
+    const orderBeforeDrag = await groupButtons.allTextContents();
+    await folderButton.scrollIntoViewIfNeeded();
+    const dragSource = (await folderButton.boundingBox())!;
+    const dragDestination = (await page.getByRole('button', { name: '按日期分组', exact: true }).boundingBox())!;
+    await page.mouse.move(dragSource.x + dragSource.width / 2, dragSource.y + dragSource.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(dragSource.x + dragSource.width / 2 - 8, dragSource.y + dragSource.height / 2, { steps: 3 });
+    await expect(page.locator('.catalog-facet.is-dragging')).toHaveCount(1);
+    await page.mouse.move(dragDestination.x + dragDestination.width / 2, dragDestination.y + dragDestination.height / 2, { steps: 12 });
+    await expect.poll(() => page.locator('.catalog-facet:not(.is-dragging)').evaluateAll((elements) => elements.some((element) => (element as HTMLElement).style.transform.includes('translate')))).toBe(true);
+    expect(await page.locator('.catalog-facet').evaluateAll((elements) => elements.every((element) => Math.abs(element.getBoundingClientRect().width - (element as HTMLElement).offsetWidth) < 1))).toBe(true);
+    await page.mouse.up();
+    await expect(page.locator('.catalog-facet.is-dragging')).toHaveCount(0);
+    // Let the sensor's post-drag click suppression expire before unrelated clicks.
+    await page.waitForTimeout(100);
+    const orderAfterDrag = await groupButtons.allTextContents();
+    expect(orderAfterDrag).not.toEqual(orderBeforeDrag);
+    expect(orderAfterDrag.indexOf('文件夹')).toBeLessThan(orderAfterDrag.indexOf('日期'));
+    await expect(folderButton).toHaveAttribute('aria-pressed', 'true');
+    await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
+    const settings = page.getByRole('dialog', { name: '配置图库工具栏' });
+    await settings.getByRole('button', { name: '分割线', exact: true }).click();
+    await settings.getByRole('button', { name: '分割线', exact: true }).click();
+    await settings.getByRole('button', { name: '弹性空白', exact: true }).click();
+    await expect(page.locator('.catalog-toolbar-scroll > .viewer-toolbar-separator')).toHaveCount(2);
+    await expect(page.locator('.catalog-toolbar-scroll > .toolbar-layout-spacer')).toHaveCount(2);
+    await settings.getByRole('button', { name: '移除分割线', exact: true }).first().click();
+    await settings.getByRole('button', { name: '移除弹性空白', exact: true }).last().click();
+    await expect(page.locator('.catalog-toolbar-scroll > .viewer-toolbar-separator')).toHaveCount(1);
+    await expect(page.locator('.catalog-toolbar-scroll > .toolbar-layout-spacer')).toHaveCount(1);
+    await page.keyboard.press('Escape');
+    expect(await groupButtons.allTextContents()).toEqual(orderAfterDrag);
     const groupsBeforeReset = await page.locator('.catalog-photo-group').count();
     await page.getByRole('button', { name: '至少 1 星', exact: true }).click();
     await page.getByRole('button', { name: '重置图库过滤器', exact: true }).click();
     await expect(page.locator('.catalog-card')).toHaveCount(6);
     await expect(page.locator('.catalog-photo-group')).toHaveCount(groupsBeforeReset);
+    await folderButton.scrollIntoViewIfNeeded();
+    const cancelSource = (await folderButton.boundingBox())!;
+    const cancelDestination = (await page.getByRole('button', { name: '按日期分组', exact: true }).boundingBox())!;
+    await page.mouse.move(cancelSource.x + 15, cancelSource.y + 10);
+    await page.mouse.down();
+    await page.mouse.move(cancelSource.x + 23, cancelSource.y + 10, { steps: 3 });
+    await expect(page.locator('.catalog-facet.is-dragging')).toHaveCount(1);
+    await page.mouse.move(cancelDestination.x + 15, cancelDestination.y + 10, { steps: 10 });
+    await page.keyboard.press('Escape');
+    await page.mouse.up();
+    await expect(page.locator('.catalog-facet.is-dragging')).toHaveCount(0);
+    expect(await groupButtons.allTextContents()).toEqual(orderAfterDrag);
     expect(errors).toEqual([]);
   } finally { await app.close(); await rm(directory, { recursive: true, force: true }); }
 });

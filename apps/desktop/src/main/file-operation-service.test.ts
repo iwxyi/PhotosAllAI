@@ -204,6 +204,24 @@ describe('safe catalog file moves', () => {
     expect(context.catalog.resolveAssetFile(asset.id)?.path).toBe(path.join(context.target, 'photo.jpg'));
   });
 
+  it('moves and copies into a created child directory without changing the root catalog owner', async () => {
+    const context = await fixture(['move.jpg', 'copy.jpg']);
+    const child = (await context.catalog.createFolder({ parentFolderId: context.targetFolderId })).folder;
+    const service = new FileOperationService(context.databasePath, undefined, null, process.platform, context.catalog);
+    services.push(service);
+    const assets = context.catalog.listAssets();
+    const moved = await service.move({ assetIds: [assets.find((asset) => asset.fileName === 'move.jpg')!.id], targetFolderId: child.id });
+    expect(moved).toMatchObject({ status: 'completed', moved: 1, skipped: 0 });
+    expect(context.catalog.resolveAssetFile(assets.find((asset) => asset.fileName === 'move.jpg')!.id)?.path).toBe(path.join(context.target, child.name, 'move.jpg'));
+    expect(context.catalog.listAssets().find((asset) => asset.fileName === 'move.jpg')).toMatchObject({ directoryId: child.id, folderId: context.targetFolderId });
+    const repeated = await service.move({ assetIds: [assets.find((asset) => asset.fileName === 'move.jpg')!.id], targetFolderId: child.id });
+    expect(repeated).toMatchObject({ status: 'completed', moved: 0, skipped: 1 });
+    const copied = await service.copy({ assetIds: [assets.find((asset) => asset.fileName === 'copy.jpg')!.id], targetFolderId: child.id });
+    expect(copied).toMatchObject({ status: 'completed', copied: 1 });
+    expect(await readFile(path.join(context.target, child.name, 'copy.jpg'), 'utf8')).toBe('content:copy.jpg');
+    expect(await readFile(path.join(context.source, 'copy.jpg'), 'utf8')).toBe('content:copy.jpg');
+  });
+
   it('reserves deterministic conflict names without overwriting destination files', async () => {
     const context = await fixture();
     await writeFile(path.join(context.target, 'photo.jpg'), 'keep-me');

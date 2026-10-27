@@ -20,6 +20,36 @@ afterEach(async () => {
 });
 
 describe('catalog image discovery', () => {
+  it('persists empty child folders, resolves name collisions and tracks renames and moves', async () => {
+    const root = await createTemporaryDirectory();
+    const source = path.join(root, 'photos');
+    await mkdir(source);
+    const database = path.join(root, 'catalog.sqlite');
+    let catalog = new CatalogService(database);
+    try {
+      await catalog.importFolders([source]);
+      const parent = catalog.listFolders()[0]!;
+      const first = (await catalog.createFolder({ parentFolderId: parent.id })).folder;
+      const second = (await catalog.createFolder({ parentFolderId: parent.id })).folder;
+      expect(first.name).toBe('新建文件夹');
+      expect(second.name).toBe('新建文件夹 2');
+      const nested = (await catalog.createFolder({ parentFolderId: first.id })).folder;
+      expect(nested.parentId).toBe(first.id);
+      await expect(catalog.renameFolder({ folderId: first.id, name: '..' })).rejects.toThrow('INVALID_FOLDER_NAME');
+      await expect(catalog.renameFolder({ folderId: first.id, name: second.name })).rejects.toThrow('FOLDER_NAME_ALREADY_EXISTS');
+      const renamed = (await catalog.renameFolder({ folderId: first.id, name: '输出' })).folder;
+      expect(renamed.id).not.toBe(first.id);
+      expect(catalog.listFolders().find((folder) => folder.parentId === renamed.id)?.name).toBe('新建文件夹');
+      const moved = await catalog.moveFolder({ sourceFolderId: renamed.id, targetFolderId: second.id });
+      expect(moved.folder.parentId).toBe(second.id);
+      catalog.close();
+      catalog = new CatalogService(database);
+      expect(catalog.listFolders().find((folder) => folder.id === moved.folder.id)?.assetCount).toBe(0);
+      expect(catalog.resolveFolderPath(moved.folder.id)).toBe(await realpath(path.join(source, second.name, '输出')));
+      expect((await stat(path.join(source, second.name, '输出', nested.name))).isDirectory()).toBe(true);
+    } finally { catalog.close(); }
+  });
+
   it('combines folder, local date, month and format filters before counting and pagination', async () => {
     const root = await createTemporaryDirectory();
     const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));

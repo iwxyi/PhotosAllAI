@@ -121,7 +121,8 @@ describe('workspace session service', () => {
         selectedTagId: null,
         selectedAssetId: 'asset-legacy',
         favoriteOnly: false,
-        sortBy: 'modifiedAt',
+        sortBy: 'fileName',
+        sortDirection: 'asc',
         searchQuery: '旧会话'
       }
     });

@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ViewerToolbar } from './viewer-toolbar';
+import { useTransientNotice } from './use-transient-notice';
 import { CatalogBrowseControls } from './catalog-browse-controls';
 import { emptyBrowseFilters, groupCatalogPhotos, metadataDimensions, type BrowseFilters } from './catalog-browse';
 import { ViewerZoomControl } from './viewer-zoom-control';
@@ -67,6 +68,7 @@ import {
   FolderInput,
   FolderMinus,
   FolderOpen,
+  FolderPlus,
   GalleryHorizontalEnd,
   Grid2X2,
   Heart,
@@ -79,7 +81,6 @@ import {
   LibraryBig,
   ListFilter,
   Maximize2,
-  PanelBottomOpen,
   Plus,
   Search,
   Server,
@@ -102,6 +103,8 @@ import { photos, type Photo } from './mock-data';
 import { analysisFailureMessage, generationFailureMessage, fileOperationFailureMessage } from './error-messages';
 
 const THEME_CHANGE_EVENT = 'photoallisai-theme-change';
+const CATALOG_FILE_NAME_CENTERED_KEY = 'photoallisai.catalog-file-name-centered';
+const VIEWER_VERSION_TARGET_KEY = 'photoallisai.viewer-version-target';
 const OPEN_TASK_DRAWER_EVENT = 'photoallisai-open-task-drawer';
 const OPERATION_NOTICE_EVENT = 'photoallisai-operation-notice';
 const E2E_DEMO_MODE = new URLSearchParams(window.location.search).get('e2e-demo') === '1';
@@ -151,6 +154,15 @@ function applyTheme(theme: AppSettings['theme']): void {
     ? window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
     : theme;
   document.documentElement.dataset.theme = resolved;
+}
+
+function applyCatalogFileNameAlignment(centered: boolean): void {
+  document.documentElement.dataset.catalogFileNameCentered = String(centered);
+}
+
+function catalogFileNameCentered(): boolean {
+  try { return localStorage.getItem(CATALOG_FILE_NAME_CENTERED_KEY) !== 'false'; }
+  catch { return true; }
 }
 
 function formatStorageBytes(bytes: number): string {
@@ -292,9 +304,70 @@ function BufferedPreviewImage({ src, alt, className, onReady }: { src: string; a
   return <>{displayed.src ? <img className={`${className} buffered-image${ready ? ' is-ready' : ''}`} src={displayed.src} alt={displayed.alt} onLoad={(event) => { DECODED_IMAGE_SOURCES.add(displayed.src); if (event.currentTarget.naturalHeight > 0) IMAGE_ASPECT_RATIOS.set(displayed.src, event.currentTarget.naturalWidth / event.currentTarget.naturalHeight); setReady(true); onReadyRef.current?.(event.currentTarget); }} /> : null}{showLoading && <span className="preview-loading" aria-label="正在载入下一张照片"><span className="working-pulse" /></span>}</>;
 }
 
-function CatalogImage({ src, alt = '', onAspectRatio }: { src: string; alt?: string; onAspectRatio?: (ratio: number) => void }): React.JSX.Element {
-  const [readySrc, setReadySrc] = useState<string | null>(null);
-  return <img className={readySrc === src ? 'is-ready' : ''} src={src} alt={alt} onLoad={(event) => { setReadySrc(src); const image = event.currentTarget; if (image.naturalHeight > 0) onAspectRatio?.(image.naturalWidth / image.naturalHeight); }} onError={(event) => { event.currentTarget.style.display = 'none'; }} />;
+const catalogImageVisibility = new Map<Element, (visible: boolean) => void>();
+let catalogImageObserver: IntersectionObserver | undefined;
+
+function CatalogImage({ src, previewSrc, alt = '', onAspectRatio }: { src: string; previewSrc?: string; alt?: string; onAspectRatio?: (ratio: number) => void }): React.JSX.Element {
+  const ref = useRef<HTMLImageElement>(null);
+  const [nearViewport, setNearViewport] = useState(false);
+  const [requestedSrc, setRequestedSrc] = useState<string | undefined>();
+  const [displayed, setDisplayed] = useState<{ base: string; src: string; ready: boolean }>();
+  const [needsPreview, setNeedsPreview] = useState(false);
+  const onAspectRatioRef = useRef(onAspectRatio);
+  useLayoutEffect(() => { onAspectRatioRef.current = onAspectRatio; }, [onAspectRatio]);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    catalogImageObserver ??= new IntersectionObserver((entries) => {
+      for (const entry of entries) catalogImageVisibility.get(entry.target)?.(entry.isIntersecting);
+    }, { rootMargin: '300px' });
+    catalogImageVisibility.set(element, setNearViewport);
+    catalogImageObserver.observe(element);
+    return () => { catalogImageObserver?.unobserve(element); catalogImageVisibility.delete(element); };
+  }, []);
+  useEffect(() => {
+    if (nearViewport) setRequestedSrc(src);
+  }, [nearViewport, src]);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element || !previewSrc || !nearViewport) return;
+    const measure = () => {
+      const { width, height } = element.getBoundingClientRect();
+      const ratio = IMAGE_ASPECT_RATIOS.get(src);
+      const longEdge = ratio ? Math.max(Math.min(width, height * ratio), Math.min(height, width / ratio)) : Math.max(width, height);
+      setNeedsPreview(longEdge * window.devicePixelRatio > 384);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    window.addEventListener('resize', measure);
+    return () => { observer.disconnect(); window.removeEventListener('resize', measure); };
+  }, [nearViewport, previewSrc, src, displayed?.ready]);
+  useEffect(() => {
+    if (!previewSrc || !nearViewport || !needsPreview || displayed?.base !== src || !displayed.ready || displayed.src === previewSrc) return;
+    let active = true;
+    const image = new window.Image();
+    // Wait for zoom gestures to settle before requesting a larger disk preview.
+    const timer = window.setTimeout(() => {
+      image.onload = async () => {
+        try { await image.decode(); } catch { /* A loaded image remains usable if decode rejects. */ }
+        if (active) setDisplayed({ base: src, src: previewSrc, ready: true });
+      };
+      image.src = previewSrc;
+    }, 180);
+    return () => { active = false; window.clearTimeout(timer); image.onload = null; image.onerror = null; };
+  }, [displayed, nearViewport, needsPreview, previewSrc, src]);
+  const current = displayed?.base === src ? displayed : undefined;
+  return <img ref={ref} className={current?.ready ? 'is-ready' : ''} src={current?.src ?? (requestedSrc === src ? src : undefined)} alt={alt} decoding="async" onLoad={(event) => {
+    const image = event.currentTarget;
+    if (!image.getAttribute('src')) return;
+    setDisplayed((previous) => previous?.base === src && previous.ready ? previous : { base: src, src, ready: true });
+    if (image.naturalHeight > 0) {
+      const ratio = image.naturalWidth / image.naturalHeight;
+      IMAGE_ASPECT_RATIOS.set(src, ratio);
+      onAspectRatioRef.current?.(ratio);
+    }
+  }} />;
 }
 
 type CompareMode = 'single' | 'split';
@@ -559,10 +632,12 @@ function Sidebar({
   const [folderRenameCandidate, setFolderRenameCandidate] = useState<CatalogFolder | null>(null);
   const [folderRenameDraft, setFolderRenameDraft] = useState('');
   const [folderRenameBusy, setFolderRenameBusy] = useState(false);
+  const [inlineFolderRename, setInlineFolderRename] = useState(false);
+  const folderRenameLock = useRef(false);
   const [folderAppearance, setFolderAppearance] = useState<FolderAppearance>(loadFolderAppearance);
   const [folderContextMenu, setFolderContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [folderActionBusy, setFolderActionBusy] = useState(false);
-  const [folderActionNotice, setFolderActionNotice] = useState('');
+  const [folderActionNotice, setFolderActionNotice] = useTransientNotice();
   const [folderDropTargetId, setFolderDropTargetId] = useState<string | null>(null);
   const [draggedFolderId, setDraggedFolderId] = useState<string | null>(null);
   const folderDropCopies = useRef(false);
@@ -619,16 +694,44 @@ function Sidebar({
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [folderRemovalBusy, folderRemovalCandidate]);
   const renameFolder = async () => {
-    if (!folderRenameCandidate || !folderRenameDraft.trim() || folderRenameBusy) return;
+    if (!folderRenameCandidate || !folderRenameDraft.trim() || folderRenameLock.current) return;
+    folderRenameLock.current = true;
     setFolderRenameBusy(true);
     try {
-      await window.desktopApi.renameCatalogFolder({ folderId: folderRenameCandidate.id, name: folderRenameDraft.trim() });
+      const { folder } = await window.desktopApi.renameCatalogFolder({ folderId: folderRenameCandidate.id, name: folderRenameDraft.trim() });
       setFolderRenameCandidate(null);
-      setFolderActionNotice('文件夹已重命名，原图和图库关系保持不变。');
+      setInlineFolderRename(false);
       await onRefreshAlbums();
+      onSelectFolder(folder.id);
+      requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-folder-id="${CSS.escape(folder.id)}"]`)?.focus());
     } catch (error) {
       setFolderActionNotice(error instanceof Error && error.message.includes('FOLDER_NAME_ALREADY_EXISTS') ? '重命名失败：同级目录中已存在同名文件夹。' : '重命名失败，请检查文件夹权限。');
-    } finally { setFolderRenameBusy(false); }
+    } finally { folderRenameLock.current = false; setFolderRenameBusy(false); }
+  };
+  const startFolderRename = (folder: CatalogFolder) => {
+    setFolderContextMenu(null);
+    setFolderActionNotice('');
+    setFolderRenameCandidate(folder);
+    setFolderRenameDraft(folder.name);
+    setInlineFolderRename(true);
+  };
+  const createFolder = async (parentId: string) => {
+    if (folderActionBusy) return;
+    setFolderActionBusy(true);
+    setFolderContextMenu(null);
+    setFolderActionNotice('');
+    try {
+      const { folder } = await window.desktopApi.createCatalogFolder({ parentFolderId: parentId });
+      await onRefreshAlbums();
+      setFolderAppearance((current) => ({ ...current, sectionCollapsed: false, expandedIds: [...new Set([...current.expandedIds, parentId])] }));
+      onSelectFolder(folder.id);
+      setInlineFolderRename(true);
+      setFolderRenameCandidate(folder);
+      setFolderRenameDraft(folder.name);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setFolderActionNotice(message.includes('EACCES') || message.includes('EPERM') ? '创建失败：没有该文件夹的写入权限。' : `创建文件夹失败：${message.replace(/^Error invoking remote method [^:]+: /u, '').slice(0, 120)}`);
+    } finally { setFolderActionBusy(false); }
   };
   return (
     <aside className="sidebar">
@@ -654,7 +757,7 @@ function Sidebar({
         <div className="sidebar-section">
           <div className="section-heading">
             <button className="section-disclosure" type="button" aria-label={folderAppearance.sectionCollapsed ? '展开关联文件夹区域' : '收起关联文件夹区域'} aria-expanded={!folderAppearance.sectionCollapsed} onClick={() => setFolderAppearance((current) => ({ ...current, sectionCollapsed: !current.sectionCollapsed }))}><ChevronRight size={12} /><span>关联文件夹</span></button>
-            <span>{selectedOfflineFolder && <button type="button" aria-label={`重新定位 ${selectedOfflineFolder.name}`} title="重新定位离线文件夹" onClick={() => void onRelinkFolder(selectedOfflineFolder.id)}><RotateCcw size={13} /></button>}<button type="button" aria-label="添加关联文件夹" onClick={() => void onImportFolders()}><Plus size={13} /></button></span>
+            <span><button type="button" aria-label="创建子文件夹" title="在选中的文件夹内创建子文件夹" disabled={isDemo || !selectedFolderId || folderActionBusy} onClick={() => { if (selectedFolderId) void createFolder(selectedFolderId); }}><FolderInput size={13} /></button>{selectedOfflineFolder && <button type="button" aria-label={`重新定位 ${selectedOfflineFolder.name}`} title="重新定位离线文件夹" onClick={() => void onRelinkFolder(selectedOfflineFolder.id)}><RotateCcw size={13} /></button>}<button type="button" aria-label="添加关联文件夹" onClick={() => void onImportFolders()}><Plus size={13} /></button></span>
           </div>
           {!folderAppearance.sectionCollapsed && <div className="folder-tree" role="tree" aria-label="关联文件夹" onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFolderDropTargetId(null); }}>
           {displayedFolders.map((folder, index) => {
@@ -685,7 +788,8 @@ function Sidebar({
                   event.preventDefault();
                   if (expanded) setFolderAppearance((current) => ({ ...current, expandedIds: current.expandedIds.filter((id) => id !== folder.id) }));
                   else if (folder.parentId) { const parent = visibleFolders.find((item) => item.id === folder.parentId); if (parent) { onSelectFolder(parent.id); requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-folder-id="${CSS.escape(parent.id)}"]`)?.focus()); } }
-                } else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelectFolder(folder.id); }
+                } else if (event.key === 'F2' && !isDemo) { event.preventDefault(); startFolderRename(folder); }
+                else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelectFolder(folder.id); }
               }} data-folder-id={folder.id} onClick={() => onSelectFolder(folder.id)} onDragOver={(event) => {
                 const types = Array.from(event.dataTransfer.types);
                 if (isDemo || !types.some((type) => type === 'application/x-photoallisai-assets' || type === 'application/x-photoallisai-folder')) return;
@@ -726,7 +830,7 @@ function Sidebar({
                 } catch { setFolderActionNotice('无法识别拖入的照片，请重试或使用“移动到文件夹”菜单。'); }
               }} onDragEnter={(event) => { if (Array.from(event.dataTransfer.types).some((type) => type === 'application/x-photoallisai-assets' || type === 'application/x-photoallisai-folder')) setFolderDropTargetId(folder.id); }} onContextMenu={(event) => { event.preventDefault(); setFolderContextMenu({ id: folder.id, x: event.clientX, y: event.clientY }); }}>
                 <Folder size={15} />
-                <span>{folder.name}</span>
+                {inlineFolderRename && folderRenameCandidate?.id === folder.id ? <input className="folder-inline-name" aria-label="文件夹名称" autoFocus value={folderRenameDraft} disabled={folderRenameBusy} onFocus={(event) => { event.currentTarget.select(); event.currentTarget.scrollIntoView({ block: 'nearest' }); }} onChange={(event) => setFolderRenameDraft(event.target.value)} onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onBlur={() => { if (folderRenameDraft.trim()) void renameFolder(); else { setFolderRenameCandidate(null); setInlineFolderRename(false); } }} onKeyDown={(event) => { event.stopPropagation(); if (event.key === 'Enter') { event.preventDefault(); void renameFolder(); } else if (event.key === 'Escape') { event.preventDefault(); setFolderRenameCandidate(null); setInlineFolderRename(false); } }} /> : <span>{folder.name}</span>}
                 <span className="row-count">{folder.offlineCount > 0 ? `离线 ${folder.offlineCount}` : folder.assetCount}</span>
               </button>
             </div>;
@@ -735,7 +839,8 @@ function Sidebar({
           {folderContextMenu && contextFolder && <div className="folder-context-menu" role="menu" aria-label={`文件夹菜单 ${contextFolder.name}`} style={{ left: Math.min(folderContextMenu.x, Math.max(8, window.innerWidth - 224)), top: Math.min(folderContextMenu.y, Math.max(8, window.innerHeight - 286)) }} onPointerDown={(event) => event.stopPropagation()}>
             <div className="folder-menu-title"><Folder size={14} /><span>{contextFolder.name}</span></div>
             <button type="button" role="menuitem" onClick={() => { onSelectFolder(contextFolder.id); setFolderContextMenu(null); }}><GalleryHorizontalEnd size={14} /><span>在图库中显示</span></button>
-            <button type="button" role="menuitem" onClick={() => { setFolderRenameCandidate(contextFolder); setFolderRenameDraft(contextFolder.name); setFolderContextMenu(null); }}><FilePenLine size={14} /><span>重命名文件夹…</span></button>
+            <button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={() => void createFolder(contextFolder.id)}><FolderPlus size={14} /><span>创建子文件夹</span></button>
+            <button type="button" role="menuitem" disabled={isDemo} onClick={() => startFolderRename(contextFolder)}><FilePenLine size={14} /><span>重命名</span></button>
             <button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={async () => { setFolderActionBusy(true); try { const revealed = await onRevealFolder(contextFolder.id); setFolderActionNotice(revealed ? '已在文件管理器中显示文件夹。' : '文件夹当前不可访问。'); } catch { setFolderActionNotice('无法打开文件管理器，请检查文件夹权限或磁盘连接。'); } finally { setFolderActionBusy(false); setFolderContextMenu(null); } }}><FolderOpen size={14} /><span>{FILE_MANAGER_LABEL}</span></button>
             <button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={async () => { setFolderActionBusy(true); try { const report = await onSynchronizeFolder(contextFolder.id); setFolderActionNotice(`同步完成：新增 ${report.discovered} 张，离线 ${report.offline} 张。`); } catch { setFolderActionNotice('同步失败，请检查文件夹权限或磁盘连接。'); } finally { setFolderActionBusy(false); setFolderContextMenu(null); } }}><RefreshCw size={14} /><span>同步文件夹</span></button>
             {contextHasChildren && <button type="button" role="menuitem" onClick={() => { setFolderAppearance((current) => ({ ...current, expandedIds: contextExpanded ? current.expandedIds.filter((id) => id !== contextFolder.id) : [...current.expandedIds, contextFolder.id] })); setFolderContextMenu(null); }}><ChevronRight className={contextExpanded ? 'is-expanded' : ''} size={14} /><span>{contextExpanded ? '收起子文件夹' : '展开子文件夹'}</span></button>}
@@ -773,7 +878,6 @@ function Sidebar({
       {albumManagerOpen && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !albumBusy) setAlbumManagerOpen(false); }}><form className="album-dialog" role="dialog" aria-modal="true" aria-labelledby="album-dialog-title" onSubmit={async (event) => { event.preventDefault(); if (!albumName.trim() || albumBusy) return; setAlbumBusy(true); try { await window.desktopApi.saveCatalogAlbum({ id: editingAlbumId ?? undefined, name: albumName }); await onRefreshAlbums(); setAlbumName(''); setEditingAlbumId(null); } finally { setAlbumBusy(false); } }}><header><div><span className="dialog-icon"><FolderHeart size={16} /></span><div><h2 id="album-dialog-title">管理相册</h2><p>相册只管理图库关系，不会移动原文件。</p></div></div><IconButton label="关闭相册管理" onClick={() => setAlbumManagerOpen(false)}><X size={15} /></IconButton></header><div className="album-list">{albums.map((album) => <div className={`album-row${editingAlbumId === album.id ? ' is-selected' : ''}`} key={album.id}><button type="button" onClick={() => { setEditingAlbumId(album.id); setAlbumName(album.name); }}><FolderHeart size={14} /><span>{album.name}</span><small>{album.assetCount} 张</small></button><button type="button" aria-label={`删除相册 ${album.name}`} onClick={async () => { if (albumBusy) return; setAlbumBusy(true); try { await window.desktopApi.deleteCatalogAlbum(album.id); if (selectedAlbumId === album.id) onSelectAlbum(null); await onRefreshAlbums(); } finally { setAlbumBusy(false); } }}><Trash2 size={13} /></button></div>)}</div><label className="album-field"><span>{editingAlbumId ? '重命名相册' : '新建相册'}</span><input autoFocus value={albumName} maxLength={120} placeholder="例如：客户交付" onChange={(event) => setAlbumName(event.target.value)} /></label><footer><button className="quiet-button" type="button" onClick={() => setAlbumManagerOpen(false)}>关闭</button><button className="primary-action compact" type="submit" disabled={!albumName.trim() || albumBusy}>{editingAlbumId ? '保存名称' : '创建相册'}</button></footer></form></div>}
       {tagManagerOpen && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !tagBusy) setTagManagerOpen(false); }}><section className="album-dialog tag-dialog" role="dialog" aria-modal="true" aria-labelledby="tag-dialog-title"><header><div><span className="dialog-icon"><Tags size={16} /></span><div><h2 id="tag-dialog-title">管理标签</h2><p>删除标签只会移除标签关系，不会删除照片或文件。</p></div></div><IconButton label="关闭标签管理" disabled={tagBusy} onClick={() => setTagManagerOpen(false)}><X size={15} /></IconButton></header><div className="tag-list">{tags.length === 0 ? <div className="operation-history-empty">暂无可管理标签</div> : tags.map((tag) => <div className={`tag-manager-row${tagDeleteCandidate === tag.id ? ' is-pending' : ''}`} key={tag.id}><span><strong>{tag.name}</strong><small>{tag.assetCount} 张照片</small></span>{tagDeleteCandidate === tag.id ? <div><button className="quiet-button" type="button" disabled={tagBusy} onClick={() => setTagDeleteCandidate(null)}>取消</button><button className="danger-action compact" type="button" disabled={tagBusy} onClick={async () => { setTagBusy(true); try { await window.desktopApi.deleteCatalogTag(tag.id); if (selectedTagId === tag.id) onSelectTag(null); await onRefreshAlbums(); setTagDeleteCandidate(null); } finally { setTagBusy(false); } }}>确认删除</button></div> : <button type="button" aria-label={`删除标签 ${tag.name}`} onClick={() => setTagDeleteCandidate(tag.id)}><Trash2 size={13} /></button>}</div>)}</div><footer><button className="quiet-button" type="button" disabled={tagBusy} onClick={() => setTagManagerOpen(false)}>关闭</button></footer></section></div>}
       {folderRemovalCandidate && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !folderRemovalBusy) setFolderRemovalCandidate(null); }}><section className="removal-dialog" role="alertdialog" aria-modal="true" aria-labelledby="folder-removal-title" aria-describedby="folder-removal-description"><header><span className="dialog-icon"><FolderMinus size={17} /></span><div><h2 id="folder-removal-title">取消关联「{folderRemovalCandidate.name}」？</h2><p id="folder-removal-description">只会从本图库移除该路径的关联，不会删除、移动或修改磁盘上的任何文件。</p></div></header><div className="removal-impact"><Info size={15} /><span>其中 {folderRemovalCandidate.assetCount} 张照片会从图库和搜索结果中隐藏。AI 分析、生成版本、评分、标签和相册关系都会保留，重新关联同一路径后自动恢复。</span></div>{folderRemovalError && <div className="folder-removal-error" role="alert"><CircleAlert size={14} /><span>{folderRemovalError}</span></div>}<footer><button autoFocus className="quiet-button" type="button" disabled={folderRemovalBusy} onClick={() => setFolderRemovalCandidate(null)}>取消</button><button className="primary-action compact" type="button" disabled={folderRemovalBusy} onClick={async () => { setFolderRemovalBusy(true); setFolderRemovalError(''); try { await onUnregisterFolder(folderRemovalCandidate.id); setFolderRemovalCandidate(null); } catch (error) { const message = error instanceof Error ? error.message : String(error); setFolderRemovalError(message.includes('FOLDER_HAS_ACTIVE_TASKS') ? '此文件夹仍有正在运行或等待中的 AI 任务，请先取消或完成任务。' : message.includes('FOLDER_HAS_ACTIVE_FILE_OPERATIONS') ? '此文件夹仍有未完成的文件操作，请等待操作完成或恢复后重试。' : '无法移除此关联文件夹。请刷新图库后重试。'); } finally { setFolderRemovalBusy(false); } }}>{folderRemovalBusy ? '正在取消关联…' : '取消关联'}</button></footer></section></div>}
-      {folderRenameCandidate && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !folderRenameBusy) setFolderRenameCandidate(null); }}><form className="rename-dialog" role="dialog" aria-modal="true" aria-labelledby="folder-rename-title" onSubmit={(event) => { event.preventDefault(); void renameFolder(); }}><header><div><span className="dialog-icon"><Folder size={16} /></span><div><h2 id="folder-rename-title">重命名文件夹</h2><p>会同步更新磁盘目录和图库路径，不会影响照片元数据。</p></div></div><IconButton label="关闭文件夹重命名窗口" disabled={folderRenameBusy} onClick={() => setFolderRenameCandidate(null)}><X size={15} /></IconButton></header><label className="rename-field"><span>文件夹名称</span><input autoFocus value={folderRenameDraft} onChange={(event) => setFolderRenameDraft(event.target.value)} spellCheck={false} /></label><footer><span>不能包含路径分隔符，也不能与同级目录重名。</span><div><button className="quiet-button" type="button" disabled={folderRenameBusy} onClick={() => setFolderRenameCandidate(null)}>取消</button><button className="primary-action compact" type="submit" disabled={!folderRenameDraft.trim() || folderRenameBusy}>{folderRenameBusy ? '正在重命名…' : '重命名'}</button></div></footer></form></div>}
       {albumDeleteCandidate && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !albumBusy) setAlbumDeleteCandidate(null); }}><section className="removal-dialog" role="alertdialog" aria-modal="true" aria-labelledby="album-removal-title"><header><span className="dialog-icon"><Trash2 size={17} /></span><div><h2 id="album-removal-title">删除相册「{albumDeleteCandidate.name}」？</h2><p>只删除相册及其照片关系，不会删除或移动任何原图和 AI 生成版本。</p></div></header><div className="removal-impact"><Info size={15} /><span>相册内的 {albumDeleteCandidate.assetCount} 张照片仍会保留在图库和原文件夹中。</span></div><footer><button autoFocus className="quiet-button" type="button" disabled={albumBusy} onClick={() => setAlbumDeleteCandidate(null)}>取消</button><button className="danger-action" type="button" disabled={albumBusy} onClick={async () => { setAlbumBusy(true); try { await window.desktopApi.deleteCatalogAlbum(albumDeleteCandidate.id); if (selectedAlbumId === albumDeleteCandidate.id) onSelectAlbum(null); await onRefreshAlbums(); setAlbumDeleteCandidate(null); } finally { setAlbumBusy(false); } }}>{albumBusy ? '正在删除…' : '删除相册'}</button></footer></section></div>}
       {folderActionNotice && <div className="operation-toast" role="status">{folderActionNotice}<button type="button" aria-label="关闭文件夹提示" onClick={() => setFolderActionNotice('')}><X size={13} /></button></div>}
     </aside>
@@ -809,7 +913,8 @@ type PhotoFilters = BrowseFilters & {
 };
 const emptyPhotoFilters: PhotoFilters = { ...emptyBrowseFilters, minimumRating: null, ratingOperator: 'gte', flags: [], colors: [] };
 
-function PhotoFilterBar({ leading, onReset, compact = false, scope, search, setSearch, minimumRating, setMinimumRating, ratingOperator, setRatingOperator, flags, setFlags, colors, setColors, onlyFavorites, setOnlyFavorites, favoriteOnly, onFavoriteOnlyChange, temporary = false }: {
+function PhotoFilterBar({ leading, onReset, compact = false, scope, search, setSearch, minimumRating, setMinimumRating, ratingOperator, setRatingOperator, flags, setFlags, colors, setColors, onlyFavorites, setOnlyFavorites, favoriteOnly, onFavoriteOnlyChange, temporary = false, renderTools }: {
+  renderTools?: (tools: Record<string, React.ReactNode>) => React.ReactNode;
   leading?: React.ReactNode;
   onReset?: (() => void) | undefined;
   compact?: boolean;
@@ -832,19 +937,16 @@ function PhotoFilterBar({ leading, onReset, compact = false, scope, search, setS
 }): React.JSX.Element {
   const [searchOpen, setSearchOpen] = useState(false);
   const filtered = Boolean(search.trim() || minimumRating !== null || flags.length || colors.length || onlyFavorites || favoriteOnly);
-  return (<div className={`filmstrip-filter-bar${leading ? ' has-grouping' : ''}${compact ? ' is-inline' : ''}`} role="group" aria-label={scope + "过滤条件"}>
-        {leading}
-        <div className="photo-filter-controls">
-        {!compact || searchOpen || search ? <input autoFocus={compact} aria-label={"筛选" + scope + "文件名"} placeholder="文件名" value={search} onChange={(event) => setSearch(event.target.value)} onBlur={() => { if (!search.trim()) setSearchOpen(false); }} /> : <button type="button" aria-label={"筛选" + scope + "文件名"} title="筛选文件名" onClick={() => setSearchOpen(true)}><Search size={13} /></button>}
-        {!temporary && <>
-          <div className="filmstrip-filter-stars" role="group" aria-label={scope + "星级筛选"}><select aria-label="星级筛选条件" value={ratingOperator} onChange={(event) => setRatingOperator(event.target.value as typeof ratingOperator)}><option value="eq">＝</option><option value="gte">≥</option><option value="lte">≤</option></select>{[1, 2, 3, 4, 5].map((rating) => <button type="button" key={rating} aria-label={`${ratingOperator === 'eq' ? '等于' : ratingOperator === 'lte' ? '至多' : '至少'} ${rating} 星`} title={`${rating} 星，再次点击取消`} aria-pressed={minimumRating === rating} className={(minimumRating ?? 0) >= rating ? 'is-filled' : ''} onClick={() => setMinimumRating((current) => current === rating ? null : rating)}><Star size={13} fill={(minimumRating ?? 0) >= rating ? 'currentColor' : 'none'} /></button>)}</div>
-          <div className="filmstrip-filter-colors" role="group" aria-label="筛选旗标">{(['picked', 'rejected', 'unflagged'] as const).map((flag) => <button type="button" key={flag} aria-label={`筛选${flag === 'picked' ? '留用' : flag === 'rejected' ? '排除' : '无旗标'}`} title={flag === 'picked' ? '留用 (P)' : flag === 'rejected' ? '排除 (X)' : '无旗标 (U)'} aria-pressed={flags.includes(flag)} className={flags.includes(flag) ? 'is-active' : ''} onClick={() => setFlags((current) => current.includes(flag) ? current.filter((value) => value !== flag) : [...current, flag])}>{flag === 'rejected' ? <span className="photo-flag-cross"><Flag size={13} fill="currentColor" /><X size={9} /></span> : <Flag size={13} fill={flag === 'picked' ? 'currentColor' : 'none'} />}</button>)}</div>
-          <div className="filmstrip-filter-colors" role="group" aria-label="筛选颜色">{(['red', 'yellow', 'green', 'blue', 'purple'] as const).map((color) => <button type="button" key={color} aria-label={`筛选${photoColorName(color)}标签`} aria-pressed={colors.includes(color)} className={colors.includes(color) ? 'is-active' : ''} onClick={() => setColors((current) => current.includes(color) ? current.filter((value) => value !== color) : [...current, color])}><i className={`photo-color-swatch is-${color}`} /></button>)}</div>
-          <button className={onlyFavorites || favoriteOnly ? 'is-active' : ''} type="button" aria-label="仅显示收藏照片" aria-pressed={onlyFavorites || favoriteOnly} title="仅显示收藏照片" onClick={() => { if (favoriteOnly) onFavoriteOnlyChange(false); setOnlyFavorites(!(onlyFavorites || favoriteOnly)); }}><Heart size={13} /></button>
-        </>}
-        <IconButton label={"重置" + scope + "过滤器"} disabled={!filtered && (!onReset || Boolean(leading))} onClick={() => { setSearchOpen(false); setSearch(''); setMinimumRating(null); setFlags([]); setColors([]); setOnlyFavorites(false); if (favoriteOnly) onFavoriteOnlyChange(false); if (!leading) onReset?.(); }}><RotateCcw size={13} /></IconButton>
-        </div>
-      </div>);
+  const tools: Record<string, React.ReactNode> = {
+    search: !compact || searchOpen || search ? <input autoFocus={compact} aria-label={"筛选" + scope + "文件名"} placeholder="文件名" value={search} onChange={(event) => setSearch(event.target.value)} onBlur={() => { if (!search.trim()) setSearchOpen(false); }} /> : <button type="button" aria-label={"筛选" + scope + "文件名"} title="筛选文件名" onClick={() => setSearchOpen(true)}><Search size={13} /></button>,
+    stars: !temporary && <div className="filmstrip-filter-stars" role="group" aria-label={scope + "星级筛选"}><select aria-label="星级筛选条件" value={ratingOperator} onChange={(event) => setRatingOperator(event.target.value as typeof ratingOperator)}><option value="eq">＝</option><option value="gte">≥</option><option value="lte">≤</option></select>{[1, 2, 3, 4, 5].map((rating) => <button type="button" key={rating} aria-label={`${ratingOperator === 'eq' ? '等于' : ratingOperator === 'lte' ? '至多' : '至少'} ${rating} 星`} title={`${rating} 星，再次点击取消`} aria-pressed={minimumRating === rating} className={(minimumRating ?? 0) >= rating ? 'is-filled' : ''} onClick={() => setMinimumRating((current) => current === rating ? null : rating)}><Star size={13} fill={(minimumRating ?? 0) >= rating ? 'currentColor' : 'none'} /></button>)}</div>,
+    flags: !temporary && <div className="filmstrip-filter-colors" role="group" aria-label="筛选旗标">{(['picked', 'rejected', 'unflagged'] as const).map((flag) => <button type="button" key={flag} aria-label={`筛选${flag === 'picked' ? '留用' : flag === 'rejected' ? '排除' : '无旗标'}`} title={flag === 'picked' ? '留用 (P)' : flag === 'rejected' ? '排除 (X)' : '无旗标 (U)'} aria-pressed={flags.includes(flag)} className={flags.includes(flag) ? 'is-active' : ''} onClick={() => setFlags((current) => current.includes(flag) ? current.filter((value) => value !== flag) : [...current, flag])}>{flag === 'rejected' ? <span className="photo-flag-cross"><Flag size={13} fill="currentColor" /><X size={9} /></span> : <Flag size={13} fill={flag === 'picked' ? 'currentColor' : 'none'} />}</button>)}</div>,
+    colors: !temporary && <div className="filmstrip-filter-colors" role="group" aria-label="筛选颜色">{(['red', 'yellow', 'green', 'blue', 'purple'] as const).map((color) => <button type="button" key={color} aria-label={`筛选${photoColorName(color)}标签`} aria-pressed={colors.includes(color)} className={colors.includes(color) ? 'is-active' : ''} onClick={() => setColors((current) => current.includes(color) ? current.filter((value) => value !== color) : [...current, color])}><i className={`photo-color-swatch is-${color}`} /></button>)}</div>,
+    favorites: !temporary && <button className={onlyFavorites || favoriteOnly ? 'is-active' : ''} type="button" aria-label="仅显示收藏照片" aria-pressed={onlyFavorites || favoriteOnly} title="仅显示收藏照片" onClick={() => { if (favoriteOnly) onFavoriteOnlyChange(false); setOnlyFavorites(!(onlyFavorites || favoriteOnly)); }}><Heart size={13} /></button>,
+    reset: <IconButton label={"重置" + scope + "过滤器"} disabled={!filtered && (!onReset || Boolean(leading))} onClick={() => { setSearchOpen(false); setSearch(''); setMinimumRating(null); setFlags([]); setColors([]); setOnlyFavorites(false); if (favoriteOnly) onFavoriteOnlyChange(false); if (!leading) onReset?.(); }}><RotateCcw size={13} /></IconButton>
+  };
+  if (renderTools) return <>{renderTools(tools)}</>;
+  return <div className={`filmstrip-filter-bar${leading ? ' has-grouping' : ''}${compact ? ' is-inline' : ''}`} role="group" aria-label={scope + "过滤条件"}>{leading}<div className="photo-filter-controls">{Object.entries(tools).map(([id, tool]) => <Fragment key={id}>{tool}</Fragment>)}</div></div>;
 }
 
 function Filmstrip({
@@ -1078,6 +1180,12 @@ function Viewer({
   onToolbarHostChange: (element: HTMLDivElement | null) => void;
   onWorkflowStageChange?: ((photo: Photo) => void) | undefined;
 }): React.JSX.Element {
+  const [versionTarget, setVersionTarget] = useState<string>(() => {
+    const saved = localStorage.getItem(VIEWER_VERSION_TARGET_KEY);
+    return saved === 'no-ai' || saved === 'preferred-ai' || saved?.startsWith('stage:') ? saved : 'latest-ai';
+  });
+  const manualStagePhotoId = useRef<string | null>(null);
+  const [targetRevision, setTargetRevision] = useState(0);
   const [compareMode, setCompareMode] = useState<CompareMode>('single');
   const [split, setSplit] = useState(52);
   const [showOriginal, setShowOriginal] = useState(false);
@@ -1095,10 +1203,35 @@ function Viewer({
     return saved === 'checker' || saved === 'light' || saved === 'dark' ? saved : 'neutral';
   });
   const [fitMode, setFitMode] = useState<'fit' | 'actual' | 'width' | 'custom'>('fit');
-  const [viewerNotice, setViewerNotice] = useState('');
+  const [viewerNotice, setViewerNotice] = useTransientNotice();
   const canvasWrapRef = useRef<HTMLDivElement>(null);
-  const latestResultId = results[0]?.id ?? null;
-  const initialSelectionId = initialResultId === undefined ? latestResultId : results.find((result) => result.id === initialResultId)?.id ?? null;
+  const latestBatchId = [...results].sort((a, b) => b.createdAt - a.createdAt || b.version - a.version)[0]?.batchId;
+  const latestResult = latestBatchId
+    ? results.filter((result) => result.batchId === latestBatchId).sort((a, b) => a.version - b.version)[0]
+    : undefined;
+  const preferredResult = results.find((result) => result.reviewState === 'preferred');
+  const workflowMembers = photo.workflow?.members ?? [];
+  const workflowStages = photo.workflow?.stages ?? [...new Map(workflowMembers.map((member) => [member.stageId, { id: member.stageId, name: member.stageName }])).values()];
+  const requestedStageId = versionTarget.startsWith('stage:') ? versionTarget.slice(6) : null;
+  const requestedStageIndex = workflowStages.findIndex((stage) => stage.id === requestedStageId);
+  const requestedMember = requestedStageId ? workflowStages.slice(0, Math.max(0, requestedStageIndex) + 1).reverse()
+    .flatMap((stage) => workflowMembers.filter((member) => member.stageId === stage.id && !member.asset.offline))[0] : undefined;
+  const noAiMember = [...workflowMembers].reverse().find((member) => !/\bAI\b|人工智能|生成/u.test(member.stageName))
+    ?? workflowMembers.at(-1);
+  const initialSelectionId = initialResultId !== undefined
+    ? results.find((result) => result.id === initialResultId)?.id ?? null
+    : versionTarget === 'preferred-ai' ? preferredResult?.id ?? null
+      : versionTarget === 'latest-ai' ? latestResult?.id ?? null
+        : null;
+  const wantsNoAi = versionTarget === 'no-ai' || (versionTarget === 'preferred-ai' && !preferredResult) || (versionTarget === 'latest-ai' && !latestResult);
+  const targetPhotoId = requestedStageId ? requestedMember?.asset.id ?? workflowMembers[0]?.asset.id ?? null : wantsNoAi ? noAiMember?.asset.id ?? null : null;
+  const effectiveSelectionId = targetPhotoId && targetPhotoId !== photo.id ? null : initialSelectionId;
+  useEffect(() => {
+    if (!targetPhotoId || targetPhotoId === photo.id || !photo.workflow || manualStagePhotoId.current === photo.id) return;
+    const member = photo.workflow.members.find((item) => item.asset.id === targetPhotoId);
+    if (member) onWorkflowStageChange?.({ ...mapCatalogAssets([member.asset])[0]!, workflow: photo.workflow });
+  }, [targetPhotoId, photo.id, photo.workflow, onWorkflowStageChange, targetRevision]);
+  useEffect(() => { try { localStorage.setItem(VIEWER_VERSION_TARGET_KEY, versionTarget); } catch { /* Keep the current selection when storage is unavailable. */ } }, [versionTarget]);
   const selectedResult = selectedResultId ? results.find((result) => result.id === selectedResultId) : undefined;
   const generatedSource = isDemo ? photo.src : selectedResult?.resultUrl;
   const activeSource = generatedSource && !showOriginal ? generatedSource : photo.originalSrc ?? photo.src;
@@ -1126,11 +1259,11 @@ function Viewer({
   }, [fitMode, fittedSize.width, fittedSize.height, pixelZoom]);
 
   useEffect(() => {
-    setSelectedResultId(initialSelectionId);
+    setSelectedResultId(effectiveSelectionId);
     setZoom(1);
     setFitMode('fit');
     setPan({ x: 0, y: 0 });
-  }, [photo.id, photo.src, initialSelectionId]);
+  }, [photo.id, photo.src, effectiveSelectionId]);
 
   useLayoutEffect(() => {
     const container = canvasWrapRef.current;
@@ -1267,6 +1400,15 @@ function Viewer({
           <PhotoFlag photo={photo} />
           <i>{selectedResult ? `生成版本 ${selectedResult.version}` : isDemo ? '生成版本 2' : photo.workflow?.members.find((member) => member.asset.id === photo.id)?.stageName ?? '原图'}</i>
         </div>
+        {!isDemo && <div className="viewer-target-version">
+          <select aria-label="切换目标版本" title="目标版本" value={versionTarget} onChange={(event) => { manualStagePhotoId.current = null; setVersionTarget(event.target.value); setTargetRevision((revision) => revision + 1); }}>
+            {workflowStages.length ? workflowStages.map((stage) => <option key={stage.id} value={`stage:${stage.id}`}>{stage.name}</option>) : <option value="stage:original">原图</option>}
+            <hr />
+            <option value="no-ai">未 AI</option>
+            <option value="preferred-ai">首选 AI</option>
+            <option value="latest-ai">最新 AI</option>
+          </select>
+        </div>}
         <div
           className={`photo-canvas${canCompare && compareMode === 'split' ? ' is-comparing' : ''}`}
           style={{ width: fittedSize.width, height: fittedSize.height, visibility: fittedSize.height > 0 ? 'visible' : 'hidden', transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})` }}
@@ -1350,7 +1492,7 @@ function Viewer({
         {(photo.workflow || results.length > 0 || isDemo) && <div className="version-switcher" data-tool-group="versions">
           {photo.workflow && <select aria-label="流程阶段" title="按规则关联" value={photo.id} onChange={(event) => {
             const member = photo.workflow!.members.find((item) => item.asset.id === event.target.value);
-            if (member) onWorkflowStageChange?.({ ...mapCatalogAssets([member.asset])[0]!, workflow: photo.workflow! });
+            if (member) { manualStagePhotoId.current = member.asset.id; onWorkflowStageChange?.({ ...mapCatalogAssets([member.asset])[0]!, workflow: photo.workflow! }); }
           }}>{photo.workflow.members.map((member, index) => <option key={member.asset.id} value={member.asset.id}>{member.stageName}{member.variant ? ` · ${member.variant}` : photo.workflow!.members.filter((item) => item.stageId === member.stageId).length > 1 ? ` · ${index + 1}` : ''} — {member.asset.fileName}{member.asset.offline ? '（离线）' : ''}</option>)}</select>}
           <button className={!selectedResult && !isDemo ? 'is-current' : ''} type="button" title="按住 O 键可临时查看当前文件" onClick={() => setSelectedResultId(null)}>{photo.workflow ? '当前文件' : '原图'}</button>
           {isDemo ? <><button type="button">V1</button><button className="is-current" type="button">V2</button></> : [...results].reverse().map((result) => (
@@ -1760,9 +1902,7 @@ function TaskBar({ panelVisibility, onTogglePanel, suspended, open, onToggle, on
   const visibleTasks = (tasks ?? []).filter((task) => !['completed', 'failed', 'canceled'].includes(task.status))
     .sort((left, right) => Number(['queued', 'paused'].includes(left.status)) - Number(['queued', 'paused'].includes(right.status)) || left.position - right.position);
   const runningCount = isDemo ? 0 : counts?.activeCount ?? visibleTasks.filter((task) => ['preparing', 'uploading', 'processing', 'downloading', 'saving'].includes(task.status)).length;
-  const waitingCount = isDemo ? 0 : counts?.queuedCount ?? visibleTasks.filter((task) => task.status === 'queued').length;
   const failedCount = isDemo ? 0 : counts?.failedCount ?? 0;
-  const pausedCount = isDemo ? 0 : counts?.pausedCount ?? visibleTasks.filter((task) => task.status === 'paused').length;
   const batches = groupTaskBatches(tasks ?? []);
   const onOpenViewer = (assetId: string, assetIds?: string[]) => openViewer(assetId, assetIds ?? batches.find((batch) => batch.tasks.some((task) => task.assetId === assetId))?.tasks.flatMap((task) => task.assetId ? [task.assetId] : []));
   const pendingBatches = batches.filter((batch) => batch.active + batch.queued + batch.paused > 0);
@@ -1777,9 +1917,9 @@ function TaskBar({ panelVisibility, onTogglePanel, suspended, open, onToggle, on
       )}
       <div className="task-statusbar">
         <button className="panel-visibility-toggle" type="button" aria-label={panelVisibility.left ? '隐藏左侧栏' : '显示左侧栏'} aria-expanded={panelVisibility.left} title={panelVisibility.left ? '隐藏左侧栏（Tab 切换两侧）' : '显示左侧栏（Tab 切换两侧）'} onClick={() => onTogglePanel('left')}>{panelVisibility.left ? <ChevronLeft size={15} /> : <ChevronRight size={15} />}</button>
-        <button className="task-status-toggle" type="button" onClick={onToggle} aria-expanded={open} aria-label="后台任务"><span className={`working-pulse${runningCount === 0 ? ' is-idle' : ''}`} /><strong>后台任务</strong><span>{pendingBatches.length} 批进行中</span></button>
-        <div className="task-status-batches">{pendingBatches.map((batch) => <button type="button" className="task-status-batch" key={batch.id} onClick={() => expandBatch(batch.id)}><TaskKindIcon kind={batch.tasks[0]!.kind} /><span>{taskLabels[batch.tasks[0]!.kind]} {batch.settled}/{batch.total}</span><progress aria-label="批次进度" max={Math.max(batch.total, 1)} value={batch.settled} /></button>)}</div>
-        <span>运行 {runningCount} 项</span><span>排队 {waitingCount} 项</span>{pausedCount > 0 && <span>暂停 {pausedCount} 项</span>}{failedCount > 0 && <span className="failed-count">失败 {failedCount} 项</span>}<button className="task-status-toggle" type="button" onClick={onToggle} aria-label={open ? '收起后台任务' : '展开后台任务'}><PanelBottomOpen size={15} className={open ? 'is-open' : ''} /></button>
+        <button className="task-status-toggle" type="button" onClick={onToggle} aria-expanded={open} aria-label="后台任务" title="后台任务"><span className={`working-pulse${runningCount === 0 ? ' is-idle' : ''}`} /><span>{pendingBatches.length ? `${pendingBatches.length} 批任务` : '任务'}</span><ChevronDown size={12} className={open ? 'is-open' : ''} /></button>
+        <div className="task-status-batches">{pendingBatches.slice(0, 2).map((batch) => <button type="button" className="task-status-batch" key={batch.id} onClick={() => expandBatch(batch.id)} title={`${taskLabels[batch.tasks[0]!.kind]} · ${batch.settled}/${batch.total}`}><TaskKindIcon kind={batch.tasks[0]!.kind} /><span>{taskLabels[batch.tasks[0]!.kind]} {batch.settled}/{batch.total}</span><progress aria-label="批次进度" max={Math.max(batch.total, 1)} value={batch.settled} /></button>)}</div>
+        {pendingBatches.length > 2 && <button className="task-status-toggle" type="button" onClick={onToggle} aria-label="查看其余后台任务">+{pendingBatches.length - 2}</button>}{failedCount > 0 && <button className="task-status-toggle failed-count" type="button" onClick={onToggle}>失败 {failedCount}</button>}<div className="status-spacer" />
         <button className="panel-visibility-toggle" type="button" aria-label={panelVisibility.right ? '隐藏右侧栏' : '显示右侧栏'} aria-expanded={panelVisibility.right} title={panelVisibility.right ? '隐藏右侧栏（Tab 切换两侧）' : '显示右侧栏（Tab 切换两侧）'} onClick={() => onTogglePanel('right')}>{panelVisibility.right ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}</button>
       </div>
     </TaskActions>
@@ -1792,7 +1932,7 @@ type LibraryWorkspaceProps = {
   onWorkflowStageChange?: (photo: Photo) => void;
   initialResultId?: string | null;
   view: 'library' | 'viewer';
-  onOpenViewer: (assetId: string) => void;
+  onOpenViewer: (assetId: string, assetIds?: string[]) => void;
   availablePhotos: Photo[];
   catalogFolders: CatalogFolder[];
   catalogAlbums: CatalogAlbum[];
@@ -1872,8 +2012,7 @@ function collectionTitle(props: Pick<LibraryWorkspaceProps, 'catalogFolders' | '
   return props.searchQuery ? `搜索：${props.searchQuery}` : '所有照片';
 }
 
-function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetId: string) => void; onOpenPhotoContextMenu?: (event: React.MouseEvent, photo: Photo) => void }): React.JSX.Element {
-  const [filtersOpen, setFiltersOpen] = useState(() => { try { return localStorage.getItem('photoallisai.catalog-filters-open') === 'true'; } catch { return false; } });
+function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMenu?: (event: React.MouseEvent, photo: Photo) => void }): React.JSX.Element {
   const { minimumRating, ratingOperator, flags, colors } = props.photoFilters;
   const filtered = Boolean(props.searchQuery.trim() || minimumRating !== null || flags.length || colors.length || props.favoriteOnly);
   const [groupDetails, setGroupDetails] = useState<Record<string, { modifiedAt: number | undefined; data: FileDetails | null }>>({});
@@ -1906,6 +2045,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
   })) as Record<string, FileDetails | null>, [groupDetails, props.availablePhotos]);
   const photoGroups = useMemo(() => groupCatalogPhotos(props.availablePhotos, props.photoFilters.groupBy, props.catalogFolders, props.photoFilters.groupOrder, metadata), [props.availablePhotos, props.photoFilters.groupBy, props.photoFilters.groupOrder, props.catalogFolders, metadata]);
   const grouped = props.photoFilters.groupBy.length > 0;
+  const defaultGroupTitle = collectionTitle(props);
   const setFilter = <K extends keyof PhotoFilters>(key: K, value: React.SetStateAction<PhotoFilters[K]>) => {
     props.onPhotoFiltersChange((current) => ({ ...current, [key]: typeof value === 'function' ? (value as (old: PhotoFilters[K]) => PhotoFilters[K])(current[key]) : value }));
   };
@@ -1915,7 +2055,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
   const marqueeOriginRef = useRef<{ x: number; y: number; additive: boolean; initialIds: Set<string> } | null>(null);
   const [marquee, setMarquee] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [viewMode, setViewMode] = useState<CatalogViewMode>(() => {
-    try { const saved = window.localStorage.getItem('photoallisai.catalog-view-mode'); return saved === 'analysis' ? 'list' : saved === 'list' || saved === 'masonry' ? saved : 'grid'; } catch { return 'grid'; }
+    try { const saved = window.localStorage.getItem('photoallisai.catalog-view-mode'); return saved === 'analysis' ? 'list' : saved === 'list' || saved === 'masonry' ? saved : saved === 'grid' ? 'grid' : 'masonry'; } catch { return 'masonry'; }
   });
   const [visibleColumns, setVisibleColumns] = useState<CatalogColumn[]>(() => {
     try {
@@ -2083,23 +2223,24 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
       case 'suggestions': return analysis ? [...analysis.adjustments.global, ...analysis.adjustments.local].map((item) => item.reason).join('；') || analysis.generationRecommendation.reason || '—' : '—';
     }
   };
-  const listRows = photoGroups.flatMap((group) => [...(grouped ? [<header className="catalog-group-heading" key={`group:${group.key}`}><strong>{group.title}</strong><span title="当前已加载的照片数量">{group.items.length} 张</span></header>] : []), ...group.items.map((photo) => <div className={`catalog-list-row${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}`} style={listStyle} role="option" aria-selected={selection.selectedIds.has(photo.id)} tabIndex={0} key={photo.id} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onKeyDown={(event) => { if (event.key === 'Enter') props.onOpenViewer(photo.id); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onDoubleClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>
+  const listRows = photoGroups.flatMap((group) => [...(grouped ? [<header className="catalog-group-heading" key={`group:${group.key}`}><strong>{group.title}</strong><span title="当前已加载的照片数量">{group.items.length} 张</span></header>] : []), ...group.items.map((photo) => <div className={`catalog-list-row${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}`} style={listStyle} role="option" aria-selected={selection.selectedIds.has(photo.id)} tabIndex={0} key={photo.id} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onKeyDown={(event) => { if (event.key === 'Enter') props.onOpenViewer(photo.id, orderedIds); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onDoubleClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
     {selectButton(photo)}{columns.map((column) => <span className={`catalog-list-cell catalog-list-cell-${column.id}`} key={column.id}>{field(photo, column.id)}</span>)}
   </div>)]);
   return (
     <>
-      <main className={`catalog-main${filtersOpen ? ' has-filters' : ''}`}>
+      <main className="catalog-main">
         <header className="catalog-toolbar">
-          <div className="catalog-toolbar-actions">
-            {!props.isDemo && <FileWorkflowControl scope={{ folderId: props.selectedFolderId, albumId: props.selectedAlbumId }} folders={props.catalogFolders} scopeName={collectionTitle(props)} />}
-            <div className="catalog-view-switcher" role="group" aria-label="图库视图">
+          <PhotoFilterBar scope="图库" search={props.filterSearch} setSearch={props.onSearchChange} minimumRating={minimumRating} setMinimumRating={(value) => setFilter('minimumRating', value)} ratingOperator={ratingOperator} setRatingOperator={(value) => setFilter('ratingOperator', value)} flags={flags} setFlags={(value) => setFilter('flags', value)} colors={colors} setColors={(value) => setFilter('colors', value)} onlyFavorites={false} setOnlyFavorites={props.onFavoriteOnlyChange} favoriteOnly={props.favoriteOnly} onFavoriteOnlyChange={props.onFavoriteOnlyChange} renderTools={(filterTools) => <CatalogBrowseControls value={props.photoFilters} onChange={(next) => props.onPhotoFiltersChange((current) => ({ ...current, ...next }))} pending={missingDetails.length + (needsDetails ? Math.max(0, props.totalCount - props.availablePhotos.length) : 0)} total={props.totalCount} tools={{
+            ...filterTools,
+            title: <strong className="catalog-toolbar-title" title={defaultGroupTitle}>{defaultGroupTitle}</strong>,
+            count: <span className="catalog-toolbar-count" title="当前集合的文件数量">{props.totalCount} 张</span>,
+            workflow: !props.isDemo && <FileWorkflowControl scope={{ folderId: props.selectedFolderId, albumId: props.selectedAlbumId }} folders={props.catalogFolders} scopeName={collectionTitle(props)} />,
+            view: <div className="catalog-view-switcher" role="group" aria-label="图库视图">
               {([{ mode: 'list', label: '列表视图', icon: ListFilter }, { mode: 'grid', label: '网格视图', icon: Grid2X2 }, { mode: 'masonry', label: '瀑布流视图', icon: PanelsTopLeft }] as const).map(({ mode, label, icon: Icon }) => <button key={mode} className={viewMode === mode ? 'is-active' : ''} type="button" aria-label={label} title={label} aria-pressed={viewMode === mode} onClick={() => changeViewMode(mode)}><Icon size={14} /></button>)}
-            </div>
-            <div className="sort-control"><select aria-label="图库排序" value={props.sortBy} onChange={(event) => props.onSortByChange(event.target.value as CatalogSort)}><option value="modifiedAt">修改时间</option><option value="fileName">文件名</option><option value="rating">评分</option></select><button type="button" aria-label={`图库排序：${(props.sortDirection ?? (props.sortBy === 'fileName' ? 'asc' : 'desc')) === 'asc' ? '正序' : '逆序'}，点击切换`} title="切换排序方向" onClick={() => props.onSortDirectionChange((props.sortDirection ?? (props.sortBy === 'fileName' ? 'asc' : 'desc')) === 'asc' ? 'desc' : 'asc')}>{(props.sortDirection ?? (props.sortBy === 'fileName' ? 'asc' : 'desc')) === 'asc' ? <ArrowUp size={13} /> : <ArrowDown size={13} />}</button></div>
-            <span className={filtered ? 'filmstrip-filter-toggle is-filtering' : 'filmstrip-filter-toggle'}><button type="button" aria-label="图库过滤器" title={filtered ? '图库过滤器（已启用）' : '图库过滤器'} aria-expanded={filtersOpen} onClick={() => setFiltersOpen((open) => { try { localStorage.setItem('photoallisai.catalog-filters-open', String(!open)); } catch { /* restricted storage */ } return !open; })}><ListFilter size={14} /></button></span>
-          </div>
+            </div>,
+            sort: <div className="sort-control"><select aria-label="图库排序" value={props.sortBy} onChange={(event) => props.onSortByChange(event.target.value as CatalogSort)}><option value="modifiedAt">修改时间</option><option value="fileName">文件名</option><option value="rating">评分</option></select><button type="button" aria-label={`图库排序：${(props.sortDirection ?? (props.sortBy === 'fileName' ? 'asc' : 'desc')) === 'asc' ? '正序' : '逆序'}，点击切换`} title="切换排序方向" onClick={() => props.onSortDirectionChange((props.sortDirection ?? (props.sortBy === 'fileName' ? 'asc' : 'desc')) === 'asc' ? 'desc' : 'asc')}>{(props.sortDirection ?? (props.sortBy === 'fileName' ? 'asc' : 'desc')) === 'asc' ? <ArrowUp size={13} /> : <ArrowDown size={13} />}</button></div>
+          }} />} />
         </header>
-        {filtersOpen && <PhotoFilterBar scope="图库" leading={<CatalogBrowseControls value={props.photoFilters} onChange={(next) => props.onPhotoFiltersChange((current) => ({ ...current, ...next }))} pending={missingDetails.length + (needsDetails ? Math.max(0, props.totalCount - props.availablePhotos.length) : 0)} total={props.totalCount} />} onReset={filtered || grouped ? () => props.onPhotoFiltersChange(emptyPhotoFilters) : undefined} search={props.filterSearch} setSearch={props.onSearchChange} minimumRating={minimumRating} setMinimumRating={(value) => setFilter('minimumRating', value)} ratingOperator={ratingOperator} setRatingOperator={(value) => setFilter('ratingOperator', value)} flags={flags} setFlags={(value) => setFilter('flags', value)} colors={colors} setColors={(value) => setFilter('colors', value)} onlyFavorites={false} setOnlyFavorites={props.onFavoriteOnlyChange} favoriteOnly={props.favoriteOnly} onFavoriteOnlyChange={props.onFavoriteOnlyChange} />}
         {props.availablePhotos.length === 0 ? (
           <section className="catalog-empty">
             {props.catalogFolders.length === 0 ? <FolderOpen size={34} /> : <Search size={34} />}
@@ -2142,16 +2283,16 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenViewer: (assetI
               event.preventDefault();
               setSelection(selectAll(orderedIds));
             }
-            if (event.key === 'Enter' && selectedPhoto) props.onOpenViewer(selectedPhoto.id);
+            if (event.key === 'Enter' && selectedPhoto) props.onOpenViewer(selectedPhoto.id, orderedIds);
             moveGridFocus(event);
           }}>
             {photoGroups.flatMap((group) => {
               const cards = group.items.map((photo) => {
                 const metadataHeight = 24 + 19 * (Number(photo.rating > 0) + Number(Boolean(photo.workflow)) + Number(Boolean(photo.workflowConflict)));
-                return <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} style={viewMode === 'masonry' ? { gridRowEnd: `span ${Math.ceil(cardWidth / (aspectRatios[photo.thumbnailSrc ?? photo.src] ?? 1.5) + metadataHeight + 10)}` } : undefined} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable key={photo.id} onDragStart={(event) => { preparePhotoDrag(event, photo, selection); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id); }}>
-              <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{photo.thumbnailSrc || photo.src ? <CatalogImage src={photo.thumbnailSrc ?? photo.src} onAspectRatio={(ratio) => { const src = photo.thumbnailSrc ?? photo.src; setAspectRatios((current) => current[src] === ratio ? current : { ...current, [src]: ratio }); }} /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
+                return <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} style={viewMode === 'masonry' ? { gridRowEnd: `span ${Math.ceil(cardWidth / (aspectRatios[photo.thumbnailSrc ?? photo.src] ?? 1.5) + metadataHeight + 10)}` } : undefined} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable key={photo.id} onDragStart={(event) => { preparePhotoDrag(event, photo, selection); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
+              <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{photo.thumbnailSrc || photo.src ? <CatalogImage src={photo.thumbnailSrc ?? photo.src} previewSrc={photo.src} onAspectRatio={(ratio) => { const src = photo.thumbnailSrc ?? photo.src; setAspectRatios((current) => current[src] === ratio ? current : { ...current, [src]: ratio }); }} /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
               <span className="catalog-photo-badges"><PhotoFlag photo={photo} /></span>
-              <span className="catalog-card-meta"><strong>{photo.fileName}</strong>{photo.rating > 0 && <span className="catalog-card-rating" aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}{photo.workflow && <small title={`${photo.workflow.name} · 按规则关联`}>{photo.workflow.members.length} 版本</small>}{photo.workflowConflict && <small title="多条流程规则同时匹配，已保留独立显示">规则冲突</small>}</span>
+              <span className="catalog-card-meta"><strong title={photo.fileName}>{photo.fileName}</strong>{photo.rating > 0 && <span className="catalog-card-rating" aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}{photo.workflow && <small title={`${photo.workflow.name} · 按规则关联`}>{photo.workflow.members.length} 版本</small>}{photo.workflowConflict && <small title="多条流程规则同时匹配，已保留独立显示">规则冲突</small>}</span>
             </button>;
               });
               // Keep cards under the same parent so grouping preserves decoded images and focus.
@@ -2205,7 +2346,7 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
   } = props;
   const [viewerToolbarHost, setViewerToolbarHost] = useState<HTMLDivElement | null>(null);
   const [filmstripVisibleIds, setFilmstripVisibleIds] = useState<string[] | null>(null);
-  const [operationNotice, setOperationNotice] = useState('');
+  const [operationNotice, setOperationNotice] = useTransientNotice();
   const [viewerLayout, setViewerLayout] = useViewerLayout();
   const initialSelectedId = availablePhotos.some((photo) => photo.id === selectedAssetId)
     ? selectedAssetId!
@@ -2672,6 +2813,12 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
 
   const reviewResult = async (resultId: string, reviewState: GenerationResult['reviewState']): Promise<void> => {
     try {
+      if (reviewState === 'rejected') {
+        await window.desktopApi.trashGenerationResult({ resultId });
+        setGenerationResults((current) => current.filter((result) => result.id !== resultId));
+        setOperationNotice('已拒绝并移入应用回收站。');
+        return;
+      }
       const updated = await window.desktopApi.updateGenerationResultReview({ resultId, reviewState });
       setGenerationResults((current) => current.map((result) => {
         if (result.id === updated.id) return updated;
@@ -3317,6 +3464,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
   const [integrityBusy, setIntegrityBusy] = useState(false);
   const [generationStorageMode, setGenerationStorageMode] = useState<AppSettings['generationStorageMode']>('managed');
   const [theme, setTheme] = useState<AppSettings['theme']>('system');
+  const [centerFileNames, setCenterFileNames] = useState(catalogFileNameCentered);
   const [locale, setLocalePreference] = useState<AppSettings['locale']>('zh-CN');
   const [cacheMaxBytes, setCacheMaxBytes] = useState(5 * 1024 ** 3);
   const [storageMessage, setStorageMessage] = useState('');
@@ -3373,6 +3521,12 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
     } catch {
       setMessage('主题设置保存失败，请检查应用权限。');
     }
+  };
+
+  const saveFileNameAlignment = (centered: boolean) => {
+    setCenterFileNames(centered);
+    applyCatalogFileNameAlignment(centered);
+    try { localStorage.setItem(CATALOG_FILE_NAME_CENTERED_KEY, String(centered)); } catch { /* Keep the current preference for this session. */ }
   };
 
   const saveCacheMaxBytes = async (value: number) => {
@@ -3583,6 +3737,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
         {settingsSection === 'appearance' && <>
           <section className="settings-section storage-section"><div className="settings-heading"><h2>界面主题</h2></div><div className="storage-options appearance-options" aria-label="界面主题">{([['system', '跟随系统'], ['dark', '深色'], ['light', '浅色']] as const).map(([value, label]) => <label className={theme === value ? 'is-selected' : ''} key={value}><input type="radio" name="theme" checked={theme === value} onChange={() => void saveTheme(value)} /><span><strong>{label}</strong></span></label>)}</div></section>
           <section className="settings-section storage-section"><div className="settings-heading"><h2>界面语言</h2></div><div className="storage-options appearance-options" aria-label="界面语言">{([['zh-CN', '简体中文'], ['en-US', 'English']] as const).map(([value, label]) => <label className={locale === value ? 'is-selected' : ''} key={value}><input type="radio" name="locale" checked={locale === value} onChange={() => void saveLocale(value)} /><span><strong>{label}</strong></span></label>)}</div></section>
+          <section className="settings-section storage-section"><div className="settings-heading"><h2>图库</h2></div><div className="storage-options appearance-options"><label className={centerFileNames ? 'is-selected' : ''}><input type="checkbox" checked={centerFileNames} onChange={(event) => saveFileNameAlignment(event.target.checked)} /><span><strong>文件名居中</strong></span></label></div></section>
         </>}
         {settingsSection === 'models' && <>
         <section className="provider-layout">
@@ -4170,7 +4325,7 @@ function QuickPhotoViewer({ session, photo, onPhotoChange, onClose }: { session:
   const [toolbarHost, setToolbarHost] = useState<HTMLDivElement | null>(null);
   const [visibleIds, setVisibleIds] = useState<string[] | null>(null);
   const panel = useRef<HTMLElement>(null);
-  const [notice, setNotice] = useState('');
+  const [notice, setNotice] = useTransientNotice();
   const [menu, setMenu] = useState<{ x: number; y: number; photo: Photo; filmstrip?: FilmstripMenuOptions | undefined } | null>(null);
   useEffect(() => { panel.current?.querySelector<HTMLElement>('.canvas-wrap')?.focus(); }, []);
   useEffect(() => {
@@ -4248,7 +4403,7 @@ export function App(): React.JSX.Element {
     window.addEventListener('keydown', togglePanels);
     return () => window.removeEventListener('keydown', togglePanels);
   }, []);
-  const [navigationNotice, setNavigationNotice] = useState('');
+  const [navigationNotice, setNavigationNotice] = useTransientNotice();
   const [globalTasks, setGlobalTasks] = useState<PersistedTask[]>([]);
   const [globalTaskCounts, setGlobalTaskCounts] = useState<Pick<TaskPage, 'activeCount' | 'queuedCount' | 'failedCount' | 'pausedCount'>>({ activeCount: 0, queuedCount: 0, failedCount: 0, pausedCount: 0 });
   const [taskDrawerOpen, setTaskDrawerOpen] = useState(false);
@@ -4375,14 +4530,27 @@ export function App(): React.JSX.Element {
   const [searchDraft, setSearchDraft] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [favoriteOnly, setFavoriteOnly] = useState(false);
-  const [photoFilters, setPhotoFilters] = useState<PhotoFilters>(emptyPhotoFilters);
+  const [photoFilters, setPhotoFilters] = useState<PhotoFilters>(() => {
+    try {
+      const saved: unknown = JSON.parse(localStorage.getItem('photoallisai.catalog-group-order') ?? 'null');
+      if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+        const groupOrder = Object.fromEntries(Object.entries(saved).filter(([, order]) => order === 'asc' || order === 'desc')) as PhotoFilters['groupOrder'];
+        return { ...emptyPhotoFilters, groupOrder };
+      }
+    } catch { /* restricted storage */ }
+    return emptyPhotoFilters;
+  });
+  useEffect(() => {
+    try { localStorage.setItem('photoallisai.catalog-group-order', JSON.stringify(photoFilters.groupOrder)); } catch { /* restricted storage */ }
+  }, [photoFilters.groupOrder]);
   const catalogFilterInput = useMemo(() => ({ minimumRating: photoFilters.minimumRating, ratingOperator: photoFilters.ratingOperator, flags: photoFilters.flags, colors: photoFilters.colors }), [photoFilters.minimumRating, photoFilters.ratingOperator, photoFilters.flags, photoFilters.colors]);
-  const [sortBy, setSortBy] = useState<CatalogSort>('modifiedAt');
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc' | undefined>();
+  const [sortBy, setSortBy] = useState<CatalogSort>('fileName');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc' | undefined>('asc');
   const catalogRequest = useRef(0);
   const groupAutoLoadFailed = useRef(false);
 
   useEffect(() => {
+    applyCatalogFileNameAlignment(catalogFileNameCentered());
     let preference: AppSettings['theme'] = 'system';
     const media = window.matchMedia('(prefers-color-scheme: dark)');
     const refresh = () => applyTheme(preference);
@@ -4471,7 +4639,7 @@ export function App(): React.JSX.Element {
     } finally {
       if (request === catalogRequest.current) setLoadingMore(false);
     }
-  }, [favoriteOnly, catalogFilterInput, searchQuery, selectedAlbumId, selectedFolderId, selectedSmartCollection, selectedTagId, sortBy, sortDirection]);
+  }, [favoriteOnly, catalogFilterInput, searchQuery, selectedAlbumId, selectedFolderId, selectedSmartCollection, selectedTagId, sortBy, sortDirection, setNavigationNotice]);
 
   useEffect(() => {
     if (!sessionReady) return;
@@ -4627,7 +4795,7 @@ export function App(): React.JSX.Element {
     } finally {
       if (request === catalogRequest.current) setLoadingMore(false);
     }
-  }, [nextCursor, loadingMore, selectedFolderId, selectedTagId, selectedAlbumId, selectedSmartCollection, favoriteOnly, catalogFilterInput, sortBy, sortDirection, searchQuery]);
+  }, [nextCursor, loadingMore, selectedFolderId, selectedTagId, selectedAlbumId, selectedSmartCollection, favoriteOnly, catalogFilterInput, sortBy, sortDirection, searchQuery, setNavigationNotice]);
 
   useEffect(() => {
     if (photoFilters.groupBy.length && catalogReady && nextCursor && !loadingMore && !groupAutoLoadFailed.current) void loadMoreCatalog();
@@ -4736,7 +4904,7 @@ export function App(): React.JSX.Element {
   const workspaceProps: LibraryWorkspaceProps = {
     view: 'library',
     active: !viewerPhoto && !quickPhoto,
-    onOpenViewer: (assetId) => void openViewer(assetId),
+    onOpenViewer: (assetId, assetIds) => void openViewer(assetId, assetIds),
     availablePhotos,
     catalogFolders,
     catalogAlbums,
@@ -4849,8 +5017,9 @@ export function App(): React.JSX.Element {
       else if ('copied' in report) setNavigationNotice(`已复制 ${report.copied} 张照片${companions.files.length ? `；另有 ${companions.files.length} 个 RAW/JPEG/XMP 关联文件未复制` : ''}。`);
       else setNavigationNotice(`已移动 ${report.moved} 张照片${report.skipped ? `，${report.skipped} 张原本就在目标文件夹` : ''}${companions.files.length ? `；另有 ${companions.files.length} 个 RAW/JPEG/XMP 关联文件未移动` : ''}。`);
       await refreshCatalog();
-    } catch {
-      setNavigationNotice('拖放操作失败：请检查目标文件夹权限、磁盘状态或所选照片的活动任务。');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setNavigationNotice(message.includes('TARGET_FOLDER_NOT_FOUND') ? '目标文件夹已变化，请刷新图库后重试。' : message.includes('ASSET_HAS_ACTIVE_TASKS') ? '所选照片有正在运行的任务，完成后再移动。' : message.includes('EACCES') || message.includes('EPERM') ? '无法写入目标文件夹，请检查磁盘权限。' : `拖放操作失败：${message.replace(/^Error invoking remote method [^:]+: /u, '').slice(0, 120)}`);
     }
   };
 

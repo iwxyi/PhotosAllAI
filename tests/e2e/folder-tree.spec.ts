@@ -57,7 +57,7 @@ test('expands nested folders and keeps icon colors independent', async () => {
   await expect(childMenu.getByRole('menuitem', { name: /更新关联路径/ })).toHaveCount(0);
   await expect(childMenu.getByRole('menuitem', { name: /取消关联/ })).toHaveCount(0);
   await childMenu.getByRole('menuitem', { name: '同步文件夹' }).click();
-  await expect(page.getByRole('status')).toContainText('同步完成：新增 0 张，离线 0 张');
+  await expect(page.locator('.operation-toast')).toContainText('同步完成：新增 0 张，离线 0 张');
   await parent.locator('.folder-row').click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'red 色' }).click();
   await expect(parent).toHaveClass(/color-red/);
@@ -91,7 +91,7 @@ test('drags a nested folder into another folder', async () => {
   const childRow = page.locator('.folder-row[data-folder-id]').filter({ hasText: 'child' });
   const targetRow = page.locator('.folder-row[data-folder-id]').filter({ hasText: 'target' });
   await childRow.dragTo(targetRow);
-  await expect(page.getByRole('status')).toContainText('已将文件夹移入「target」');
+  await expect(page.locator('.operation-toast')).toContainText('已将文件夹移入「target」');
   await expect.poll(async () => stat(path.join(testRoot, 'source', 'target', 'child', 'child.jpg')).then(() => true, () => false)).toBe(true);
   const movedChild = page.locator('.folder-entry').filter({ has: page.locator('.folder-row', { hasText: 'child' }) });
   await expect(movedChild).toBeVisible();

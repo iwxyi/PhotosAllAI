@@ -17,7 +17,8 @@ export const defaultWorkspaceSession: WorkspaceSession = {
     selectedTagId: null,
     selectedAssetId: null,
     favoriteOnly: false,
-    sortBy: 'modifiedAt',
+    sortBy: 'fileName',
+    sortDirection: 'asc',
     searchQuery: ''
   }
 };

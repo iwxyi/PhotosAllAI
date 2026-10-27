@@ -100,6 +100,12 @@ test('keeps settings distinct and preserves text editing shortcuts', async () =>
   await page.keyboard.press('Meta+A');
   await expect.poll(() => url.evaluate((element) => ({ start: (element as HTMLInputElement).selectionStart, end: (element as HTMLInputElement).selectionEnd }))).toEqual({ start: 0, end: 'https://example.com/v1'.length });
   await page.getByRole('button', { name: '外观' }).click();
+  const centerNames = page.getByRole('checkbox', { name: '文件名居中' });
+  await expect(centerNames).toBeChecked();
+  await centerNames.uncheck();
+  await expect(page.locator('html')).toHaveAttribute('data-catalog-file-name-centered', 'false');
+  await centerNames.check();
+  await expect(page.locator('html')).toHaveAttribute('data-catalog-file-name-centered', 'true');
   await page.getByRole('radio', { name: /浅色/ }).check();
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
   await page.getByRole('radio', { name: /深色/ }).check();

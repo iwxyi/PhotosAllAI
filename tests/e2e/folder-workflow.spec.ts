@@ -33,7 +33,15 @@ test('configures dynamic workflows, browses stages, and refreshes external outpu
     await group.dblclick();
     const viewer = page.getByRole('region', { name: '看图', exact: true });
     const stages = viewer.getByRole('combobox', { name: '流程阶段' });
+    const versionTarget = viewer.getByRole('combobox', { name: '切换目标版本' });
     await expect(stages.locator('option')).toHaveCount(5);
+    await expect(versionTarget.locator('option')).toHaveText(['原图', '后期', '美颜', '调色', 'AI 修图', '未 AI', '首选 AI', '最新 AI']);
+    await expect(versionTarget.locator('hr')).toHaveCount(1);
+    await versionTarget.selectOption('stage:original');
+    await expect(viewer.locator('.viewer-title')).toContainText('DSC1.jpg');
+    const noAiStage = await stages.locator('option').filter({ hasText: '调色' }).getAttribute('value');
+    await versionTarget.selectOption('no-ai');
+    await expect(stages).toHaveValue(noAiStage!);
     await expect(viewer.locator('.base-image')).toHaveClass(/is-ready/);
     const original = await stages.locator('option').filter({ hasText: '原图' }).getAttribute('value');
     await stages.selectOption(original!);

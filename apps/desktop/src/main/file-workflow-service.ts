@@ -111,6 +111,7 @@ export class FileWorkflowService {
       projected.push({ ...byId.get(representative.id)!, workflow: {
         id: createHash('sha256').update(match.group).digest('hex'), key: match.key,
         name: fileById.get(match.id)!.preset.name,
+        stages: fileById.get(match.id)!.preset.steps.map((step) => ({ id: step.id, name: step.name })),
         members: group.map((member) => ({ stageId: member.stageId, stageName: member.stageName, variant: member.variant, asset: byId.get(member.id)! }))
       } });
     }

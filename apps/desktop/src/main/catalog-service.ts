@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { opendir, realpath, rename, stat } from 'node:fs/promises';
+import { mkdir, opendir, realpath, rename, rmdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -25,6 +25,7 @@ import {
   type RelinkCatalogFolderResult,
   type RenameCatalogFolderInput,
   type RenameCatalogFolderResult,
+  type CreateCatalogFolderInput,
   type UnregisterCatalogFolderReport,
   unregisterCatalogFolderReportSchema,
   type CatalogSmartCollection,
@@ -282,6 +283,7 @@ export class CatalogService {
         COMMIT;
       `);
     }
+    this.#ensureCreatedDirectories();
   }
 
   close(): void {
@@ -508,6 +510,13 @@ export class CatalogService {
       const rootAssets = assetsByRoot.get(root.id) ?? [];
       result.push(catalogFolderSchema.parse({ id: root.id, name: root.name, assetCount: rootAssets.length, offlineCount: rootAssets.filter((asset) => asset.offline_at !== null).length, parentId: null, rootId: root.id, depth: 0, isRoot: true }));
       const directories = new Map<string, { assetCount: number; offlineCount: number }>();
+      for (const item of this.#database.prepare('SELECT path FROM created_directories WHERE root_id = ?').all(root.id) as { path: string }[]) {
+        let relative = path.relative(root.path, item.path);
+        while (relative && relative !== '.' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
+          directories.set(relative, { assetCount: 0, offlineCount: 0 });
+          relative = path.dirname(relative);
+        }
+      }
       for (const asset of rootAssets) {
         const relativeDirectory = path.relative(root.path, path.dirname(asset.path));
         if (!relativeDirectory || relativeDirectory === '.' || relativeDirectory.startsWith(`..${path.sep}`) || path.isAbsolute(relativeDirectory)) continue;
@@ -541,10 +550,12 @@ export class CatalogService {
     const roots = this.#database.prepare('SELECT id, path FROM folders WHERE removed_at IS NULL').all() as { id: string; path: string }[];
     for (const root of roots) {
       if (root.id === directoryId) return { rootId: root.id, rootPath: root.path, relativePath: '' };
-      const paths = this.#database.prepare('SELECT path FROM assets WHERE folder_id = ? AND removed_at IS NULL').all(root.id) as { path: string }[];
+      const assets = this.#database.prepare('SELECT path FROM assets WHERE folder_id = ? AND removed_at IS NULL').all(root.id) as { path: string }[];
+      const created = this.#database.prepare('SELECT path FROM created_directories WHERE root_id = ?').all(root.id) as { path: string }[];
+      const directories = [...assets.map((item) => path.dirname(item.path)), ...created.map((item) => item.path)];
       const checked = new Set<string>();
-      for (const item of paths) {
-        let relativePath = path.relative(root.path, path.dirname(item.path));
+      for (const directory of directories) {
+        let relativePath = path.relative(root.path, directory);
         while (relativePath && relativePath !== '.' && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath)) {
           if (!checked.has(relativePath)) {
             if (stableDirectoryId(root.id, relativePath) === directoryId) return { rootId: root.id, rootPath: root.path, relativePath };
@@ -682,6 +693,7 @@ export class CatalogService {
     try {
       this.#database.prepare('UPDATE folders SET path = ?, name = ? WHERE id = ?')
         .run(nextRoot, path.basename(nextRoot), folderId);
+      this.#relocateCreatedDirectories(folderId, folder.path, folderId, nextRoot);
       this.#database.prepare('UPDATE assets SET offline_at = ? WHERE folder_id = ? AND removed_at IS NULL')
         .run(Date.now(), folderId);
       const update = this.#database.prepare(`
@@ -729,7 +741,40 @@ export class CatalogService {
     };
   }
 
+  #ensureCreatedDirectories(): void {
+    this.#database.exec('CREATE TABLE IF NOT EXISTS created_directories (root_id TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE, path TEXT NOT NULL, PRIMARY KEY(root_id, path))');
+  }
+
+  #relocateCreatedDirectories(rootId: string, oldPath: string, nextRootId: string, nextPath: string): void {
+    const rows = this.#database.prepare('SELECT path FROM created_directories WHERE root_id = ?').all(rootId) as { path: string }[];
+    for (const row of rows) {
+      if (row.path !== oldPath && !row.path.startsWith(`${oldPath}${path.sep}`)) continue;
+      this.#database.prepare('DELETE FROM created_directories WHERE root_id = ? AND path = ?').run(rootId, row.path);
+      this.#database.prepare('INSERT OR IGNORE INTO created_directories (root_id, path) VALUES (?, ?)').run(nextRootId, nextPath + row.path.slice(oldPath.length));
+    }
+  }
+
+  async createFolder(input: CreateCatalogFolderInput): Promise<RenameCatalogFolderResult> {
+    const parent = this.#resolveDirectory(input.parentFolderId);
+    if (!parent) throw new Error('CATALOG_FOLDER_NOT_FOUND');
+    const parentPath = path.join(parent.rootPath, parent.relativePath);
+    for (let suffix = 1; ; suffix += 1) {
+      const name = suffix === 1 ? '新建文件夹' : `新建文件夹 ${suffix}`;
+      const destination = path.join(parentPath, name);
+      try { await mkdir(destination); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue;
+        throw error;
+      }
+      try {
+        this.#database.prepare('INSERT INTO created_directories (root_id, path) VALUES (?, ?)').run(parent.rootId, destination);
+      } catch (error) { await rmdir(destination).catch(() => undefined); throw error; }
+      const id = stableDirectoryId(parent.rootId, path.relative(parent.rootPath, destination));
+      return { folder: this.listFolders().find((folder) => folder.id === id)! };
+    }
+  }
+
   async renameFolder(input: RenameCatalogFolderInput): Promise<RenameCatalogFolderResult> {
+    if (!input.name.trim() || input.name === '.' || input.name === '..' || /[\\/]/u.test(input.name) || input.name.includes('\0')) throw new Error('INVALID_FOLDER_NAME');
     const directory = this.#resolveDirectory(input.folderId);
     if (!directory) throw new Error('CATALOG_FOLDER_NOT_FOUND');
     const oldPath = path.join(directory.rootPath, directory.relativePath);
@@ -758,13 +803,15 @@ export class CatalogService {
         else if (asset.path.startsWith(prefix)) updateAsset.run(`${nextPrefix}${asset.path.slice(prefix.length)}`, asset.id);
       }
       if (directory.relativePath === '') this.#database.prepare('UPDATE folders SET path = ?, name = ? WHERE id = ?').run(nextPath, input.name, directory.rootId);
+      this.#relocateCreatedDirectories(directory.rootId, oldPath, directory.rootId, nextPath);
       this.#database.exec('COMMIT');
     } catch (error) {
       this.#database.exec('ROLLBACK');
       try { await rename(nextPath, oldPath); } catch { /* preserve the database error */ }
       throw error;
     }
-    const folder = this.listFolders().find((item) => item.id === input.folderId);
+    const nextId = directory.relativePath ? stableDirectoryId(directory.rootId, path.relative(directory.rootPath, nextPath)) : directory.rootId;
+    const folder = this.listFolders().find((item) => item.id === nextId);
     if (!folder) throw new Error('CATALOG_FOLDER_NOT_FOUND');
     return { folder };
   }
@@ -800,6 +847,8 @@ export class CatalogService {
     try {
       const update = this.#database.prepare('UPDATE assets SET folder_id = ?, path = ?, offline_at = NULL WHERE id = ?');
       for (const item of relocations) update.run(target.rootId, item.nextPath, item.assetId);
+      this.#relocateCreatedDirectories(source.rootId, sourcePath, target.rootId, nextPath);
+      this.#database.prepare('INSERT OR IGNORE INTO created_directories (root_id, path) VALUES (?, ?)').run(target.rootId, nextPath);
       if (source.relativePath === '') this.#database.prepare('UPDATE folders SET removed_at = ? WHERE id = ? AND removed_at IS NULL').run(Date.now(), source.rootId);
       this.#database.exec('COMMIT');
     } catch (error) {

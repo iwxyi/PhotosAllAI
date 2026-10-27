@@ -225,6 +225,7 @@ const catalogAssetBaseSchema = z.object({
 
 export const fileWorkflowGroupSchema = z.object({
   id: z.string(), key: z.string(), name: z.string(),
+  stages: z.array(z.object({ id: z.string(), name: z.string() })).optional(),
   members: z.array(z.object({ stageId: z.string(), stageName: z.string(), variant: z.string(), asset: catalogAssetBaseSchema }))
 });
 export type FileWorkflowGroup = z.infer<typeof fileWorkflowGroupSchema>;
@@ -318,6 +319,8 @@ export const renameCatalogFolderInputSchema = z.object({
 export type RenameCatalogFolderInput = z.infer<typeof renameCatalogFolderInputSchema>;
 export const renameCatalogFolderResultSchema = z.object({ folder: catalogFolderSchema });
 export type RenameCatalogFolderResult = z.infer<typeof renameCatalogFolderResultSchema>;
+export const createCatalogFolderInputSchema = z.object({ parentFolderId: z.string().regex(/^[a-f0-9]{32}$/u) });
+export type CreateCatalogFolderInput = z.infer<typeof createCatalogFolderInputSchema>;
 
 export const moveCatalogFolderInputSchema = z.object({
   sourceFolderId: z.string().regex(/^[a-f0-9]{32}$/u),
@@ -1110,6 +1113,7 @@ export interface DesktopApi {
   importFolders(): Promise<CatalogSnapshot | null>;
   relinkCatalogFolder(folderId: string): Promise<RelinkCatalogFolderResult | null>;
   renameCatalogFolder(input: RenameCatalogFolderInput): Promise<RenameCatalogFolderResult>;
+  createCatalogFolder(input: CreateCatalogFolderInput): Promise<RenameCatalogFolderResult>;
   moveCatalogFolder(input: MoveCatalogFolderInput): Promise<MoveCatalogFolderResult>;
   synchronizeCatalogFolder(folderId: string): Promise<CatalogFolderSyncReport>;
   revealCatalogFolder(folderId: string): Promise<boolean>;

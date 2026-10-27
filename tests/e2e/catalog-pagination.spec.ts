@@ -50,7 +50,7 @@ test.afterAll(async () => {
 test('loads cursor pages at the virtualized filmstrip boundary', async () => {
   await page.locator('.catalog-card').first().dblclick();
   await page.keyboard.press('Escape');
-  await expect(page.getByText('205 张照片', { exact: true })).toBeVisible();
+  await expect(page.locator('[data-catalog-tool="count"]')).toContainText('205 张');
   await expect(page.getByRole('button', { name: /最近 30 天 0/ })).toBeVisible();
   await page.getByRole('button', { name: /最近 30 天 0/ }).click();
   await expect(page.getByText('此集合为空')).toBeVisible();
@@ -65,7 +65,7 @@ test('loads cursor pages at the virtualized filmstrip boundary', async () => {
   await options.nth(1).click({ button: 'right' });
   await expect(page.getByRole('menu', { name: '照片菜单 2 张' })).toBeVisible();
   await page.getByRole('menuitem', { name: '添加到收藏' }).click();
-  await expect(page.getByRole('status')).toContainText('已收藏 2 张照片');
+  await expect(page.locator('.operation-toast')).toContainText('已收藏 2 张照片');
   await expect(page.getByRole('button', { name: /收藏 2/ })).toBeVisible();
   await page.screenshot({ path: 'test-results/catalog-batch-favorite.png', animations: 'disabled' });
   const filmstrip = page.locator('.catalog-grid');
@@ -81,10 +81,8 @@ test('loads cursor pages at the virtualized filmstrip boundary', async () => {
 test('grouping loads every photo in the selected folder across cursor pages', async () => {
   await page.reload();
   await expect(page.locator('.catalog-card')).toHaveCount(200);
-  const filterButton = page.getByRole('button', { name: '图库过滤器', exact: true });
-  if (await filterButton.getAttribute('aria-expanded') !== 'true') await filterButton.click();
-  await page.getByRole('button', { name: '配置图库分组字段', exact: true }).click();
-  await page.getByRole('menuitemcheckbox', { name: '月份', exact: true }).click();
+  await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
+  await page.getByRole('checkbox', { name: '分组:月份', exact: true }).click();
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: '按月份分组', exact: true }).click();
   await expect.poll(() => page.locator('.catalog-card').count()).toBe(205);

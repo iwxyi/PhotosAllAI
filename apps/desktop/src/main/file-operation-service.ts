@@ -12,6 +12,7 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import type { CatalogService } from './catalog-service';
 
 import {
   catalogAssetRemovalInputSchema,
@@ -101,19 +102,22 @@ export class FileOperationService {
   readonly #fileSystem: FileSystemPort;
   readonly #systemTrash: SystemTrashPort | null;
   readonly #platform: NodeJS.Platform;
+  readonly #catalog: Pick<CatalogService, 'listFolders' | 'resolveFolderPath'> | null;
   #pending: Promise<void> = Promise.resolve();
 
   constructor(
     databasePath: string,
     fileSystem: FileSystemPort = nodeFileSystem,
     systemTrash: SystemTrashPort | null = null,
-    platform: NodeJS.Platform = process.platform
+    platform: NodeJS.Platform = process.platform,
+    catalog: Pick<CatalogService, 'listFolders' | 'resolveFolderPath'> | null = null
   ) {
     this.#database = new DatabaseSync(databasePath);
     this.#database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.#fileSystem = fileSystem;
     this.#systemTrash = systemTrash;
     this.#platform = platform;
+    this.#catalog = catalog;
     this.#migrate();
   }
 
@@ -830,12 +834,23 @@ export class FileOperationService {
     if (result.changes !== 1) throw new Error('CATALOG_CONCURRENT_CHANGE');
   }
 
+  #resolveTargetFolder(folderId: string): { id: string; path: string } {
+    const root = this.#database.prepare('SELECT id, path FROM folders WHERE id = ? AND removed_at IS NULL')
+      .get(folderId) as { id: string; path: string } | undefined;
+    if (root) return root;
+    const folder = this.#catalog?.listFolders().find((item) => item.id === folderId);
+    const folderPath = folder && this.#catalog?.resolveFolderPath(folderId);
+    if (!folder || !folderPath) throw new Error('TARGET_FOLDER_NOT_FOUND');
+    const activeRoot = this.#database.prepare('SELECT id FROM folders WHERE id = ? AND removed_at IS NULL')
+      .get(folder.rootId) as { id: string } | undefined;
+    if (!activeRoot) throw new Error('TARGET_FOLDER_NOT_FOUND');
+    return { id: activeRoot.id, path: folderPath };
+  }
+
   async #planCopy(operationId: string, input: CopyCatalogAssetsInput): Promise<PlannedItem[]> {
     const assetIds = [...new Set(input.assetIds)];
     if (assetIds.length !== input.assetIds.length) throw new Error('DUPLICATE_ASSET_ID');
-    const target = this.#database.prepare('SELECT id, path FROM folders WHERE id = ? AND removed_at IS NULL')
-      .get(input.targetFolderId) as { id: string; path: string } | undefined;
-    if (!target) throw new Error('TARGET_FOLDER_NOT_FOUND');
+    const target = this.#resolveTargetFolder(input.targetFolderId);
     const targetPath = await this.#fileSystem.realpath(target.path);
     if (!(await this.#fileSystem.stat(targetPath)).isDirectory()) throw new Error('TARGET_NOT_DIRECTORY');
     const placeholders = assetIds.map(() => '?').join(', ');
@@ -942,9 +957,7 @@ export class FileOperationService {
   async #plan(operationId: string, input: MoveCatalogAssetsInput): Promise<PlannedItem[]> {
     const assetIds = [...new Set(input.assetIds)];
     if (assetIds.length !== input.assetIds.length) throw new Error('DUPLICATE_ASSET_ID');
-    const target = this.#database.prepare('SELECT id, path FROM folders WHERE id = ? AND removed_at IS NULL')
-      .get(input.targetFolderId) as { id: string; path: string } | undefined;
-    if (!target) throw new Error('TARGET_FOLDER_NOT_FOUND');
+    const target = this.#resolveTargetFolder(input.targetFolderId);
     const targetPath = await this.#fileSystem.realpath(target.path);
     const targetStats = await this.#fileSystem.stat(targetPath);
     if (!targetStats.isDirectory()) throw new Error('TARGET_NOT_DIRECTORY');
@@ -960,12 +973,12 @@ export class FileOperationService {
     const uniqueRows = [...new Map(operationRows.map((row) => [row.id, row])).values()];
     const reserved = new Set((await this.#fileSystem.readdir(targetPath)).map(normalizeFileName));
     const movingSources = [
-      ...uniqueRows.filter((asset) => asset.folder_id !== target.id).map((asset) => ({ path: asset.path, fileName: asset.file_name })),
-      ...companions.filter((item) => !item.asset && item.owner.folder_id !== target.id).map((item) => ({ path: item.path, fileName: item.fileName }))
+      ...uniqueRows.filter((asset) => path.dirname(asset.path) !== targetPath).map((asset) => ({ path: asset.path, fileName: asset.file_name })),
+      ...companions.filter((item) => !item.asset && path.dirname(item.path) !== targetPath).map((item) => ({ path: item.path, fileName: item.fileName }))
     ];
     const destinationNames = reserveGroupedFileNames(movingSources, reserved);
     const items = uniqueRows.map((asset): PlannedItem => {
-      const skipped = asset.folder_id === target.id;
+      const skipped = path.dirname(asset.path) === targetPath;
       const fileName = skipped ? asset.file_name : destinationNames.get(asset.path)!;
       const itemId = randomUUID();
       return {
@@ -985,7 +998,7 @@ export class FileOperationService {
       };
     });
     for (const companion of companions.filter((item) => !item.asset)) {
-      const skipped = companion.owner.folder_id === target.id;
+      const skipped = path.dirname(companion.path) === targetPath;
       const fileName = skipped ? companion.fileName : destinationNames.get(companion.path)!;
       const itemId = randomUUID();
       items.push({
