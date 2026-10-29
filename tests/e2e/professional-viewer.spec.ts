@@ -36,8 +36,8 @@ test('opens actual files temporarily, browses siblings, and measures physical pi
     const canvas = viewer.locator('.photo-canvas');
     const enlargedWidth = (await canvas.boundingBox())!.width;
     await canvas.dblclick({ position: { x: enlargedWidth / 2, y: (await canvas.boundingBox())!.height / 2 } });
-    const fitBounds = (await canvas.boundingBox())!;
     await expect(viewer.locator('.canvas-wrap')).not.toHaveClass(/is-zoomed/);
+    const fitBounds = (await canvas.boundingBox())!;
     const point = { x: fitBounds.x + fitBounds.width * .6, y: fitBounds.y + fitBounds.height * .55 };
     await page.mouse.dblclick(point.x, point.y);
     await expect(viewer.getByRole('textbox', { name: '缩放比例', exact: true })).toHaveValue('400%');
@@ -74,7 +74,7 @@ test('opens actual files temporarily, browses siblings, and measures physical pi
     await viewer.locator('.canvas-wrap').focus();
     await page.keyboard.press('ArrowRight');
     await expect(viewer.locator('.viewer-title')).toContainText('photo10.jpg');
-    await expect(viewer.locator('.thumb.is-selected')).toContainText('photo10.jpg');
+    await expect(viewer.locator('.thumb.is-selected')).toHaveAttribute('aria-label', 'photo10.jpg');
     await page.getByRole('button', { name: '详情', exact: true }).click();
     await expect(page.locator('.inspector-scroll')).toContainText('photo10.jpg');
     await expect(page.locator('.inspector-scroll')).toContainText('位置');

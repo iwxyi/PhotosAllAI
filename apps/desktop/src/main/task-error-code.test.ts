@@ -21,4 +21,11 @@ describe('task error classification', () => {
   it('keeps unknown provider text private', () => {
     expect(normalizeTaskErrorCode(new Error('secret api-key'), 'ANALYSIS_FAILED')).toBe('ANALYSIS_FAILED');
   });
+
+  it('keeps a bounded provider detail for diagnosing HTTP failures', () => {
+    expect(normalizeTaskErrorCode(new Error('PROVIDER_HTTP_403: model access denied'), 'GENERATION_FAILED'))
+      .toBe('PROVIDER_HTTP_403: model access denied');
+    expect(normalizeTaskErrorCode(new Error(`PROVIDER_HTTP_403: ${'x'.repeat(761)}`), 'GENERATION_FAILED'))
+      .toBe('GENERATION_FAILED');
+  });
 });

@@ -1311,15 +1311,16 @@ export class CatalogService {
     return rows.map((row) => {
       const rootPath = rootPaths.get(row.folder_id);
       const relative = rootPath ? path.relative(rootPath, path.dirname(row.path)) : '';
-      return this.#toAsset(row, tagsByAsset.get(row.id) ?? [], relative && relative !== '.' ? stableDirectoryId(row.folder_id, relative) : row.folder_id);
+      return this.#toAsset(row, tagsByAsset.get(row.id) ?? [], relative && relative !== '.' ? stableDirectoryId(row.folder_id, relative) : row.folder_id, rootPath);
     });
   }
 
-  #toAsset(row: AssetRow, tags: { id: string; name: string }[], directoryId: string): CatalogAsset {
+  #toAsset(row: AssetRow, tags: { id: string; name: string }[], directoryId: string, rootPath?: string): CatalogAsset {
     return catalogAssetSchema.parse({
       id: row.id,
       folderId: row.folder_id,
       directoryId,
+      ...(rootPath ? { relativePath: path.relative(rootPath, row.path).split(path.sep).join('/') } : {}),
       fileName: row.file_name,
       format: row.extension.slice(1).toUpperCase(),
       sizeBytes: row.size_bytes,

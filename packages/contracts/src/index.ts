@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { AgentSession, McpStatus } from './agent';
 import type { FileWorkflowConfig, FileWorkflowScope } from './file-workflow';
 export * from './file-workflow';
 
@@ -209,6 +210,7 @@ const catalogAssetBaseSchema = z.object({
   id: z.string(),
   folderId: z.string(),
   directoryId: z.string().optional(),
+  relativePath: z.string().optional(),
   fileName: z.string(),
   format: z.string(),
   sizeBytes: z.number().nonnegative(),
@@ -954,6 +956,7 @@ export const collectionAnalysisReportSchema = z.object({
 export type CollectionAnalysisReport = z.infer<typeof collectionAnalysisReportSchema>;
 
 export const generationTaskPayloadSchema = z.object({
+  sourceResultId: z.string().uuid().optional(),
   submissionId: z.string().uuid().optional(),
   providerProfileId: z.string().uuid(),
   batchId: z.string().uuid(),
@@ -1070,7 +1073,16 @@ export const imageCacheStatsSchema = z.object({
 export type ImageCacheStats = z.infer<typeof imageCacheStatsSchema>;
 export const pruneImageCacheInputSchema = z.object({ maxBytes: z.number().int().nonnegative().max(100 * 1024 * 1024 * 1024) });
 
+export * from './agent';
 export interface DesktopApi {
+  createAgentSession(input: { assetIds: string[] }): Promise<AgentSession>;
+  getMcpStatus(): Promise<McpStatus>;
+  setMcpEnabled(enabled: boolean): Promise<McpStatus>;
+  listAgentSessions(): Promise<AgentSession[]>;
+  getAgentSession(id: string): Promise<AgentSession>;
+  deleteAgentSession(id: string): Promise<void>;
+  sendAgentMessage(input: { sessionId: string; text: string; assetIds?: string[] }): Promise<AgentSession>;
+  controlAgentSession(input: { sessionId: string; action: 'pause' | 'resume' | 'cancel' | 'approve' | 'reject'; callId?: string }): Promise<AgentSession>;
   getFileWorkflowConfig(): Promise<FileWorkflowConfig>;
   saveFileWorkflowConfig(input: FileWorkflowConfig): Promise<FileWorkflowConfig>;
   previewFileWorkflow(input: FileWorkflowScope & { config: FileWorkflowConfig }): Promise<CatalogAssetPage>;

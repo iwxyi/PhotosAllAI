@@ -175,7 +175,7 @@ test('views gallery and batch images in place and restores source state with Esc
     await page.keyboard.press('Escape');
     await expect(toolbarSettings).toHaveCount(0);
     await expect(viewer).toBeVisible();
-    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('photoallisai.viewer-toolbar.v1')!).find((entry: { id: string }) => entry.id === 'compare').visible)).toBe(false);
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('photoallisai.viewer-toolbar.v2') ?? '[]').find((entry: { id: string }) => entry.id === 'compare')?.visible)).toBe(false);
     await page.keyboard.press('Escape');
     await expect(viewer).toHaveCount(0);
     await source.focus();

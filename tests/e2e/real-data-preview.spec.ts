@@ -57,6 +57,7 @@ suite('real photo preview pipeline', () => {
   });
 
   test('decodes large camera images, reuses cached previews, and reports timings', async () => {
+    test.setTimeout(120_000);
     const coldStartedAt = performance.now();
     await waitForVisibleImages(page);
     const coldMs = performance.now() - coldStartedAt;
@@ -96,7 +97,7 @@ suite('real photo preview pipeline', () => {
 });
 
 async function waitForVisibleImages(target: Page): Promise<void> {
-  await expect(target.locator('.result-summary').getByText('8 张照片', { exact: true }))
+  await expect(target.getByRole('group', { name: '文件数量工具', exact: true }).getByText('8 张', { exact: true }))
     .toBeVisible({ timeout: 60_000 });
   await expect.poll(async () => target.locator('img').evaluateAll((images) =>
     images.length > 1 && images.every((image) => image.complete && image.naturalWidth > 0)

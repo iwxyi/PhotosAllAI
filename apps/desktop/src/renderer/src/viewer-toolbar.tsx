@@ -6,7 +6,7 @@ import { Plus, RotateCcw, X } from 'lucide-react';
 import { ToolbarCustomizeRow } from './toolbar-customize-row';
 
 const labels: Record<string, string> = { compare: '对比', zoom: '缩放', versions: '版本切换', library: '胶片带工具' };
-const storageKey = 'photoallisai.viewer-toolbar.v1';
+const storageKey = 'photoallisai.viewer-toolbar.v2';
 type Entry = { id: string; visible: boolean };
 const defaultOrder = ['versions', 'zoom', 'compare', 'spacer-default', 'library'];
 const legacyOrder = ['compare', 'zoom', 'review', 'versions', 'export', 'spacer-default', 'library'];
@@ -17,7 +17,8 @@ const layoutLabel = (id: string) => labels[id] ?? (isSeparator(id) ? '分割线'
 
 function loadLayout(): Entry[] {
   try {
-    const saved: unknown = JSON.parse(localStorage.getItem(storageKey) ?? 'null');
+    const current = localStorage.getItem(storageKey);
+    const saved: unknown = JSON.parse(current ?? localStorage.getItem('photoallisai.viewer-toolbar.v1') ?? 'null');
     if (!Array.isArray(saved)) return defaults();
     if (saved.length === legacyOrder.length && saved.every((entry, index) => entry?.id === legacyOrder[index] && entry.visible === true)) return defaults();
     const seen = new Set<string>();

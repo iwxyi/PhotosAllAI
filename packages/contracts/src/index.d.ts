@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import type { AgentSession, McpStatus } from './agent';
+import type { FileWorkflowConfig, FileWorkflowScope } from './file-workflow';
+export * from './file-workflow';
 export declare const appInfoSchema: z.ZodObject<{
     name: z.ZodString;
     version: z.ZodString;
@@ -11,9 +14,9 @@ export declare const appInfoSchema: z.ZodObject<{
 export type AppInfo = z.infer<typeof appInfoSchema>;
 export declare const libraryIntegrityReportSchema: z.ZodObject<{
     status: z.ZodEnum<{
+        error: "error";
         healthy: "healthy";
         warning: "warning";
-        error: "error";
     }>;
     databaseStatus: z.ZodEnum<{
         ok: "ok";
@@ -92,18 +95,18 @@ export declare const diagnosticSnapshotSchema: z.ZodObject<{
         }, z.core.$strip>;
         automaticBackup: z.ZodObject<{
             status: z.ZodEnum<{
+                completed: "completed";
                 failed: "failed";
                 pending: "pending";
-                completed: "completed";
                 skipped: "skipped";
             }>;
         }, z.core.$strip>;
     }, z.core.$strip>;
     integrity: z.ZodObject<{
         status: z.ZodEnum<{
+            error: "error";
             healthy: "healthy";
             warning: "warning";
-            error: "error";
         }>;
         databaseStatus: z.ZodEnum<{
             ok: "ok";
@@ -181,7 +184,7 @@ export declare const appSettingsSchema: z.ZodObject<{
     cacheMaxBytes: z.ZodDefault<z.ZodNumber>;
 }, z.core.$strip>;
 export type AppSettings = z.infer<typeof appSettingsSchema>;
-export declare const workspaceTabSchema: z.ZodEnum<{
+export declare const workspaceTabSchema: z.ZodUnion<readonly [z.ZodEnum<{
     tasks: "tasks";
     library: "library";
     viewer: "viewer";
@@ -189,11 +192,11 @@ export declare const workspaceTabSchema: z.ZodEnum<{
     workflow: "workflow";
     templates: "templates";
     settings: "settings";
-}>;
+}>, z.ZodTemplateLiteral<`task:${string}`>]>;
 export type WorkspaceTab = z.infer<typeof workspaceTabSchema>;
 export declare const workspaceSessionV1Schema: z.ZodObject<{
     version: z.ZodLiteral<1>;
-    openTabs: z.ZodArray<z.ZodEnum<{
+    openTabs: z.ZodArray<z.ZodUnion<readonly [z.ZodEnum<{
         tasks: "tasks";
         library: "library";
         viewer: "viewer";
@@ -201,8 +204,8 @@ export declare const workspaceSessionV1Schema: z.ZodObject<{
         workflow: "workflow";
         templates: "templates";
         settings: "settings";
-    }>>;
-    activeTab: z.ZodEnum<{
+    }>, z.ZodTemplateLiteral<`task:${string}`>]>>;
+    activeTab: z.ZodUnion<readonly [z.ZodEnum<{
         tasks: "tasks";
         library: "library";
         viewer: "viewer";
@@ -210,7 +213,7 @@ export declare const workspaceSessionV1Schema: z.ZodObject<{
         workflow: "workflow";
         templates: "templates";
         settings: "settings";
-    }>;
+    }>, z.ZodTemplateLiteral<`task:${string}`>]>;
     library: z.ZodObject<{
         selectedFolderId: z.ZodNullable<z.ZodString>;
         selectedTagId: z.ZodNullable<z.ZodString>;
@@ -221,7 +224,7 @@ export declare const workspaceSessionV1Schema: z.ZodObject<{
 export type WorkspaceSessionV1 = z.infer<typeof workspaceSessionV1Schema>;
 export declare const workspaceSessionSchema: z.ZodObject<{
     version: z.ZodLiteral<2>;
-    openTabs: z.ZodArray<z.ZodEnum<{
+    openTabs: z.ZodArray<z.ZodUnion<readonly [z.ZodEnum<{
         tasks: "tasks";
         library: "library";
         viewer: "viewer";
@@ -229,8 +232,8 @@ export declare const workspaceSessionSchema: z.ZodObject<{
         workflow: "workflow";
         templates: "templates";
         settings: "settings";
-    }>>;
-    activeTab: z.ZodEnum<{
+    }>, z.ZodTemplateLiteral<`task:${string}`>]>>;
+    activeTab: z.ZodUnion<readonly [z.ZodEnum<{
         tasks: "tasks";
         library: "library";
         viewer: "viewer";
@@ -238,7 +241,7 @@ export declare const workspaceSessionSchema: z.ZodObject<{
         workflow: "workflow";
         templates: "templates";
         settings: "settings";
-    }>;
+    }>, z.ZodTemplateLiteral<`task:${string}`>]>;
     library: z.ZodObject<{
         selectedFolderId: z.ZodNullable<z.ZodString>;
         selectedAlbumId: z.ZodNullable<z.ZodString>;
@@ -258,6 +261,10 @@ export declare const workspaceSessionSchema: z.ZodObject<{
             fileName: "fileName";
             rating: "rating";
         }>;
+        sortDirection: z.ZodOptional<z.ZodEnum<{
+            asc: "asc";
+            desc: "desc";
+        }>>;
         searchQuery: z.ZodString;
     }, z.core.$strip>;
 }, z.core.$strip>;
@@ -286,7 +293,7 @@ export declare const menuCommandSchema: z.ZodEnum<{
 }>;
 export type MenuCommand = z.infer<typeof menuCommandSchema>;
 export declare const menuStateSchema: z.ZodObject<{
-    activeTab: z.ZodEnum<{
+    activeTab: z.ZodUnion<readonly [z.ZodEnum<{
         tasks: "tasks";
         library: "library";
         viewer: "viewer";
@@ -294,7 +301,7 @@ export declare const menuStateSchema: z.ZodObject<{
         workflow: "workflow";
         templates: "templates";
         settings: "settings";
-    }>;
+    }>, z.ZodTemplateLiteral<`task:${string}`>]>;
     hasSelection: z.ZodBoolean;
     selectionCount: z.ZodNumber;
     hasVisionProvider: z.ZodBoolean;
@@ -316,24 +323,238 @@ export declare const catalogTagSchema: z.ZodObject<{
 export type CatalogTag = z.infer<typeof catalogTagSchema>;
 export declare const deleteCatalogTagInputSchema: z.ZodString;
 export type DeleteCatalogTagInput = z.input<typeof deleteCatalogTagInputSchema>;
+export declare const fileWorkflowGroupSchema: z.ZodObject<{
+    id: z.ZodString;
+    key: z.ZodString;
+    name: z.ZodString;
+    stages: z.ZodOptional<z.ZodArray<z.ZodObject<{
+        id: z.ZodString;
+        name: z.ZodString;
+    }, z.core.$strip>>>;
+    members: z.ZodArray<z.ZodObject<{
+        stageId: z.ZodString;
+        stageName: z.ZodString;
+        variant: z.ZodString;
+        asset: z.ZodObject<{
+            id: z.ZodString;
+            folderId: z.ZodString;
+            directoryId: z.ZodOptional<z.ZodString>;
+            relativePath: z.ZodOptional<z.ZodString>;
+            fileName: z.ZodString;
+            format: z.ZodString;
+            sizeBytes: z.ZodNumber;
+            modifiedAt: z.ZodNumber;
+            rating: z.ZodNumber;
+            labelColor: z.ZodDefault<z.ZodNullable<z.ZodEnum<{
+                red: "red";
+                yellow: "yellow";
+                green: "green";
+                blue: "blue";
+                purple: "purple";
+            }>>>;
+            flag: z.ZodDefault<z.ZodEnum<{
+                rejected: "rejected";
+                picked: "picked";
+                unflagged: "unflagged";
+            }>>;
+            favorite: z.ZodBoolean;
+            offline: z.ZodBoolean;
+            tags: z.ZodArray<z.ZodObject<{
+                id: z.ZodString;
+                name: z.ZodString;
+            }, z.core.$strip>>;
+            thumbnailUrl: z.ZodString;
+            previewUrl: z.ZodString;
+        }, z.core.$strip>;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
+export type FileWorkflowGroup = z.infer<typeof fileWorkflowGroupSchema>;
+export declare const fileWorkflowStatusSchema: z.ZodObject<{
+    enabled: z.ZodBoolean;
+    matched: z.ZodNumber;
+    unmatched: z.ZodNumber;
+    conflicts: z.ZodNumber;
+}, z.core.$strip>;
 export declare const catalogAssetSchema: z.ZodObject<{
     id: z.ZodString;
     folderId: z.ZodString;
+    directoryId: z.ZodOptional<z.ZodString>;
+    relativePath: z.ZodOptional<z.ZodString>;
     fileName: z.ZodString;
     format: z.ZodString;
     sizeBytes: z.ZodNumber;
     modifiedAt: z.ZodNumber;
     rating: z.ZodNumber;
+    labelColor: z.ZodDefault<z.ZodNullable<z.ZodEnum<{
+        red: "red";
+        yellow: "yellow";
+        green: "green";
+        blue: "blue";
+        purple: "purple";
+    }>>>;
+    flag: z.ZodDefault<z.ZodEnum<{
+        rejected: "rejected";
+        picked: "picked";
+        unflagged: "unflagged";
+    }>>;
     favorite: z.ZodBoolean;
     offline: z.ZodBoolean;
     tags: z.ZodArray<z.ZodObject<{
-        name: z.ZodString;
         id: z.ZodString;
+        name: z.ZodString;
     }, z.core.$strip>>;
     thumbnailUrl: z.ZodString;
     previewUrl: z.ZodString;
+    workflow: z.ZodOptional<z.ZodObject<{
+        id: z.ZodString;
+        key: z.ZodString;
+        name: z.ZodString;
+        stages: z.ZodOptional<z.ZodArray<z.ZodObject<{
+            id: z.ZodString;
+            name: z.ZodString;
+        }, z.core.$strip>>>;
+        members: z.ZodArray<z.ZodObject<{
+            stageId: z.ZodString;
+            stageName: z.ZodString;
+            variant: z.ZodString;
+            asset: z.ZodObject<{
+                id: z.ZodString;
+                folderId: z.ZodString;
+                directoryId: z.ZodOptional<z.ZodString>;
+                fileName: z.ZodString;
+                format: z.ZodString;
+                sizeBytes: z.ZodNumber;
+                modifiedAt: z.ZodNumber;
+                rating: z.ZodNumber;
+                labelColor: z.ZodDefault<z.ZodNullable<z.ZodEnum<{
+                    red: "red";
+                    yellow: "yellow";
+                    green: "green";
+                    blue: "blue";
+                    purple: "purple";
+                }>>>;
+                flag: z.ZodDefault<z.ZodEnum<{
+                    rejected: "rejected";
+                    picked: "picked";
+                    unflagged: "unflagged";
+                }>>;
+                favorite: z.ZodBoolean;
+                offline: z.ZodBoolean;
+                tags: z.ZodArray<z.ZodObject<{
+                    id: z.ZodString;
+                    name: z.ZodString;
+                }, z.core.$strip>>;
+                thumbnailUrl: z.ZodString;
+                previewUrl: z.ZodString;
+            }, z.core.$strip>;
+        }, z.core.$strip>>;
+    }, z.core.$strip>>;
+    workflowConflict: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export type CatalogAsset = z.infer<typeof catalogAssetSchema>;
+export declare const fileDetailsSchema: z.ZodObject<{
+    path: z.ZodString;
+    sizeBytes: z.ZodNumber;
+    modifiedAt: z.ZodNumber;
+    width: z.ZodOptional<z.ZodNumber>;
+    height: z.ZodOptional<z.ZodNumber>;
+    camera: z.ZodOptional<z.ZodString>;
+    lens: z.ZodOptional<z.ZodString>;
+    takenAt: z.ZodOptional<z.ZodString>;
+    cameraMake: z.ZodOptional<z.ZodString>;
+    cameraModel: z.ZodOptional<z.ZodString>;
+    lensMake: z.ZodOptional<z.ZodString>;
+    lensModel: z.ZodOptional<z.ZodString>;
+    city: z.ZodOptional<z.ZodString>;
+    country: z.ZodOptional<z.ZodString>;
+    exposure: z.ZodOptional<z.ZodString>;
+    aperture: z.ZodOptional<z.ZodNumber>;
+    exposureSeconds: z.ZodOptional<z.ZodNumber>;
+    iso: z.ZodOptional<z.ZodNumber>;
+    focalLength: z.ZodOptional<z.ZodNumber>;
+    metadataWarning: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export type FileDetails = z.infer<typeof fileDetailsSchema>;
+export declare const quickViewSessionSchema: z.ZodObject<{
+    items: z.ZodArray<z.ZodObject<{
+        id: z.ZodString;
+        folderId: z.ZodString;
+        directoryId: z.ZodOptional<z.ZodString>;
+        fileName: z.ZodString;
+        format: z.ZodString;
+        sizeBytes: z.ZodNumber;
+        modifiedAt: z.ZodNumber;
+        rating: z.ZodNumber;
+        labelColor: z.ZodDefault<z.ZodNullable<z.ZodEnum<{
+            red: "red";
+            yellow: "yellow";
+            green: "green";
+            blue: "blue";
+            purple: "purple";
+        }>>>;
+        flag: z.ZodDefault<z.ZodEnum<{
+            rejected: "rejected";
+            picked: "picked";
+            unflagged: "unflagged";
+        }>>;
+        favorite: z.ZodBoolean;
+        offline: z.ZodBoolean;
+        tags: z.ZodArray<z.ZodObject<{
+            id: z.ZodString;
+            name: z.ZodString;
+        }, z.core.$strip>>;
+        thumbnailUrl: z.ZodString;
+        previewUrl: z.ZodString;
+        workflow: z.ZodOptional<z.ZodObject<{
+            id: z.ZodString;
+            key: z.ZodString;
+            name: z.ZodString;
+            stages: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                id: z.ZodString;
+                name: z.ZodString;
+            }, z.core.$strip>>>;
+            members: z.ZodArray<z.ZodObject<{
+                stageId: z.ZodString;
+                stageName: z.ZodString;
+                variant: z.ZodString;
+                asset: z.ZodObject<{
+                    id: z.ZodString;
+                    folderId: z.ZodString;
+                    directoryId: z.ZodOptional<z.ZodString>;
+                    fileName: z.ZodString;
+                    format: z.ZodString;
+                    sizeBytes: z.ZodNumber;
+                    modifiedAt: z.ZodNumber;
+                    rating: z.ZodNumber;
+                    labelColor: z.ZodDefault<z.ZodNullable<z.ZodEnum<{
+                        red: "red";
+                        yellow: "yellow";
+                        green: "green";
+                        blue: "blue";
+                        purple: "purple";
+                    }>>>;
+                    flag: z.ZodDefault<z.ZodEnum<{
+                        rejected: "rejected";
+                        picked: "picked";
+                        unflagged: "unflagged";
+                    }>>;
+                    favorite: z.ZodBoolean;
+                    offline: z.ZodBoolean;
+                    tags: z.ZodArray<z.ZodObject<{
+                        id: z.ZodString;
+                        name: z.ZodString;
+                    }, z.core.$strip>>;
+                    thumbnailUrl: z.ZodString;
+                    previewUrl: z.ZodString;
+                }, z.core.$strip>;
+            }, z.core.$strip>>;
+        }, z.core.$strip>>;
+        workflowConflict: z.ZodOptional<z.ZodBoolean>;
+    }, z.core.$strip>>;
+    selectedId: z.ZodString;
+    directory: z.ZodString;
+}, z.core.$strip>;
+export type QuickViewSession = z.infer<typeof quickViewSessionSchema>;
 export declare const catalogAssetCursorSchema: z.ZodObject<{
     modifiedAt: z.ZodNumber;
     id: z.ZodString;
@@ -341,6 +562,7 @@ export declare const catalogAssetCursorSchema: z.ZodObject<{
 }, z.core.$strip>;
 export type CatalogAssetCursor = z.infer<typeof catalogAssetCursorSchema>;
 export declare const listCatalogAssetsInputSchema: z.ZodObject<{
+    assetIds: z.ZodOptional<z.ZodArray<z.ZodString>>;
     folderId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
     tagId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
     albumId: z.ZodDefault<z.ZodNullable<z.ZodString>>;
@@ -353,12 +575,40 @@ export declare const listCatalogAssetsInputSchema: z.ZodObject<{
         "to-review": "to-review";
     }>>>;
     favoriteOnly: z.ZodDefault<z.ZodBoolean>;
+    folderIds: z.ZodDefault<z.ZodArray<z.ZodString>>;
+    dateFrom: z.ZodDefault<z.ZodNullable<z.ZodNumber>>;
+    dateTo: z.ZodDefault<z.ZodNullable<z.ZodNumber>>;
+    months: z.ZodDefault<z.ZodArray<z.ZodString>>;
+    formats: z.ZodDefault<z.ZodArray<z.ZodString>>;
+    minimumRating: z.ZodDefault<z.ZodNullable<z.ZodNumber>>;
+    ratingOperator: z.ZodDefault<z.ZodEnum<{
+        eq: "eq";
+        gte: "gte";
+        lte: "lte";
+    }>>;
+    flags: z.ZodDefault<z.ZodArray<z.ZodEnum<{
+        rejected: "rejected";
+        picked: "picked";
+        unflagged: "unflagged";
+    }>>>;
+    colors: z.ZodDefault<z.ZodArray<z.ZodEnum<{
+        red: "red";
+        yellow: "yellow";
+        green: "green";
+        blue: "blue";
+        purple: "purple";
+    }>>>;
     sortBy: z.ZodDefault<z.ZodEnum<{
         modifiedAt: "modifiedAt";
         fileName: "fileName";
         rating: "rating";
     }>>;
+    sortDirection: z.ZodOptional<z.ZodEnum<{
+        asc: "asc";
+        desc: "desc";
+    }>>;
     query: z.ZodDefault<z.ZodString>;
+    workflow: z.ZodDefault<z.ZodBoolean>;
     cursor: z.ZodDefault<z.ZodNullable<z.ZodObject<{
         modifiedAt: z.ZodNumber;
         id: z.ZodString;
@@ -371,25 +621,89 @@ export declare const catalogAssetPageSchema: z.ZodObject<{
     items: z.ZodArray<z.ZodObject<{
         id: z.ZodString;
         folderId: z.ZodString;
+        directoryId: z.ZodOptional<z.ZodString>;
         fileName: z.ZodString;
         format: z.ZodString;
         sizeBytes: z.ZodNumber;
         modifiedAt: z.ZodNumber;
         rating: z.ZodNumber;
+        labelColor: z.ZodDefault<z.ZodNullable<z.ZodEnum<{
+            red: "red";
+            yellow: "yellow";
+            green: "green";
+            blue: "blue";
+            purple: "purple";
+        }>>>;
+        flag: z.ZodDefault<z.ZodEnum<{
+            rejected: "rejected";
+            picked: "picked";
+            unflagged: "unflagged";
+        }>>;
         favorite: z.ZodBoolean;
         offline: z.ZodBoolean;
         tags: z.ZodArray<z.ZodObject<{
-            name: z.ZodString;
             id: z.ZodString;
+            name: z.ZodString;
         }, z.core.$strip>>;
         thumbnailUrl: z.ZodString;
         previewUrl: z.ZodString;
+        workflow: z.ZodOptional<z.ZodObject<{
+            id: z.ZodString;
+            key: z.ZodString;
+            name: z.ZodString;
+            stages: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                id: z.ZodString;
+                name: z.ZodString;
+            }, z.core.$strip>>>;
+            members: z.ZodArray<z.ZodObject<{
+                stageId: z.ZodString;
+                stageName: z.ZodString;
+                variant: z.ZodString;
+                asset: z.ZodObject<{
+                    id: z.ZodString;
+                    folderId: z.ZodString;
+                    directoryId: z.ZodOptional<z.ZodString>;
+                    fileName: z.ZodString;
+                    format: z.ZodString;
+                    sizeBytes: z.ZodNumber;
+                    modifiedAt: z.ZodNumber;
+                    rating: z.ZodNumber;
+                    labelColor: z.ZodDefault<z.ZodNullable<z.ZodEnum<{
+                        red: "red";
+                        yellow: "yellow";
+                        green: "green";
+                        blue: "blue";
+                        purple: "purple";
+                    }>>>;
+                    flag: z.ZodDefault<z.ZodEnum<{
+                        rejected: "rejected";
+                        picked: "picked";
+                        unflagged: "unflagged";
+                    }>>;
+                    favorite: z.ZodBoolean;
+                    offline: z.ZodBoolean;
+                    tags: z.ZodArray<z.ZodObject<{
+                        id: z.ZodString;
+                        name: z.ZodString;
+                    }, z.core.$strip>>;
+                    thumbnailUrl: z.ZodString;
+                    previewUrl: z.ZodString;
+                }, z.core.$strip>;
+            }, z.core.$strip>>;
+        }, z.core.$strip>>;
+        workflowConflict: z.ZodOptional<z.ZodBoolean>;
     }, z.core.$strip>>;
     totalCount: z.ZodNumber;
     nextCursor: z.ZodNullable<z.ZodObject<{
         modifiedAt: z.ZodNumber;
         id: z.ZodString;
         sortValue: z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+    }, z.core.$strip>>;
+    workflowStatus: z.ZodOptional<z.ZodObject<{
+        enabled: z.ZodBoolean;
+        matched: z.ZodNumber;
+        unmatched: z.ZodNumber;
+        conflicts: z.ZodNumber;
     }, z.core.$strip>>;
 }, z.core.$strip>;
 export type CatalogAssetPage = z.infer<typeof catalogAssetPageSchema>;
@@ -422,6 +736,10 @@ export declare const renameCatalogFolderResultSchema: z.ZodObject<{
     }, z.core.$strip>;
 }, z.core.$strip>;
 export type RenameCatalogFolderResult = z.infer<typeof renameCatalogFolderResultSchema>;
+export declare const createCatalogFolderInputSchema: z.ZodObject<{
+    parentFolderId: z.ZodString;
+}, z.core.$strip>;
+export type CreateCatalogFolderInput = z.infer<typeof createCatalogFolderInputSchema>;
 export declare const moveCatalogFolderInputSchema: z.ZodObject<{
     sourceFolderId: z.ZodString;
     targetFolderId: z.ZodString;
@@ -513,8 +831,8 @@ export type MoveCatalogAssetsInput = z.infer<typeof moveCatalogAssetsInputSchema
 export declare const moveCatalogAssetsReportSchema: z.ZodObject<{
     operationId: z.ZodString;
     status: z.ZodEnum<{
-        failed: "failed";
         completed: "completed";
+        failed: "failed";
     }>;
     total: z.ZodNumber;
     moved: z.ZodNumber;
@@ -537,8 +855,8 @@ export type CopyCatalogAssetsInput = z.infer<typeof copyCatalogAssetsInputSchema
 export declare const copyCatalogAssetsReportSchema: z.ZodObject<{
     operationId: z.ZodString;
     status: z.ZodEnum<{
-        failed: "failed";
         completed: "completed";
+        failed: "failed";
     }>;
     total: z.ZodNumber;
     copied: z.ZodNumber;
@@ -574,8 +892,8 @@ export type RenameCatalogAssetInput = z.infer<typeof renameCatalogAssetInputSche
 export declare const renameCatalogAssetReportSchema: z.ZodObject<{
     operationId: z.ZodString;
     status: z.ZodEnum<{
-        failed: "failed";
         completed: "completed";
+        failed: "failed";
     }>;
     assetId: z.ZodString;
     previousFileName: z.ZodString;
@@ -598,8 +916,8 @@ export declare const renameCatalogAssetsReportSchema: z.ZodObject<{
     reports: z.ZodArray<z.ZodObject<{
         operationId: z.ZodString;
         status: z.ZodEnum<{
-            failed: "failed";
             completed: "completed";
+            failed: "failed";
         }>;
         assetId: z.ZodString;
         previousFileName: z.ZodString;
@@ -620,8 +938,8 @@ export declare const catalogAssetRemovalReportSchema: z.ZodObject<{
         trash: "trash";
     }>;
     status: z.ZodEnum<{
-        failed: "failed";
         completed: "completed";
+        failed: "failed";
         partial: "partial";
     }>;
     total: z.ZodNumber;
@@ -643,11 +961,11 @@ export declare const fileOperationHistoryItemSchema: z.ZodObject<{
         rename: "rename";
     }>;
     status: z.ZodEnum<{
-        failed: "failed";
+        executing: "executing";
         completed: "completed";
+        failed: "failed";
         partial: "partial";
         planned: "planned";
-        executing: "executing";
         compensating: "compensating";
         undoing: "undoing";
         undone: "undone";
@@ -670,8 +988,8 @@ export type UndoFileOperationInput = z.infer<typeof undoFileOperationInputSchema
 export declare const undoFileOperationReportSchema: z.ZodObject<{
     operationId: z.ZodString;
     status: z.ZodEnum<{
-        failed: "failed";
         completed: "completed";
+        failed: "failed";
     }>;
     total: z.ZodNumber;
     undone: z.ZodNumber;
@@ -687,6 +1005,18 @@ export type UndoFileOperationReport = z.infer<typeof undoFileOperationReportSche
 export declare const updateCatalogMetadataInputSchema: z.ZodObject<{
     assetIds: z.ZodArray<z.ZodString>;
     rating: z.ZodOptional<z.ZodNumber>;
+    labelColor: z.ZodOptional<z.ZodNullable<z.ZodEnum<{
+        red: "red";
+        yellow: "yellow";
+        green: "green";
+        blue: "blue";
+        purple: "purple";
+    }>>>;
+    flag: z.ZodOptional<z.ZodEnum<{
+        rejected: "rejected";
+        picked: "picked";
+        unflagged: "unflagged";
+    }>>;
     favorite: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export type UpdateCatalogMetadataInput = z.infer<typeof updateCatalogMetadataInputSchema>;
@@ -700,19 +1030,77 @@ export declare const catalogSnapshotSchema: z.ZodObject<{
     assets: z.ZodArray<z.ZodObject<{
         id: z.ZodString;
         folderId: z.ZodString;
+        directoryId: z.ZodOptional<z.ZodString>;
         fileName: z.ZodString;
         format: z.ZodString;
         sizeBytes: z.ZodNumber;
         modifiedAt: z.ZodNumber;
         rating: z.ZodNumber;
+        labelColor: z.ZodDefault<z.ZodNullable<z.ZodEnum<{
+            red: "red";
+            yellow: "yellow";
+            green: "green";
+            blue: "blue";
+            purple: "purple";
+        }>>>;
+        flag: z.ZodDefault<z.ZodEnum<{
+            rejected: "rejected";
+            picked: "picked";
+            unflagged: "unflagged";
+        }>>;
         favorite: z.ZodBoolean;
         offline: z.ZodBoolean;
         tags: z.ZodArray<z.ZodObject<{
-            name: z.ZodString;
             id: z.ZodString;
+            name: z.ZodString;
         }, z.core.$strip>>;
         thumbnailUrl: z.ZodString;
         previewUrl: z.ZodString;
+        workflow: z.ZodOptional<z.ZodObject<{
+            id: z.ZodString;
+            key: z.ZodString;
+            name: z.ZodString;
+            stages: z.ZodOptional<z.ZodArray<z.ZodObject<{
+                id: z.ZodString;
+                name: z.ZodString;
+            }, z.core.$strip>>>;
+            members: z.ZodArray<z.ZodObject<{
+                stageId: z.ZodString;
+                stageName: z.ZodString;
+                variant: z.ZodString;
+                asset: z.ZodObject<{
+                    id: z.ZodString;
+                    folderId: z.ZodString;
+                    directoryId: z.ZodOptional<z.ZodString>;
+                    fileName: z.ZodString;
+                    format: z.ZodString;
+                    sizeBytes: z.ZodNumber;
+                    modifiedAt: z.ZodNumber;
+                    rating: z.ZodNumber;
+                    labelColor: z.ZodDefault<z.ZodNullable<z.ZodEnum<{
+                        red: "red";
+                        yellow: "yellow";
+                        green: "green";
+                        blue: "blue";
+                        purple: "purple";
+                    }>>>;
+                    flag: z.ZodDefault<z.ZodEnum<{
+                        rejected: "rejected";
+                        picked: "picked";
+                        unflagged: "unflagged";
+                    }>>;
+                    favorite: z.ZodBoolean;
+                    offline: z.ZodBoolean;
+                    tags: z.ZodArray<z.ZodObject<{
+                        id: z.ZodString;
+                        name: z.ZodString;
+                    }, z.core.$strip>>;
+                    thumbnailUrl: z.ZodString;
+                    previewUrl: z.ZodString;
+                }, z.core.$strip>;
+            }, z.core.$strip>>;
+        }, z.core.$strip>>;
+        workflowConflict: z.ZodOptional<z.ZodBoolean>;
     }, z.core.$strip>>;
     importedCount: z.ZodNumber;
 }, z.core.$strip>;
@@ -720,6 +1108,7 @@ export type CatalogSnapshot = z.infer<typeof catalogSnapshotSchema>;
 export declare const providerKindSchema: z.ZodEnum<{
     "openai-compatible": "openai-compatible";
     "nanobanana-compatible": "nanobanana-compatible";
+    "acedata-nano-banana": "acedata-nano-banana";
 }>;
 export type ProviderKind = z.infer<typeof providerKindSchema>;
 export declare const providerPurposeSchema: z.ZodEnum<{
@@ -734,6 +1123,7 @@ export declare const providerProfileSchema: z.ZodObject<{
     kind: z.ZodEnum<{
         "openai-compatible": "openai-compatible";
         "nanobanana-compatible": "nanobanana-compatible";
+        "acedata-nano-banana": "acedata-nano-banana";
     }>;
     purpose: z.ZodEnum<{
         vision: "vision";
@@ -756,6 +1146,7 @@ export declare const saveProviderProfileInputSchema: z.ZodObject<{
     kind: z.ZodEnum<{
         "openai-compatible": "openai-compatible";
         "nanobanana-compatible": "nanobanana-compatible";
+        "acedata-nano-banana": "acedata-nano-banana";
     }>;
     purpose: z.ZodEnum<{
         vision: "vision";
@@ -785,13 +1176,24 @@ export declare const taskKindSchema: z.ZodEnum<{
     agent: "agent";
     export: "export";
 }>;
+export declare const taskBatchInputSchema: z.ZodObject<{
+    kind: z.ZodEnum<{
+        generation: "generation";
+        analysis: "analysis";
+        "collection-analysis": "collection-analysis";
+        agent: "agent";
+        export: "export";
+    }>;
+    batchId: z.ZodString;
+}, z.core.$strip>;
+export type TaskBatchInput = z.infer<typeof taskBatchInputSchema>;
 export declare const taskStatusSchema: z.ZodEnum<{
-    failed: "failed";
+    paused: "paused";
     completed: "completed";
+    failed: "failed";
     canceled: "canceled";
     draft: "draft";
     queued: "queued";
-    paused: "paused";
     preparing: "preparing";
     uploading: "uploading";
     processing: "processing";
@@ -810,12 +1212,12 @@ export declare const persistedTaskSchema: z.ZodObject<{
     assetId: z.ZodNullable<z.ZodString>;
     assetFileName: z.ZodOptional<z.ZodString>;
     status: z.ZodEnum<{
-        failed: "failed";
+        paused: "paused";
         completed: "completed";
+        failed: "failed";
         canceled: "canceled";
         draft: "draft";
         queued: "queued";
-        paused: "paused";
         preparing: "preparing";
         uploading: "uploading";
         processing: "processing";
@@ -840,6 +1242,7 @@ export declare const taskListCursorSchema: z.ZodObject<{
 }, z.core.$strip>;
 export type TaskListCursor = z.infer<typeof taskListCursorSchema>;
 export declare const listTaskPageInputSchema: z.ZodObject<{
+    includeBatchMembers: z.ZodDefault<z.ZodBoolean>;
     limit: z.ZodDefault<z.ZodNumber>;
     cursor: z.ZodDefault<z.ZodNullable<z.ZodObject<{
         sortGroup: z.ZodNumber;
@@ -862,12 +1265,12 @@ export declare const taskPageSchema: z.ZodObject<{
         assetId: z.ZodNullable<z.ZodString>;
         assetFileName: z.ZodOptional<z.ZodString>;
         status: z.ZodEnum<{
-            failed: "failed";
+            paused: "paused";
             completed: "completed";
+            failed: "failed";
             canceled: "canceled";
             draft: "draft";
             queued: "queued";
-            paused: "paused";
             preparing: "preparing";
             uploading: "uploading";
             processing: "processing";
@@ -924,6 +1327,30 @@ export declare const enqueueTaskInputSchema: z.ZodObject<{
 }, z.core.$strip>;
 export type EnqueueTaskInput = z.infer<typeof enqueueTaskInputSchema>;
 export declare const taskIdSchema: z.ZodString;
+export declare const deleteTasksInputSchema: z.ZodObject<{
+    scope: z.ZodEnum<{
+        batch: "batch";
+        task: "task";
+        below: "below";
+        "below-batches": "below-batches";
+        "batch-unfinished": "batch-unfinished";
+        all: "all";
+        unfinished: "unfinished";
+    }>;
+    taskId: z.ZodOptional<z.ZodString>;
+    orderedTaskIds: z.ZodDefault<z.ZodArray<z.ZodString>>;
+}, z.core.$strip>;
+export type DeleteTasksInput = z.input<typeof deleteTasksInputSchema>;
+export declare const taskBatchActionInputSchema: z.ZodObject<{
+    taskId: z.ZodString;
+    action: z.ZodEnum<{
+        pause: "pause";
+        resume: "resume";
+        cancel: "cancel";
+        retry: "retry";
+    }>;
+}, z.core.$strip>;
+export type TaskBatchActionInput = z.input<typeof taskBatchActionInputSchema>;
 export declare const agentStepKindSchema: z.ZodEnum<{
     move: "move";
     export: "export";
@@ -1280,8 +1707,8 @@ export declare const promptTemplateSchema: z.ZodObject<{
 }, z.core.$strip>;
 export type PromptTemplate = z.infer<typeof promptTemplateSchema>;
 export declare const savePromptTemplateInputSchema: z.ZodObject<{
-    name: z.ZodString;
     description: z.ZodString;
+    name: z.ZodString;
     category: z.ZodString;
     body: z.ZodString;
     id: z.ZodOptional<z.ZodString>;
@@ -1392,6 +1819,11 @@ export declare const listGenerationResultsInputSchema: z.ZodObject<{
     assetId: z.ZodString;
 }, z.core.$strip>;
 export declare const analysisTaskPayloadSchema: z.ZodObject<{
+    batchId: z.ZodOptional<z.ZodString>;
+    locale: z.ZodOptional<z.ZodEnum<{
+        "zh-CN": "zh-CN";
+        "en-US": "en-US";
+    }>>;
     providerProfileId: z.ZodString;
     mode: z.ZodDefault<z.ZodEnum<{
         catalog: "catalog";
@@ -1399,6 +1831,10 @@ export declare const analysisTaskPayloadSchema: z.ZodObject<{
     }>>;
 }, z.core.$strip>;
 export declare const collectionAnalysisTaskPayloadSchema: z.ZodObject<{
+    locale: z.ZodOptional<z.ZodEnum<{
+        "zh-CN": "zh-CN";
+        "en-US": "en-US";
+    }>>;
     providerProfileId: z.ZodString;
     assetIds: z.ZodArray<z.ZodString>;
 }, z.core.$strip>;
@@ -1415,6 +1851,8 @@ export declare const collectionAnalysisReportSchema: z.ZodObject<{
 }, z.core.$strip>;
 export type CollectionAnalysisReport = z.infer<typeof collectionAnalysisReportSchema>;
 export declare const generationTaskPayloadSchema: z.ZodObject<{
+    sourceResultId: z.ZodOptional<z.ZodString>;
+    submissionId: z.ZodOptional<z.ZodString>;
     providerProfileId: z.ZodString;
     batchId: z.ZodString;
     prompt: z.ZodString;
@@ -1445,9 +1883,9 @@ export declare const generationResultSchema: z.ZodObject<{
         portable: "portable";
     }>>;
     reviewState: z.ZodEnum<{
+        rejected: "rejected";
         undecided: "undecided";
         accepted: "accepted";
-        rejected: "rejected";
         preferred: "preferred";
     }>;
     createdAt: z.ZodNumber;
@@ -1469,9 +1907,9 @@ export declare const trashedGenerationResultSchema: z.ZodObject<{
         portable: "portable";
     }>>;
     reviewState: z.ZodEnum<{
+        rejected: "rejected";
         undecided: "undecided";
         accepted: "accepted";
-        rejected: "rejected";
         preferred: "preferred";
     }>;
     createdAt: z.ZodNumber;
@@ -1500,9 +1938,9 @@ export type EmptyGenerationTrashReport = z.infer<typeof emptyGenerationTrashRepo
 export declare const updateGenerationResultReviewInputSchema: z.ZodObject<{
     resultId: z.ZodString;
     reviewState: z.ZodEnum<{
+        rejected: "rejected";
         undecided: "undecided";
         accepted: "accepted";
-        rejected: "rejected";
         preferred: "preferred";
     }>;
 }, z.core.$strip>;
@@ -1595,7 +2033,32 @@ export type ImageCacheStats = z.infer<typeof imageCacheStatsSchema>;
 export declare const pruneImageCacheInputSchema: z.ZodObject<{
     maxBytes: z.ZodNumber;
 }, z.core.$strip>;
+export * from './agent';
 export interface DesktopApi {
+    createAgentSession(input: {
+        assetIds: string[];
+    }): Promise<AgentSession>;
+    getMcpStatus(): Promise<McpStatus>;
+    setMcpEnabled(enabled: boolean): Promise<McpStatus>;
+    listAgentSessions(): Promise<AgentSession[]>;
+    getAgentSession(id: string): Promise<AgentSession>;
+    deleteAgentSession(id: string): Promise<void>;
+    sendAgentMessage(input: {
+        sessionId: string;
+        text: string;
+        assetIds?: string[];
+    }): Promise<AgentSession>;
+    controlAgentSession(input: {
+        sessionId: string;
+        action: 'pause' | 'resume' | 'cancel' | 'approve' | 'reject';
+        callId?: string;
+    }): Promise<AgentSession>;
+    getFileWorkflowConfig(): Promise<FileWorkflowConfig>;
+    saveFileWorkflowConfig(input: FileWorkflowConfig): Promise<FileWorkflowConfig>;
+    previewFileWorkflow(input: FileWorkflowScope & {
+        config: FileWorkflowConfig;
+    }): Promise<CatalogAssetPage>;
+    onCatalogChanged(listener: () => void): () => void;
     onMenuCommand(listener: (command: MenuCommand) => void): () => void;
     updateMenuState(state: MenuState): void;
     getAppInfo(): Promise<AppInfo>;
@@ -1634,22 +2097,36 @@ export interface DesktopApi {
     importFolders(): Promise<CatalogSnapshot | null>;
     relinkCatalogFolder(folderId: string): Promise<RelinkCatalogFolderResult | null>;
     renameCatalogFolder(input: RenameCatalogFolderInput): Promise<RenameCatalogFolderResult>;
+    createCatalogFolder(input: CreateCatalogFolderInput): Promise<RenameCatalogFolderResult>;
     moveCatalogFolder(input: MoveCatalogFolderInput): Promise<MoveCatalogFolderResult>;
     synchronizeCatalogFolder(folderId: string): Promise<CatalogFolderSyncReport>;
     revealCatalogFolder(folderId: string): Promise<boolean>;
     unregisterCatalogFolder(input: UnregisterCatalogFolderInput): Promise<UnregisterCatalogFolderReport>;
     revealCatalogAsset(assetId: string): Promise<boolean>;
+    getFileDetails(assetId: string): Promise<FileDetails>;
+    openAssetExternally(assetId: string): Promise<void>;
+    linkImageDirectory(assetId: string): Promise<void>;
+    openImages(paths?: string[]): Promise<QuickViewSession | null>;
+    takePendingOpenImages(): Promise<QuickViewSession | null>;
+    onOpenImages(listener: (session: QuickViewSession) => void): () => void;
+    getDroppedFilePaths(files: File[]): string[];
     listProviderProfiles(): Promise<ProviderProfile[]>;
     saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;
     deleteProviderProfile(profileId: string): Promise<void>;
     testProviderConnection(input: SaveProviderProfileInput): Promise<ConnectionTest>;
     listTaskPage(input: ListTaskPageInput): Promise<TaskPage>;
+    listTaskBatch(input: TaskBatchInput): Promise<PersistedTask[]>;
     getTask(taskId: string): Promise<PersistedTask | null>;
     enqueueTask(input: EnqueueTaskInput): Promise<PersistedTask>;
     cancelTask(taskId: string): Promise<PersistedTask>;
+    deleteTasks(input: DeleteTasksInput): Promise<{
+        deletedIds: string[];
+    }>;
+    actOnTaskBatch(input: TaskBatchActionInput): Promise<number>;
     pauseTask(taskId: string): Promise<PersistedTask>;
     resumeTask(taskId: string): Promise<PersistedTask>;
     retryTask(taskId: string): Promise<PersistedTask>;
+    retryFailedTasks(): Promise<number>;
     moveQueuedTask(input: MoveQueuedTaskInput): Promise<PersistedTask>;
     retryFailedGenerationTasks(input?: RetryFailedGenerationTasksInput): Promise<RetryFailedGenerationTasksReport>;
     updateQueuedGenerationTask(input: UpdateQueuedGenerationTaskInput): Promise<PersistedTask>;

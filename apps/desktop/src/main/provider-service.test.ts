@@ -111,7 +111,7 @@ describe('provider service', () => {
     expect(result.message).toContain(message);
   });
 
-  it('stores only an encrypted credential and returns masked metadata', async () => {
+  it('stores portable credentials and returns masked metadata', async () => {
     const providers = await service();
     const saved = await providers.save({
       name: 'Vision', kind: 'openai-compatible', purpose: 'vision',
@@ -123,6 +123,24 @@ describe('provider service', () => {
     await providers.delete(saved.id);
     await expect(providers.list()).resolves.toEqual([]);
     await expect(providers.resolve(saved.id)).rejects.toThrow('PROVIDER_NOT_FOUND');
+  });
+
+  it('converts unavailable secure storage into a stable credential error', async () => {
+    const { providers, settingsPath } = await serviceWithPath();
+    const saved = await providers.save({
+      name: 'Vision', kind: 'openai-compatible', purpose: 'vision',
+      baseUrl: 'https://example.com/v1', modelId: 'vision-model', apiKey: 'secret-key', enabled: true
+    });
+    const stored = JSON.parse(await readFile(settingsPath, 'utf8'));
+    stored[0].encryptedCredential = stored[0].credential;
+    delete stored[0].credential;
+    await writeFile(settingsPath, JSON.stringify(stored));
+    const unavailable = new ProviderService(settingsPath, {
+      available: () => false,
+      encrypt: (value) => value,
+      decrypt: () => { throw new Error('Error while decrypting the ciphertext provided to safeStorage.decryptString. Decryption is not available'); }
+    });
+    await expect(unavailable.resolve(saved.id)).rejects.toThrow('CREDENTIAL_STORAGE_UNAVAILABLE');
   });
 
   it('replaces provider settings repeatedly without transaction artifacts', async () => {

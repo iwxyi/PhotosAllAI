@@ -1526,7 +1526,11 @@ function validateRenamedFileName(requested: string, current: string): string {
   }
   const deviceStem = fileName.split('.')[0]!.toUpperCase();
   if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/u.test(deviceStem)) throw new Error('INVALID_FILE_NAME');
-  if (path.extname(fileName).toLocaleLowerCase('en-US') !== path.extname(current).toLocaleLowerCase('en-US')) {
+  const requestedExtension = path.extname(fileName).toLocaleLowerCase('en-US');
+  const currentExtension = path.extname(current).toLocaleLowerCase('en-US');
+  const jpegFamily = new Set([requestedExtension, currentExtension]);
+  const isJpegFamilyRename = jpegFamily.size <= 2 && [...jpegFamily].every((extension) => extension === '.jpg' || extension === '.jpeg');
+  if (requestedExtension !== currentExtension && !isJpegFamilyRename) {
     throw new Error('FILE_EXTENSION_CHANGE_NOT_ALLOWED');
   }
   return fileName;

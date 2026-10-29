@@ -7,6 +7,10 @@ import { pathToFileURL } from 'node:url';
 import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, safeStorage, shell, type MenuItemConstructorOptions } from 'electron';
 import {
   appInfoSchema,
+  createAgentSessionSchema,
+  agentSessionIdSchema,
+  agentSendSchema,
+  agentControlSchema,
   appSettingsSchema,
   fileWorkflowConfigSchema,
   previewFileWorkflowInputSchema,
@@ -88,6 +92,14 @@ import { FileOperationService } from './file-operation-service';
 import { ProviderService } from './provider-service';
 import { replaceRegularFileSafely } from './safe-file-write';
 import { TaskService } from './task-service';
+import { AgentRuntime } from './agent-runtime';
+import { AgentStore } from './agent-store';
+import { ProviderAgentModel } from './agent-model';
+import { AgentVision } from './agent-vision';
+import { createAgentTools } from './agent-tools';
+import { createAgentAppTools } from './agent-app-tools';
+import { createAgentProgramTools } from './agent-program-tools';
+import { AgentMcpServer } from './agent-mcp';
 import { TaskRunner } from './task-runner';
 import { AgentProcessor } from './agent-processor';
 import { toRendererTask } from './task-sanitizer';
@@ -102,7 +114,7 @@ import { LibraryRestoreService } from './library-restore-service';
 import { LibraryIntegrityService } from './library-integrity-service';
 import { classifyAutomaticBackupFailure, classifyAutomaticBackupResult, type AutomaticBackupStatus } from './automatic-backup-status';
 import { settleBeforeShutdown } from './shutdown-coordinator';
-import { createStartupFailureDialog } from './startup-failure';
+import { createStartupFailureDialog, writeStartupFailureLog } from './startup-failure';
 import { getWindowChromeOptions } from './window-chrome';
 
 const APP_ORIGIN = 'app://photoallisai';
@@ -124,6 +136,8 @@ let exportService: ExportService;
 let exportPresets: ExportPresetService;
 let fileOperations: FileOperationService;
 let taskRunner: TaskRunner;
+let agentRuntime: AgentRuntime;
+let agentMcp: AgentMcpServer;
 let workspace: WorkspaceService;
 let appSettings: AppSettingsService;
 let databaseBackup: DatabaseBackupService;
@@ -651,8 +665,20 @@ function registerIpc(): void {
     const task = tasks.find(taskIdSchema.parse(taskId));
     return task ? toRendererTask(task) : null;
   });
+  ipcMain.handle('agent.sessions.create.v1', (_event, input: unknown) => agentRuntime.create(createAgentSessionSchema.parse(input).assetIds));
+  ipcMain.handle('agent.sessions.list.v1', () => agentRuntime.list());
+  ipcMain.handle('agent.mcp.status.v1', () => agentMcp.status());
+  ipcMain.handle('agent.mcp.enable.v1', (_event, enabled: unknown) => {
+    if (typeof enabled !== 'boolean') throw new Error('INVALID_MCP_ENABLED');
+    return agentMcp.setEnabled(enabled);
+  });
+  ipcMain.handle('agent.sessions.get.v1', (_event, id: unknown) => agentRuntime.get(agentSessionIdSchema.parse(id)));
+  ipcMain.handle('agent.sessions.delete.v1', (_event, id: unknown) => { agentRuntime.delete(agentSessionIdSchema.parse(id)); });
+  ipcMain.handle('agent.sessions.send.v1', (_event, input: unknown) => { const value = agentSendSchema.parse(input); return agentRuntime.send(value.sessionId, value.text, value.assetIds); });
+  ipcMain.handle('agent.sessions.control.v1', (_event, input: unknown) => { const value = agentControlSchema.parse(input); return agentRuntime.control(value.sessionId, value.action, value.callId); });
   ipcMain.handle('tasks.enqueue.v1', async (_event, input: unknown) => {
     const parsed = enqueueTaskInputSchema.parse(input);
+    if (parsed.kind === 'agent') throw new Error('请使用 Agent 会话安排任务。');
     if (parsed.kind === 'export') throw new Error('EXPORT_TASK_REQUIRES_DIRECTORY_SELECTION');
     if (parsed.kind === 'analysis' || parsed.kind === 'collection-analysis') {
       parsed.payload.locale ??= (await appSettings.get()).locale;
@@ -928,8 +954,10 @@ app.on('second-instance', (_event, argv) => {
 });
 app.on('activate', showMainWindow);
 
+let startupStage = '准备启动';
 app.whenReady().then(async () => {
   if (!hasLock) return;
+  startupStage = '检查待恢复图库';
   const libraryDirectory = join(app.getPath('userData'), 'library');
   const prospectiveDatabasePath = join(libraryDirectory, 'catalog.sqlite');
   libraryBackup = new LibraryBackupService(prospectiveDatabasePath, join(libraryDirectory, 'generated'));
@@ -942,21 +970,26 @@ app.whenReady().then(async () => {
   }
   mkdirSync(libraryDirectory, { recursive: true });
   const databasePath = prospectiveDatabasePath;
+  startupStage = '检查数据库与迁移';
   const migration = new DatabaseMigrationService(databasePath);
   const migrationCheckpoint = await migration.prepare(APPLICATION_SCHEMA_VERSION);
+  startupStage = '读取工作区与设置';
   workspace = new WorkspaceService(databasePath);
   appSettings = new AppSettingsService(join(app.getPath('userData'), 'settings', 'app.json'));
   const initialAppSettings = await appSettings.get();
   appLocale = initialAppSettings.locale;
   databaseBackup = new DatabaseBackupService(databasePath);
+  startupStage = '初始化图库';
   catalog = new CatalogService(databasePath);
   imageFiles = new ImageFileService(catalog);
   fileWorkflows = new FileWorkflowService(join(app.getPath('userData'), 'settings', 'file-workflows.json'), catalog);
+  startupStage = '检查关联文件夹';
   await catalog.reconcileImportedFolders();
   catalogWatcher = new CatalogWatcher(catalog, { onChanged: () => {
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1');
   } });
   catalogWatcher.watchFolders(catalog.listFolderPaths());
+  startupStage = '初始化文件操作与任务';
   fileOperations = new FileOperationService(databasePath, undefined, {
     trashItem: (filePath) => shell.trashItem(filePath)
   }, process.platform, catalog);
@@ -967,6 +1000,7 @@ app.whenReady().then(async () => {
   );
   await imageCache.cleanupTemporaryFiles();
   void imageCache.prune(initialAppSettings.cacheMaxBytes);
+  startupStage = '初始化模型服务';
   providers = new ProviderService(join(app.getPath('userData'), 'settings', 'providers.json'), {
     available: () => safeStorage.isEncryptionAvailable(),
     encrypt: (value) => safeStorage.encryptString(value).toString('base64'),
@@ -980,6 +1014,7 @@ app.whenReady().then(async () => {
     imageCache,
     catalog
   );
+  startupStage = '恢复中断的文件操作';
   const trashPurges = await generation.recoverInterruptedTrashPurges();
   const recoveredFileOperations = await fileOperations.recoverInterruptedOperations(async (change) => {
     await generation.relocatePortableResults(
@@ -996,6 +1031,7 @@ app.whenReady().then(async () => {
   libraryIntegrity = new LibraryIntegrityService(databasePath, join(libraryDirectory, 'generated'));
   exportService = new ExportService(databasePath, generation);
   exportPresets = new ExportPresetService(databasePath);
+  startupStage = '完成数据库迁移';
   await migration.complete(APPLICATION_SCHEMA_VERSION, migrationCheckpoint);
   taskRunner = new TaskRunner(tasks, analysis, generation, {
     export: async (rawPayload, signal, taskId) => {
@@ -1013,6 +1049,39 @@ app.whenReady().then(async () => {
       return report;
     }
   }, new AgentProcessor({ catalog: { listAssets: catalog.listAssets.bind(catalog), updateMetadata: catalog.updateMetadata.bind(catalog), updateTags: catalog.updateTags.bind(catalog), removeFromCatalog: (input) => fileOperations.removeFromCatalog(input) }, files: { move: (input) => fileOperations.move(input) }, generation, providers }));
+  startupStage = '初始化 Agent';
+  const agentVision = new AgentVision(providers, imageCache, generation);
+  const agentChanged = () => { for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1'); };
+  const agentTools = [...createAgentTools({
+    catalog, providers, analysis, generation, files: fileOperations, tasks,
+    inspect: (input, signal) => agentVision.inspect(input, signal),
+    wake: () => taskRunner.wake(),
+    changed: agentChanged
+  }), ...createAgentAppTools({ catalog, generation, files: fileOperations, workflows: fileWorkflows, tasks, wake: () => taskRunner.wake(), changed: agentChanged }),
+  ...createAgentProgramTools({ catalog, generation, files: fileOperations, tasks, templates, exportPresets, settings: appSettings,
+    wake: () => taskRunner.wake(), cancelTask: (id) => taskRunner.cancel(id), changed: agentChanged,
+    watchFolders: () => catalogWatcher.watchFolders(catalog.listFolderPaths()), diagnostics: createDiagnosticSnapshot,
+    relocate: relocatePortableAfterFileOperation,
+    settingsChanged: async () => { const settings = await appSettings.get(); appLocale = settings.locale; buildApplicationMenu(); await imageCache.setMaxBytes(settings.cacheMaxBytes); }
+  })].map((tool) => {
+    if (!['files.move', 'files.rename', 'files.rename-many', 'files.undo'].includes(tool.name)) return tool;
+    const execute = tool.execute;
+    return { ...tool, execute: async (args: unknown, context: Parameters<typeof execute>[1]) => {
+      const ids = tool.name === 'files.undo' ? fileOperations.getUndoAssetIds(String((args as { operationId: string }).operationId)) : context.session.assetIds;
+      const before = new Map(ids.map((id) => [id, catalog.resolveAssetFile(id)]));
+      try { return await execute(args, context); }
+      finally {
+        for (const [id, previous] of before) await relocatePortableAfterFileOperation(id, previous);
+        agentChanged();
+      }
+    } };
+  });
+  agentRuntime = new AgentRuntime(new AgentStore(databasePath), new ProviderAgentModel(providers), agentTools, (id) => { const task = tasks.find(id); if (task && !['completed', 'failed', 'canceled'].includes(task.status)) { tasks.cancel(id); taskRunner.cancel(id); } });
+  agentMcp = new AgentMcpServer(agentRuntime, async (session, kind, id) => {
+    const allowed = kind === 'original' ? session.assetIds.includes(id) : session.assetIds.some((assetId) => generation.list(assetId).some((r) => r.id === id));
+    if (!allowed) throw new Error('图片超出会话范围');
+    return agentVision.preview(id, kind);
+  });
   void databaseBackup.createAutomatic(join(libraryDirectory, 'backups'))
     .then((result) => {
       startupRecovery.automaticBackup.status = classifyAutomaticBackupResult(result);
@@ -1047,6 +1116,7 @@ app.whenReady().then(async () => {
   };
   scheduleContentHashPass();
 
+  startupStage = '注册图片协议';
   protocol.handle('photoasset', async (request) => {
     const url = new URL(request.url);
     if (!['thumbnail', 'preview', 'original', 'temporary', 'temporary-thumbnail'].includes(url.host)) {
@@ -1083,16 +1153,21 @@ app.whenReady().then(async () => {
     return net.fetch(pathToFileURL(resultPath).toString());
   });
 
+  startupStage = '注册应用接口';
   registerIpc();
   taskRunner.start();
   startupReady = true;
+  startupStage = '打开主窗口';
   showMainWindow();
   buildApplicationMenu();
   const startupPaths = [...pendingOpenPaths, ...process.argv.filter((arg) => isAbsolute(arg) && isSupportedImage(arg))];
   pendingOpenPaths = [];
   if (startupPaths.length) void openImagePaths([...new Set(startupPaths)]).catch(reportOpenFailure);
 }).catch((error: unknown) => {
-  const failure = createStartupFailureDialog(error);
+  console.error('[startup] failed to open library', error);
+  const logPath = join(app.getPath('userData'), 'logs', 'startup-failure.log');
+  const logged = writeStartupFailureLog(logPath, startupStage, error);
+  const failure = createStartupFailureDialog(error, startupStage, logged ? logPath : undefined);
   dialog.showErrorBox(failure.title, failure.content);
   app.exit(1);
 });
@@ -1117,13 +1192,15 @@ app.on('before-quit', (event) => {
       catalogWatcher?.stop();
       const result = await settleBeforeShutdown([
         ...(taskRunner ? [taskRunner.stop()] : []),
+        ...(agentRuntime ? [agentRuntime.stop()] : []),
+        ...(agentMcp ? [agentMcp.stop()] : []),
         ...(contentHashPass ? [contentHashPass] : [])
       ], 9_000);
       if (result === 'timed-out') {
         app.exit(0);
         return;
       }
-      for (const service of [workspace, generation, exportService, exportPresets, analysis, templates, tasks, fileOperations, catalog]) {
+      for (const service of [agentRuntime, workspace, generation, exportService, exportPresets, analysis, templates, tasks, fileOperations, catalog]) {
         try {
           service?.close();
         } catch (error) {

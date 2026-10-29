@@ -2,6 +2,14 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { DesktopApi, MenuCommand } from '@photoallisai/contracts';
 
 const api: DesktopApi = {
+  createAgentSession: (input) => ipcRenderer.invoke('agent.sessions.create.v1', input),
+  getMcpStatus: () => ipcRenderer.invoke('agent.mcp.status.v1'),
+  setMcpEnabled: (enabled) => ipcRenderer.invoke('agent.mcp.enable.v1', enabled),
+  listAgentSessions: () => ipcRenderer.invoke('agent.sessions.list.v1'),
+  getAgentSession: (id) => ipcRenderer.invoke('agent.sessions.get.v1', id),
+  deleteAgentSession: (id) => ipcRenderer.invoke('agent.sessions.delete.v1', id),
+  sendAgentMessage: (input) => ipcRenderer.invoke('agent.sessions.send.v1', input),
+  controlAgentSession: (input) => ipcRenderer.invoke('agent.sessions.control.v1', input),
   getFileDetails: (id) => ipcRenderer.invoke('image.details.v1', id),
   openAssetExternally: (id) => ipcRenderer.invoke('image.open-external.v1', id),
   linkImageDirectory: (id) => ipcRenderer.invoke('image.link-directory.v1', id),

@@ -1,7 +1,52 @@
 import path from 'node:path';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { _electron as electron, expect, test } from '@playwright/test';
+import { CatalogService } from '../../apps/desktop/src/main/catalog-service';
+
+test('updates an open viewer from folder navigation and preserves filmstrip multiselection', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'photo-viewer-folder-'));
+  const userData = path.join(directory, 'user-data');
+  const firstFolder = path.join(directory, 'first');
+  const secondFolder = path.join(directory, 'second');
+  await mkdir(path.join(userData, 'library'), { recursive: true });
+  await mkdir(firstFolder);
+  await mkdir(secondFolder);
+  const fixture = path.resolve('apps/desktop/src/renderer/public/demo/portrait.jpg');
+  for (const name of ['A.jpg', 'B.jpg', 'C.jpg']) await copyFile(fixture, path.join(firstFolder, name));
+  await copyFile(fixture, path.join(secondFolder, 'Other.jpg'));
+  const catalog = new CatalogService(path.join(userData, 'library', 'catalog.sqlite'));
+  await catalog.importFolders([firstFolder, secondFolder]);
+  catalog.close();
+  const app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js')], env: { ...process.env, PHOTOALLISAI_USER_DATA: userData } });
+  try {
+    const page = await app.firstWindow();
+    await page.getByRole('treeitem', { name: /^first / }).click();
+    await expect(page.locator('.catalog-card')).toHaveCount(3);
+    await page.locator('.catalog-card').first().dblclick();
+    const viewer = page.getByRole('region', { name: '看图', exact: true });
+    const thumbs = viewer.locator('.thumb');
+    await expect(thumbs).toHaveCount(3);
+    await expect(viewer.locator('.thumb-index, .selection-check')).toHaveCount(0);
+    await thumbs.first().click();
+    await thumbs.nth(1).click({ modifiers: ['Control'] });
+    await expect(viewer.locator('.thumb[aria-selected="true"]')).toHaveCount(2);
+    await expect(viewer.locator('.thumb.is-selected')).toHaveAttribute('data-asset-id', (await thumbs.nth(1).getAttribute('data-asset-id'))!);
+    await thumbs.first().click();
+    await thumbs.last().click({ modifiers: ['Shift'] });
+    await expect(viewer.locator('.thumb[aria-selected="true"]')).toHaveCount(3);
+    await page.getByRole('treeitem', { name: /^second / }).click();
+    await expect(viewer.locator('.viewer-title')).toContainText('Other.jpg');
+    await expect(thumbs).toHaveCount(1);
+    await expect(viewer.locator('.base-image')).toHaveClass(/is-ready/);
+    await page.getByRole('treeitem', { name: /^first / }).click();
+    await expect(thumbs).toHaveCount(3);
+    await expect(viewer.locator('.viewer-title')).toContainText('A.jpg');
+  } finally {
+    await app.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('switches portrait and landscape previews without painting the previous image at the next aspect ratio', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'photo-viewer-switch-'));

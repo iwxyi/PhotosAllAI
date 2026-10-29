@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   enqueueTaskInputSchema,
+  taskIdSchema,
   deleteTasksInputSchema,
   type DeleteTasksInput,
   generationTaskPayloadSchema,
@@ -287,10 +288,10 @@ export class TaskService {
     });
   }
 
-  enqueue(rawInput: EnqueueTaskInput): PersistedTask {
+  enqueue(rawInput: EnqueueTaskInput, reservedId?: string): PersistedTask {
     const input = enqueueTaskInputSchema.parse(rawInput);
     const now = Date.now();
-    const id = randomUUID();
+    const id = reservedId ? taskIdSchema.parse(reservedId) : randomUUID();
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       // Different entry points can submit the same photo before the UI refreshes.

@@ -45,7 +45,7 @@ test('serves bounded cached images without exposing file paths', async () => {
   await page.locator('.catalog-card').first().dblclick();
   await expect(page.getByText('IMPORTED_PORTRAIT.jpg', { exact: true }).first()).toBeVisible();
 
-  const thumbnail = page.locator('.thumb', { hasText: 'IMPORTED_PORTRAIT.jpg' }).locator('img');
+  const thumbnail = page.locator('.thumb[data-asset-id]').locator('img').first();
   const preview = page.locator('.base-image');
   await expect(thumbnail).toHaveAttribute('src', /^photoasset:\/\/thumbnail\//);
   await expect(preview).toHaveAttribute('src', /^photoasset:\/\/original\//);
@@ -62,14 +62,14 @@ test('serves bounded cached images without exposing file paths', async () => {
   await expect(page.getByRole('treeitem', { name: /source 1/ })).toBeVisible();
   await page.keyboard.press('Escape');
   await page.getByRole('treeitem', { name: /source 1/ }).click();
-  await expect(page.getByText('1 张照片', { exact: true })).toBeVisible();
+  await expect(page.locator('.catalog-card')).toHaveCount(1);
   await page.locator('.catalog-card').first().click({ button: 'right' });
-  await page.getByRole('button', { name: '4 星' }).click();
+  await page.getByRole('button', { name: '4 星', exact: true }).click();
   await page.reload();
   await page.locator('.catalog-card').first().dblclick();
   await expect(page.getByText('IMPORTED_PORTRAIT.jpg', { exact: true }).first()).toBeVisible();
   await page.locator('.canvas-wrap').click({ button: 'right' });
-  await expect(page.getByRole('button', { name: '4 星' }).locator('svg')).toHaveAttribute('fill', 'currentColor');
+  await expect(page.getByRole('button', { name: '4 星', exact: true }).locator('svg')).toHaveAttribute('fill', 'currentColor');
   await page.getByRole('menuitem', { name: /添加标签/ }).click();
   await page.getByPlaceholder('人像, 夜景').fill('测试人像');
   await page.getByRole('button', { name: '应用' }).click();

@@ -496,11 +496,13 @@ export class GenerationService {
     if (provider.profile.purpose !== 'generation') throw new Error('PROVIDER_DOES_NOT_SUPPORT_GENERATION');
     const source = this.#catalog.resolveAssetFile(assetId);
     if (!source) throw new Error('ASSET_NOT_FOUND');
-    const previewPath = await this.#images.getOrCreate(assetId, 'preview');
+    if (payload.sourceResultId && !this.list(assetId).some((result) => result.id === payload.sourceResultId)) throw new Error('GENERATION_SOURCE_RESULT_INVALID');
+    const previewPath = payload.sourceResultId ? this.resolveResultFile(payload.sourceResultId) : await this.#images.getOrCreate(assetId, 'preview');
     if (!previewPath) throw new Error('ASSET_PREVIEW_NOT_FOUND');
     const inputImage = await readFile(previewPath);
 
-    const bytes = await requestGeneratedImage(provider, payload.prompt, inputImage, signal);
+    const sourceFormat = payload.sourceResultId ? detectImageFormat(inputImage) : 'jpg';
+    const bytes = await requestGeneratedImage(provider, payload.prompt, inputImage, signal, sourceFormat === 'jpg' ? 'image/jpeg' : `image/${sourceFormat}`);
     signal?.throwIfAborted();
     const format = detectImageFormat(bytes);
     const id = randomUUID();
@@ -822,7 +824,8 @@ async function requestGeneratedImage(
   provider: ResolvedProvider,
   prompt: string,
   inputImage: Buffer,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  inputMime = 'image/jpeg'
 ): Promise<Buffer> {
   const aceData = provider.profile.kind === 'acedata-nano-banana';
   const endpoint = aceData
@@ -833,14 +836,14 @@ async function requestGeneratedImage(
         action: 'edit',
         model: provider.profile.modelId,
         prompt,
-        image_urls: [`data:image/jpeg;base64,${inputImage.toString('base64')}`],
+        image_urls: [`data:${inputMime};base64,${inputImage.toString('base64')}`],
         count: 1
       }
     : {
         model: provider.profile.modelId,
         prompt,
         n: 1,
-        image: { mime_type: 'image/jpeg', data: inputImage.toString('base64') }
+        image: { mime_type: inputMime, data: inputImage.toString('base64') }
       };
   const response = await fetchBounded(endpoint, {
     method: 'POST',
@@ -853,7 +856,7 @@ async function requestGeneratedImage(
     retryCount: provider.profile.retryCount,
     signal
   });
-  if (!response.ok) throw new Error(`PROVIDER_HTTP_${response.status}`);
+  if (!response.ok) throw new Error(providerHttpError(response.status, response.bytes.toString('utf8')));
   const payload: unknown = JSON.parse(response.bytes.toString('utf8'));
   const candidate = extractImageCandidate(payload);
   if (candidate.base64) {
@@ -871,6 +874,20 @@ async function requestGeneratedImage(
   const bytes = download.bytes;
   if (bytes.byteLength === 0 || bytes.byteLength > MAX_RESULT_BYTES) throw new Error('GENERATED_IMAGE_INVALID_SIZE');
   return bytes;
+}
+
+function providerHttpError(status: number, body: string): string {
+  let detail = '';
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown; message?: unknown; detail?: unknown; code?: unknown };
+    const error = parsed.error && typeof parsed.error === 'object' ? parsed.error as Record<string, unknown> : undefined;
+    const candidates = [error?.message, error?.detail, error?.code, parsed.message, parsed.detail, parsed.code];
+    detail = candidates.find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim() ?? '';
+  } catch {
+    detail = body.replace(/\s+/gu, ' ').trim();
+  }
+  detail = detail.replace(/(?:api[_ -]?key|authorization|bearer)\s*[:=]\s*[^,;\s]+/giu, '$1=[redacted]').slice(0, 760);
+  return detail ? `PROVIDER_HTTP_${status}: ${detail}` : `PROVIDER_HTTP_${status}`;
 }
 
 export function isPrivateAddress(address: string): boolean {

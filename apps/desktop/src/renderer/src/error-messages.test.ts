@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { analysisFailureMessage, fileOperationFailureMessage } from './error-messages';
+import { analysisFailureMessage, fileOperationFailureMessage, generationFailureMessage } from './error-messages';
 
 describe('renderer error messages', () => {
   it('explains analysis failures with relevant recovery actions', () => {
@@ -23,6 +23,17 @@ describe('renderer error messages', () => {
     expect(analysisFailureMessage(null)).toContain('未保存具体失败原因');
     expect(analysisFailureMessage('ANALYSIS_FAILED')).toContain('未保存具体失败原因');
     expect(analysisFailureMessage('/Users/private/api-key')).not.toContain('/Users/');
+  });
+
+  it('shows the provider detail saved with a generation HTTP failure', () => {
+    const message = generationFailureMessage('PROVIDER_HTTP_403: model access denied');
+    expect(message).toContain('模型权限');
+    expect(message).toContain('model access denied');
+  });
+
+  it('keeps provider detail when a generation failure uses the shared analysis message', () => {
+    expect(generationFailureMessage('PROVIDER_HTTP_418: provider says try later'))
+      .toContain('provider says try later');
   });
 
   it('maps known operation failures without exposing internal codes', () => {

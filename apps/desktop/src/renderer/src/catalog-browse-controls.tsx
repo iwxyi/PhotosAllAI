@@ -8,11 +8,12 @@ import { browseDimensions, browseLabels, defaultGroupOrder, type BrowseDimension
 import { ToolbarCustomizeRow } from './toolbar-customize-row';
 
 const dimensions = Object.keys(browseDimensions) as BrowseDimension[];
-const toolLabels: Record<string, string> = { title: '标题', count: '文件数量', workflow: '流程配置', view: '视图', sort: '排序', search: '搜索', stars: '星级', flags: '留用', colors: '颜色', favorites: '收藏', reset: '重置' };
+const toolLabels: Record<string, string> = { title: '标题', count: '文件数量', workflow: '流程配置', version: '流程版本', view: '视图', sort: '排序', search: '搜索', stars: '星级', flags: '留用', colors: '颜色', favorites: '收藏', reset: '重置' };
 const toolIds = Object.keys(toolLabels);
+const defaultTools = toolIds.filter((id) => !['sort', 'search', 'view'].includes(id));
 const allItems = ['title', 'count', 'date', 'folder', ...dimensions.filter((id) => id !== 'date' && id !== 'folder'), 'spacer-default', ...toolIds.filter((id) => id !== 'title' && id !== 'count')];
 const orderKey = 'photoallisai.catalog-toolbar-order.v2';
-const visibleToolsKey = 'photoallisai.catalog-toolbar-tools.v2';
+const visibleToolsKey = 'photoallisai.catalog-toolbar-tools.v3';
 const isDecoration = (id: string) => id.startsWith('spacer-') || id.startsWith('separator-');
 const labelFor = (id: string) => isDecoration(id) ? (id.startsWith('spacer-') ? '弹性空白' : '分割线') : toolLabels[id] ?? `分组:${browseLabels[id as BrowseDimension]}`;
 const isDimension = (id: string): id is BrowseDimension => dimensions.includes(id as BrowseDimension);
@@ -41,12 +42,13 @@ export function CatalogBrowseControls({ value, onChange, pending = 0, total = 0,
   const [shownTools, setShownTools] = useState<string[]>(() => {
     try {
       const current = localStorage.getItem(visibleToolsKey);
-      const saved: unknown = JSON.parse(current ?? localStorage.getItem('photoallisai.catalog-toolbar-tools') ?? 'null');
-      if (current === null && Array.isArray(saved)) return ['title', 'count', ...toolIds.filter((id) => saved.includes(id))];
+      const saved: unknown = JSON.parse(current ?? localStorage.getItem('photoallisai.catalog-toolbar-tools.v2') ?? localStorage.getItem('photoallisai.catalog-toolbar-tools') ?? 'null');
+      if (current === null && Array.isArray(saved)) return ['title', 'count', 'version', ...toolIds.filter((id) => saved.includes(id))];
       if (Array.isArray(saved)) return toolIds.filter((id) => saved.includes(id));
     } catch { /* restricted storage */ }
-    return toolIds.filter((id) => id !== 'sort' && id !== 'search');
+    return defaultTools;
   });
+  useEffect(() => { try { localStorage.setItem(visibleToolsKey, JSON.stringify(shownTools)); } catch { /* restricted storage */ } }, [shownTools]);
   const [toolbarOrder, setToolbarOrder] = useState<string[]>(() => {
     try {
       const saved: unknown = JSON.parse(localStorage.getItem(orderKey) ?? localStorage.getItem('photoallisai.catalog-group-toolbar-order') ?? 'null');
@@ -176,7 +178,7 @@ export function CatalogBrowseControls({ value, onChange, pending = 0, total = 0,
       <button className="catalog-group-menu-disclosure" type="button" aria-expanded={exifOpen} onClick={() => setExifOpen((open) => !open)}>EXIF <ChevronDown size={13} className={exifOpen ? 'is-open' : ''} /></button>
       </div>
       <footer><button type="button" onClick={() => addDecoration('separator')}><Plus size={14} />分割线</button><button type="button" onClick={() => addDecoration('spacer')}><Plus size={14} />弹性空白</button><button type="button" onClick={() => {
-        setToolbarOrder(allItems); setVisible([]); setShownTools(toolIds.filter((id) => id !== 'sort' && id !== 'search'));
+        setToolbarOrder(allItems); setVisible([]); setShownTools(defaultTools);
         try { localStorage.setItem(orderKey, JSON.stringify(allItems)); localStorage.removeItem('photoallisai.catalog-filter-fields'); localStorage.removeItem(visibleToolsKey); localStorage.removeItem('photoallisai.catalog-toolbar-tools'); } catch { /* restricted storage */ }
       }}><RotateCcw size={13} />恢复默认</button></footer>
     </div></div>, document.body)}

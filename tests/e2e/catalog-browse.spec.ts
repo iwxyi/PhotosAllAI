@@ -45,7 +45,20 @@ test('gallery dimensions group the complete folder with independent masonry sect
     await expect(page.locator('[data-catalog-tool="title"]')).toContainText('所有照片');
     await expect(page.locator('[data-catalog-tool="count"]')).toContainText('6 张');
     await expect(page.locator('.catalog-photo-group')).toHaveCount(0);
-    await expect(page.getByRole('button', { name: '瀑布流视图', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.locator('[data-catalog-tool="view"]')).toHaveCount(0);
+    await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
+    await page.getByRole('checkbox', { name: '视图', exact: true }).check();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('button', { name: '等高瀑布流', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.locator('.catalog-grid')).toHaveClass(/catalog-justified/);
+    await expect.poll(() => page.locator('.catalog-card img.is-ready').count()).toBe(6);
+    await expect.poll(() => page.locator('.catalog-card').evaluateAll((cards) => {
+      const frames = cards.map((card) => card.querySelector('.catalog-card-image')!.getBoundingClientRect());
+      const rows = new Map<number, DOMRect[]>();
+      for (const frame of frames) rows.set(Math.round(frame.top), [...(rows.get(Math.round(frame.top)) ?? []), frame]);
+      return rows.size >= 2 && [...rows.values()].every((row) => row.every((frame) => Math.abs(frame.height - row[0]!.height) < 2));
+    })).toBe(true);
+    await page.getByRole('button', { name: '瀑布流视图', exact: true }).click();
     await expect(page.locator('[data-catalog-tool="sort"]')).toHaveCount(0);
     await expect(page.locator('[data-catalog-tool="search"]')).toHaveCount(0);
     await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
@@ -96,6 +109,12 @@ test('gallery dimensions group the complete folder with independent masonry sect
     await page.getByRole('button', { name: '按月份分组', exact: true }).click();
     await expect(page.locator('.catalog-card')).toHaveCount(6);
     await expect(page.locator('.catalog-photo-group')).toHaveCount(5);
+    await page.getByRole('button', { name: '等高瀑布流', exact: true }).click();
+    await expect.poll(() => page.locator('.catalog-grid').evaluate((grid) => grid.scrollWidth <= grid.clientWidth)).toBe(true);
+    await expect(page.locator('.catalog-photo-group')).toHaveCount(5);
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(1000, 640));
+    await expect.poll(() => page.locator('.catalog-grid').evaluate((grid) => grid.scrollWidth <= grid.clientWidth)).toBe(true);
+    await page.getByRole('button', { name: '瀑布流视图', exact: true }).click();
     const galleryOrder = await page.locator('.catalog-card').evaluateAll((cards) => cards.map((card) => card.getAttribute('data-asset-id')));
     await page.locator('.catalog-card').first().dblclick();
     const viewer = page.getByRole('region', { name: '看图', exact: true });

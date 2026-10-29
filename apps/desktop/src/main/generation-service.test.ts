@@ -27,7 +27,8 @@ async function fixture(
   publishTemporaryFile?: ConstructorParameters<typeof GenerationService>[5],
   moveFile?: ConstructorParameters<typeof GenerationService>[6],
   providerKind: ProviderProfile['kind'] = 'nanobanana-compatible',
-  onRequest?: (url: string | undefined, body: string) => void
+  onRequest?: (url: string | undefined, body: string) => void,
+  responseStatus = 200
 ): Promise<{ service: GenerationService; directory: string; sourcePath: string; setSourcePath: (value: string) => void }> {
   const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-generation-'));
   temporaryDirectories.push(directory);
@@ -50,7 +51,7 @@ async function fixture(
     request.on('data', (chunk: Buffer) => chunks.push(chunk));
     request.on('end', () => {
       onRequest?.(request.url, Buffer.concat(chunks).toString('utf8'));
-      response.writeHead(200, { 'content-type': 'application/json' });
+      response.writeHead(responseStatus, { 'content-type': 'application/json' });
       response.end(JSON.stringify(responseBody(origin)));
     });
   });
@@ -95,6 +96,22 @@ function payload(resultIndex = 1) {
 }
 
 describe('managed generation results', () => {
+  it('preserves the provider reason when generation is rejected with HTTP 403', async () => {
+    const { service } = await fixture(
+      () => ({ error: { message: 'model access denied for this account' } }),
+      undefined,
+      undefined,
+      undefined,
+      'nanobanana-compatible',
+      undefined,
+      403
+    );
+
+    await expect(service.generate('asset-1', payload()))
+      .rejects.toThrow('PROVIDER_HTTP_403: model access denied for this account');
+    service.close();
+  });
+
   it('calls ACE Data Nano Banana edit API with the source image and downloads image_url output', async () => {
     let requestPath: string | undefined;
     let requestBody = '';
@@ -116,6 +133,18 @@ describe('managed generation results', () => {
     });
     expect(await readFile(path.join(directory, 'managed', 'generated', 'as', 'asset-1', batchId, result.fileName))).toEqual(png);
     service.close();
+  });
+
+  it('iterates from a same-photo AI result with its real MIME type and rejects other-photo sources', async () => {
+    const requests: string[] = [];
+    const { service } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }), undefined, undefined, undefined, 'nanobanana-compatible', (_url, body) => requests.push(body));
+    try {
+      const first = await service.generate('asset-1', payload());
+      await service.generate('asset-1', { ...payload(), sourceResultId: first.id });
+      expect(JSON.parse(requests[1]!).image).toEqual({ mime_type: 'image/png', data: png.toString('base64') });
+      await expect(service.generate('asset-other', { ...payload(), sourceResultId: first.id })).rejects.toThrow('GENERATION_SOURCE_RESULT_INVALID');
+      expect(requests).toHaveLength(2);
+    } finally { service.close(); }
   });
 
   it('persists base64 output with a versioned filename and manifest', async () => {

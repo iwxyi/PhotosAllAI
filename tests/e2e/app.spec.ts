@@ -31,6 +31,9 @@ test('starts in a secure library with catalog selection', async () => {
   await expect(page.locator('.catalog-card')).toHaveCount(6);
   await expect(page.getByLabel('添加关联文件夹')).toBeVisible();
   expect(await page.evaluate(() => ({ api: typeof window.desktopApi, node: typeof (window as unknown as { process?: unknown }).process }))).toEqual({ api: 'object', node: 'undefined' });
+  await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
+  await page.getByRole('checkbox', { name: '视图', exact: true }).check();
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: '列表视图', exact: true }).click();
   const all = page.getByRole('checkbox', { name: '全选当前列表', exact: true });
   await all.check();

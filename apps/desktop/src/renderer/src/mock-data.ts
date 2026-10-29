@@ -5,6 +5,7 @@ export type Photo = {
   workflowConflict?: boolean;
   id: string;
   folderId?: string;
+  relativePath?: string;
   modifiedAt?: number;
   sizeBytes?: number;
   fileName: string;

@@ -12,6 +12,9 @@ test('list fields persist and Ctrl wheel or Chromium pinch scales only gallery t
     page.on('pageerror', (error) => errors.push(error.message));
     await expect(page.locator('.catalog-card')).toHaveCount(6);
     await expect(page.getByRole('button', { name: '分析视图', exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
+    await page.getByRole('checkbox', { name: '视图', exact: true }).check();
+    await page.keyboard.press('Escape');
     await page.getByRole('button', { name: '列表视图', exact: true }).click();
     await page.locator('.catalog-list-header').click({ button: 'right' });
     const menu = page.getByRole('menu', { name: '显示字段', exact: true });

@@ -1,15 +1,18 @@
 export function generationFailureMessage(code: string | null | undefined): string {
-  switch (code) {
-    case 'PROVIDER_HTTP_400': return '生图请求被拒绝，请检查模型 ID、接口类型及提示词。';
-    case 'PROVIDER_HTTP_403': return '生图请求被拒绝，请检查权限或调整提示词与参考图。';
-    case 'PROVIDER_IMAGE_MISSING': return '接口没有返回生成图片，请重试或检查接口兼容性。';
-    case 'GENERATED_IMAGE_FORMAT_UNSUPPORTED': return '返回的文件不是支持的图片格式。';
-    case 'GENERATED_IMAGE_INVALID_SIZE': return '生成图片为空或超过大小限制。';
-    case 'PROVIDER_NOT_FOUND': return '生成模型配置不存在，请到设置中检查。';
-    case 'PROVIDER_RESPONSE_NOT_JSON': return '生图接口未返回有效 JSON，请检查接口地址及服务状态。';
+  const [base = '', ...detailParts] = (code ?? '').split(': ');
+  const detail = detailParts.join(': ');
+  const explain = (message: string) => detail ? `${message}（服务端详情：${detail}）` : message;
+  switch (base) {
+    case 'PROVIDER_HTTP_400': return explain('生图请求被拒绝，请检查模型 ID、接口类型及提示词。');
+    case 'PROVIDER_HTTP_403': return explain('生图请求被拒绝，请检查账号权限、模型权限、内容策略或参考图权限。');
+    case 'PROVIDER_IMAGE_MISSING': return explain('接口没有返回生成图片，请重试或检查接口兼容性。');
+    case 'GENERATED_IMAGE_FORMAT_UNSUPPORTED': return explain('返回的文件不是支持的图片格式。');
+    case 'GENERATED_IMAGE_INVALID_SIZE': return explain('生成图片为空或超过大小限制。');
+    case 'PROVIDER_NOT_FOUND': return explain('生成模型配置不存在，请到设置中检查。');
+    case 'PROVIDER_RESPONSE_NOT_JSON': return explain('生图接口未返回有效 JSON，请检查接口地址及服务状态。');
     default:
-      if (code?.startsWith('PROVIDER_HTTP_') || ['PROVIDER_REQUEST_TIMEOUT', 'PROVIDER_CONNECTION_FAILED', 'PROVIDER_CREDENTIAL_MISSING', 'PROVIDER_DISABLED'].includes(code ?? '')) return analysisFailureMessage(code);
-      return '生成失败，请复制错误信息或在任务中心查看详情。';
+      if (base.startsWith('PROVIDER_HTTP_') || ['PROVIDER_REQUEST_TIMEOUT', 'PROVIDER_CONNECTION_FAILED', 'PROVIDER_CREDENTIAL_MISSING', 'PROVIDER_DISABLED'].includes(base)) return explain(analysisFailureMessage(base));
+      return explain('生成失败，请复制错误信息或在任务中心查看详情。');
   }
 }
 
@@ -23,7 +26,7 @@ export function analysisFailureMessage(code: string | null | undefined): string 
     case 'TASK_DATABASE_BUSY': return '图库数据库正忙，请稍后重试。';
     case 'PROVIDER_NOT_FOUND': return '分析模型配置不存在，请重新选择模型。';
     case 'PROVIDER_DISABLED': return '分析模型已停用，请在设置中启用或更换模型。';
-    case 'CREDENTIAL_STORAGE_UNAVAILABLE': return '系统凭据存储不可用，请检查系统钥匙串后重新配置 API 密钥。';
+    case 'CREDENTIAL_STORAGE_UNAVAILABLE': return '旧版 API 密钥无法解密，请重新填写并保存；新保存的密钥可随应用配置迁移。';
     case 'PROVIDER_REQUEST_INVALID': return '无法创建模型请求，请检查服务地址与自定义请求头。';
     case 'PROVIDER_CREDENTIAL_MISSING': return '未配置 API 密钥，请在模型设置中填写。';
     case 'PROVIDER_DOES_NOT_SUPPORT_VISION': return '所选模型配置不支持视觉分析，请选择视觉模型。';

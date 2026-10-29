@@ -11,6 +11,9 @@ test('masonry keeps full image proportions, selection and inline viewing across 
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
     await expect(page.locator('.catalog-card')).toHaveCount(6);
+    await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
+    await page.getByRole('checkbox', { name: '视图', exact: true }).check();
+    await page.keyboard.press('Escape');
     await page.getByRole('button', { name: '瀑布流视图', exact: true }).click();
     const grid = page.locator('.catalog-masonry');
     for (const [width, height] of [[1440, 900], [1000, 600]]) {

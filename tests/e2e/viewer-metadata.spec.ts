@@ -22,7 +22,7 @@ test('viewer rating and color update immediately and persist after reopening', a
     const viewer = page.getByRole('region', { name: '看图', exact: true });
     const openMenu = async () => {
       await viewer.locator('.canvas-wrap').click({ button: 'right' });
-      return viewer.getByRole('menu', { name: /照片菜单/ });
+      return page.getByRole('menu', { name: /照片菜单/ });
     };
     let menu = await openMenu();
     await menu.getByRole('button', { name: '4 星', exact: true }).click();
@@ -74,6 +74,9 @@ test('color mats stay consistent across library views, batch queue and filtered 
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
     await expect(page.locator('.catalog-card[data-label-color]')).toHaveCount(5);
+    await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
+    await page.getByRole('checkbox', { name: '视图', exact: true }).check();
+    await page.keyboard.press('Escape');
     await mkdir('test-results', { recursive: true });
     const themePalettes: Record<string, string[]> = {};
     for (const theme of ['light', 'dark']) {
@@ -82,7 +85,7 @@ test('color mats stay consistent across library views, batch queue and filtered 
         await page.getByRole('button', { name: mode, exact: true }).click();
         const items = page.locator(mode === '列表视图' ? '.catalog-list-row' : '.catalog-card');
         await expect(items.locator('.photo-color-swatch')).toHaveCount(0);
-        const backgrounds = await items.evaluateAll((elements) => elements.map((element) => getComputedStyle(element).backgroundColor));
+        const backgrounds = await (mode === '列表视图' ? items : items.locator('.catalog-card-image')).evaluateAll((elements) => elements.map((element) => getComputedStyle(element).backgroundColor));
         expect(new Set(backgrounds).size).toBe(5);
         if (mode === '网格视图') themePalettes[theme] = backgrounds;
         else expect(backgrounds).toEqual(themePalettes[theme]);
@@ -96,10 +99,10 @@ test('color mats stay consistent across library views, batch queue and filtered 
     await red.dblclick();
     const viewer = page.getByRole('region', { name: '看图', exact: true });
     await expect(viewer.locator('.thumb[data-label-color]')).toHaveCount(5);
-    expect(await viewer.locator('.thumb[data-label-color]').evaluateAll((elements) => elements.map((element) => getComputedStyle(element).backgroundColor))).toEqual(themePalettes.dark);
+    expect(await viewer.locator('.thumb[data-label-color] > img').evaluateAll((elements) => elements.map((element) => getComputedStyle(element).backgroundColor))).toEqual(themePalettes.dark);
     await page.screenshot({ path: 'test-results/color-mats-filmstrip.png' });
     await viewer.locator('.canvas-wrap').click({ button: 'right' });
-    await viewer.getByRole('menu').getByRole('menuitem', { name: /加入 AI 批量修图/ }).click();
+    await page.getByRole('menu', { name: /照片菜单/ }).getByRole('menuitem', { name: /加入 AI 批量修图/ }).click();
     await page.keyboard.press('Escape');
     await expect(page.locator('.batch-queue-original[data-label-color="red"]')).toBeVisible();
     await page.getByRole('textbox', { name: /搜索图库/ }).fill('green');

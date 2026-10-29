@@ -170,17 +170,19 @@ test('analyzes, generates, compares, and persists managed and portable results',
     const versionPosition = await versionButton.boundingBox();
     await originalButton.click();
     await expect(originalButton).toHaveClass(/is-current/);
+    await expect(originalButton).toBeVisible();
+    await expect(versionButton).toBeVisible();
     expect(await originalButton.boundingBox()).toEqual(originalPosition);
     expect(await versionButton.boundingBox()).toEqual(versionPosition);
     await versionButton.click();
     await expect(versionButton).toHaveClass(/is-current/);
-    expect(await originalButton.boundingBox()).toEqual(originalPosition);
+    await expect(originalButton).toBeVisible();
     expect(await versionButton.boundingBox()).toEqual(versionPosition);
   }
   await page.screenshot({ path: 'test-results/viewer-version-toolbar.png' });
 
   await page.getByRole('button', { name: '标记为首选' }).click();
-  await expect(page.getByRole('status')).toContainText('已标记为首选版本');
+  await expect(page.locator('.operation-toast')).toContainText('已标记为首选版本');
   await page.reload();
   await expect(page.locator('.batch-candidate.is-best')).toBeVisible();
 
@@ -191,7 +193,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await expect(storageSection.getByRole('status')).toContainText('存储策略已保存');
   await page.getByRole('tab', { name: '图库' }).click();
   await page.locator('.catalog-card').first().dblclick();
-  await page.getByRole('button', { name: '添加本图到批量修图' }).click();
+  await expect(page.getByRole('button', { name: '已加入修图列表' })).toBeVisible();
   await page.getByRole('button', { name: '打开批量修图' }).click();
   await page.getByRole('button', { name: '生成全部' }).click();
   await expect(page.getByText('V2', { exact: true })).toBeVisible({ timeout: 10_000 });

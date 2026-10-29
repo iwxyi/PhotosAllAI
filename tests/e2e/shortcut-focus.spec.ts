@@ -48,6 +48,9 @@ test('select all follows text and photo-list focus', async () => {
     await cards.first().focus();
     await invokeSelectAll();
     await expect(selectedCards).toHaveCount(await cards.count());
+    await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
+    await page.getByRole('checkbox', { name: '视图', exact: true }).check();
+    await page.keyboard.press('Escape');
     await page.getByRole('button', { name: '列表视图', exact: true }).click();
     const header = page.getByRole('checkbox', { name: '全选当前列表', exact: true });
     await header.uncheck();

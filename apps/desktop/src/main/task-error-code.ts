@@ -1,4 +1,4 @@
-const STABLE_ERROR_CODE = /^(?:ANALYSIS|COLLECTION_ANALYSIS|ASSET|CREDENTIAL|EXPORT|GENERATED_IMAGE|GENERATION|IMAGE|PROVIDER|TASK)_[A-Z0-9_]+$/u;
+const STABLE_ERROR_CODE = /^(?:ANALYSIS|COLLECTION_ANALYSIS|ASSET|CREDENTIAL|EXPORT|GENERATED_IMAGE|GENERATION|IMAGE|PROVIDER|TASK)_[A-Z0-9_]+(?:: [^\r\n]{1,760})?$/u;
 
 export function normalizeTaskErrorCode(error: unknown, fallback: string): string {
   if (error instanceof Error && error.name === 'ZodError') return 'TASK_DATA_INVALID';
@@ -13,5 +13,5 @@ export function normalizeTaskErrorCode(error: unknown, fallback: string): string
     }
   }
   const candidate = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
-  return candidate.length <= 200 && STABLE_ERROR_CODE.test(candidate) ? candidate : fallback;
+  return candidate.length <= 800 && STABLE_ERROR_CODE.test(candidate) ? candidate : fallback;
 }

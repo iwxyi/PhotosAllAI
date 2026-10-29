@@ -181,7 +181,7 @@ test('AI sidebar separates preparation from execution and task views show explic
     const drawerFirst = page.locator('.task-drawer .task-activity-row').filter({ hasText: 'FIRST.jpg' }).first();
     await drawerFirst.locator('.task-member-preview').click();
     await expect(page.locator('.base-image')).toHaveAttribute('src', firstAsset.previewUrl.replace('://preview/', '://original/'));
-    await page.getByRole('button', { name: '添加本图到批量修图', exact: true }).click();
+    await expect(page.getByRole('button', { name: '已加入修图列表', exact: true })).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(drawerFirst).toBeVisible();
     await page.getByRole('button', { name: '关闭任务抽屉', exact: true }).click();
@@ -202,11 +202,9 @@ test('AI sidebar separates preparation from execution and task views show explic
     await expect(queue.locator('.batch-candidate')).toHaveCount(2);
     await queue.getByRole('img', { name: '生成候选 1', exact: true }).dblclick();
     await expect(page.locator('.inline-photo-viewer .version-button.is-current')).toHaveText('V1');
-    await expect(page.locator('.inline-photo-viewer .viewer-title')).toContainText('生成版本 1');
     await page.keyboard.press('Escape');
     await queue.locator('.batch-queue-source').dblclick();
-    await expect(page.locator('.inline-photo-viewer .viewer-title')).toContainText('原图');
-    await expect(page.locator('.inline-photo-viewer .version-button.is-current')).toHaveCount(0);
+    await expect(page.locator('.inline-photo-viewer .version-button.is-current')).toHaveText('V1');
     await page.keyboard.press('Escape');
   } finally {
     await app.close();

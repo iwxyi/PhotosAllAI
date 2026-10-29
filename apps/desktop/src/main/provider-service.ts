@@ -16,6 +16,8 @@ import { createProviderRequestHeaders } from './provider-request-headers';
 import { fetchBounded } from './network-safety';
 
 type StoredProviderProfile = Omit<ProviderProfile, 'hasCredential'> & {
+  /** Portable credential for new profiles. Kept outside the public profile shape. */
+  credential?: string;
   encryptedCredential?: string;
 };
 
@@ -62,8 +64,8 @@ export class ProviderService {
   }
 
   async list(): Promise<ProviderProfile[]> {
-    return (await this.#read()).map(({ encryptedCredential, ...profile }) =>
-      providerProfileSchema.parse({ ...profile, hasCredential: Boolean(encryptedCredential) })
+    return (await this.#read()).map(({ credential, encryptedCredential, ...profile }) =>
+      providerProfileSchema.parse({ ...profile, hasCredential: Boolean(credential || encryptedCredential) })
     );
   }
 
@@ -71,11 +73,22 @@ export class ProviderService {
     const stored = (await this.#read()).find((profile) => profile.id === profileId);
     if (!stored) throw new Error('PROVIDER_NOT_FOUND');
     if (!stored.enabled) throw new Error('PROVIDER_DISABLED');
-    if (!stored.encryptedCredential) throw new Error('PROVIDER_CREDENTIAL_MISSING');
-    const { encryptedCredential, ...profile } = stored;
+    const { credential, encryptedCredential, ...profile } = stored;
+    let apiKey = credential;
+    if (!apiKey && encryptedCredential) {
+      try {
+        apiKey = this.#cipher.decrypt(encryptedCredential);
+      } catch {
+      // Keychain/safeStorage can become unavailable after the user rejects the
+      // macOS access prompt. Keep the profile intact and return a stable error
+      // that the UI can explain instead of exposing Electron's raw exception.
+        throw new Error('CREDENTIAL_STORAGE_UNAVAILABLE');
+      }
+    }
+    if (!apiKey) throw new Error('PROVIDER_CREDENTIAL_MISSING');
     return {
       profile: providerProfileSchema.parse({ ...profile, hasCredential: true }),
-      apiKey: this.#cipher.decrypt(encryptedCredential)
+      apiKey
     };
   }
 
@@ -86,10 +99,10 @@ export class ProviderService {
     const id = input.id ?? randomUUID();
     const credential = input.apiKey?.trim();
 
-    if (credential && !this.#cipher.available()) throw new Error('CREDENTIAL_STORAGE_UNAVAILABLE');
-    const encryptedCredential = credential
-      ? this.#cipher.encrypt(credential)
-      : existing?.encryptedCredential;
+    // New credentials are deliberately portable. Legacy encrypted credentials
+    // remain readable until the user replaces them with a new value.
+    const storedCredential = credential || existing?.credential;
+    const encryptedCredential = credential ? undefined : existing?.encryptedCredential;
 
     const next: StoredProviderProfile = {
       id,
@@ -104,6 +117,7 @@ export class ProviderService {
       enabled: input.enabled,
       isDefault: input.enabled && (input.isDefault ?? existing?.isDefault ?? false),
       updatedAt: Date.now(),
+      ...(storedCredential ? { credential: storedCredential } : {}),
       ...(encryptedCredential ? { encryptedCredential } : {})
     };
 
@@ -113,8 +127,8 @@ export class ProviderService {
     const updated = withDefaults(replaced.map((profile) => next.isDefault && profile.id !== id && profile.purpose === next.purpose
       ? { ...profile, isDefault: false } : profile));
     await this.#write(updated);
-    const { encryptedCredential: storedCredential, ...profile } = updated.find((profile) => profile.id === id)!;
-    return providerProfileSchema.parse({ ...profile, hasCredential: Boolean(storedCredential) });
+    const { credential: savedCredential, encryptedCredential: savedEncryptedCredential, ...profile } = updated.find((profile) => profile.id === id)!;
+    return providerProfileSchema.parse({ ...profile, hasCredential: Boolean(savedCredential || savedEncryptedCredential) });
   }
 
   async delete(profileId: string): Promise<void> {
@@ -128,9 +142,14 @@ export class ProviderService {
     const input = saveProviderProfileInputSchema.parse(rawInput);
     const profiles = await this.#read();
     const existing = input.id ? profiles.find((profile) => profile.id === input.id) : undefined;
-    const credential = input.apiKey?.trim() ?? (
-      existing?.encryptedCredential ? this.#cipher.decrypt(existing.encryptedCredential) : ''
-    );
+    let credential = input.apiKey?.trim() ?? existing?.credential ?? '';
+    if (!credential && existing?.encryptedCredential) {
+      try {
+        credential = this.#cipher.decrypt(existing.encryptedCredential);
+      } catch {
+        throw new Error('CREDENTIAL_STORAGE_UNAVAILABLE');
+      }
+    }
     if (!credential) return connectionTestSchema.parse({ ok: false, message: '请先填写 API Key', latencyMs: 0 });
 
     const baseUrl = normalizeBaseUrl(input.baseUrl);
@@ -198,14 +217,21 @@ export class ProviderService {
           await quarantineInvalidRegularFile(this.#settingsPath);
           return [];
         }
+        const credential = 'credential' in item && typeof item.credential === 'string'
+          ? item.credential
+          : undefined;
         const encryptedCredential = 'encryptedCredential' in item && typeof item.encryptedCredential === 'string'
           ? item.encryptedCredential
           : undefined;
+        if ('credential' in item && item.credential !== undefined && !credential) {
+          await quarantineInvalidRegularFile(this.#settingsPath);
+          return [];
+        }
         if ('encryptedCredential' in item && item.encryptedCredential !== undefined && !encryptedCredential) {
           await quarantineInvalidRegularFile(this.#settingsPath);
           return [];
         }
-        profiles.push({ ...parsed.data, ...(encryptedCredential ? { encryptedCredential } : {}) });
+        profiles.push({ ...parsed.data, ...(credential ? { credential } : {}), ...(encryptedCredential ? { encryptedCredential } : {}) });
       }
       return withDefaults(profiles);
     } catch (error) {

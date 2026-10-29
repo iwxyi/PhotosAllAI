@@ -1,4 +1,5 @@
 import { z } from 'zod';
+export * from './file-workflow';
 export const appInfoSchema = z.object({
     name: z.string(),
     version: z.string(),
@@ -106,10 +107,13 @@ export const appSettingsSchema = z.object({
     locale: z.enum(['zh-CN', 'en-US']).default('zh-CN'),
     cacheMaxBytes: z.number().int().min(1024 ** 3).max(50 * 1024 ** 3).default(5 * 1024 ** 3)
 });
-export const workspaceTabSchema = z.enum(['library', 'viewer', 'batch', 'workflow', 'templates', 'tasks', 'settings']);
+export const workspaceTabSchema = z.union([
+    z.enum(['library', 'viewer', 'batch', 'workflow', 'templates', 'tasks', 'settings']),
+    z.templateLiteral(['task:', z.string().max(160)])
+]);
 export const workspaceSessionV1Schema = z.object({
     version: z.literal(1),
-    openTabs: z.array(workspaceTabSchema).min(1).max(6)
+    openTabs: z.array(workspaceTabSchema).min(1).max(100)
         .refine((items) => new Set(items).size === items.length, 'Workspace tabs must be unique')
         .refine((items) => items.includes('library'), 'Library tab must remain open'),
     activeTab: workspaceTabSchema,
@@ -124,7 +128,7 @@ export const workspaceSessionV1Schema = z.object({
 });
 export const workspaceSessionSchema = z.object({
     version: z.literal(2),
-    openTabs: z.array(workspaceTabSchema).min(1).max(6)
+    openTabs: z.array(workspaceTabSchema).min(1).max(100)
         .refine((items) => new Set(items).size === items.length, 'Workspace tabs must be unique')
         .refine((items) => items.includes('library'), 'Library tab must remain open'),
     activeTab: workspaceTabSchema,
@@ -136,6 +140,7 @@ export const workspaceSessionSchema = z.object({
         selectedAssetId: z.string().min(1).nullable(),
         favoriteOnly: z.boolean(),
         sortBy: z.enum(['modifiedAt', 'fileName', 'rating']),
+        sortDirection: z.enum(['asc', 'desc']).optional(),
         searchQuery: z.string().max(500)
     })
 }).refine((session) => session.openTabs.includes(session.activeTab), {
@@ -166,19 +171,50 @@ export const catalogTagSchema = z.object({
     assetCount: z.number().int().nonnegative()
 });
 export const deleteCatalogTagInputSchema = z.string().uuid();
-export const catalogAssetSchema = z.object({
+const catalogAssetBaseSchema = z.object({
     id: z.string(),
     folderId: z.string(),
+    directoryId: z.string().optional(),
+    relativePath: z.string().optional(),
     fileName: z.string(),
     format: z.string(),
     sizeBytes: z.number().nonnegative(),
     modifiedAt: z.number().nonnegative(),
     rating: z.number().int().min(0).max(5),
+    labelColor: z.enum(['red', 'yellow', 'green', 'blue', 'purple']).nullable().default(null),
+    flag: z.enum(['picked', 'rejected', 'unflagged']).default('unflagged'),
     favorite: z.boolean(),
     offline: z.boolean(),
     tags: z.array(catalogTagSchema.omit({ assetCount: true })),
     thumbnailUrl: z.string(),
     previewUrl: z.string()
+});
+export const fileWorkflowGroupSchema = z.object({
+    id: z.string(), key: z.string(), name: z.string(),
+    stages: z.array(z.object({ id: z.string(), name: z.string() })).optional(),
+    members: z.array(z.object({ stageId: z.string(), stageName: z.string(), variant: z.string(), asset: catalogAssetBaseSchema }))
+});
+export const fileWorkflowStatusSchema = z.object({
+    enabled: z.boolean(), matched: z.number(), unmatched: z.number(), conflicts: z.number()
+});
+export const catalogAssetSchema = catalogAssetBaseSchema.extend({
+    workflow: fileWorkflowGroupSchema.optional(),
+    workflowConflict: z.boolean().optional()
+});
+export const fileDetailsSchema = z.object({
+    path: z.string(), sizeBytes: z.number().nonnegative(), modifiedAt: z.number().nonnegative(),
+    width: z.number().positive().optional(), height: z.number().positive().optional(),
+    camera: z.string().optional(), lens: z.string().optional(), takenAt: z.string().optional(),
+    cameraMake: z.string().optional(), cameraModel: z.string().optional(),
+    lensMake: z.string().optional(), lensModel: z.string().optional(),
+    city: z.string().optional(), country: z.string().optional(),
+    exposure: z.string().optional(), aperture: z.number().positive().optional(),
+    exposureSeconds: z.number().positive().optional(),
+    iso: z.number().positive().optional(), focalLength: z.number().positive().optional(),
+    metadataWarning: z.string().optional()
+});
+export const quickViewSessionSchema = z.object({
+    items: z.array(catalogAssetSchema), selectedId: z.string(), directory: z.string()
 });
 export const catalogAssetCursorSchema = z.object({
     modifiedAt: z.number().nonnegative(),
@@ -186,20 +222,33 @@ export const catalogAssetCursorSchema = z.object({
     sortValue: z.union([z.string(), z.number()]).optional()
 });
 export const listCatalogAssetsInputSchema = z.object({
+    assetIds: z.array(z.string().min(1)).min(1).max(500).optional(),
     folderId: z.string().min(1).nullable().default(null),
     tagId: z.string().uuid().nullable().default(null),
     albumId: z.string().uuid().nullable().default(null),
     smartCollection: z.enum(['recent', 'favorites', 'unrated', 'unanalyzed', 'generated', 'to-review']).nullable().default(null),
     favoriteOnly: z.boolean().default(false),
+    folderIds: z.array(z.string().min(1)).max(500).default([]),
+    dateFrom: z.number().nonnegative().nullable().default(null),
+    dateTo: z.number().nonnegative().nullable().default(null),
+    months: z.array(z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/u)).max(120).default([]),
+    formats: z.array(z.string().min(1).max(20)).max(50).default([]),
+    minimumRating: z.number().int().min(0).max(5).nullable().default(null),
+    ratingOperator: z.enum(['eq', 'gte', 'lte']).default('gte'),
+    flags: z.array(z.enum(['picked', 'rejected', 'unflagged'])).default([]),
+    colors: z.array(z.enum(['red', 'yellow', 'green', 'blue', 'purple'])).default([]),
     sortBy: z.enum(['modifiedAt', 'fileName', 'rating']).default('modifiedAt'),
+    sortDirection: z.enum(['asc', 'desc']).optional(),
     query: z.string().max(500).default(''),
+    workflow: z.boolean().default(true),
     cursor: catalogAssetCursorSchema.nullable().default(null),
     limit: z.number().int().min(1).max(500).default(200)
 });
 export const catalogAssetPageSchema = z.object({
     items: z.array(catalogAssetSchema),
     totalCount: z.number().int().nonnegative(),
-    nextCursor: catalogAssetCursorSchema.nullable()
+    nextCursor: catalogAssetCursorSchema.nullable(),
+    workflowStatus: fileWorkflowStatusSchema.optional()
 });
 export const catalogFolderSchema = z.object({
     id: z.string(),
@@ -216,6 +265,7 @@ export const renameCatalogFolderInputSchema = z.object({
     name: z.string().trim().min(1).max(255).refine((value) => !/[\\/]/u.test(value), 'Folder name must not contain path separators')
 });
 export const renameCatalogFolderResultSchema = z.object({ folder: catalogFolderSchema });
+export const createCatalogFolderInputSchema = z.object({ parentFolderId: z.string().regex(/^[a-f0-9]{32}$/u) });
 export const moveCatalogFolderInputSchema = z.object({
     sourceFolderId: z.string().regex(/^[a-f0-9]{32}$/u),
     targetFolderId: z.string().regex(/^[a-f0-9]{32}$/u)
@@ -365,8 +415,10 @@ export const undoFileOperationReportSchema = z.object({
 export const updateCatalogMetadataInputSchema = z.object({
     assetIds: z.array(z.string().min(1)).min(1).max(10_000),
     rating: z.number().int().min(0).max(5).optional(),
+    labelColor: z.enum(['red', 'yellow', 'green', 'blue', 'purple']).nullable().optional(),
+    flag: z.enum(['picked', 'rejected', 'unflagged']).optional(),
     favorite: z.boolean().optional()
-}).refine((input) => input.rating !== undefined || input.favorite !== undefined, {
+}).refine((input) => input.rating !== undefined || input.labelColor !== undefined || input.flag !== undefined || input.favorite !== undefined, {
     message: 'At least one metadata field is required'
 });
 export const updateCatalogTagsInputSchema = z.object({
@@ -380,7 +432,7 @@ export const catalogSnapshotSchema = z.object({
     assets: z.array(catalogAssetSchema),
     importedCount: z.number().int().nonnegative()
 });
-export const providerKindSchema = z.enum(['openai-compatible', 'nanobanana-compatible']);
+export const providerKindSchema = z.enum(['openai-compatible', 'nanobanana-compatible', 'acedata-nano-banana']);
 export const providerPurposeSchema = z.enum(['vision', 'generation']);
 const providerHeaderNameSchema = z.string().min(1).max(100).regex(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u);
 const providerHeaderValueSchema = z.string().max(2_000).refine((value) => !/[\r\n]/u.test(value));
@@ -433,6 +485,7 @@ export const connectionTestSchema = z.object({
 });
 /** A durable, multi-step photo editing workflow planned from natural language. */
 export const taskKindSchema = z.enum(['analysis', 'collection-analysis', 'generation', 'agent', 'export']);
+export const taskBatchInputSchema = z.object({ kind: taskKindSchema, batchId: z.string().min(1).max(160) });
 export const taskStatusSchema = z.enum([
     'draft', 'queued', 'paused', 'preparing', 'uploading', 'processing',
     'downloading', 'saving', 'completed', 'failed', 'canceled'
@@ -459,6 +512,7 @@ export const taskListCursorSchema = z.object({
     id: z.string().uuid()
 });
 export const listTaskPageInputSchema = z.object({
+    includeBatchMembers: z.boolean().default(false),
     limit: z.number().int().min(1).max(200).default(50),
     cursor: taskListCursorSchema.nullable().default(null)
 });
@@ -489,6 +543,12 @@ export const enqueueTaskInputSchema = z.object({
     payload: z.record(z.string(), z.unknown()).default({})
 });
 export const taskIdSchema = z.string().uuid();
+export const deleteTasksInputSchema = z.object({
+    scope: z.enum(['task', 'batch', 'below', 'below-batches', 'batch-unfinished', 'all', 'unfinished']),
+    taskId: taskIdSchema.optional(),
+    orderedTaskIds: z.array(taskIdSchema).max(10_000).default([])
+}).refine((input) => ['all', 'unfinished'].includes(input.scope) || Boolean(input.taskId), 'Task ID is required');
+export const taskBatchActionInputSchema = z.object({ taskId: taskIdSchema, action: z.enum(['retry', 'pause', 'resume', 'cancel']) });
 export const agentStepKindSchema = z.enum([
     'select', 'deduplicate', 'rank', 'rate', 'adjust', 'generate', 'move', 'delete', 'export'
 ]);
@@ -689,10 +749,13 @@ export const analysisRevisionSchema = z.object({
 export const listAnalysisInputSchema = z.object({ assetId: z.string().min(1) });
 export const listGenerationResultsInputSchema = z.object({ assetId: z.string().min(1) });
 export const analysisTaskPayloadSchema = z.object({
+    batchId: z.string().uuid().optional(),
+    locale: z.enum(['zh-CN', 'en-US']).optional(),
     providerProfileId: z.string().uuid(),
     mode: z.enum(['catalog', 'full']).default('full')
 });
 export const collectionAnalysisTaskPayloadSchema = z.object({
+    locale: z.enum(['zh-CN', 'en-US']).optional(),
     providerProfileId: z.string().uuid(),
     assetIds: z.array(z.string().min(1)).min(2).max(200)
         .refine((items) => new Set(items).size === items.length, 'Collection assets must be unique')
@@ -709,6 +772,8 @@ export const collectionAnalysisReportSchema = z.object({
     recommendations: z.array(z.string().min(1).max(1_000)).max(100)
 });
 export const generationTaskPayloadSchema = z.object({
+    sourceResultId: z.string().uuid().optional(),
+    submissionId: z.string().uuid().optional(),
     providerProfileId: z.string().uuid(),
     batchId: z.string().uuid(),
     prompt: z.string().min(1).max(50_000),
@@ -795,3 +860,4 @@ export const imageCacheStatsSchema = z.object({
     bytes: z.number().int().nonnegative()
 });
 export const pruneImageCacheInputSchema = z.object({ maxBytes: z.number().int().nonnegative().max(100 * 1024 * 1024 * 1024) });
+export * from './agent';

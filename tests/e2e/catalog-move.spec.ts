@@ -85,7 +85,7 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await dialog.getByText('target', { exact: true }).click();
   await dialog.getByRole('button', { name: '移动', exact: true }).click();
 
-  await expect(page.getByRole('status')).toContainText('已移动 1 张照片');
+  await expect(page.locator('.operation-toast')).toContainText('已移动 1 张照片');
   expect(await readFile(path.join(targetDirectory, 'MOVE_ME.jpg'))).not.toHaveLength(0);
   expect(await readFile(path.join(targetDirectory, 'MOVE_ME.xmp'), 'utf8')).toContain('fixture');
   await expect(stat(path.join(sourceDirectory, 'MOVE_ME.jpg'))).rejects.toMatchObject({ code: 'ENOENT' });
@@ -94,7 +94,8 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await expect(page.getByText('MOVE_ME.jpg', { exact: true }).first()).toBeVisible();
   await expect(page.getByRole('treeitem', { name: /target 1/ })).toBeVisible();
   await page.getByRole('treeitem', { name: /target 1/ }).click();
-  await expect(page.getByRole('main').getByText('1 张照片', { exact: true })).toBeVisible();
+  await expect(page.locator('.catalog-card')).toHaveCount(1);
+  await expect(page.locator('.catalog-card')).toContainText('MOVE_ME.jpg');
   await page.locator('.catalog-card').first().click({ button: 'right' });
   await page.getByRole('menuitem', { name: /复制到文件夹/ }).click();
   const copyDialog = page.getByRole('dialog', { name: '复制 1 张照片' });
@@ -103,7 +104,7 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await copyDialog.getByText('source', { exact: true }).click();
   await page.screenshot({ path: 'test-results/catalog-copy-dialog.png', animations: 'disabled' });
   await copyDialog.getByRole('button', { name: '复制', exact: true }).click();
-  await expect(page.getByRole('status')).toContainText('已复制 1 张照片');
+  await expect(page.locator('.operation-toast')).toContainText('已复制 1 张照片');
   expect(await readFile(path.join(sourceDirectory, 'MOVE_ME.jpg'))).not.toHaveLength(0);
   expect(await readFile(path.join(sourceDirectory, 'MOVE_ME.xmp'), 'utf8')).toContain('fixture');
 
@@ -114,7 +115,7 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await renameDialog.getByLabel('新文件名').fill('RENAMED.jpg');
   await page.screenshot({ path: 'test-results/catalog-rename-dialog.png', animations: 'disabled' });
   await renameDialog.getByRole('button', { name: '重命名', exact: true }).click();
-  await expect(page.getByRole('status')).toContainText('已重命名为 RENAMED.jpg');
+  await expect(page.locator('.operation-toast')).toContainText('已重命名为 RENAMED.jpg');
   expect(await readFile(path.join(targetDirectory, 'RENAMED.jpg'))).not.toHaveLength(0);
   await expect(stat(path.join(targetDirectory, 'MOVE_ME.jpg'))).rejects.toMatchObject({ code: 'ENOENT' });
 
@@ -148,7 +149,7 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
   await expect(page.getByText('文件操作', { exact: true })).toBeVisible();
   await expect(page.getByText('从图库移除', { exact: true })).toBeVisible();
   await page.getByLabel('撤销重命名').click();
-  await expect(page.getByRole('status')).toContainText('已撤销重命名');
+  await expect(page.locator('.task-center-page').getByRole('status')).toContainText('已撤销重命名');
   expect(await readFile(path.join(targetDirectory, 'MOVE_ME.jpg'))).not.toHaveLength(0);
   await expect(stat(path.join(targetDirectory, 'RENAMED.jpg'))).rejects.toMatchObject({ code: 'ENOENT' });
   await expect(page.getByText('已撤销', { exact: true })).toBeVisible();
