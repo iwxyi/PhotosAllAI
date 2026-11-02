@@ -138,7 +138,7 @@ export class FileOperationService {
   async previewCompanions(assetIds: string[]): Promise<CatalogCompanionPreview> {
     const companions = await this.#findCompanions([...new Set(assetIds)]);
     return catalogCompanionPreviewSchema.parse({
-      files: companions.map((item) => ({ fileName: item.fileName, kind: item.kind, assetId: item.asset?.id ?? null, bytes: item.bytes })),
+      files: companions.map((item) => ({ sourceAssetId: item.owner.id, fileName: item.fileName, kind: item.kind, assetId: item.asset?.id ?? null, bytes: item.bytes })),
       totalBytes: companions.reduce((total, item) => total + item.bytes, 0)
     });
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { groupCatalogPhotos, localDateKey } from './catalog-browse';
+import { defaultGroupOrder, groupCatalogPhotos, localDateKey } from './catalog-browse';
 import { photos } from './mock-data';
 import type { CatalogFolder, FileDetails } from '@photoallisai/contracts';
 
@@ -44,5 +44,17 @@ describe('catalog browsing', () => {
     expect(groupCatalogPhotos(decorated, ['exifIso', 'country'], folders, { exifIso: 'desc' }, metadata).map((group) => group.items[0]?.id)).toEqual(['1', '2']);
     expect(groupCatalogPhotos(decorated, ['country', 'exifIso'], folders, {}, metadata).map((group) => group.items[0]?.id)).toEqual(['1', '2']);
     expect(groupCatalogPhotos(decorated, ['exifExposure'], folders, {}, { '1': camera, '2': { ...camera, exposureSeconds: .02, exposure: '1/50 s' } }).map((group) => group.title)).toEqual(['1/125 s', '1/50 s']);
+  });
+  it('groups actual aspect ratios and orientation independently in either direction', () => {
+    const sizes = [[2500, 1000], [1500, 1000], [3000, 2000], [1000, 1000], [700, 1000], [400, 1000], [1800, 2251], null] as const;
+    const samples = sizes.map((size, index) => ({ ...items[0]!, id: String(index) }));
+    const metadata = Object.fromEntries(sizes.map((size, index) => [String(index), size === null ? null : { path: '/photo.jpg', sizeBytes: 10, modifiedAt: day, width: size[0], height: size[1] }])) as Record<string, FileDetails | null>;
+    expect(defaultGroupOrder('aspectRatio')).toBe('desc');
+    expect(defaultGroupOrder('orientation')).toBe('desc');
+    expect(groupCatalogPhotos(samples, ['aspectRatio'], folders, {}, metadata).map((group) => group.title)).toEqual(['5:2', '3:2', '1:1', '4:5', '7:10', '2:5', '未知比例']);
+    expect(groupCatalogPhotos(samples, ['aspectRatio'], folders, { aspectRatio: 'asc' }, metadata).map((group) => group.title)).toEqual(['2:5', '7:10', '4:5', '1:1', '3:2', '5:2', '未知比例']);
+    expect(groupCatalogPhotos(samples, ['orientation'], folders, {}, metadata).map((group) => group.title)).toEqual(['横图', '方图', '竖图', '未知方向']);
+    expect(groupCatalogPhotos(samples, ['orientation'], folders, { orientation: 'asc' }, metadata).map((group) => group.title)).toEqual(['竖图', '方图', '横图', '未知方向']);
+    expect(groupCatalogPhotos(samples, ['orientation', 'aspectRatio'], folders, {}, metadata).map((group) => group.title)).toEqual(['横图 · 5:2', '横图 · 3:2', '方图 · 1:1', '竖图 · 4:5', '竖图 · 7:10', '竖图 · 2:5', '未知方向 · 未知比例']);
   });
 });

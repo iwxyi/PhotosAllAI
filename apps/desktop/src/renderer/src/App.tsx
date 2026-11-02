@@ -958,15 +958,21 @@ function PhotoFilterBar({ leading, onReset, compact = false, scope, search, setS
 function resolveViewerVersion(photo: Photo, results: GenerationResult[], target: string) {
   const members = photo.workflow?.members ?? [];
   const stages = photo.workflow?.stages ?? [...new Map(members.map((member) => [member.stageId, { id: member.stageId, name: member.stageName }])).values()];
+  const rawMember = members.find((item) => isRawPhoto(item.asset) && !item.asset.offline);
   const latestBatchId = [...results].sort((a, b) => b.createdAt - a.createdAt || b.version - a.version)[0]?.batchId;
   const result = target === 'preferred-ai' ? results.find((item) => item.reviewState === 'preferred')
     : target === 'latest-ai' ? results.filter((item) => item.batchId === latestBatchId).sort((a, b) => a.version - b.version)[0] : undefined;
   const stageId = target.startsWith('stage:') ? target.slice(6) : null;
   const stageIndex = stages.findIndex((stage) => stage.id === stageId);
-  const member = stageId ? stages.slice(0, Math.max(0, stageIndex) + 1).reverse()
-    .flatMap((stage) => members.filter((item) => item.stageId === stage.id && !item.asset.offline))[0] ?? members[0]
-    : !result ? [...members].reverse().find((item) => !/\bAI\b|人工智能|生成/u.test(item.stageName)) ?? members.at(-1) : undefined;
-  return { stages, result, member };
+  const member = target === 'raw' ? rawMember ?? members.find((item) => !item.asset.offline) : stageId ? stages.slice(0, Math.max(0, stageIndex) + 1).reverse()
+    .flatMap((stage) => members.filter((item) => item.stageId === stage.id && !item.asset.offline).sort((a, b) => Number(isRawPhoto(a.asset)) - Number(isRawPhoto(b.asset))))[0] ?? members[0]
+    : !result ? [...members].reverse().find((item) => !item.asset.offline && !isRawPhoto(item.asset) && !/\bAI\b|人工智能|生成/u.test(item.stageName)) ?? members.at(-1) : undefined;
+  return { stages, result, member, rawMember };
+}
+
+const RAW_IMAGE_EXTENSIONS = /\.(?:dng|cr2|cr3|nef|nrw|arw|raf|rw2|orf|pef)$/iu;
+function isRawPhoto(photo: Pick<Photo, 'fileName' | 'format'>): boolean {
+  return RAW_IMAGE_EXTENSIONS.test(photo.fileName) || photo.format.toUpperCase() === 'RAW';
 }
 
 const VERSION_TARGET_CHANGED_EVENT = 'photoallisai:version-target-changed';
@@ -981,13 +987,15 @@ function saveVersionTarget(target: string): void {
   window.dispatchEvent(new CustomEvent(VERSION_TARGET_CHANGED_EVENT, { detail: target }));
 }
 
-function VersionTargetSelect({ stages, value, onChange, label }: {
+function VersionTargetSelect({ stages, value, onChange, label, rawAvailable }: {
   stages: { id: string; name: string }[];
   value: string;
   onChange: (target: string) => void;
   label: string;
+  rawAvailable?: boolean;
 }): React.JSX.Element {
   return <label className="version-target-control"><select aria-label={label} title="流程版本" value={value} onChange={(event) => onChange(event.target.value)}>
+    <option value="raw" disabled={!rawAvailable}>RAW</option>
     {stages.length ? stages.map((stage) => <option key={stage.id} value={`stage:${stage.id}`}>{stage.name}</option>) : <option value="stage:original">原图</option>}
     {value.startsWith('stage:') && value !== 'stage:original' && !stages.some((stage) => `stage:${stage.id}` === value) && <option value={value}>已选流程（回退）</option>}
     <hr />
@@ -1014,6 +1022,7 @@ function Filmstrip({
   onLoadMore,
   onVisibleIdsChange,
   versionTarget,
+  rawCompanions,
   activeGenerationResults,
   onOpenContextMenu
 }: {
@@ -1035,6 +1044,7 @@ function Filmstrip({
   onLoadMore: () => void;
   onVisibleIdsChange: React.Dispatch<React.SetStateAction<string[] | null>>;
   versionTarget?: string | undefined;
+  rawCompanions?: Record<string, Photo> | undefined;
   activeGenerationResults?: GenerationResult[] | undefined;
   onOpenContextMenu: (event: React.MouseEvent, photo: Photo, options?: FilmstripMenuOptions) => void;
 }): React.JSX.Element {
@@ -1044,11 +1054,12 @@ function Filmstrip({
   const [previewResults, setPreviewResults] = useState<Record<string, GenerationResult[]>>({});
   const previewPhoto = useCallback((photo: Photo): Photo => {
     if (!versionTarget) return photo;
+    if (versionTarget === 'raw' && rawCompanions?.[photo.id]) return rawCompanions[photo.id]!;
     const results = photo.id === selected.id && activeGenerationResults ? activeGenerationResults : previewResults[photo.id] ?? [];
     const { result, member } = resolveViewerVersion(photo, results, versionTarget);
     if (result) return { ...photo, src: result.resultUrl, thumbnailSrc: result.resultUrl };
     return member ? mapCatalogAssets([member.asset])[0]! : photo;
-  }, [versionTarget, activeGenerationResults, selected.id, previewResults]);
+  }, [versionTarget, rawCompanions, activeGenerationResults, selected.id, previewResults]);
 
   const [viewMode, setViewMode] = useState<'filmstrip' | 'grid'>('filmstrip');
   const [display, setDisplay] = useState(() => {
@@ -1286,6 +1297,7 @@ function Viewer({
   onVersionTargetChange,
   resultsLoading = false,
   resultSequence,
+  rawCompanion,
   onToolbarHostChange,
   onWorkflowStageChange
 }: {
@@ -1301,6 +1313,7 @@ function Viewer({
   onVersionTargetChange?: ((target: string) => void) | undefined;
   resultsLoading?: boolean;
   resultSequence?: GenerationResult[] | undefined;
+  rawCompanion?: Photo | null | undefined;
   onToolbarHostChange: (element: HTMLDivElement | null) => void;
   onWorkflowStageChange?: ((photo: Photo) => void) | undefined;
 }): React.JSX.Element {
@@ -1337,12 +1350,13 @@ function Viewer({
   const [fitMode, setFitMode] = useState<'fit' | 'actual' | 'width' | 'custom'>('fit');
   const [viewerNotice, setViewerNotice] = useTransientNotice();
   const canvasWrapRef = useRef<HTMLDivElement>(null);
-  const { stages: workflowStages, result: targetResult, member: targetMember } = resolveViewerVersion(photo, results, versionTarget);
+  const { stages: workflowStages, result: targetResult, member: targetMember, rawMember } = resolveViewerVersion(photo, results, versionTarget);
+  const availableRaw = rawMember ? mapCatalogAssets([rawMember.asset])[0] : isRawPhoto(photo) ? photo : rawCompanion;
   const explicitResult = initialResultId !== undefined && targetRevision === 0;
   const initialSelectionId = explicitResult
     ? results.find((result) => result.id === initialResultId)?.id ?? null
     : targetResult?.id ?? null;
-  const targetPhotoId = explicitResult || resultsLoading ? null : targetMember?.asset.id ?? null;
+  const targetPhotoId = explicitResult || resultsLoading ? null : versionTarget === 'raw' && !rawMember ? null : targetMember?.asset.id ?? null;
   const effectiveSelectionId = targetPhotoId && targetPhotoId !== photo.id ? null : initialSelectionId;
   useEffect(() => {
     if (!targetPhotoId || targetPhotoId === photo.id || !photo.workflow || manualStagePhotoId.current === photo.id) return;
@@ -1367,14 +1381,15 @@ function Viewer({
     void image.decode().catch(() => undefined).then(() => { if (active) setDisplayedGeneratedSource(undefined); });
     return () => { active = false; };
   }, [generatedSource, resultsLoading, isDemo, photo.originalSrc, photo.src]);
-  const currentStageId = photo.workflow?.members.find((member) => member.asset.id === photo.id)?.stageId;
-  const currentStageIndex = workflowStages.findIndex((stage) => stage.id === currentStageId);
-  const previousMember = generatedSource
-    ? resolveViewerVersion(photo, [], 'no-ai').member
-    : workflowStages.slice(0, Math.max(0, currentStageIndex)).reverse()
-      .flatMap((stage) => photo.workflow?.members.filter((member) => member.stageId === stage.id && !member.asset.offline) ?? [])[0];
-  const previousPhoto = previousMember ? mapCatalogAssets([previousMember.asset])[0] : undefined;
-  const baseSource = holdPreviousVersion && previousPhoto ? previousPhoto.originalSrc ?? previousPhoto.src : photo.originalSrc ?? photo.src;
+  const originalStage = workflowStages[0];
+  const originalMember = originalStage ? photo.workflow?.members.find((member) => member.stageId === originalStage.id && !member.asset.offline && !isRawPhoto(member.asset)) ?? photo.workflow?.members.find((member) => member.stageId === originalStage.id && !member.asset.offline) : undefined;
+  const originalPhoto = (originalMember ? mapCatalogAssets([originalMember.asset])[0] : undefined) ?? photo;
+  const showingOriginal = !generatedSource && versionTarget !== 'raw' && originalPhoto.id === photo.id;
+  const comparisonPhoto = versionTarget === 'raw' ? originalPhoto
+    : showingOriginal ? availableRaw
+      : originalPhoto;
+  const rawBase = versionTarget === 'raw' && !rawMember && availableRaw ? availableRaw : photo;
+  const baseSource = holdPreviousVersion && comparisonPhoto ? comparisonPhoto.originalSrc ?? comparisonPhoto.src : rawBase.originalSrc ?? rawBase.src;
   const activeSource = displayedGeneratedSource && !showOriginal && !holdPreviousVersion ? displayedGeneratedSource : baseSource;
   const sourceSizes = useRef(new Map<string, { width: number; height: number }>());
   const canCompare = Boolean(generatedSource);
@@ -1552,7 +1567,7 @@ function Viewer({
           <PhotoFlag photo={photo} />
         </div>
         {!isDemo && <div className="viewer-target-version" title="目标版本：优先显示所选版本，不存在时逐级回退">
-          <VersionTargetSelect stages={workflowStages} value={versionTarget} onChange={changeVersionTarget} label="切换目标版本" />
+          <VersionTargetSelect stages={workflowStages} value={versionTarget} onChange={changeVersionTarget} label="切换目标版本" rawAvailable={Boolean(availableRaw)} />
         </div>}
         <div
           className={`photo-canvas${canCompare && compareMode === 'split' ? ' is-comparing' : ''}`}
@@ -1636,11 +1651,12 @@ function Viewer({
         </div>
         <div className="version-switcher" data-tool-group="versions">
           {!!resultSequence?.length && <span className="viewer-result-position" style={{ visibility: resultPosition ? 'visible' : 'hidden' }} aria-hidden={!resultPosition}>AI 结果 · {resultPosition ?? `1/${resultSequence.length}`}</span>}
+          {availableRaw && <button className={!selectedResult && versionTarget === 'raw' ? 'is-current' : ''} type="button" onClick={() => changeVersionTarget('raw')}>RAW</button>}
           {photo.workflow && <select aria-label="流程阶段" title="按规则关联" value={photo.id} onChange={(event) => {
             const member = photo.workflow!.members.find((item) => item.asset.id === event.target.value);
             if (member) { manualStagePhotoId.current = member.asset.id; onWorkflowStageChange?.({ ...mapCatalogAssets([member.asset])[0]!, workflow: photo.workflow! }); }
           }}>{photo.workflow.members.map((member, index) => <option key={member.asset.id} value={member.asset.id}>{member.stageName}{member.variant ? ` · ${member.variant}` : photo.workflow!.members.filter((item) => item.stageId === member.stageId).length > 1 ? ` · ${index + 1}` : ''} — {member.asset.fileName}{member.asset.offline ? '（离线）' : ''}</option>)}</select>}
-          <button className={!selectedResult && !isDemo ? 'is-current' : ''} type="button" title="按住 O 键可临时查看当前文件" onClick={() => setSelectedResultId(null)}>{photo.workflow ? '当前文件' : '原图'}</button>
+          <button className={!selectedResult && versionTarget !== 'raw' && !isDemo ? 'is-current' : ''} type="button" title="按住 O 键可临时查看当前文件" onClick={() => { if (versionTarget === 'raw') changeVersionTarget('stage:original'); else setSelectedResultId(null); }}>{photo.workflow ? '当前文件' : '原图'}</button>
           {isDemo ? <><button type="button">V1</button><button className="is-current" type="button">V2</button></> : [...results].reverse().map((result) => (
             <button className={`version-button${selectedResult?.id === result.id ? ' is-current' : ''}${result.reviewState === 'preferred' ? ' is-preferred' : result.reviewState === 'rejected' ? ' is-rejected' : ''}`} type="button" key={result.id} onClick={() => setSelectedResultId(result.id)} title={result.reviewState === 'preferred' ? '首选' : result.reviewState === 'accepted' ? '已接受' : result.reviewState === 'rejected' ? '已拒绝' : '未审阅'}>V{result.version}</button>
           ))}
@@ -2209,12 +2225,36 @@ function justifiedCardSizes(groups: { items: Photo[] }[], ratioFor: (photo: Phot
 function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMenu?: (event: React.MouseEvent, photo: Photo) => void }): React.JSX.Element {
   const [versionTarget, setVersionTarget] = useState(readVersionTarget);
   const [versionResults, setVersionResults] = useState<Record<string, GenerationResult[]>>({});
+  const [rawCompanions, setRawCompanions] = useState<Record<string, Photo>>({});
   useEffect(() => {
     const update = (event: Event) => setVersionTarget((event as CustomEvent<string>).detail);
     window.addEventListener(VERSION_TARGET_CHANGED_EVENT, update);
     return () => window.removeEventListener(VERSION_TARGET_CHANGED_EVENT, update);
   }, []);
   const versionAssetKey = JSON.stringify(props.availablePhotos.map((photo) => photo.id));
+  useEffect(() => {
+    if (props.isDemo) return;
+    const photos = props.availablePhotos.filter((photo) => !isRawPhoto(photo) && !photo.workflow?.members.some((member) => isRawPhoto(member.asset) && !member.asset.offline));
+    if (!photos.length) return;
+    let active = true;
+    void (async () => {
+      const next: Record<string, Photo> = {};
+      for (let offset = 0; offset < photos.length; offset += 100) {
+        const companions = await window.desktopApi.previewCatalogCompanions(photos.slice(offset, offset + 100).map((photo) => photo.id));
+        const rawFiles = companions.files.filter((file) => file.kind === 'raw' && file.assetId);
+        const rawIds = [...new Set(rawFiles.map((file) => file.assetId!))];
+        if (!rawIds.length) continue;
+        const page = await window.desktopApi.listCatalogAssetPage({ assetIds: rawIds, workflow: false });
+        const byId = new Map(mapCatalogAssets(page.items).map((photo) => [photo.id, photo]));
+        for (const file of rawFiles) {
+          const raw = byId.get(file.assetId!);
+          if (raw) next[file.sourceAssetId] = raw;
+        }
+      }
+      if (active) setRawCompanions(next);
+    })().catch(() => undefined);
+    return () => { active = false; };
+  }, [versionAssetKey, props.isDemo]);
   useEffect(() => {
     if (props.isDemo || (versionTarget !== 'latest-ai' && versionTarget !== 'preferred-ai')) return;
     let active = true;
@@ -2236,8 +2276,10 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     return () => { active = false; window.clearInterval(timer); };
   }, [versionAssetKey, versionTarget, props.isDemo]);
   const versionStages = [...new Map(props.availablePhotos.flatMap((photo) => resolveViewerVersion(photo, [], versionTarget).stages).map((stage) => [stage.id, stage])).values()];
+  const rawAvailable = props.availablePhotos.some((photo) => isRawPhoto(photo) || photo.workflow?.members.some((member) => isRawPhoto(member.asset) && !member.asset.offline) || Boolean(rawCompanions[photo.id]));
   const previewPhoto = (photo: Photo): Photo => {
     if (props.isDemo) return photo;
+    if (versionTarget === 'raw' && rawCompanions[photo.id]) return rawCompanions[photo.id]!;
     const { result, member } = resolveViewerVersion(photo, versionResults[photo.id] ?? [], versionTarget);
     if (result) return { ...photo, src: result.resultUrl, thumbnailSrc: result.resultUrl };
     return member ? mapCatalogAssets([member.asset])[0]! : photo;
@@ -2387,6 +2429,23 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
   }, gridWidth, thumbnailSize) : {};
   const orderedIds = useMemo(() => photoGroups.flatMap((group) => group.items.map((photo) => photo.id)), [photoGroups]);
   const selectedPhoto = props.availablePhotos.find((photo) => selection.focusId === photo.id) ?? null;
+  const { hasMore, loadingMore, onLoadMore } = props;
+  const loadMoreWhenNearEnd = useCallback((element: HTMLElement) => {
+    if (!hasMore || loadingMore) return;
+    const remaining = element.scrollHeight - element.scrollTop - element.clientHeight;
+    if (remaining <= Math.max(480, element.clientHeight * 1.5)) onLoadMore();
+  }, [hasMore, loadingMore, onLoadMore]);
+  const handleCatalogScroll = useCallback((event: React.UIEvent<HTMLElement>) => {
+    setColumnMenu(null);
+    loadMoreWhenNearEnd(event.currentTarget);
+  }, [loadMoreWhenNearEnd]);
+  useEffect(() => {
+    // A fast scrollbar jump can reach the end before the newly appended page
+    // has been painted. Recheck after each page so loading continues without
+    // requiring another user scroll event.
+    if (!hasMore || loadingMore || !gridRef.current) return;
+    loadMoreWhenNearEnd(gridRef.current);
+  }, [props.availablePhotos.length, hasMore, loadingMore, loadMoreWhenNearEnd]);
 
   useEffect(() => {
     const selectPhotos = (event: Event) => {
@@ -2485,7 +2544,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
             title: <strong className="catalog-toolbar-title" title={defaultGroupTitle}>{defaultGroupTitle}</strong>,
             count: <span className="catalog-toolbar-count" title="当前集合的文件数量">{props.totalCount} 张</span>,
             workflow: !props.isDemo && <FileWorkflowControl scope={{ folderId: props.selectedFolderId, albumId: props.selectedAlbumId }} folders={props.catalogFolders} scopeName={collectionTitle(props)} />,
-            version: !props.isDemo && <VersionTargetSelect stages={versionStages} value={versionTarget} onChange={saveVersionTarget} label="图库流程版本" />,
+            version: !props.isDemo && <VersionTargetSelect stages={versionStages} value={versionTarget} onChange={saveVersionTarget} label="图库流程版本" rawAvailable={rawAvailable} />,
             view: <div className="catalog-view-switcher" role="group" aria-label="图库视图">
               {([{ mode: 'list', label: '列表视图', icon: ListFilter }, { mode: 'grid', label: '网格视图', icon: Grid2X2 }, { mode: 'masonry', label: '瀑布流视图', icon: PanelsTopLeft }, { mode: 'justified', label: '等高瀑布流', icon: Rows3 }] as const).map(({ mode, label, icon: Icon }) => <button key={mode} className={viewMode === mode ? 'is-active' : ''} type="button" aria-label={label} title={label} aria-pressed={viewMode === mode} onClick={() => changeViewMode(mode)}><Icon size={14} /></button>)}
             </div>,
@@ -2500,9 +2559,9 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
             {props.catalogFolders.length === 0 && <button className="primary-action compact" type="button" onClick={() => void props.onImportFolders()}><Plus size={14} />选择文件夹</button>}
           </section>
         ) : viewMode === 'list' ? (
-          <section className="catalog-list-view" role="listbox" aria-multiselectable="true" ref={gridRef} tabIndex={0} onScroll={() => setColumnMenu(null)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a' && !(event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]'))) { event.preventDefault(); setSelection(selectAll(orderedIds)); } }} aria-label="图库列表视图"><div className="catalog-list-header" style={listStyle} onContextMenu={(event) => { event.preventDefault(); setColumnMenu({ x: event.clientX, y: event.clientY }); }}><input className="catalog-list-select" type="checkbox" aria-label="全选当前列表" title="全选当前列表" checked={allVisibleSelected} ref={(element) => { if (element) element.indeterminate = someVisibleSelected && !allVisibleSelected; }} onChange={() => setSelection(allVisibleSelected ? { selectedIds: new Set(), anchorId: null, focusId: null } : selectAll(orderedIds))} />{columns.map((column) => <span key={column.id}>{column.label}</span>)}</div>{listRows}{props.hasMore && <button className="catalog-load-more" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? '加载中…' : '加载更多'}</button>}</section>
+          <section className="catalog-list-view" role="listbox" aria-multiselectable="true" ref={gridRef} tabIndex={0} onScroll={handleCatalogScroll} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a' && !(event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]'))) { event.preventDefault(); setSelection(selectAll(orderedIds)); } }} aria-label="图库列表视图"><div className="catalog-list-header" style={listStyle} onContextMenu={(event) => { event.preventDefault(); setColumnMenu({ x: event.clientX, y: event.clientY }); }}><input className="catalog-list-select" type="checkbox" aria-label="全选当前列表" title="全选当前列表" checked={allVisibleSelected} ref={(element) => { if (element) element.indeterminate = someVisibleSelected && !allVisibleSelected; }} onChange={() => setSelection(allVisibleSelected ? { selectedIds: new Set(), anchorId: null, focusId: null } : selectAll(orderedIds))} />{columns.map((column) => <span key={column.id}>{column.label}</span>)}</div>{listRows}{props.hasMore && <button className="catalog-load-more" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? '加载中…' : '加载更多'}</button>}</section>
         ) : (
-          <section className={`catalog-grid${viewMode === 'masonry' ? ' catalog-masonry' : ''}${viewMode === 'justified' ? ' catalog-justified' : ''}${grouped ? ' is-grouped' : ''}`} style={{ '--thumbnail-size': `${thumbnailSize}px`, '--thumbnail-height': `${Math.round(thumbnailSize * 112 / 155)}px` } as React.CSSProperties} role="listbox" aria-label="图库照片" aria-multiselectable="true" ref={gridRef} tabIndex={0} onPointerDown={(event) => {
+          <section className={`catalog-grid${viewMode === 'masonry' ? ' catalog-masonry' : ''}${viewMode === 'justified' ? ' catalog-justified' : ''}${grouped ? ' is-grouped' : ''}`} style={{ '--thumbnail-size': `${thumbnailSize}px`, '--thumbnail-height': `${Math.round(thumbnailSize * 112 / 155)}px` } as React.CSSProperties} role="listbox" aria-label="图库照片" aria-multiselectable="true" ref={gridRef} tabIndex={0} onScroll={handleCatalogScroll} onPointerDown={(event) => {
             if (event.button !== 0 || (event.target !== event.currentTarget && !(event.target instanceof Element && event.target.classList.contains('catalog-group-grid')))) return;
             event.currentTarget.setPointerCapture(event.pointerId);
             marqueeOriginRef.current = { x: event.clientX, y: event.clientY, additive: event.metaKey || event.ctrlKey || event.shiftKey, initialIds: new Set(selection.selectedIds) };
@@ -2615,6 +2674,31 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
   const [analysisAssetId, setAnalysisAssetId] = useState<string | null>(null);
   const [generationResults, setGenerationResults] = useState<GenerationResult[]>([]);
   const [generationAssetId, setGenerationAssetId] = useState<string | null>(null);
+  const [rawCompanion, setRawCompanion] = useState<Photo | null>(null);
+  const [filmstripRawCompanions, setFilmstripRawCompanions] = useState<Record<string, Photo>>({});
+  const filmstripRawIds = JSON.stringify(availablePhotos.map((photo) => photo.id));
+  useEffect(() => {
+    if (isDemo || filmstripVersionTarget !== 'raw') return;
+    let active = true;
+    void (async () => {
+      const photos = availablePhotos.filter((photo) => !isRawPhoto(photo) && !photo.workflow?.members.some((member) => isRawPhoto(member.asset) && !member.asset.offline));
+      const next: Record<string, Photo> = {};
+      for (let offset = 0; offset < photos.length; offset += 100) {
+        const preview = await window.desktopApi.previewCatalogCompanions(photos.slice(offset, offset + 100).map((photo) => photo.id));
+        const rawFiles = preview.files.filter((file) => file.kind === 'raw' && file.assetId);
+        const rawIds = [...new Set(rawFiles.map((file) => file.assetId!))];
+        if (!rawIds.length) continue;
+        const page = await window.desktopApi.listCatalogAssetPage({ assetIds: rawIds, workflow: false });
+        const byId = new Map(mapCatalogAssets(page.items).map((photo) => [photo.id, photo]));
+        for (const file of rawFiles) {
+          const raw = byId.get(file.assetId!);
+          if (raw) next[file.sourceAssetId] = raw;
+        }
+      }
+      if (active) setFilmstripRawCompanions(next);
+    })().catch(() => undefined);
+    return () => { active = false; };
+  }, [isDemo, filmstripVersionTarget, filmstripRawIds]);
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
   const [tagEditorOpen, setTagEditorOpen] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
@@ -2831,6 +2915,22 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     const interval = window.setInterval(refresh, 1_000);
     return () => { active = false; window.clearInterval(interval); };
   }, [isDemo, selected.id]);
+
+  useEffect(() => {
+    if (isDemo || isRawPhoto(selected) || selected.workflow?.members.some((member) => isRawPhoto(member.asset) && !member.asset.offline)) {
+      setRawCompanion(null);
+      return;
+    }
+    let active = true;
+    setRawCompanion(null);
+    void window.desktopApi.previewCatalogCompanions([selected.id]).then(async (preview) => {
+      const id = preview.files.find((file) => file.sourceAssetId === selected.id && file.kind === 'raw' && file.assetId)?.assetId;
+      if (!id) return;
+      const page = await window.desktopApi.listCatalogAssetPage({ assetIds: [id], workflow: false });
+      if (active) setRawCompanion(page.items[0] ? mapCatalogAssets([page.items[0]])[0]! : null);
+    }).catch(() => { if (active) setRawCompanion(null); });
+    return () => { active = false; };
+  }, [isDemo, selected.id, selected.fileName, selected.workflow]);
 
   useEffect(() => {
     if (isDemo) return;
@@ -3246,9 +3346,9 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     <div className="workspace viewer-workspace">
       {view === 'library' ? <CatalogWorkspace {...props} onOpenPhotoContextMenu={(event, photo) => openPhotoContextMenu(event, photo)} /> :
       <main className="library-main" style={{ gridTemplateRows: `minmax(0, 1fr) 5px ${viewerLayout.filmstripHeight}px` }}>
-        <Viewer resultSequence={props.resultSequence} photo={selected} results={currentGenerationResults} resultsLoading={generationAssetId !== selected.id} initialVersionTarget={props.initialVersionTarget} onVersionTargetChange={setFilmstripVersionTarget} isDemo={isDemo} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onReview={reviewResult} onOpenContextMenu={(event, resultId) => openPhotoContextMenu(event, selected, true, undefined, resultId)} onClose={props.onCloseViewer} initialResultId={props.initialResultId} onToolbarHostChange={setViewerToolbarHost} onWorkflowStageChange={props.onWorkflowStageChange} />
+        <Viewer resultSequence={props.resultSequence} photo={selected} results={currentGenerationResults} resultsLoading={generationAssetId !== selected.id} initialVersionTarget={props.initialVersionTarget} onVersionTargetChange={setFilmstripVersionTarget} rawCompanion={rawCompanion} isDemo={isDemo} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onReview={reviewResult} onOpenContextMenu={(event, resultId) => openPhotoContextMenu(event, selected, true, undefined, resultId)} onClose={props.onCloseViewer} initialResultId={props.initialResultId} onToolbarHostChange={setViewerToolbarHost} onWorkflowStageChange={props.onWorkflowStageChange} />
         <PaneSplitter orientation="horizontal" value={viewerLayout.filmstripHeight} minimum={72} maximum={320} label="调整大图和胶片带高度" invert onChange={(value) => setViewerLayout('filmstripHeight', value)} />
-        {props.resultSequence && props.onSelectViewerResult ? <ResultFilmstrip results={props.resultSequence} selectedId={props.initialResultId} onSelect={props.onSelectViewerResult} /> : <Filmstrip versionTarget={isDemo ? undefined : filmstripVersionTarget} activeGenerationResults={generationAssetId === selected.id ? currentGenerationResults : undefined} toolbarHost={viewerToolbarHost} items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} onSelectionChange={setSelection} onFocusPhoto={(photo) => { setSelectedId(photo.id); onSelectedAssetChange(photo.id); }} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} onVisibleIdsChange={setFilmstripVisibleIds} onOpenContextMenu={(event, photo, options) => openPhotoContextMenu(event, photo, false, options)} />}
+        {props.resultSequence && props.onSelectViewerResult ? <ResultFilmstrip results={props.resultSequence} selectedId={props.initialResultId} onSelect={props.onSelectViewerResult} /> : <Filmstrip versionTarget={isDemo ? undefined : filmstripVersionTarget} rawCompanions={filmstripRawCompanions} activeGenerationResults={generationAssetId === selected.id ? currentGenerationResults : undefined} toolbarHost={viewerToolbarHost} items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} onSelectionChange={setSelection} onFocusPhoto={(photo) => { setSelectedId(photo.id); onSelectedAssetChange(photo.id); }} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} onVisibleIdsChange={setFilmstripVisibleIds} onOpenContextMenu={(event, photo, options) => openPhotoContextMenu(event, photo, false, options)} />}
       </main>}
       {photoContextMenu && <ContextMenuSurface className="folder-context-menu photo-context-menu" role="menu" aria-label={`照片菜单 ${selection.selectedIds.size} 张`} style={{ left: Math.min(photoContextMenu.x, Math.max(8, window.innerWidth - 244)), top: Math.min(photoContextMenu.y, Math.max(8, window.innerHeight - 530)) }} onPointerDown={(event) => event.stopPropagation()}>
         {!isDemo && selection.selectedIds.size === 1 && <><button type="button" role="menuitem" onClick={() => { void window.desktopApi.openAssetExternally(selected.id).catch((error: unknown) => setOperationNotice(error instanceof Error ? error.message : '无法打开文件')); setPhotoContextMenu(null); }}><Image size={14} /><span>用默认应用打开</span></button><button type="button" role="menuitem" onClick={() => { void window.desktopApi.getFileDetails(selected.id).then((details) => navigator.clipboard.writeText(details.path)).catch(() => setOperationNotice('无法复制文件路径')); setPhotoContextMenu(null); }}><Copy size={14} /><span>复制文件路径</span></button></>}
@@ -3348,7 +3448,6 @@ type WorkflowDraft = {
   globalRules: WorkflowRule[];
   itemRules: Record<string, WorkflowRule[]>;
   itemTemplateIds: Record<string, string>;
-  itemGenerationCounts: Record<string, number>;
   collectionReport: CollectionReport | null;
 };
 const WORKFLOW_DRAFT_KEY = 'photoallisai.ai-workflow.v1';
@@ -3360,7 +3459,7 @@ const DEFAULT_WORKFLOW_RULES: WorkflowRule[] = [
 ];
 
 function loadWorkflowDraft(): WorkflowDraft {
-  const fallback: WorkflowDraft = { workflowAssetIds: [], workflowAssetMeta: {}, stage: 'analysis', templateId: '', generationCount: 1, globalRules: DEFAULT_WORKFLOW_RULES, itemRules: {}, itemTemplateIds: {}, itemGenerationCounts: {}, collectionReport: null };
+  const fallback: WorkflowDraft = { workflowAssetIds: [], workflowAssetMeta: {}, stage: 'analysis', templateId: '', generationCount: 1, globalRules: DEFAULT_WORKFLOW_RULES, itemRules: {}, itemTemplateIds: {}, collectionReport: null };
   try {
     const value = JSON.parse(window.localStorage.getItem(WORKFLOW_DRAFT_KEY) ?? '') as Partial<WorkflowDraft>;
     const stages: WorkflowStage[] = ['analysis', 'collection', 'optimization', 'prompt', 'generation', 'review'];
@@ -3374,7 +3473,6 @@ function loadWorkflowDraft(): WorkflowDraft {
       globalRules: validRules(value.globalRules) ? value.globalRules : fallback.globalRules,
       itemRules: value.itemRules && typeof value.itemRules === 'object' ? Object.fromEntries(Object.entries(value.itemRules).filter(([, rules]) => validRules(rules))) : {},
       itemTemplateIds: value.itemTemplateIds && typeof value.itemTemplateIds === 'object' ? Object.fromEntries(Object.entries(value.itemTemplateIds).filter(([, id]) => typeof id === 'string')) as Record<string, string> : {},
-      itemGenerationCounts: value.itemGenerationCounts && typeof value.itemGenerationCounts === 'object' ? Object.fromEntries(Object.entries(value.itemGenerationCounts).filter(([, count]) => Number.isInteger(count) && Number(count) >= 1 && Number(count) <= 8)) as Record<string, number> : {},
       collectionReport: value.collectionReport && typeof value.collectionReport.summary === 'string' && Array.isArray(value.collectionReport.groups) && Array.isArray(value.collectionReport.keep) && Array.isArray(value.collectionReport.review) && Array.isArray(value.collectionReport.recommendations) ? value.collectionReport : null
     };
   } catch {
@@ -3400,7 +3498,6 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
   const [collectionReport] = useState<CollectionReport | null>(initialDraft.collectionReport);
   const [generationCount, setGenerationCount] = useState(initialDraft.generationCount);
   const [itemTemplateIds] = useState<Record<string, string>>(initialDraft.itemTemplateIds);
-  const [itemGenerationCounts, setItemGenerationCounts] = useState<Record<string, number>>(initialDraft.itemGenerationCounts);
   const [localFocusId, setLocalFocusId] = useState<string | null>(focusId);
   const [itemRules, setItemRules] = useState<Record<string, WorkflowRule[]>>(initialDraft.itemRules);
   const ids = workflowAssetIds;
@@ -3553,9 +3650,9 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
   }, [ids, idsKey, revisions]);
   useEffect(() => { if (focusId && ids.includes(focusId)) setLocalFocusId(focusId); }, [focusId, ids, idsKey]);
   useEffect(() => {
-    const timeout = window.setTimeout(() => window.localStorage.setItem(WORKFLOW_DRAFT_KEY, JSON.stringify({ workflowAssetIds, workflowAssetMeta, stage, templateId, generationCount, globalRules, itemRules, itemTemplateIds, itemGenerationCounts, collectionReport })), 300);
+    const timeout = window.setTimeout(() => window.localStorage.setItem(WORKFLOW_DRAFT_KEY, JSON.stringify({ workflowAssetIds, workflowAssetMeta, stage, templateId, generationCount, globalRules, itemRules, itemTemplateIds, collectionReport })), 300);
     return () => window.clearTimeout(timeout);
-  }, [collectionReport, generationCount, globalRules, itemGenerationCounts, itemRules, itemTemplateIds, stage, templateId, workflowAssetIds, workflowAssetMeta]);
+  }, [collectionReport, generationCount, globalRules, itemRules, itemTemplateIds, stage, templateId, workflowAssetIds, workflowAssetMeta]);
   const openGeneratedViewer = async (candidate: GenerationResult) => {
     try {
       // Browse the same candidates shown in the queue, including earlier submissions.
@@ -3626,14 +3723,14 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
         const prompt = composeGenerationPrompt({ templateBody: template?.body ?? '{{user_instruction}}', analysis: revision ? { ...revision.result, generativeActions: revision.result.generativeActions.filter((action) => enabled.some((item) => item.startsWith(`${action.target}：`))) } : undefined, userInstruction: [...rules, ...enabled].join('\n') });
         if (!prompt.trim()) throw new Error('请填写批次提示词、本图提示词或选择模板。');
         const batchId = crypto.randomUUID();
-        const count = itemGenerationCounts[assetId] ?? generationCount;
+        const count = generationCount;
         for (let resultIndex = 1; resultIndex <= count; resultIndex += 1) {
           const task = await window.desktopApi.enqueueTask({ kind: 'generation', assetId, payload: { providerProfileId: profile.id, batchId, submissionId, prompt, templateId: template?.id ?? null, templateVersion: template?.version ?? null, resultIndex, storageMode, ...(revision ? { analysisRevisionId: revision.id } : {}), disabledActionIds: revision?.result.generativeActions.filter((action) => !enabled.some((item) => item.startsWith(`${action.target}：`))).map((action) => action.id) ?? [], userInstruction: [...rules, ...enabled].join('\n') } });
           submittedCount += 1;
           setSubmissionTasks((current) => [...current.filter((item) => item.id !== task.id), task]);
         }
       }
-      const taskCount = usable.reduce((sum, item) => sum + (itemGenerationCounts[item.assetId] ?? generationCount), 0);
+      const taskCount = usable.length * generationCount;
       setNotice(`已将 ${usable.length} 张照片、共 ${taskCount} 个版本加入生图队列。`); setStage('review');
     } catch (error) { setNotice(`已提交 ${submittedCount} 个生成任务；${error instanceof Error ? error.message : String(error)}`); }
     finally { submitting.current = false; setBusy(false); }
@@ -3642,9 +3739,16 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
     <div className="workflow-body">
       <section className="workflow-main">
         <section className="batch-prompt-card"><div><span>批次整体提示词</span><label className="batch-model-choice"><select aria-label="本批生成模型" value={generationProfileId || (profiles.find((item) => item.purpose === 'generation' && item.enabled && item.isDefault) ?? profiles.find((item) => item.purpose === 'generation' && item.enabled))?.id || ''} onChange={(event) => setGenerationProfileId(event.target.value)}>{!profiles.some((item) => item.purpose === 'generation' && item.enabled) && <option value="">尚未配置生成模型</option>}{profiles.filter((item) => item.purpose === 'generation' && item.enabled).map((item) => <option key={item.id} value={item.id}>{item.name}{item.isDefault ? ' · 默认' : ''}</option>)}</select></label></div><textarea aria-label="批次整体提示词" value={globalRules.filter((item) => item.enabled).map((item) => item.text).join('\n')} onChange={(event) => onGlobalRulesChange([{ id: 'batch-prompt', text: event.target.value, enabled: true }])} placeholder="描述所有照片共有的修图要求" /></section>
-        <div className="batch-queue-toolbar"><strong>处理队列 <span>{workflowPhotos.length} 张 · {ids.reduce((sum, id) => sum + (itemGenerationCounts[id] ?? generationCount), 0)} 个版本</span></strong><div className="batch-queue-toolbar-actions"><label><span>每图生成</span><input aria-label="默认生成数量" type="number" min="1" max="8" value={generationCount} onChange={(event) => setGenerationCount(clamp(Number(event.target.value) || 1, 1, 8))} /></label><button className="quiet-button compact" type="button" disabled={busy || workflowPhotos.length === 0} onClick={() => void analyze()}><Sparkles size={12} />视觉分析</button><button className="primary-action compact" type="button" disabled={busy || generationActive || generationResultsReadyKey !== idsKey || workflowPhotos.length === 0} onClick={() => void generate()}><WandSparkles size={12} />{busy ? '正在提交…' : generationActive ? '生成中…' : generationResultsReadyKey !== idsKey ? '读取版本…' : '生成全部'}</button><button className="quiet-button compact" type="button" aria-label="清空处理列表" title="清空处理列表（后台任务继续运行）" disabled={workflowAssetIds.length === 0} onClick={() => { onClearAssets(); setNotice('已清空处理列表。'); }}><X size={12} /></button></div></div>
+        <div className="batch-queue-toolbar">
+          <div className="batch-queue-heading" role="region" aria-label="本批生成进度" aria-live="polite">
+            <strong>处理队列</strong>
+            <span>{submissionTasks.length > 0 ? `${workflowPhotos.length} 张 · 完成 ${batchCompleted}/${submissionTasks.length}${batchFailed > 0 ? ` · 失败 ${batchFailed}` : ''}${batchCanceled > 0 ? ` · 取消 ${batchCanceled}` : ''}${batchRunning > 0 ? ` · 生成中 ${batchRunning}` : ''}${batchQueued > 0 ? ` · 排队 ${batchQueued}` : ''}${batchPaused > 0 ? ` · 暂停 ${batchPaused}` : ''}` : `${workflowPhotos.length} 张 · 待生成 ${workflowPhotos.length * generationCount} 个版本`}</span>
+            {batchPending && <progress aria-label="本批已结束版本" value={batchCompleted + batchFailed + batchCanceled} max={submissionTasks.length} />}
+            {batchFailed > 0 && <button className="quiet-button compact" type="button" disabled={busy || batchRunning > 0 || batchQueued > 0 || batchPaused > 0} onClick={() => void retryGeneration(submissionTasks.filter((task) => task.status === 'failed'))}>重试失败</button>}
+          </div>
+          <div className="batch-queue-toolbar-actions"><label><span>每图生成</span><input aria-label="默认生成数量" type="number" min="1" max="8" value={generationCount} onChange={(event) => setGenerationCount(clamp(Number(event.target.value) || 1, 1, 8))} /></label><button className="quiet-button compact" type="button" disabled={busy || workflowPhotos.length === 0} onClick={() => void analyze()}><Sparkles size={12} />视觉分析</button><button className="primary-action compact" type="button" disabled={busy || generationActive || generationResultsReadyKey !== idsKey || workflowPhotos.length === 0} onClick={() => void generate()}><WandSparkles size={12} />{busy ? '正在提交…' : generationActive ? '生成中…' : generationResultsReadyKey !== idsKey ? '读取版本…' : '生成全部'}</button><button className="quiet-button compact" type="button" aria-label="清空处理列表" title="清空处理列表（后台任务继续运行）" disabled={workflowAssetIds.length === 0} onClick={() => { onClearAssets(); setNotice('已清空处理列表。'); }}><X size={12} /></button></div>
+        </div>
         {notice && <p className="workflow-notice" role="status">{notice}</p>}
-        {submissionTasks.length > 0 && <section className={`batch-generation-progress${batchPending ? '' : ' is-finished'}`} aria-label="本批生成进度" aria-live="polite"><div><strong>{batchRunning || batchQueued || batchPaused || busy ? '本批生成' : batchFailed ? '本批已结束' : batchCanceled ? '本批已取消' : '本批已完成'}</strong><span>{batchPending ? `成功 ${batchCompleted} / ${submissionTasks.length} 个版本` : `完成 ${batchCompleted} · 失败 ${batchFailed}`}</span>{batchRunning > 0 && <span>生成中 {batchRunning}</span>}{batchQueued > 0 && <span>排队 {batchQueued}</span>}{batchPaused > 0 && <span>已暂停 {batchPaused}</span>}{batchPending && batchFailed > 0 && <span className="batch-generation-error">失败 {batchFailed}</span>}{batchCanceled > 0 && <span>取消 {batchCanceled}</span>}{batchFailed > 0 && <button className="quiet-button compact" type="button" disabled={busy || batchRunning > 0 || batchQueued > 0 || batchPaused > 0} onClick={() => void retryGeneration(submissionTasks.filter((task) => task.status === 'failed'))}>重试失败</button>}</div>{batchPending && <progress aria-label="本批已结束版本" value={batchCompleted + batchFailed + batchCanceled} max={submissionTasks.length} />}</section>}
         {workflowPhotos.length === 0 ? <div className="workflow-empty">从图库或看图将照片加入处理队列</div> : <div className="batch-queue-list">{workflowPhotos.map((photo) => {
             const result = revisions[photo.id]?.result;
             const task = analysisTasks.get(photo.id);
@@ -3657,7 +3761,7 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
             const state = imageTasks.length && (active || pending.length || failed.length || candidates.length === 0)
               ? `${active ? taskStage(active) : pending.length ? pending.every((item) => item.status === 'paused') ? '已暂停' : '等待生成' : failed.length ? '生成失败' : imageTasks.every((item) => item.status === 'canceled') ? '已取消' : '生成完成'} · ${completed}/${imageTasks.length}`
               : candidates.length > 0 ? `已生成 · ${candidates.length} 个版本` : task && isUnfinished(task) ? '视觉分析中' : '待生成';
-            return <article className={`batch-queue-item${photo.id === effectiveCurrentId ? ' is-active' : ''}`} data-workflow-asset-id={photo.id} key={photo.id} onClick={() => { setLocalFocusId(photo.id); onFocusAsset(photo.id); }} onContextMenu={(event) => { event.preventDefault(); setLocalFocusId(photo.id); onFocusAsset(photo.id); setBatchContextMenu({ x: event.clientX, y: event.clientY, assetId: photo.id }); }}><div className="batch-queue-source" onClick={(event) => { event.stopPropagation(); onOpenViewer(photo.id, workflowAssetIds, { target: 'latest-ai' }); }}><span className="batch-queue-original" data-label-color={photo.labelColor ?? undefined}>{photo.thumbnailSrc || photo.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" /> : <Image size={20} />}<small>原图</small></span><span className="batch-queue-file"><strong>{photo.fileName}</strong><em>{active && <LoaderCircle size={12} className="batch-generation-spinner" />}{state}</em>{pending.length > 0 && <progress aria-label={`${photo.fileName} 已结束版本`} value={imageTasks.filter((item) => !isUnfinished(item)).length} max={imageTasks.length} />}</span></div><div className="batch-item-settings"><div className="batch-queue-editor"><label><span>本图补充要求</span><textarea value={(itemRules[photo.id] ?? []).filter((rule) => rule.enabled).map((rule) => rule.text).join('\n')} onClick={(event) => event.stopPropagation()} onChange={(event) => setItemRules((current) => ({ ...current, [photo.id]: [{ id: `prompt-${photo.id}`, text: event.target.value, enabled: true }] }))} placeholder="补充这张图片的独立要求" /></label><label><span>生成数量</span><input type="number" min="1" max="8" aria-label={`${photo.fileName} 生成数量`} placeholder={`全局 ${generationCount}`} value={itemGenerationCounts[photo.id] ?? ''} onClick={(event) => event.stopPropagation()} onChange={(event) => setItemGenerationCounts((current) => { const next = { ...current }; if (!event.target.value) delete next[photo.id]; else next[photo.id] = clamp(Number(event.target.value), 1, 8); return next; })} /></label></div></div><div className="batch-queue-candidates">{candidates.slice(0, 8).map((candidate) => <button data-label-color={photo.labelColor ?? undefined} className={`batch-candidate${candidate.reviewState === 'preferred' ? ' is-best' : ''}`} type="button" key={candidate.id} title="点击打开大图" onClick={(event) => { event.stopPropagation(); void openGeneratedViewer(candidate); }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setBatchContextMenu({ x: event.clientX, y: event.clientY, assetId: photo.id, resultId: candidate.id }); }}><img src={candidate.resultUrl} alt={`生成候选 ${candidate.version}`} /><small>{candidate.reviewState === 'preferred' && <Star size={10} fill="currentColor" aria-label="首选" />}V{candidate.version}</small></button>)}</div><div className="batch-queue-meta"><span>{failed.length > 0 ? <span className="batch-generation-error" role="alert">{failed.length} 个版本失败 · {generationFailureMessage(failed[0]!.errorCode)} <code>{failed[0]!.errorCode}</code> <button type="button" aria-label="复制生成错误" title="复制生成错误" onClick={(event) => { event.stopPropagation(); void navigator.clipboard.writeText(failed.map((item) => `图片：${photo.fileName}\n错误码：${item.errorCode ?? '未知错误'}\n任务 ID：${item.id}`).join('\n\n')); }}><Copy size={13} /></button></span> : result?.catalog.shortDescription ?? ''}</span><div><button type="button" aria-label={`${failed.length ? '重试失败版本' : '再次生成'} ${photo.fileName}`} title={failed.length ? '仅重试失败版本' : '再次生成'} disabled={busy || pending.length > 0} onClick={(event) => { event.stopPropagation(); setLocalFocusId(photo.id); onFocusAsset(photo.id); void (failed.length ? retryGeneration(failed) : generate(photo.id, true)); }}><RotateCcw size={12} /></button><button type="button" aria-label={`移除 ${photo.fileName}`} onClick={(event) => { event.stopPropagation(); onRemoveAsset(photo.id); }}><X size={12} /></button></div></div></article>;
+            return <article className={`batch-queue-item${photo.id === effectiveCurrentId ? ' is-active' : ''}`} data-workflow-asset-id={photo.id} key={photo.id} onClick={() => { setLocalFocusId(photo.id); onFocusAsset(photo.id); }} onContextMenu={(event) => { event.preventDefault(); setLocalFocusId(photo.id); onFocusAsset(photo.id); setBatchContextMenu({ x: event.clientX, y: event.clientY, assetId: photo.id }); }}><div className="batch-queue-source" onClick={(event) => { event.stopPropagation(); onOpenViewer(photo.id, workflowAssetIds, { target: 'latest-ai' }); }}><span className="batch-queue-original" data-label-color={photo.labelColor ?? undefined}>{photo.thumbnailSrc || photo.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" /> : <Image size={20} />}<small>原图</small></span><span className="batch-queue-file"><strong>{photo.fileName}</strong><em>{active && <LoaderCircle size={12} className="batch-generation-spinner" />}{state}</em>{pending.length > 0 && <progress aria-label={`${photo.fileName} 已结束版本`} value={imageTasks.filter((item) => !isUnfinished(item)).length} max={imageTasks.length} />}</span></div><div className="batch-item-settings"><label className="batch-item-instruction"><textarea aria-label={`${photo.fileName} 本图补充要求`} value={(itemRules[photo.id] ?? []).filter((rule) => rule.enabled).map((rule) => rule.text).join('\n')} onClick={(event) => event.stopPropagation()} onChange={(event) => setItemRules((current) => ({ ...current, [photo.id]: [{ id: `prompt-${photo.id}`, text: event.target.value, enabled: true }] }))} placeholder="补充这张图片的独立要求" /></label></div><div className="batch-queue-candidates">{candidates.slice(0, 8).map((candidate, candidateIndex, visibleCandidates) => { const startsPreviousBatch = candidateIndex > 0 && candidate.batchId !== visibleCandidates[0]?.batchId && visibleCandidates[candidateIndex - 1]?.batchId === visibleCandidates[0]?.batchId; return <button data-label-color={photo.labelColor ?? undefined} className={`batch-candidate${candidate.reviewState === 'preferred' ? ' is-best' : ''}${startsPreviousBatch ? ' is-previous-batch' : ''}`} type="button" key={candidate.id} title="点击打开大图" onClick={(event) => { event.stopPropagation(); void openGeneratedViewer(candidate); }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setBatchContextMenu({ x: event.clientX, y: event.clientY, assetId: photo.id, resultId: candidate.id }); }}><img src={candidate.resultUrl} alt={`生成候选 ${candidate.version}`} /><small>{candidate.reviewState === 'preferred' && <Star size={10} fill="currentColor" aria-label="首选" />}V{candidate.version}</small></button>; })}</div><div className="batch-queue-meta"><span>{failed.length > 0 ? <span className="batch-generation-error" role="alert">{failed.length} 个版本失败 · {generationFailureMessage(failed[0]!.errorCode)} <code>{failed[0]!.errorCode}</code> <button type="button" aria-label="复制生成错误" title="复制生成错误" onClick={(event) => { event.stopPropagation(); void navigator.clipboard.writeText(failed.map((item) => `图片：${photo.fileName}\n错误码：${item.errorCode ?? '未知错误'}\n任务 ID：${item.id}`).join('\n\n')); }}><Copy size={13} /></button></span> : result?.catalog.shortDescription ?? ''}</span><div><button type="button" aria-label={`${failed.length ? '重试失败版本' : '再次生成'} ${photo.fileName}`} title={failed.length ? '仅重试失败版本' : '再次生成'} disabled={busy || pending.length > 0} onClick={(event) => { event.stopPropagation(); setLocalFocusId(photo.id); onFocusAsset(photo.id); void (failed.length ? retryGeneration(failed) : generate(photo.id, true)); }}><RotateCcw size={12} /></button><button type="button" aria-label={`移除 ${photo.fileName}`} onClick={(event) => { event.stopPropagation(); onRemoveAsset(photo.id); }}><X size={12} /></button></div></div></article>;
 
           })}</div>}
         {batchContextMenu && <div className="batch-context-menu" role="menu" aria-label="批量修图操作" style={{ left: Math.min(batchContextMenu.x, window.innerWidth - 220), top: Math.min(batchContextMenu.y, window.innerHeight - 180) }} onPointerDown={(event) => event.stopPropagation()}><button type="button" role="menuitem" onClick={() => { void generate(batchContextMenu.assetId, true); setBatchContextMenu(null); }}><RotateCcw size={13} />再次生成</button><button type="button" role="menuitem" onClick={() => { void window.desktopApi.revealCatalogAsset(batchContextMenu.assetId); setBatchContextMenu(null); }}><FolderOpen size={13} />打开原图位置</button>{batchContextMenu.resultId && <button type="button" role="menuitem" onClick={() => { void window.desktopApi.revealGenerationResult(batchContextMenu.resultId!); setBatchContextMenu(null); }}><FolderOpen size={13} />打开生成图位置</button>}</div>}
@@ -4834,7 +4938,7 @@ export function App(): React.JSX.Element {
   const [sortBy, setSortBy] = useState<CatalogSort>('fileName');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc' | undefined>('asc');
   const catalogRequest = useRef(0);
-  const groupAutoLoadFailed = useRef(false);
+  const catalogPagePending = useRef(false);
 
   useEffect(() => {
     applyCatalogFileNameAlignment(catalogFileNameCentered());
@@ -4899,7 +5003,7 @@ export function App(): React.JSX.Element {
 
   const refreshCatalog = useCallback(async (folderId: string | null = selectedFolderId) => {
     const request = ++catalogRequest.current;
-    groupAutoLoadFailed.current = false;
+    catalogPagePending.current = false;
     setLoadingMore(true);
     try {
       const [page, folders, tags, albums, smartCollections] = await Promise.all([
@@ -5060,7 +5164,8 @@ export function App(): React.JSX.Element {
   }, [activeTab, closeViewer, closeWorkspaceTab, openTabs, viewerPhoto, viewerPreloading, quickPhoto]);
 
   const loadMoreCatalog = useCallback(async () => {
-    if (!nextCursor || loadingMore) return;
+    if (!nextCursor || loadingMore || catalogPagePending.current) return;
+    catalogPagePending.current = true;
     const request = ++catalogRequest.current;
     setLoadingMore(true);
     try {
@@ -5084,18 +5189,13 @@ export function App(): React.JSX.Element {
       });
       setCatalogTotal(page.totalCount);
       setNextCursor(page.nextCursor);
-      groupAutoLoadFailed.current = false;
     } catch (error) {
-      groupAutoLoadFailed.current = true;
-      setNavigationNotice(error instanceof Error ? error.message : '无法继续加载分组照片');
+      setNavigationNotice(error instanceof Error ? error.message : '无法继续加载照片');
     } finally {
+      catalogPagePending.current = false;
       if (request === catalogRequest.current) setLoadingMore(false);
     }
   }, [nextCursor, loadingMore, selectedFolderId, selectedTagId, selectedAlbumId, selectedSmartCollection, favoriteOnly, catalogFilterInput, sortBy, sortDirection, searchQuery, setNavigationNotice]);
-
-  useEffect(() => {
-    if (photoFilters.groupBy.length && catalogReady && nextCursor && !loadingMore && !groupAutoLoadFailed.current) void loadMoreCatalog();
-  }, [photoFilters.groupBy, catalogReady, nextCursor, loadingMore, loadMoreCatalog]);
 
   const isDemo = E2E_DEMO_MODE && catalogReady && catalogTotal === 0 && catalogFolders.length === 0;
   const availablePhotos = useMemo(() => {

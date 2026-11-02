@@ -48,8 +48,22 @@ test('gallery dimensions group the complete folder with independent masonry sect
     await expect(page.locator('[data-catalog-tool="view"]')).toHaveCount(0);
     await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
     await page.getByRole('checkbox', { name: '视图', exact: true }).check();
+    await page.getByRole('checkbox', { name: '分组:比例', exact: true }).check();
+    await page.getByRole('checkbox', { name: '分组:横竖', exact: true }).check();
     await page.keyboard.press('Escape');
     await expect(page.getByRole('button', { name: '等高瀑布流', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await page.getByRole('button', { name: '按比例分组', exact: true }).click();
+    await expect(page.getByRole('button', { name: '比例：逆序，点击切换', exact: true })).toBeVisible();
+    await expect(page.locator('.catalog-group-heading').filter({ hasText: /^\d+:\d+/ }).first()).toBeAttached();
+    await page.getByRole('button', { name: '比例：逆序，点击切换', exact: true }).click();
+    await expect(page.getByRole('button', { name: '比例：正序，点击切换', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '按比例分组', exact: true }).click();
+    await page.getByRole('button', { name: '按横竖分组', exact: true }).click();
+    await expect(page.getByRole('button', { name: '横竖：逆序，点击切换', exact: true })).toBeVisible();
+    await expect(page.locator('.catalog-group-heading').filter({ hasText: '竖图' }).first()).toBeAttached();
+    await page.getByRole('button', { name: '横竖：逆序，点击切换', exact: true }).click();
+    await expect(page.getByRole('button', { name: '横竖：正序，点击切换', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '按横竖分组', exact: true }).click();
     await expect(page.locator('.catalog-grid')).toHaveClass(/catalog-justified/);
     await expect.poll(() => page.locator('.catalog-card img.is-ready').count()).toBe(6);
     await expect.poll(() => page.locator('.catalog-card').evaluateAll((cards) => {

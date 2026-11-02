@@ -35,7 +35,8 @@ test('configures dynamic workflows, browses stages, and refreshes external outpu
     const stages = viewer.getByRole('combobox', { name: '流程阶段' });
     const versionTarget = viewer.getByRole('combobox', { name: '切换目标版本' });
     await expect(stages.locator('option')).toHaveCount(5);
-    await expect(versionTarget.locator('option')).toHaveText(['原图', '后期', '美颜', '调色', 'AI 修图', '未 AI', '首选 AI', '最新 AI']);
+    await expect(versionTarget.locator('option')).toHaveText(['RAW', '原图', '后期', '美颜', '调色', 'AI 修图', '未 AI', '首选 AI', '最新 AI']);
+    await expect(versionTarget.locator('option').first()).toHaveAttribute('disabled', '');
     await expect(versionTarget.locator('hr')).toHaveCount(1);
     await versionTarget.selectOption('stage:original');
     await expect(viewer.locator('.viewer-title')).toContainText('DSC1.jpg');
@@ -46,7 +47,7 @@ test('configures dynamic workflows, browses stages, and refreshes external outpu
     await versionTarget.selectOption('no-ai');
     await expect(stages).toHaveValue(noAiStage!);
     const currentSource = assets.find((asset) => asset.id === noAiStage)!.previewUrl.replace('://preview/', '://original/');
-    const previousSource = assets.find((asset) => asset.fileName === 'DSC1-美颜.jpg')!.previewUrl.replace('://preview/', '://original/');
+    const previousSource = assets.find((asset) => asset.fileName === 'DSC1.jpg')!.previewUrl.replace('://preview/', '://original/');
     await viewer.locator('.canvas-wrap').focus();
     await page.keyboard.down('Space');
     await expect(viewer.locator('.base-image')).toHaveAttribute('src', previousSource);
@@ -116,5 +117,49 @@ test('configures dynamic workflows, browses stages, and refreshes external outpu
     await page.keyboard.press('Escape');
     await expect(page.locator('.catalog-card')).toHaveCount(2);
     expect(errors).toEqual([]);
+  } finally { await app.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('shows a matching RAW in version controls and compares the JPEG original against it', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'photo-raw-version-e2e-'));
+  const userData = path.join(root, 'user-data');
+  const source = path.join(root, 'photos');
+  await mkdir(path.join(userData, 'library'), { recursive: true });
+  await mkdir(source, { recursive: true });
+  const fixture = path.resolve('apps/desktop/src/renderer/public/demo/portrait.jpg');
+  await copyFile(fixture, path.join(source, 'A.jpg'));
+  await copyFile(fixture, path.join(source, 'A.dng'));
+  await copyFile(fixture, path.join(source, 'B.jpg'));
+  const catalog = new CatalogService(path.join(userData, 'library', 'catalog.sqlite'));
+  await catalog.importFolders([source]); catalog.close();
+  const app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js')], env: { ...process.env, PHOTOALLISAI_USER_DATA: userData } });
+  try {
+    const page = await app.firstWindow();
+    await expect(page.locator('.catalog-card')).toHaveCount(3);
+    const catalogTarget = page.getByLabel('图库流程版本', { exact: true });
+    await expect(catalogTarget.locator('option').first()).toBeEnabled();
+    const jpeg = page.locator('.catalog-card').filter({ hasText: 'A.jpg' });
+    const raw = page.locator('.catalog-card').filter({ hasText: 'A.dng' });
+    const rawImage = await raw.locator('img').getAttribute('src');
+    await catalogTarget.selectOption('raw');
+    await expect(jpeg.locator('img')).toHaveAttribute('src', rawImage!);
+    await jpeg.dblclick();
+    const viewer = page.getByRole('region', { name: '看图', exact: true });
+    const target = viewer.getByRole('combobox', { name: '切换目标版本' });
+    await expect(target).toHaveValue('raw');
+    await expect(viewer.locator('.version-switcher button').filter({ hasText: 'RAW' })).toBeVisible();
+    const rawSource = (await page.evaluate(() => window.desktopApi.listCatalogAssets())).find((asset) => asset.fileName === 'A.dng')!.previewUrl;
+    await expect(viewer.locator('.base-image')).toHaveAttribute('src', rawSource);
+    await expect(viewer.locator('.thumb[data-asset-id] img').first()).toHaveAttribute('src', rawImage!);
+    await target.selectOption('stage:original');
+    const originalSource = (await page.evaluate(() => window.desktopApi.listCatalogAssets())).find((asset) => asset.fileName === 'A.jpg')!.previewUrl.replace('://preview/', '://original/');
+    await viewer.locator('.canvas-wrap').focus();
+    await page.keyboard.down('Space');
+    await expect(viewer.locator('.base-image')).toHaveAttribute('src', rawSource);
+    await page.keyboard.up('Space');
+    await expect(viewer.locator('.base-image')).toHaveAttribute('src', originalSource);
+    await page.keyboard.press('Escape');
+    await page.getByRole('treeitem', { name: /photos/ }).click();
+    expect(await page.locator('.catalog-card').count()).toBe(3);
   } finally { await app.close(); await rm(root, { recursive: true, force: true }); }
 });

@@ -63,15 +63,16 @@ test('direct generation shows batch and image progress, retains candidates and r
   }, `http://127.0.0.1:${address.port}`);
   await expect(page.locator('.catalog-card')).toHaveCount(2);
   await page.locator('.catalog-card').first().dblclick();
-  await page.getByRole('button', { name: '添加本图到批量修图' }).click();
+  await page.getByRole('button', { name: '添加到批量修图', exact: true }).click();
   await page.keyboard.press('Escape');
   await page.locator('.catalog-card').nth(1).dblclick();
-  await page.getByRole('button', { name: '添加本图到批量修图' }).click();
+  await page.getByRole('button', { name: '添加到批量修图', exact: true }).click();
   await page.getByRole('button', { name: '打开批量修图' }).click();
   const items = page.locator('.batch-queue-item');
   await expect(items).toHaveCount(2);
   await expect(items.first().getByPlaceholder('补充这张图片的独立要求')).toBeVisible();
-  await expect(items.first().getByRole('spinbutton')).toHaveAttribute('placeholder', '全局 1');
+  await expect(items.first().getByText('本图补充要求')).toHaveCount(0);
+  await expect(items.first().getByRole('spinbutton')).toHaveCount(0);
   await page.getByLabel('批次整体提示词').fill('水彩风格，保持人物身份');
   await items.first().locator('textarea').fill('FAIL_TEST 保留构图');
   await page.getByLabel('默认生成数量').fill('2');
@@ -80,7 +81,7 @@ test('direct generation shows batch and image progress, retains candidates and r
   await expect(progress).toBeVisible();
   await expect(page.getByRole('button', { name: '生成中…', exact: true })).toBeDisabled();
   await expect(items.first()).not.toContainText('待识别');
-  await expect(progress).toContainText('完成 2 · 失败 2', { timeout: 25_000 });
+  await expect(progress).toContainText('完成 2/4 · 失败 2', { timeout: 25_000 });
   await expect(progress).toContainText('失败 2');
   await expect(items.first()).toContainText('生图请求被拒绝');
   await expect(items.first().getByRole('button', { name: '复制生成错误' })).toBeVisible();
@@ -93,7 +94,7 @@ test('direct generation shows batch and image progress, retains candidates and r
   await expect(page.locator('.batch-candidate')).toHaveCount(2);
   fail = false;
   await page.getByRole('button', { name: '重试失败', exact: true }).click();
-  await expect(page.getByRole('region', { name: '本批生成进度' })).toContainText('完成 4 · 失败 0', { timeout: 25_000 });
+  await expect(page.getByRole('region', { name: '本批生成进度' })).toContainText('完成 4/4', { timeout: 25_000 });
   await expect(page.getByRole('region', { name: '本批生成进度' }).getByRole('progressbar')).toHaveCount(0);
   await expect(page.locator('.batch-candidate')).toHaveCount(4);
   expect(requests).toHaveLength(6);
@@ -106,7 +107,11 @@ test('direct generation shows batch and image progress, retains candidates and r
 test('viewer remembers one target, temporarily overrides task originals and navigates batch results', async () => {
   test.setTimeout(90_000);
   await page.getByRole('button', { name: '生成全部', exact: true }).click();
-  await expect(page.getByRole('region', { name: '本批生成进度' })).toContainText('完成 4 · 失败 0', { timeout: 25_000 });
+  await page.getByRole('alertdialog', { name: '重新生成全部图片？' }).getByRole('button', { name: '重新生成' }).click();
+  await expect.poll(async () => page.evaluate(async () => {
+    const assets = await window.desktopApi.listCatalogAssets();
+    return (await Promise.all(assets.map((asset) => window.desktopApi.listGenerationResults(asset.id)))).flat().length;
+  }), { timeout: 25_000 }).toBeGreaterThanOrEqual(8);
   await expect(page.locator('.batch-candidate')).toHaveCount(8);
 
   await page.getByRole('tab', { name: '图库', exact: true }).click();
@@ -211,6 +216,8 @@ test('viewer remembers one target, temporarily overrides task originals and navi
     return (await Promise.all(assets.map((asset) => window.desktopApi.listGenerationResults(asset.id)))).flat().map(({ id, reviewState }) => ({ id, reviewState }));
   });
   expect(reviewsAfter).toEqual(reviewsBefore);
+  await page.locator('.canvas-wrap').focus();
+  await page.keyboard.press('Escape');
   await candidates.nth(1).click({ button: 'right' });
   const batchMenu = page.getByRole('menu', { name: '批量修图操作' });
   await expect(batchMenu).toBeVisible();
@@ -267,7 +274,7 @@ test('viewer remembers one target, temporarily overrides task originals and navi
 
   await page.getByRole('button', { name: '打开工作区' }).click();
   await page.getByRole('menuitem', { name: '任务中心', exact: true }).click();
-  const taskBatch = page.locator('.task-batch-group').filter({ has: page.locator('.task-batch-summary').filter({ hasText: '图片生成' }) }).first();
+  const taskBatch = page.locator('.task-batch-group').filter({ has: page.locator('.task-batch-summary').filter({ hasText: '生成:' }) }).first();
   await taskBatch.locator(':scope > summary').click();
   await taskBatch.locator('.task-analysis-result').filter({ has: page.locator('summary', { hasText: '生成详情' }) }).first().locator('summary').click();
   await taskBatch.getByRole('button', { name: /^查看生成图片/ }).first().click();

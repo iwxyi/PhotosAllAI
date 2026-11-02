@@ -21,6 +21,7 @@ it('reads photographic and textual location metadata without deriving a city fro
   vi.mocked(exifr.parse).mockResolvedValueOnce({ Make: 'Sony', Model: 'A7 IV', LensMake: 'Sigma', LensModel: 'Art 35mm', City: 'Tokyo', CountryName: 'Japan', DateTimeOriginal: new Date('2024-05-12T12:00:00Z'), ExposureTime: 1 / 125, FNumber: 2.8, FocalLength: 35, ISO: 400 } as never);
   const details = await service.details('asset-id');
   expect(details).toMatchObject({ cameraMake: 'Sony', cameraModel: 'A7 IV', lensMake: 'Sigma', lensModel: 'Art 35mm', city: 'Tokyo', country: 'Japan', takenAt: '2024-05-12T12:00:00.000Z', exposureSeconds: 1 / 125, aperture: 2.8, focalLength: 35, iso: 400 });
+  expect(details).toMatchObject({ width: 1800, height: 2251 });
   expect(exifr.parse).toHaveBeenCalledWith(file, expect.objectContaining({ iptc: true, xmp: true }));
   await service.details('asset-id');
   expect(exifr.parse).toHaveBeenCalledTimes(1);
@@ -29,4 +30,14 @@ it('reads photographic and textual location metadata without deriving a city fro
   const gpsOnly = await service.details('asset-id');
   expect(gpsOnly.city).toBeUndefined();
   expect(gpsOnly.country).toBeUndefined();
+});
+
+it('uses display orientation when grouping camera images by aspect ratio', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'photo-group-orientation-'));
+  directories.push(directory);
+  const file = path.join(directory, 'image.jpg');
+  await copyFile(path.resolve('apps/desktop/src/renderer/public/demo/portrait.jpg'), file);
+  const service = new ImageFileService({ resolveAssetFile: () => ({ path: file, fileName: 'image.jpg', modifiedAt: 0, sizeBytes: 0 }) });
+  vi.mocked(exifr.parse).mockResolvedValueOnce({ ExifImageWidth: 3000, ExifImageHeight: 2000, Orientation: 6 } as never);
+  await expect(service.details('asset-id')).resolves.toMatchObject({ width: 2000, height: 3000 });
 });

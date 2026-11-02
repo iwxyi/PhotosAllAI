@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readdir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import exifr from 'exifr';
+import { imageSizeFromFile } from 'image-size/fromFile';
 import type { CatalogAsset, FileDetails, QuickViewSession } from '@photoallisai/contracts';
 import { isSupportedImage, type CatalogService } from './catalog-service';
 
@@ -57,7 +58,7 @@ export class ImageFileService {
     if (cached?.sizeBytes === metadata.size && cached.modifiedAt === metadata.mtimeMs) return { ...cached.details };
     const result: FileDetails = { path: file, sizeBytes: metadata.size, modifiedAt: metadata.mtimeMs };
     try {
-      const tags = await exifr.parse(file, { iptc: true, xmp: true, pick: ['Make', 'Model', 'LensMake', 'LensModel', 'DateTimeOriginal', 'ExposureTime', 'FNumber', 'ISO', 'FocalLength', 'ExifImageWidth', 'ExifImageHeight', 'ImageWidth', 'ImageHeight', 'City', 'Country', 'CountryName'] });
+      const tags = await exifr.parse(file, { iptc: true, xmp: true, pick: ['Make', 'Model', 'LensMake', 'LensModel', 'DateTimeOriginal', 'ExposureTime', 'FNumber', 'ISO', 'FocalLength', 'ExifImageWidth', 'ExifImageHeight', 'ImageWidth', 'ImageHeight', 'Orientation', 'City', 'Country', 'CountryName'] });
       if (tags) {
         result.camera = [tags.Make, tags.Model].filter(Boolean).join(' ') || undefined;
         result.lens = tags.LensModel;
@@ -74,9 +75,19 @@ export class ImageFileService {
         for (const [key, value] of Object.entries({ aperture: tags.FNumber, iso: tags.ISO, focalLength: tags.FocalLength, width: tags.ExifImageWidth ?? tags.ImageWidth, height: tags.ExifImageHeight ?? tags.ImageHeight })) {
           if (typeof value === 'number' && Number.isFinite(value) && value > 0) Object.assign(result, { [key]: value });
         }
+        if (result.width && result.height && [5, 6, 7, 8].includes(Number(tags.Orientation))) [result.width, result.height] = [result.height, result.width];
       }
     } catch {
       result.metadataWarning = '此文件未提供可读取的拍摄信息';
+    }
+    if (!result.width || !result.height) {
+      try {
+        const size = await imageSizeFromFile(file);
+        if (size.width > 0 && size.height > 0) {
+          [result.width, result.height] = [size.width, size.height];
+          if (size.orientation && [5, 6, 7, 8].includes(size.orientation)) [result.width, result.height] = [result.height, result.width];
+        }
+      } catch { /* RAW or unsupported formats may only expose dimensions through EXIF. */ }
     }
     this.#detailsCache.delete(file);
     this.#detailsCache.set(file, { sizeBytes: metadata.size, modifiedAt: metadata.mtimeMs, details: result });

@@ -11,6 +11,8 @@ export const browseDimensions = {
   country: { label: '国家', section: 'file' },
   rating: { label: '评分', section: 'file' },
   size: { label: '大小', section: 'file' },
+  aspectRatio: { label: '比例', section: 'file' },
+  orientation: { label: '横竖', section: 'file' },
   folder: { label: '文件夹', section: 'file' },
   exifLensMake: { label: '镜头制造商', section: 'exif' },
   exifLensModel: { label: '镜头型号', section: 'exif' },
@@ -33,8 +35,8 @@ export type BrowseFilters = {
 };
 export const emptyBrowseFilters: BrowseFilters = { groupBy: [], groupOrder: {} };
 export const browseLabels = Object.fromEntries(Object.entries(browseDimensions).map(([key, value]) => [key, value.label])) as Record<BrowseDimension, string>;
-export const metadataDimensions = new Set<BrowseDimension>(['city', 'country', 'exifLensMake', 'exifLensModel', 'exifYear', 'exifMonth', 'exifDay', 'exifAperture', 'exifFocalLength', 'exifExposure', 'exifIso', 'cameraModel']);
-const descendingDimensions = new Set<BrowseDimension>(['year', 'month', 'date', 'rating', 'exifYear', 'exifMonth', 'exifDay']);
+export const metadataDimensions = new Set<BrowseDimension>(['aspectRatio', 'orientation', 'city', 'country', 'exifLensMake', 'exifLensModel', 'exifYear', 'exifMonth', 'exifDay', 'exifAperture', 'exifFocalLength', 'exifExposure', 'exifIso', 'cameraModel']);
+const descendingDimensions = new Set<BrowseDimension>(['year', 'month', 'date', 'rating', 'aspectRatio', 'orientation', 'exifYear', 'exifMonth', 'exifDay']);
 
 export function defaultGroupOrder(dimension: BrowseDimension): 'asc' | 'desc' {
   return descendingDimensions.has(dimension) ? 'desc' : 'asc';
@@ -51,6 +53,24 @@ type GroupPart = { key: string; label: string; sort: string | number; missing?: 
 const unknown = (label: string): GroupPart => ({ key: '', label: `未知${label}`, sort: '', missing: true });
 const part = (value: string | number | null | undefined, label = String(value ?? '')): GroupPart => value === null || value === undefined || value === '' ? unknown('信息') : { key: String(value), label, sort: value };
 const formatNumber = (value: number) => Number(value.toFixed(2)).toString();
+const commonRatios = [[3, 1], [21, 9], [2, 1], [16, 9], [3, 2], [4, 3], [5, 4], [1, 1], [4, 5], [3, 4], [2, 3], [9, 16], [1, 2], [1, 3]] as const;
+const gcd = (left: number, right: number): number => right ? gcd(right, left % right) : left;
+const imageRatio = (details?: FileDetails | null): number | null => {
+  const width = details?.width;
+  const height = details?.height;
+  return width && height && Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0 ? width / height : null;
+};
+
+function ratioPart(details?: FileDetails | null): GroupPart {
+  const ratio = imageRatio(details);
+  if (ratio === null) return unknown('比例');
+  const common = commonRatios.find(([width, height]) => Math.abs(ratio - width / height) / (width / height) <= .005);
+  const width = common?.[0] ?? Math.round(details!.width!);
+  const height = common?.[1] ?? Math.round(details!.height!);
+  const divisor = gcd(width, height);
+  const label = `${width / divisor}:${height / divisor}`;
+  return { key: label, label, sort: width / height };
+}
 
 function groupPart(photo: Photo, dimension: BrowseDimension, folders: Map<string, CatalogFolder>, details?: FileDetails | null): GroupPart {
   const folderPath = (id: string): string => {
@@ -84,6 +104,13 @@ function groupPart(photo: Photo, dimension: BrowseDimension, folders: Map<string
       if (size === undefined) return unknown('大小');
       const bucket = size < 1024 ** 2 ? 0 : size < 10 * 1024 ** 2 ? 1 : size < 100 * 1024 ** 2 ? 2 : 3;
       return part(bucket, ['< 1 MB', '1–10 MB', '10–100 MB', '≥ 100 MB'][bucket]!);
+    }
+    case 'aspectRatio': return ratioPart(details);
+    case 'orientation': {
+      const ratio = imageRatio(details);
+      if (ratio === null) return unknown('方向');
+      const bucket = ratio > 1.05 ? 3 : ratio < .95 ? 1 : 2;
+      return part(bucket, ({ 3: '横图', 2: '方图', 1: '竖图' } as const)[bucket as 1 | 2 | 3]);
     }
     case 'folder': return photo.folderId ? { key: photo.folderId, label: folderPath(photo.folderId) || '未知文件夹', sort: folderPath(photo.folderId) } : unknown('文件夹');
     case 'exifLensMake': return details?.lensMake ? part(details.lensMake) : unknown('镜头制造商');

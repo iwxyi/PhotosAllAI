@@ -47,7 +47,7 @@ test.afterAll(async () => {
   await rm(testRoot, { recursive: true, force: true });
 });
 
-test('loads cursor pages at the virtualized filmstrip boundary', async () => {
+test('loads cursor pages automatically near the gallery end', async () => {
   await page.locator('.catalog-card').first().dblclick();
   await page.keyboard.press('Escape');
   await expect(page.locator('[data-catalog-tool="count"]')).toContainText('205 张');
@@ -68,25 +68,36 @@ test('loads cursor pages at the virtualized filmstrip boundary', async () => {
   await expect(page.locator('.operation-toast')).toContainText('已收藏 2 张照片');
   await expect(page.getByRole('button', { name: /收藏 2/ })).toBeVisible();
   await page.screenshot({ path: 'test-results/catalog-batch-favorite.png', animations: 'disabled' });
-  const filmstrip = page.locator('.catalog-grid');
-  await filmstrip.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
-  const more = page.getByRole('button', { name: /更多|加载中/ });
-  if (await more.count()) await more.click();
-  await expect(page.getByRole('option').filter({ hasText: 'PAGE_204.jpg' })).toBeVisible();
-
-  await filmstrip.evaluate((element) => { element.scrollLeft = element.scrollWidth; });
-  expect(await options.count()).toBeGreaterThanOrEqual(205);
+  const gallery = page.locator('.catalog-grid');
+  await expect(options).toHaveCount(200);
+  await gallery.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(options).toHaveCount(205);
+  await expect(options.filter({ hasText: 'PAGE_204.jpg' })).toHaveCount(1);
 });
 
-test('grouping loads every photo in the selected folder across cursor pages', async () => {
+test('grouping keeps later pages deferred until the gallery is scrolled', async () => {
   await page.reload();
   await expect(page.locator('.catalog-card')).toHaveCount(200);
   await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
   await page.getByRole('checkbox', { name: '分组:月份', exact: true }).click();
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: '按月份分组', exact: true }).click();
-  await expect.poll(() => page.locator('.catalog-card').count()).toBe(205);
+  await expect(page.locator('.catalog-card')).toHaveCount(200);
   await expect(page.locator('.catalog-photo-group')).toHaveCount(1);
   await expect(page.locator('.catalog-group-heading')).toContainText('1970-01');
+  await page.locator('.catalog-grid').evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(page.locator('.catalog-card')).toHaveCount(205);
   await page.getByRole('button', { name: '按月份分组', exact: true }).click();
+});
+
+test('loads the next page in list view without a manual button click', async () => {
+  await page.reload();
+  await expect(page.locator('.catalog-card')).toHaveCount(200);
+  await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
+  await page.getByRole('checkbox', { name: '视图', exact: true }).check();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: '列表视图', exact: true }).click();
+  await expect(page.locator('.catalog-list-row')).toHaveCount(200);
+  await page.locator('.catalog-list-view').evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(page.locator('.catalog-list-row')).toHaveCount(205);
 });

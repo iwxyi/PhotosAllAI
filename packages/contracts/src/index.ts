@@ -429,6 +429,7 @@ export type CopyCatalogAssetsReport = z.infer<typeof copyCatalogAssetsReportSche
 
 export const catalogCompanionPreviewSchema = z.object({
   files: z.array(z.object({
+    sourceAssetId: z.string().min(1),
     fileName: z.string().min(1),
     kind: z.enum(['raw', 'jpeg', 'xmp']),
     assetId: z.string().min(1).nullable(),
