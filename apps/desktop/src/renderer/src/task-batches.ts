@@ -9,7 +9,10 @@ export function groupTaskBatches(tasks: PersistedTask[]) {
     if (!members.some((member) => member.id === task.id)) members.push(task);
     groups.set(id, members);
   }
-  return [...groups].map(([id, members]) => ({ id, tasks: members, ...batchProgress(members) }));
+  return [...groups].map(([id, members]) => {
+    const ordered = members.sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id));
+    return { id, tasks: ordered, ...batchProgress(ordered) };
+  }).sort((left, right) => right.tasks[0]!.createdAt - left.tasks[0]!.createdAt || right.tasks[0]!.id.localeCompare(left.tasks[0]!.id));
 }
 
 export function batchProgress(tasks: PersistedTask[]) {

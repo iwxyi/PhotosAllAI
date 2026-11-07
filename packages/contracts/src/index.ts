@@ -39,7 +39,10 @@ export const diagnosticSnapshotSchema = z.object({
     watchedFolders: z.number().int().nonnegative(),
     activeWatchers: z.number().int().nonnegative(),
     watchFailures: z.number().int().nonnegative(),
-    reconciliationFailures: z.number().int().nonnegative()
+    reconciliationFailures: z.number().int().nonnegative(),
+    reconciling: z.boolean(),
+    fullScans: z.number().int().nonnegative(),
+    fullScanMsTotal: z.number().int().nonnegative()
   }),
   providers: z.object({ total: z.number().int().nonnegative(), enabled: z.number().int().nonnegative() }),
   tasks: z.record(z.string(), z.number().int().nonnegative()),
@@ -50,7 +53,20 @@ export const diagnosticSnapshotSchema = z.object({
       hits: z.number().int().nonnegative(),
       misses: z.number().int().nonnegative(),
       decodes: z.number().int().nonnegative(),
-      decodeMsTotal: z.number().nonnegative()
+      abortedConsumers: z.number().int().nonnegative(),
+      canceledQueued: z.number().int().nonnegative(),
+      decodeMsTotal: z.number().nonnegative(),
+      queueWaitMsTotal: z.number().nonnegative(),
+      createMsTotal: z.number().nonnegative(),
+      sourceStatMsTotal: z.number().nonnegative(),
+      nativeDecodeMsTotal: z.number().nonnegative(),
+      jpegEncodeMsTotal: z.number().nonnegative(),
+      cacheWriteMsTotal: z.number().nonnegative(),
+      cachePayloadWriteMsTotal: z.number().nonnegative(),
+      cachePublishMsTotal: z.number().nonnegative(),
+      cacheCleanupMsTotal: z.number().nonnegative()
+      ,eventLoopDelayMaxMs: z.number().nonnegative(),
+      eventLoopDelayMeanMs: z.number().nonnegative()
     }),
     raw: z.object({ nativeImage: z.boolean(), imageMagick: z.boolean(), sips: z.boolean() })
   }),
@@ -255,9 +271,16 @@ export const fileDetailsSchema = z.object({
 });
 export type FileDetails = z.infer<typeof fileDetailsSchema>;
 export const quickViewSessionSchema = z.object({
-  items: z.array(catalogAssetSchema), selectedId: z.string(), directory: z.string()
+  items: z.array(catalogAssetSchema), selectedId: z.string(), directory: z.string(),
+  sessionId: z.string().optional(), complete: z.boolean().optional(), indexed: z.boolean().optional(), totalCount: z.number().int().nonnegative().optional()
 });
 export type QuickViewSession = z.infer<typeof quickViewSessionSchema>;
+export const temporaryMediaPageInputSchema = z.object({
+  sessionId: z.string().uuid(), offset: z.number().int().nonnegative(), limit: z.number().int().min(1).max(500), selectedId: z.string().optional()
+});
+export type TemporaryMediaPageInput = z.infer<typeof temporaryMediaPageInputSchema>;
+export const temporaryMediaPageSchema = z.object({ items: z.array(catalogAssetSchema), totalCount: z.number().int().nonnegative(), selectedPosition: z.number().int().nonnegative().nullable().optional() });
+export type TemporaryMediaPage = z.infer<typeof temporaryMediaPageSchema>;
 
 export const catalogAssetCursorSchema = z.object({
   modifiedAt: z.number().nonnegative(),
@@ -287,6 +310,7 @@ export const listCatalogAssetsInputSchema = z.object({
   query: z.string().max(500).default(''),
   workflow: z.boolean().default(true),
   cursor: catalogAssetCursorSchema.nullable().default(null),
+  offset: z.number().int().nonnegative().max(10_000_000).optional(),
   limit: z.number().int().min(1).max(500).default(200)
 });
 
@@ -958,6 +982,10 @@ export type CollectionAnalysisReport = z.infer<typeof collectionAnalysisReportSc
 
 export const generationTaskPayloadSchema = z.object({
   sourceResultId: z.string().uuid().optional(),
+  inputSources: z.array(z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('asset'), assetId: z.string().min(1) }),
+    z.object({ kind: z.literal('result'), resultId: z.string().uuid() })
+  ])).min(1).max(8).optional(),
   submissionId: z.string().uuid().optional(),
   providerProfileId: z.string().uuid(),
   batchId: z.string().uuid(),
@@ -975,6 +1003,10 @@ export const generationResultSchema = z.object({
   id: z.string().uuid(),
   assetId: z.string(),
   batchId: z.string().uuid(),
+  inputSources: z.array(z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('asset'), assetId: z.string().min(1) }),
+    z.object({ kind: z.literal('result'), resultId: z.string().uuid() })
+  ])).min(1).max(8).optional(),
   version: z.number().int().positive(),
   fileName: z.string().min(1),
   resultUrl: z.string(),
@@ -1076,6 +1108,7 @@ export const pruneImageCacheInputSchema = z.object({ maxBytes: z.number().int().
 
 export * from './agent';
 export interface DesktopApi {
+  cancelPreviewRequest(requestId: string): void;
   createAgentSession(input: { assetIds: string[] }): Promise<AgentSession>;
   getMcpStatus(): Promise<McpStatus>;
   setMcpEnabled(enabled: boolean): Promise<McpStatus>;
@@ -1087,7 +1120,7 @@ export interface DesktopApi {
   getFileWorkflowConfig(): Promise<FileWorkflowConfig>;
   saveFileWorkflowConfig(input: FileWorkflowConfig): Promise<FileWorkflowConfig>;
   previewFileWorkflow(input: FileWorkflowScope & { config: FileWorkflowConfig }): Promise<CatalogAssetPage>;
-  onCatalogChanged(listener: () => void): () => void;
+  onCatalogChanged(listener: (updatedAssets?: CatalogAsset[]) => void): () => void;
   onMenuCommand(listener: (command: MenuCommand) => void): () => void;
   updateMenuState(state: MenuState): void;
   getAppInfo(): Promise<AppInfo>;
@@ -1137,7 +1170,9 @@ export interface DesktopApi {
   linkImageDirectory(assetId: string): Promise<void>;
   openImages(paths?: string[]): Promise<QuickViewSession | null>;
   takePendingOpenImages(): Promise<QuickViewSession | null>;
+  listTemporaryMediaPage(input: TemporaryMediaPageInput): Promise<TemporaryMediaPage>;
   onOpenImages(listener: (session: QuickViewSession) => void): () => void;
+  onOpenImagesProgress(listener: (session: QuickViewSession) => void): () => void;
   getDroppedFilePaths(files: File[]): string[];
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;

@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, realpath, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rename, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -146,9 +146,14 @@ describe('catalog image discovery', () => {
         const second = catalog.listAssetPage({ sortBy, sortDirection, cursor: first.nextCursor, limit: 1 });
         const complete = catalog.listAssetPage({ sortBy, sortDirection, limit: 20 });
         expect([...first.items, ...second.items].map((item) => item.id)).toEqual(complete.items.map((item) => item.id));
+        const positioned = catalog.listAssetPage({ sortBy, sortDirection, offset: 1, limit: 1 });
+        expect(positioned.items.map((item) => item.id)).toEqual(second.items.map((item) => item.id));
+        expect(positioned.totalCount).toBe(complete.totalCount);
+        expect(catalog.listAssetPage({ sortBy, sortDirection, offset: 2, limit: 1 }).items).toEqual([]);
         expect(new Set([...first.items, ...second.items].map((item) => item.id)).size).toBe(2);
       }
     }
+    expect(() => catalog.listAssetPage({ cursor: firstPage.nextCursor, offset: 1 })).toThrow('Use either cursor or offset');
     expect(catalog.listAssetPage({ sortBy: 'fileName', sortDirection: 'desc' }).items[0]?.fileName).toBe('visible.jpg');
     expect(catalog.listAssetPage({ sortBy: 'rating', sortDirection: 'asc' }).items[0]?.rating).toBe(1);
     expect(catalog.listAssetPage({ minimumRating: 5, ratingOperator: 'gte' }).totalCount).toBe(1);
@@ -296,6 +301,35 @@ describe('catalog image discovery', () => {
     catalog.close();
   });
 
+  it('keeps indexed sorting deterministic in both directions with tied values', async () => {
+    const root = await createTemporaryDirectory();
+    const photosDirectory = path.join(root, 'photos');
+    await mkdir(photosDirectory, { recursive: true });
+    for (const fileName of ['a.jpg', 'A.jpg', 'b.jpg', 'B.jpg', 'c.jpg', 'C.jpg']) {
+      await writeFile(path.join(photosDirectory, fileName), fileName);
+    }
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([photosDirectory]);
+    const folder = catalog.listFolders()[0];
+    expect(folder).toBeDefined();
+    for (const sortBy of ['fileName', 'rating', 'modifiedAt'] as const) {
+      for (const sortDirection of ['asc', 'desc'] as const) {
+        for (const folderId of [null, folder!.id]) {
+          const expected = catalog.listAssetPage({ folderId, sortBy, sortDirection, limit: 100 }).items.map((asset) => asset.id);
+          const actual: string[] = [];
+          let cursor = null;
+          do {
+            const page = catalog.listAssetPage({ folderId, sortBy, sortDirection, limit: 2, cursor });
+            actual.push(...page.items.map((asset) => asset.id));
+            cursor = page.nextCursor;
+          } while (cursor);
+          expect(actual).toEqual(expected);
+        }
+      }
+    }
+    catalog.close();
+  });
+
   it('does not hold the catalog write lock while inspecting source files', async () => {
     const root = await createTemporaryDirectory();
     const photosDirectory = path.join(root, 'photos');
@@ -324,6 +358,25 @@ describe('catalog image discovery', () => {
     observer.close();
     catalog.close();
   });
+
+  it('imports a large directory in bounded metadata batches and skips vanished files', async () => {
+    const root = await createTemporaryDirectory();
+    const photosDirectory = path.join(root, 'photos');
+    await mkdir(photosDirectory);
+    const files = Array.from({ length: 1_100 }, (_, index) => path.join(photosDirectory, `photo-${String(index).padStart(4, '0')}.jpg`));
+    await Promise.all(files.map((file) => writeFile(file, 'image')));
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    let eventLoopTurnObserved = false;
+    const importing = catalog.importFolders([photosDirectory]);
+    setImmediate(() => { eventLoopTurnObserved = true; });
+    expect(await importing).toBe(1_100);
+    expect(eventLoopTurnObserved).toBe(true);
+    expect(catalog.getStats().assets).toBe(1_100);
+    await unlink(files[900]!);
+    await expect(catalog.synchronizeFolder(catalog.listFolders()[0]!.id)).resolves.toEqual({ discovered: 0, offline: 1 });
+    expect(catalog.getStats().assets).toBe(1_100);
+    catalog.close();
+  }, 20_000);
 
   it('manages virtual albums and dynamic smart collections without moving files', async () => {
     const root = await createTemporaryDirectory();
@@ -423,6 +476,105 @@ describe('catalog image discovery', () => {
     await expect(catalog.reconcileImportedFolders()).resolves.toMatchObject({ discovered: 0, offline: 1 });
     expect(catalog.listAssets().find((asset) => asset.fileName === 'first.jpg')?.offline).toBe(true);
     expect(catalog.listAssets().find((asset) => asset.fileName === 'second.jpg')?.offline).toBe(false);
+    catalog.close();
+  });
+
+  it('synchronizes one imported root without marking unrelated roots offline', async () => {
+    const root = await createTemporaryDirectory();
+    const first = path.join(root, 'first');
+    const second = path.join(root, 'second');
+    await mkdir(first);
+    await mkdir(second);
+    await writeFile(path.join(first, 'first.jpg'), 'first');
+    await writeFile(path.join(second, 'second.jpg'), 'second');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([first, second]);
+    await unlink(path.join(first, 'first.jpg'));
+    await writeFile(path.join(second, 'new.jpg'), 'new');
+    await expect(catalog.synchronizeImportedRoot(first)).resolves.toEqual({ discovered: 0, offline: 1 });
+    expect(catalog.listAssets().find((asset) => asset.fileName === 'second.jpg')?.offline).toBe(false);
+    expect(catalog.listAssets().find((asset) => asset.fileName === 'new.jpg')).toBeUndefined();
+    await expect(catalog.synchronizeImportedRoot(second)).resolves.toEqual({ discovered: 1, offline: 0 });
+    catalog.close();
+  });
+
+  it('updates a changed file without scanning unrelated files', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    await mkdir(photos);
+    const first = path.join(photos, 'first.jpg');
+    const second = path.join(photos, 'second.jpg');
+    await writeFile(first, 'old');
+    await writeFile(second, 'other');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([photos]);
+    const original = catalog.listAssets().find((asset) => asset.fileName === 'first.jpg')!;
+    await writeFile(first, 'longer new content');
+    await catalog.synchronizeImportedFile(await realpath(photos), 'first.jpg');
+    const updated = catalog.listAssets().find((asset) => asset.fileName === 'first.jpg')!;
+    expect(updated.id).toBe(original.id);
+    expect(updated.sizeBytes).toBeGreaterThan(original.sizeBytes);
+    expect(catalog.listAssets().find((asset) => asset.fileName === 'second.jpg')?.offline).toBe(false);
+    await unlink(first);
+    await catalog.synchronizeImportedFile(await realpath(photos), 'first.jpg');
+    expect(catalog.listAssets().find((asset) => asset.fileName === 'first.jpg')?.offline).toBe(true);
+    await expect(catalog.synchronizeImportedFile(await realpath(photos), '../outside.jpg')).rejects.toThrow('INVALID_WATCH_PATH');
+    await mkdir(path.join(photos, '_PhotoAllIsAI'));
+    await writeFile(path.join(photos, '_PhotoAllIsAI', 'generated.jpg'), 'generated');
+    await catalog.synchronizeImportedFile(await realpath(photos), '_PhotoAllIsAI/generated.jpg');
+    expect(catalog.listAssets().some((asset) => asset.fileName === 'generated.jpg')).toBe(false);
+    catalog.close();
+  });
+
+  it('reconciles a renamed file within its parent directory and preserves unrelated directories', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    const a = path.join(photos, 'a');
+    const b = path.join(photos, 'b');
+    await mkdir(a, { recursive: true });
+    await mkdir(b);
+    const oldPath = path.join(a, 'old.jpg');
+    await writeFile(oldPath, 'old');
+    await writeFile(path.join(b, 'unrelated.jpg'), 'other');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([photos]);
+    await rename(oldPath, path.join(a, 'new.jpg'));
+    await writeFile(path.join(b, 'unseen.jpg'), 'unseen');
+    const canonical = await realpath(photos);
+    expect(await catalog.synchronizeImportedDirectory(canonical, 'a/new.jpg')).toBe(true);
+    expect(catalog.listAssets().find((asset) => asset.fileName === 'old.jpg')?.offline).toBe(true);
+    expect(catalog.listAssets().find((asset) => asset.fileName === 'new.jpg')?.offline).toBe(false);
+    expect(catalog.listAssets().find((asset) => asset.fileName === 'unseen.jpg')).toBeUndefined();
+    expect(catalog.listAssets().find((asset) => asset.fileName === 'unrelated.jpg')?.offline).toBe(false);
+    catalog.close();
+  });
+
+  it('requires a root scan when a watched rename points to a moved directory', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    const child = path.join(photos, 'child');
+    await mkdir(child, { recursive: true });
+    await writeFile(path.join(child, 'photo.jpg'), 'photo');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([photos]);
+    const canonical = await realpath(photos);
+    await rename(child, path.join(photos, 'moved'));
+    expect(await catalog.synchronizeImportedDirectory(canonical, 'child')).toBe(false);
+    expect(await catalog.synchronizeImportedDirectory(canonical, 'moved')).toBe(false);
+    catalog.close();
+  });
+
+  it('escalates a rename of an indexed empty directory', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    await mkdir(photos);
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([photos]);
+    const parent = catalog.listFolders()[0]!;
+    const empty = (await catalog.createFolder({ parentFolderId: parent.id })).folder;
+    const originalPath = catalog.resolveFolderPath(empty.id)!;
+    await rename(originalPath, path.join(photos, 'renamed-empty'));
+    expect(await catalog.synchronizeImportedDirectory(await realpath(photos), path.basename(originalPath))).toBe(false);
     catalog.close();
   });
 
@@ -680,6 +832,25 @@ describe('catalog image discovery', () => {
     await catalog.importFolders([photos]);
 
     await expect(catalog.indexPendingContentHashes()).resolves.toEqual({ indexed: 1, remaining: 0 });
+    catalog.close();
+  });
+
+  it('counts reappearing and newly discovered files while preserving asset identity', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    await mkdir(photos);
+    const oldPath = path.join(photos, 'old.jpg');
+    await writeFile(oldPath, 'old');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    expect(await catalog.importFolders([photos])).toBe(1);
+    const id = catalog.listAssets()[0]!.id;
+    await unlink(oldPath);
+    await catalog.synchronizeImportedFile(await realpath(photos), 'old.jpg');
+    await writeFile(oldPath, 'restored');
+    await writeFile(path.join(photos, 'new.jpg'), 'new');
+    expect(await catalog.importFolders([photos])).toBe(1);
+    expect(await catalog.importFolders([photos])).toBe(0);
+    expect(catalog.listAssets().find((asset) => asset.fileName === 'old.jpg')).toMatchObject({ id, offline: false });
     catalog.close();
   });
 });

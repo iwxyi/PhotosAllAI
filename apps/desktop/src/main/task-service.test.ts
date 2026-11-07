@@ -177,6 +177,43 @@ describe('persistent task service', () => {
     tasks.close();
   });
 
+  it('keeps completed generation submissions in creation order after queue positions are reused', async () => {
+    const file = await databasePath();
+    const tasks = new TaskService(file);
+    try {
+      const enqueue = (batchId: string) => tasks.enqueue({ kind: 'generation', assetId: 'same-photo', payload: { batchId, prompt: batchId } });
+      const old = enqueue('old-batch');
+      tasks.claimNext(['generation']);
+      tasks.advance(old.id, 'processing', 0.5);
+      tasks.advance(old.id, 'downloading', 0.8);
+      tasks.advance(old.id, 'saving', 0.9);
+      tasks.finish(old.id, 'completed', { saved: true });
+      const middle = enqueue('middle-batch');
+      tasks.claimNext(['generation']);
+      tasks.advance(middle.id, 'processing', 0.5);
+      tasks.advance(middle.id, 'downloading', 0.8);
+      tasks.advance(middle.id, 'saving', 0.9);
+      tasks.finish(middle.id, 'completed', { saved: true });
+      const latest = enqueue('latest-batch');
+      tasks.claimNext(['generation']);
+      tasks.advance(latest.id, 'processing', 0.5);
+      tasks.advance(latest.id, 'downloading', 0.8);
+      tasks.advance(latest.id, 'saving', 0.9);
+      tasks.finish(latest.id, 'completed', { saved: true });
+      const database = new DatabaseSync(file);
+      const setCreatedAt = database.prepare('UPDATE tasks SET created_at = ? WHERE id = ?');
+      setCreatedAt.run(1000, old.id);
+      setCreatedAt.run(2000, middle.id);
+      setCreatedAt.run(3000, latest.id);
+      database.close();
+      expect([old, middle, latest].map((task) => task.position)).toEqual([0, 0, 0]);
+      expect(tasks.listPage({ limit: 10 }).items.map((task) => task.id)).toEqual([latest.id, middle.id, old.id]);
+      const firstPage = tasks.listPage({ limit: 1 });
+      expect(firstPage.items[0]?.id).toBe(latest.id);
+      expect(tasks.listPage({ limit: 1, cursor: firstPage.nextCursor }).items[0]?.id).toBe(middle.id);
+    } finally { tasks.close(); }
+  });
+
   it('paginates growing task history with stable cursors and global counts', async () => {
     const file = await databasePath();
     const tasks = new TaskService(file);
@@ -206,9 +243,7 @@ describe('persistent task service', () => {
 
     expect(seen).toHaveLength(7);
     expect(new Set(seen).size).toBe(7);
-    expect(seen[0]).toBe(active.id);
-    expect(seen.at(-2)).toBe(failed.id);
-    expect(seen.at(-1)).toBe(created.at(-1)!.id);
+    expect(seen).toEqual([...created].sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id)).map((task) => task.id));
     tasks.close();
     const database = new DatabaseSync(file);
     expect(database.prepare(`

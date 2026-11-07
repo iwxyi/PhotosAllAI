@@ -63,8 +63,9 @@ test('reorders queued work and batch-retries failed generation tasks', async () 
   await page.getByRole('menuitem', { name: '任务中心' }).click();
   const rows = page.locator('.task-table-row');
   await expect(rows).toHaveCount(3);
-  await expect(rows).toContainText(['asset-A', 'asset-B']);
-  await page.locator('.task-batch-summary').first().click();
+  await expect(rows.filter({ hasText: 'asset-A' })).toHaveCount(1);
+  await expect(rows.filter({ hasText: 'asset-B' })).toHaveCount(1);
+  await rows.filter({ hasText: 'asset-A' }).locator('xpath=../..').locator(':scope > summary').click();
 
   const exportRow = rows.filter({ hasText: 'asset-A' });
   await exportRow.click({ button: 'right' });

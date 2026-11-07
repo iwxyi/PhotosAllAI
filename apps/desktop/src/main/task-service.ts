@@ -44,7 +44,7 @@ type TaskRow = {
   updated_at: number;
 };
 
-type TaskPageRow = TaskRow & { sort_group: number };
+type TaskPageRow = TaskRow & { sort_group: number; sort_position: number };
 
 const INTERRUPTED_STATUSES: TaskStatus[] = [
   'preparing', 'uploading', 'processing', 'downloading', 'saving'
@@ -207,32 +207,16 @@ export class TaskService {
     const conditions: string[] = [];
     const values: (string | number)[] = [];
     if (input.cursor) {
-      conditions.push(`(
-        sort_group > ?
-        OR (sort_group = ? AND position > ?)
-        OR (sort_group = ? AND position = ? AND created_at < ?)
-        OR (sort_group = ? AND position = ? AND created_at = ? AND id > ?)
-      )`);
-      values.push(
-        input.cursor.sortGroup,
-        input.cursor.sortGroup, input.cursor.position,
-        input.cursor.sortGroup, input.cursor.position, input.cursor.createdAt,
-        input.cursor.sortGroup, input.cursor.position, input.cursor.createdAt, input.cursor.id
-      );
+      conditions.push('(created_at < ? OR (created_at = ? AND id < ?))');
+      values.push(input.cursor.createdAt, input.cursor.createdAt, input.cursor.id);
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const rows = this.#database.prepare(`
       SELECT * FROM (
-        SELECT tasks.*,
-          CASE
-            WHEN status IN ('queued', 'paused', 'preparing', 'uploading', 'processing', 'downloading', 'saving') THEN 0
-            WHEN status = 'failed' THEN 1
-            ELSE 2
-          END AS sort_group
-        FROM tasks
+        SELECT tasks.*, 0 AS sort_group, 0 AS sort_position FROM tasks
       ) ranked
       ${where}
-      ORDER BY sort_group ASC, position ASC, created_at DESC, id ASC
+      ORDER BY created_at DESC, id DESC
       LIMIT ?
     `).all(...values, input.limit + 1) as TaskPageRow[];
     const hasMore = rows.length > input.limit;
@@ -281,7 +265,7 @@ export class TaskService {
       failedGenerationCount: counts.failed_generation_count ?? 0,
       nextCursor: hasMore && last ? {
         sortGroup: last.sort_group,
-        position: last.position,
+        position: last.sort_position,
         createdAt: last.created_at,
         id: last.id
       } : null
@@ -431,9 +415,7 @@ export class TaskService {
     if (input.scope === 'batch' || input.scope === 'batch-unfinished') {
       return this.batchForTask(input.taskId!).filter((task) => input.scope === 'batch' || task.status !== 'completed');
     }
-    const all = (this.#database.prepare(`SELECT * FROM tasks ORDER BY
-      CASE WHEN status IN ('queued', 'paused', 'preparing', 'uploading', 'processing', 'downloading', 'saving') THEN 0
-        WHEN status = 'failed' THEN 1 ELSE 2 END, position, created_at DESC, id`).all() as TaskRow[]).map((row) => this.#toTask(row));
+    const all = (this.#database.prepare('SELECT * FROM tasks ORDER BY created_at DESC, id DESC').all() as TaskRow[]).map((row) => this.#toTask(row));
     if (input.scope === 'all') return all;
     if (input.scope === 'unfinished') return all.filter((task) => task.status !== 'completed');
     const byId = new Map(all.map((task) => [task.id, task]));

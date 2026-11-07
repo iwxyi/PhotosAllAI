@@ -88,7 +88,8 @@ test('opens actual files temporarily, browses siblings, and measures physical pi
     await page.keyboard.press('Escape');
     await expect(viewer).toHaveCount(0);
     const session = await page.evaluate((file) => window.desktopApi.openImages([file]), source);
-    expect(session?.items).toHaveLength(2);
+    expect(session?.items).toHaveLength(1);
+    expect(session?.complete).toBe(false);
     expect(await page.evaluate(() => window.desktopApi.listCatalogFolders())).toEqual([]);
     expect(errors).toEqual([]);
   } finally {

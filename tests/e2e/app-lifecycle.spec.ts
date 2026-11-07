@@ -18,7 +18,7 @@ test.afterEach(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 async function launch(extra: Record<string, string> = {}) {
-  application = await electron.launch({ args: [entry], env: { ...process.env, PHOTOALLISAI_USER_DATA: directory, ...extra } });
+  application = await electron.launch({ args: [entry], env: { ...process.env, ELECTRON_RENDERER_URL: '', PHOTOALLISAI_USER_DATA: directory, ...extra } });
   await (await application.firstWindow()).waitForLoadState('domcontentloaded');
   return application;
 }
@@ -39,6 +39,29 @@ test('Dock activation restores hidden windows and recreates closed Mac windows',
   await page.waitForLoadState('domcontentloaded');
   await expect(page.getByRole('tab', { name: '图库', exact: true })).toBeVisible();
   await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.isVisible())).toBe(true);
+});
+
+test('closing a loading window does not show its destroyed instance', async () => {
+  test.skip(process.platform !== 'darwin');
+  const app = await launch();
+  const reopened = app.waitForEvent('window');
+  await app.evaluate(({ BrowserWindow, app }) => {
+    const window = BrowserWindow.getAllWindows()[0]!;
+    window.once('closed', () => {
+      setImmediate(() => {
+        if (!window.isDestroyed()) throw new Error('Expected the closed window to be destroyed');
+        for (const eventName of ['show', 'hide', 'minimize', 'maximize', 'restore']) window.emit(eventName);
+        app.emit('activate');
+      });
+    });
+    setImmediate(() => {
+      void window.loadURL('data:text/html,<title>Closing window</title>').catch(() => {});
+      window.close();
+    });
+  });
+  const page = await reopened;
+  await expect(page.getByRole('tab', { name: '图库', exact: true })).toBeVisible();
+  await expect.poll(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length)).toBe(1);
 });
 
 test('second launch restores the first window and exits without taking its lock', async () => {

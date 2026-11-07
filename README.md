@@ -2,7 +2,7 @@
 
 PhotoAllIsAI 是一款面向 macOS 与 Windows 的 AI 原生图片管理和生成式修图桌面应用。
 
-项目当前处于可运行的垂直切片迭代阶段。图库、文件管理、AI 分析与生成队列、模板、版本比较、导出和跨平台打包已有实现，并持续通过自动化门禁迭代；完整 RAW 显影、跨平台签名和更多专业调色能力仍按交付计划推进。产品范围见 [产品设计](docs/product-design.md)，工程边界见 [系统架构](docs/architecture.md)，交付顺序见 [实施计划](docs/delivery-plan.md)。
+项目当前处于可运行的垂直切片迭代阶段。产品聚焦大量图片浏览、选片与图片批任务生成，后续仅考虑轻量剪辑，不做网页素材采集。图库、文件管理、AI 分析与生成队列、模板、版本比较、导出和跨平台打包已有实现；大目录首屏、超大图库长期性能、RAW 全尺寸与跨平台发行仍需逐项验证或完善。当前范围、能力状态与后续验收见[浏览与批量生成路线图](docs/browsing-batch-generation-roadmap.md)，长期设计见[产品设计](docs/product-design.md)，工程边界见[系统架构](docs/architecture.md)。
 
 ## 核心原则
 
@@ -14,6 +14,7 @@ PhotoAllIsAI 是一款面向 macOS 与 Windows 的 AI 原生图片管理和生�
 
 ## 文档
 
+- [大量图片浏览与批量生成路线图](docs/browsing-batch-generation-roadmap.md)
 - [产品与系统设计](docs/product-design.md)
 - [企业级系统架构](docs/architecture.md)
 - [实施与验收计划](docs/delivery-plan.md)

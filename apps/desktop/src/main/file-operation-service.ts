@@ -104,6 +104,7 @@ export class FileOperationService {
   readonly #platform: NodeJS.Platform;
   readonly #catalog: Pick<CatalogService, 'listFolders' | 'resolveFolderPath'> | null;
   #pending: Promise<void> = Promise.resolve();
+  #companionDirectoryCache: { directory: string; mtimeMs: number; ctimeMs: number; entries: Map<string, string[]> } | null = null;
 
   constructor(
     databasePath: string,
@@ -122,6 +123,7 @@ export class FileOperationService {
   }
 
   close(): void {
+    this.#companionDirectoryCache = null;
     this.#database.close();
   }
 
@@ -1063,7 +1065,7 @@ export class FileOperationService {
     if (selected.length !== assetIds.length) throw new Error('CATALOG_ASSET_SET_MISMATCH');
     const selectedPaths = new Set(selected.map((item) => item.path));
     const found = new Map<string, CompanionFile>();
-    const entriesByDirectory = new Map<string, string[]>();
+    const entriesByDirectory = new Map<string, Map<string, string[]>>();
     const assetByPath = this.#database.prepare(`
       SELECT id, folder_id, path, file_name, size_bytes FROM assets
       WHERE removed_at IS NULL AND path = ?
@@ -1072,16 +1074,31 @@ export class FileOperationService {
       const extension = path.extname(owner.file_name).toLocaleLowerCase('en-US');
       if (!RAW_EXTENSIONS.has(extension) && !JPEG_EXTENSIONS.has(extension)) continue;
       const directory = path.dirname(owner.path);
-      let entries = entriesByDirectory.get(directory);
-      if (!entries) {
-        entries = await this.#fileSystem.readdir(directory);
-        entriesByDirectory.set(directory, entries);
+      let entriesByStem = entriesByDirectory.get(directory);
+      if (!entriesByStem) {
+        const directoryMetadata = await this.#fileSystem.stat(directory);
+        const cached = this.#companionDirectoryCache;
+        if (cached?.directory === directory && cached.mtimeMs === directoryMetadata.mtimeMs && cached.ctimeMs === directoryMetadata.ctimeMs) {
+          entriesByStem = cached.entries;
+        } else {
+          const entries = await this.#fileSystem.readdir(directory);
+          entriesByStem = new Map();
+          for (const entry of entries) {
+            const entryStem = path.basename(entry, path.extname(entry)).normalize('NFC').toLocaleLowerCase('en-US');
+            const matching = entriesByStem.get(entryStem);
+            if (matching) matching.push(entry);
+            else entriesByStem.set(entryStem, [entry]);
+          }
+          // Keep at most one moderate directory indexed between preview pages.
+          this.#companionDirectoryCache = entries.length <= 200_000
+            ? { directory, mtimeMs: directoryMetadata.mtimeMs, ctimeMs: directoryMetadata.ctimeMs, entries: entriesByStem }
+            : null;
+        }
+        entriesByDirectory.set(directory, entriesByStem);
       }
       const stem = path.basename(owner.file_name, path.extname(owner.file_name)).normalize('NFC').toLocaleLowerCase('en-US');
-      for (const entry of entries) {
+      for (const entry of entriesByStem.get(stem) ?? []) {
         const entryExtension = path.extname(entry).toLocaleLowerCase('en-US');
-        const entryStem = path.basename(entry, path.extname(entry)).normalize('NFC').toLocaleLowerCase('en-US');
-        if (entryStem !== stem) continue;
         const kind = entryExtension === '.xmp'
           ? 'xmp'
           : RAW_EXTENSIONS.has(extension) && JPEG_EXTENSIONS.has(entryExtension)

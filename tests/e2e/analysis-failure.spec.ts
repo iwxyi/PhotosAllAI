@@ -85,9 +85,10 @@ test('AI sidebar separates preparation from execution and task views show explic
     await expect(page.locator('.task-status-batch')).toHaveCount(2);
     await expect(page.getByRole('button', { name: '查看其余后台任务', exact: true })).toHaveText('+1');
     const tabCount = await page.getByRole('tab').count();
-    await page.locator('.task-status-batch').first().click();
-    const firstBatch = page.locator('.task-drawer .task-batch-group').first();
+    await page.getByRole('button', { name: '后台任务', exact: true }).click();
+    const firstBatch = page.locator('.task-drawer .task-batch-group').filter({ hasText: '本次分析：夜景人像' });
     await expect(page.locator('.task-drawer .task-batch-group')).toHaveCount(3);
+    await firstBatch.locator(':scope > summary').click();
     await expect(firstBatch).toHaveAttribute('open', '');
     await expect(firstBatch).toContainText('成功 1');
     await expect(firstBatch.locator('progress')).toHaveAttribute('max', '3');
@@ -97,7 +98,7 @@ test('AI sidebar separates preparation from execution and task views show explic
     await expect(firstBatch.locator('.task-analysis-failure')).toBeVisible();
     await firstBatch.locator(':scope > summary').click();
     await expect(firstBatch).not.toHaveAttribute('open');
-    await page.locator('.task-status-batch').first().click();
+    await firstBatch.locator(':scope > summary').click();
     await expect(firstBatch).toHaveAttribute('open', '');
     await expect(page.getByRole('tab')).toHaveCount(tabCount);
     await expect(page.getByRole('tab', { name: '图库', exact: true })).toHaveAttribute('aria-selected', 'true');
@@ -106,7 +107,7 @@ test('AI sidebar separates preparation from execution and task views show explic
     await page.getByRole('menuitem', { name: '任务中心', exact: true }).click();
     await expect(page.locator('.task-table > .task-batch-group')).toHaveCount(3);
     await expect(page.locator('.task-table-row:visible')).toHaveCount(0);
-    const centerBatch = page.locator('.task-table > .task-batch-group').first();
+    const centerBatch = page.locator('.task-table > .task-batch-group').filter({ hasText: '本次分析：夜景人像' });
     await expect(centerBatch).toContainText('成功 1');
     await expect(centerBatch).toContainText('处理中 1');
     await expect(centerBatch).toContainText('失败 1');
@@ -125,9 +126,9 @@ test('AI sidebar separates preparation from execution and task views show explic
     const batch = page.getByRole('region', { name: '批量修图', exact: true });
     await expect(analysis).toBeVisible();
     await expect(batch).toBeVisible();
-    await expect(batch.getByRole('button', { name: '添加本图到批量修图', exact: true })).toBeVisible();
+    await expect(batch.getByRole('button', { name: '添加到批量修图', exact: true })).toBeVisible();
     await expect(batch).not.toContainText('等待分析');
-    await batch.getByRole('button', { name: '添加本图到批量修图', exact: true }).click();
+    await batch.getByRole('button', { name: '添加到批量修图', exact: true }).click();
     await expect(batch).toContainText('1 张图片');
     await expect(page.locator('.task-statusbar')).toContainText('批任务');
     await page.getByRole('tab', { name: '图库', exact: true }).click();
@@ -138,7 +139,7 @@ test('AI sidebar separates preparation from execution and task views show explic
     for (const width of [1440, 900]) {
       await app.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0]!.setSize(width, 900), width);
       await page.getByRole('tab', { name: '任务中心', exact: true }).click();
-      const group = page.locator('.task-table > .task-batch-group').first();
+      const group = page.locator('.task-table > .task-batch-group').filter({ hasText: '本次分析：夜景人像' });
       if (!(await group.evaluate((element) => (element as HTMLDetailsElement).open))) await group.locator(':scope > summary').click();
       await expect.poll(() => page.locator('.task-center-page').evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
       await expect.poll(() => batch.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
@@ -153,8 +154,9 @@ test('AI sidebar separates preparation from execution and task views show explic
     await page.getByRole('textbox', { name: '搜索图库', exact: true }).fill('SECOND');
     await expect(page.locator('.catalog-card')).toHaveCount(1);
     await page.getByRole('tab', { name: '任务中心', exact: true }).click();
-    await page.locator('.task-table > .task-batch-group').first().locator(':scope > summary').click();
-    const firstRow = page.locator('.task-table-row').filter({ hasText: 'FIRST.jpg' }).first();
+    const analysisGroup = page.locator('.task-table > .task-batch-group').filter({ hasText: '本次分析：夜景人像' });
+    if (!(await analysisGroup.evaluate((element) => (element as HTMLDetailsElement).open))) await analysisGroup.locator(':scope > summary').click();
+    const firstRow = analysisGroup.locator('.task-table-row').filter({ hasText: 'FIRST.jpg' }).first();
     const preview = firstRow.locator('.task-member-preview img');
     await expect(preview).toBeVisible();
     await expect.poll(() => preview.evaluate((image) => (image as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
@@ -170,15 +172,17 @@ test('AI sidebar separates preparation from execution and task views show explic
     await firstRow.locator('.task-member-preview').click();
     await expect(page.locator('.base-image')).toHaveAttribute('src', firstAsset.previewUrl.replace('://preview/', '://original/'));
     await page.keyboard.press('Escape');
-    await page.locator('.task-status-batch').first().click();
-    const drawerRow = page.locator('.task-drawer .task-activity-row').filter({ hasText: 'SECOND.jpg' }).first();
+    await page.getByRole('button', { name: '后台任务', exact: true }).click();
+    const drawerGroup = page.locator('.task-drawer .task-batch-group').filter({ hasText: '本次分析：夜景人像' });
+    if (!(await drawerGroup.evaluate((element) => (element as HTMLDetailsElement).open))) await drawerGroup.locator(':scope > summary').click();
+    const drawerRow = drawerGroup.locator('.task-activity-row').filter({ hasText: 'SECOND.jpg' }).first();
     await expect.poll(() => drawerRow.locator('img').evaluate((image) => (image as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
     await drawerRow.locator('strong').dblclick();
     await expect(page.locator('.base-image')).toHaveAttribute('src', assets.find((asset) => asset.fileName === 'SECOND.jpg')!.previewUrl.replace('://preview/', '://original/'));
     await expect(page.locator('.task-drawer')).toBeHidden();
     await page.keyboard.press('Escape');
     await expect(drawerRow).toBeVisible();
-    const drawerFirst = page.locator('.task-drawer .task-activity-row').filter({ hasText: 'FIRST.jpg' }).first();
+    const drawerFirst = drawerGroup.locator('.task-activity-row').filter({ hasText: 'FIRST.jpg' }).first();
     await drawerFirst.locator('.task-member-preview').click();
     await expect(page.locator('.base-image')).toHaveAttribute('src', firstAsset.previewUrl.replace('://preview/', '://original/'));
     await expect(page.getByRole('button', { name: '已加入修图列表', exact: true })).toBeVisible();

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { copyFile, link, mkdtemp, mkdir, readFile, readdir, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { copyFile, link, mkdtemp, mkdir, readFile, readdir, realpath, rename, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -32,6 +32,30 @@ async function fixture(fileNames = ['photo.jpg']) {
 }
 
 describe('safe catalog file moves', () => {
+  it('reuses a companion directory index and refreshes it after directory changes', async () => {
+    const context = await fixture(['capture.NEF', 'capture.jpg']);
+    const raw = context.catalog.listAssets().find((asset) => asset.fileName === 'capture.NEF')!;
+    let directoryReads = 0;
+    const service = new FileOperationService(context.databasePath, {
+      copyFile, link, realpath, rename, stat, unlink,
+      readdir: ((...args: Parameters<typeof readdir>) => {
+        directoryReads += 1;
+        return readdir(...args);
+      }) as typeof readdir
+    });
+    services.push(service);
+
+    await service.previewCompanions([raw.id]);
+    await service.previewCompanions([raw.id]);
+    expect(directoryReads).toBe(1);
+
+    await writeFile(path.join(context.source, 'capture.xmp'), 'new-sidecar');
+    await utimes(context.source, new Date(2020, 0, 1), new Date(2020, 0, 1));
+    const refreshed = await service.previewCompanions([raw.id]);
+    expect(refreshed.files.map((file) => file.fileName).sort()).toEqual(['capture.jpg', 'capture.xmp']);
+    expect(directoryReads).toBe(2);
+  });
+
   it('previews RAW, JPEG, and XMP companions but leaves them untouched by default', async () => {
     const context = await fixture(['capture.NEF', 'capture.jpg', 'capture.xmp']);
     const raw = context.catalog.listAssets().find((asset) => asset.fileName === 'capture.NEF')!;

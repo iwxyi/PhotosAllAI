@@ -18,6 +18,10 @@ export class AgentVision {
     private readonly generation: Pick<GenerationService, 'resolveResultFile'>) {}
 
   async preview(id: string, kind: 'original' | 'result'): Promise<string> {
+    return (await this.previewImage(id, kind)).base64;
+  }
+
+  private async previewImage(id: string, kind: 'original' | 'result'): Promise<{ base64: string; mime: string }> {
     const path = kind === 'original' ? await this.images.getOrCreate(id, 'preview') : this.generation.resolveResultFile(id);
     if (!path) throw new Error('图片无法读取');
     const image = await readFile(path).catch(() => null);
@@ -26,7 +30,10 @@ export class AgentVision {
     // ImageCacheService already creates a bounded JPEG preview for originals.
     // Reading that file directly avoids a second Electron decode that can turn
     // valid previews into an empty or placeholder image on some platforms.
-    return image.toString('base64');
+    const mime = image.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ? 'image/png'
+      : image.toString('ascii', 0, 4) === 'RIFF' && image.toString('ascii', 8, 12) === 'WEBP' ? 'image/webp'
+        : 'image/jpeg';
+    return { base64: image.toString('base64'), mime };
   }
 
   async inspect(input: { assetIds: string[]; resultIds: string[]; goal: string }, signal: AbortSignal): Promise<unknown> {
@@ -38,7 +45,8 @@ export class AgentVision {
     for (const [kind, ids] of [['original', input.assetIds], ['result', input.resultIds]] as const) {
       for (const id of ids) {
         signal.throwIfAborted();
-        content.push({ type: 'text', text: `${kind}: ${id}` }, { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${await this.preview(id, kind)}` } });
+        const preview = await this.previewImage(id, kind);
+        content.push({ type: 'text', text: `${kind}: ${id}` }, { type: 'image_url', image_url: { url: `data:${preview.mime};base64,${preview.base64}` } });
       }
     }
     content.unshift({ type: 'text', text: '摄影判断原则：不要机械拉平直方图或中和所有色偏。根据内容、环境光和表达意图判断暗调、高调、适度过曝或深黑阴影的审美价值；肤色曝光须符合具体光线。组图统一是视觉语言和色彩关系协调，允许每张处理不同。明确区别艺术性取舍和技术缺陷。主动提出有依据的优化，不能只推荐滤镜。' });

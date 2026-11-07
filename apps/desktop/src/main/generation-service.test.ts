@@ -140,10 +140,37 @@ describe('managed generation results', () => {
     const { service } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }), undefined, undefined, undefined, 'nanobanana-compatible', (_url, body) => requests.push(body));
     try {
       const first = await service.generate('asset-1', payload());
-      await service.generate('asset-1', { ...payload(), sourceResultId: first.id });
+      const second = await service.generate('asset-1', { ...payload(), sourceResultId: first.id });
       expect(JSON.parse(requests[1]!).image).toEqual({ mime_type: 'image/png', data: png.toString('base64') });
+      expect(second.inputSources).toEqual([{ kind: 'result', resultId: first.id }]);
+      expect(service.list('asset-1').find((item) => item.id === second.id)?.inputSources).toEqual(second.inputSources);
       await expect(service.generate('asset-other', { ...payload(), sourceResultId: first.id })).rejects.toThrow('GENERATION_SOURCE_RESULT_INVALID');
       expect(requests).toHaveLength(2);
+    } finally { service.close(); }
+  });
+
+  it('sends ordered originals and generated results as distinct composition inputs', async () => {
+    const requests: string[] = [];
+    const { service } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }), undefined, undefined, undefined, 'nanobanana-compatible', (_url, body) => requests.push(body));
+    try {
+      const first = await service.generate('asset-1', payload());
+      const inputs = [{ kind: 'result' as const, resultId: first.id }, { kind: 'asset' as const, assetId: 'asset-other' }];
+      const composed = await service.generate('asset-1', { ...payload(), inputSources: inputs });
+      expect(JSON.parse(requests[1]!).image).toEqual([
+        { mime_type: 'image/png', data: png.toString('base64') },
+        { mime_type: 'image/jpeg', data: Buffer.from('bounded-preview').toString('base64') }
+      ]);
+      expect(composed.inputSources).toEqual(inputs);
+      expect(service.list('asset-1').find((item) => item.id === composed.id)?.inputSources).toEqual(inputs);
+    } finally { service.close(); }
+  });
+
+  it('sends multiple ordered inputs to the ACE edit endpoint', async () => {
+    const requests: string[] = [];
+    const { service } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }), undefined, undefined, undefined, 'acedata-nano-banana', (_url, body) => requests.push(body));
+    try {
+      await service.generate('asset-1', { ...payload(), inputSources: [{ kind: 'asset', assetId: 'asset-1' }, { kind: 'asset', assetId: 'asset-other' }] });
+      expect(JSON.parse(requests[0]!).image_urls).toEqual(Array(2).fill(`data:image/jpeg;base64,${Buffer.from('bounded-preview').toString('base64')}`));
     } finally { service.close(); }
   });
 

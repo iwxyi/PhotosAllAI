@@ -40,15 +40,15 @@ import {
 } from '@photoallisai/contracts';
 
 import { normalizeSearchText, tokenizeSearchText } from './search-index';
-
-const SUPPORTED_EXTENSIONS = new Set([
-  '.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif', '.bmp', '.ico', '.heic', '.heif', '.tif', '.tiff',
-  '.dng', '.cr2', '.cr3', '.nef', '.nrw', '.arw', '.raf', '.rw2', '.orf', '.pef'
-]);
+import { isSupportedImage } from './media-format-registry';
+export { isSupportedImage } from './media-format-registry';
 
 const IGNORED_DIRECTORIES = new Set(['_PhotoAllIsAI', '.git', 'node_modules']);
 const RECENT_IMPORT_WINDOW_MS = 30 * 24 * 60 * 60 * 1_000;
 const IMPORT_BATCH_SIZE = 256;
+const IMPORT_STAT_CONCURRENCY = 16;
+const RECONCILE_BATCH_SIZE = 256;
+const COUNT_CACHE_LIMIT = 64;
 
 type AssetRow = {
   id: string;
@@ -79,10 +79,6 @@ export type RelinkCatalogFolderOperationResult = RelinkCatalogFolderResult & {
 export type MoveCatalogFolderOperationResult = MoveCatalogFolderResult & {
   relocations: Array<{ assetId: string; previousPath: string; nextPath: string; previousFileName: string; nextFileName: string }>;
 };
-
-export function isSupportedImage(filePath: string): boolean {
-  return SUPPORTED_EXTENSIONS.has(path.extname(filePath).toLowerCase());
-}
 
 function stableFolderId(folderPath: string): string {
   return createHash('sha256').update(folderPath).digest('hex').slice(0, 32);
@@ -120,6 +116,11 @@ async function* walkImages(root: string): AsyncGenerator<string> {
 
 export class CatalogService {
   readonly #database: DatabaseSync;
+  readonly #countCache = new Map<string, number>();
+  #countCacheVersion = '';
+  #folderCache: CatalogFolder[] | null = null;
+  #folderCacheVersion = '';
+  #directoryLookup = new Map<string, { rootId: string; rootPath: string; relativePath: string }>();
 
   constructor(databasePath: string) {
     this.#database = new DatabaseSync(databasePath);
@@ -283,11 +284,59 @@ export class CatalogService {
         COMMIT;
       `);
     }
+    const browseIndexVersion = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (browseIndexVersion.user_version < 12) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        CREATE INDEX assets_browse_name_asc_idx ON assets(folder_id, file_name COLLATE NOCASE ASC, id ASC) WHERE removed_at IS NULL;
+        CREATE INDEX assets_browse_name_desc_idx ON assets(folder_id, file_name COLLATE NOCASE DESC, id ASC) WHERE removed_at IS NULL;
+        CREATE INDEX assets_browse_rating_asc_idx ON assets(folder_id, rating ASC, id ASC) WHERE removed_at IS NULL;
+        CREATE INDEX assets_browse_rating_desc_idx ON assets(folder_id, rating DESC, id ASC) WHERE removed_at IS NULL;
+        CREATE INDEX assets_browse_modified_asc_idx ON assets(folder_id, modified_at ASC, id ASC) WHERE removed_at IS NULL;
+        CREATE INDEX assets_browse_modified_desc_idx ON assets(folder_id, modified_at DESC, id ASC) WHERE removed_at IS NULL;
+        CREATE INDEX assets_browse_all_name_asc_idx ON assets(file_name COLLATE NOCASE ASC, id ASC) WHERE removed_at IS NULL;
+        CREATE INDEX assets_browse_all_name_desc_idx ON assets(file_name COLLATE NOCASE DESC, id ASC) WHERE removed_at IS NULL;
+        CREATE INDEX assets_browse_all_rating_asc_idx ON assets(rating ASC, id ASC) WHERE removed_at IS NULL;
+        CREATE INDEX assets_browse_all_rating_desc_idx ON assets(rating DESC, id ASC) WHERE removed_at IS NULL;
+        CREATE INDEX assets_browse_all_modified_asc_idx ON assets(modified_at ASC, id ASC) WHERE removed_at IS NULL;
+        CREATE INDEX assets_browse_all_modified_desc_idx ON assets(modified_at DESC, id ASC) WHERE removed_at IS NULL;
+        PRAGMA user_version = 12;
+        COMMIT;
+      `);
+    }
     this.#ensureCreatedDirectories();
   }
 
   close(): void {
+    this.#countCache.clear();
+    this.#folderCache = null;
+    this.#directoryLookup.clear();
     this.#database.close();
+  }
+
+  #databaseVersion(): string {
+    const changes = this.#database.prepare('SELECT total_changes() AS value').get() as { value: number };
+    const dataVersion = this.#database.prepare('PRAGMA data_version').get() as { data_version: number };
+    return `${changes.value}:${dataVersion.data_version}`;
+  }
+
+  #countAssets(where: string, values: (string | number)[]): number {
+    const version = this.#databaseVersion();
+    if (this.#countCacheVersion !== version) {
+      this.#countCache.clear();
+      this.#countCacheVersion = version;
+    }
+    const key = JSON.stringify([where, values]);
+    const cached = this.#countCache.get(key);
+    if (cached !== undefined) {
+      this.#countCache.delete(key);
+      this.#countCache.set(key, cached);
+      return cached;
+    }
+    const row = this.#database.prepare(`SELECT COUNT(*) AS value FROM assets ${where}`).get(...values) as { value: number };
+    this.#countCache.set(key, row.value);
+    if (this.#countCache.size > COUNT_CACHE_LIMIT) this.#countCache.delete(this.#countCache.keys().next().value!);
+    return row.value;
   }
 
   listAssets(limit = 500): CatalogAsset[] {
@@ -314,6 +363,7 @@ export class CatalogService {
 
   listAssetPage(rawInput: ListCatalogAssetsInput): CatalogAssetPage {
     const input = listCatalogAssetsInputSchema.parse(rawInput);
+    if (input.cursor && input.offset !== undefined) throw new RangeError('Use either cursor or offset for catalog paging');
     const activeGenerationPredicate = this.#tableExists('generation_results') && this.#columnExists('generation_results', 'trashed_at')
       ? 'trashed_at IS NULL'
       : '1';
@@ -450,18 +500,26 @@ export class CatalogService {
       : input.sortBy === 'rating'
         ? `rating ${direction}, id ASC`
         : `modified_at ${direction}, id ASC`;
+    const plainFolder = baseConditions.length === 2 && baseConditions[1] === 'folder_id = ?';
+    const plainCatalog = baseConditions.length === 1;
+    const browseField = input.sortBy === 'fileName' ? 'name' : input.sortBy === 'rating' ? 'rating' : 'modified';
+    const browseDirection = direction === 'asc' ? 'asc' : 'desc';
+    const browseIndex = plainFolder
+      ? `assets_browse_${browseField}_${browseDirection}_idx`
+      : plainCatalog
+        ? `assets_browse_all_${browseField}_${browseDirection}_idx`
+        : null;
+    const indexedBy = browseIndex ? `INDEXED BY ${browseIndex}` : '';
     const rows = this.#database.prepare(`
       SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, label_color, flag, favorite, offline_at
-      FROM assets ${where}
+      FROM assets ${indexedBy} ${where}
       ORDER BY ${orderBy}
-      LIMIT ?
-    `).all(...values, input.limit + 1) as AssetRow[];
+      LIMIT ? ${input.offset === undefined ? '' : 'OFFSET ?'}
+    `).all(...values, input.limit + 1, ...(input.offset === undefined ? [] : [input.offset])) as AssetRow[];
     const hasMore = rows.length > input.limit;
     const pageRows = hasMore ? rows.slice(0, input.limit) : rows;
     const countWhere = baseConditions.length > 0 ? `WHERE ${baseConditions.join(' AND ')}` : '';
-    const count = this.#database.prepare(`
-      SELECT COUNT(*) AS value FROM assets ${countWhere}
-    `).get(...baseValues) as { value: number };
+    const totalCount = this.#countAssets(countWhere, baseValues);
     const last = pageRows.at(-1);
     const sortValue = last
       ? input.sortBy === 'fileName'
@@ -472,7 +530,7 @@ export class CatalogService {
       : undefined;
     return catalogAssetPageSchema.parse({
       items: this.#toAssets(pageRows),
-      totalCount: count.value,
+      totalCount,
       nextCursor: hasMore && last ? { modifiedAt: last.modified_at, id: last.id, ...(sortValue === undefined ? {} : { sortValue }) } : null
     });
   }
@@ -492,23 +550,25 @@ export class CatalogService {
   }
 
   listFolders(): CatalogFolder[] {
+    const version = this.#databaseVersion();
+    if (this.#folderCache && this.#folderCacheVersion === version) return this.#folderCache;
     const roots = this.#database.prepare(`
       SELECT id, path, name FROM folders WHERE removed_at IS NULL
       ORDER BY name COLLATE NOCASE ASC, id ASC
     `).all() as { id: string; path: string; name: string }[];
-    const assets = this.#database.prepare(`
-      SELECT folder_id, path, offline_at FROM assets WHERE removed_at IS NULL
-    `).all() as { folder_id: string; path: string; offline_at: number | null }[];
-    const assetsByRoot = new Map<string, typeof assets>();
-    for (const asset of assets) {
-      const items = assetsByRoot.get(asset.folder_id) ?? [];
-      items.push(asset);
-      assetsByRoot.set(asset.folder_id, items);
-    }
+    const rootCounts = new Map((this.#database.prepare(`
+      SELECT folder_id, COUNT(*) AS asset_count,
+        SUM(CASE WHEN offline_at IS NOT NULL THEN 1 ELSE 0 END) AS offline_count
+      FROM assets WHERE removed_at IS NULL GROUP BY folder_id
+    `).all() as { folder_id: string; asset_count: number; offline_count: number }[])
+      .map((row) => [row.folder_id, row]));
+    const paths = this.#database.prepare('SELECT path, offline_at FROM assets WHERE folder_id = ? AND removed_at IS NULL');
     const result: CatalogFolder[] = [];
+    const lookup = new Map<string, { rootId: string; rootPath: string; relativePath: string }>();
     for (const root of roots) {
-      const rootAssets = assetsByRoot.get(root.id) ?? [];
-      result.push(catalogFolderSchema.parse({ id: root.id, name: root.name, assetCount: rootAssets.length, offlineCount: rootAssets.filter((asset) => asset.offline_at !== null).length, parentId: null, rootId: root.id, depth: 0, isRoot: true }));
+      lookup.set(root.id, { rootId: root.id, rootPath: root.path, relativePath: '' });
+      const counts = rootCounts.get(root.id);
+      result.push(catalogFolderSchema.parse({ id: root.id, name: root.name, assetCount: counts?.asset_count ?? 0, offlineCount: counts?.offline_count ?? 0, parentId: null, rootId: root.id, depth: 0, isRoot: true }));
       const directories = new Map<string, { assetCount: number; offlineCount: number }>();
       for (const item of this.#database.prepare('SELECT path FROM created_directories WHERE root_id = ?').all(root.id) as { path: string }[]) {
         let relative = path.relative(root.path, item.path);
@@ -517,7 +577,7 @@ export class CatalogService {
           relative = path.dirname(relative);
         }
       }
-      for (const asset of rootAssets) {
+      for (const asset of paths.iterate(root.id) as Iterable<{ path: string; offline_at: number | null }>) {
         const relativeDirectory = path.relative(root.path, path.dirname(asset.path));
         if (!relativeDirectory || relativeDirectory === '.' || relativeDirectory.startsWith(`..${path.sep}`) || path.isAbsolute(relativeDirectory)) continue;
         const parts = relativeDirectory.split(path.sep).filter(Boolean);
@@ -531,8 +591,10 @@ export class CatalogService {
       }
       for (const [relativePath, counts] of [...directories].sort(([left], [right]) => left.localeCompare(right))) {
         const parentPath = path.dirname(relativePath);
+        const directoryId = stableDirectoryId(root.id, relativePath);
+        lookup.set(directoryId, { rootId: root.id, rootPath: root.path, relativePath });
         result.push(catalogFolderSchema.parse({
-          id: stableDirectoryId(root.id, relativePath),
+          id: directoryId,
           name: path.basename(relativePath),
           assetCount: counts.assetCount,
           offlineCount: counts.offlineCount,
@@ -543,31 +605,17 @@ export class CatalogService {
         }));
       }
     }
+    this.#folderCache = result;
+    this.#folderCacheVersion = version;
+    this.#directoryLookup = lookup;
     return result;
   }
 
   #resolveDirectory(directoryId: string): { rootId: string; rootPath: string; relativePath: string } | null {
-    const roots = this.#database.prepare('SELECT id, path FROM folders WHERE removed_at IS NULL').all() as { id: string; path: string }[];
-    for (const root of roots) {
-      if (root.id === directoryId) return { rootId: root.id, rootPath: root.path, relativePath: '' };
-      const assets = this.#database.prepare('SELECT path FROM assets WHERE folder_id = ? AND removed_at IS NULL').all(root.id) as { path: string }[];
-      const created = this.#database.prepare('SELECT path FROM created_directories WHERE root_id = ?').all(root.id) as { path: string }[];
-      const directories = [...assets.map((item) => path.dirname(item.path)), ...created.map((item) => item.path)];
-      const checked = new Set<string>();
-      for (const directory of directories) {
-        let relativePath = path.relative(root.path, directory);
-        while (relativePath && relativePath !== '.' && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath)) {
-          if (!checked.has(relativePath)) {
-            if (stableDirectoryId(root.id, relativePath) === directoryId) return { rootId: root.id, rootPath: root.path, relativePath };
-            checked.add(relativePath);
-          }
-          const parent = path.dirname(relativePath);
-          if (parent === relativePath || parent === '.') break;
-          relativePath = parent;
-        }
-      }
-    }
-    return null;
+    const root = this.#database.prepare('SELECT id, path FROM folders WHERE id = ? AND removed_at IS NULL').get(directoryId) as { id: string; path: string } | undefined;
+    if (root) return { rootId: root.id, rootPath: root.path, relativePath: '' };
+    if (!this.#folderCache || this.#folderCacheVersion !== this.#databaseVersion()) this.listFolders();
+    return this.#directoryLookup.get(directoryId) ?? null;
   }
 
   unregisterFolder(folderId: string): UnregisterCatalogFolderReport {
@@ -1007,6 +1055,7 @@ export class CatalogService {
 
   updateMetadata(rawInput: UpdateCatalogMetadataInput): CatalogAsset[] {
     const input = updateCatalogMetadataInputSchema.parse(rawInput);
+    const previousFolderVersion = this.#folderCache ? this.#databaseVersion() : null;
     const uniqueIds = [...new Set(input.assetIds)];
     const assignments: string[] = [];
     const values: (number | string | null)[] = [];
@@ -1034,6 +1083,7 @@ export class CatalogService {
       `).run(...values, ...uniqueIds);
       if (result.changes !== uniqueIds.length) throw new Error('CATALOG_ASSET_SET_MISMATCH');
       this.#database.exec('COMMIT');
+      if (previousFolderVersion && this.#folderCacheVersion === previousFolderVersion) this.#folderCacheVersion = this.#databaseVersion();
     } catch (error) {
       this.#database.exec('ROLLBACK');
       throw error;
@@ -1098,9 +1148,7 @@ export class CatalogService {
 
       const folderId = stableFolderId(folderPath);
       const now = Date.now();
-      const knownPaths = new Set((this.#database.prepare(`
-        SELECT path FROM assets WHERE folder_id = ? AND removed_at IS NULL
-      `).all(folderId) as { path: string }[]).map((row) => row.path));
+      const countExisting = this.#database.prepare('SELECT 1 AS found FROM assets WHERE path = ? AND removed_at IS NULL LIMIT 1');
       this.#database
         .prepare(`
           INSERT INTO folders (id, path, name, imported_at)
@@ -1127,13 +1175,29 @@ export class CatalogService {
           trashed_at = NULL,
           offline_at = NULL
       `);
-      const batch: Array<{ path: string; size: number; modifiedAt: number }> = [];
-      const flush = () => {
+      const pendingPaths: string[] = [];
+      const flush = async () => {
+        if (pendingPaths.length === 0) return;
+        const paths = pendingPaths.splice(0);
+        const batch: Array<{ path: string; size: number; modifiedAt: number }> = [];
+        for (let offset = 0; offset < paths.length; offset += IMPORT_STAT_CONCURRENCY) {
+          const metadata = await Promise.all(paths.slice(offset, offset + IMPORT_STAT_CONCURRENCY).map(async (filePath) => {
+            try {
+              const fileStats = await stat(filePath);
+              return fileStats.isFile() ? { path: filePath, size: fileStats.size, modifiedAt: Math.trunc(fileStats.mtimeMs) } : null;
+            } catch {
+              // A disappeared or unreadable file must not abort the batch.
+              return null;
+            }
+          }));
+          for (const item of metadata) if (item) batch.push(item);
+        }
         if (batch.length === 0) return;
         let newlyImported = 0;
         this.#database.exec('BEGIN IMMEDIATE');
         try {
           for (const file of batch) {
+            const existing = countExisting.get(file.path);
             upsert.run(
               randomUUID(),
               folderId,
@@ -1144,33 +1208,24 @@ export class CatalogService {
               file.modifiedAt,
               now
             );
-            if (!knownPaths.has(file.path)) {
-              knownPaths.add(file.path);
-              newlyImported += 1;
-            }
+            if (!existing) newlyImported += 1;
           }
           this.#database.exec('COMMIT');
           importedCount += newlyImported;
         } catch (error) {
           this.#database.exec('ROLLBACK');
           throw error;
-        } finally {
-          batch.length = 0;
         }
       };
 
       for await (const filePath of walkImages(folderPath)) {
-        let fileStats;
-        try {
-          fileStats = await stat(filePath);
-        } catch {
-          // A single unreadable file must not abort the rest of the import.
-          continue;
+        pendingPaths.push(filePath);
+        if (pendingPaths.length >= IMPORT_BATCH_SIZE) {
+          await flush();
+          await new Promise<void>((resolve) => setImmediate(resolve));
         }
-        batch.push({ path: filePath, size: fileStats.size, modifiedAt: Math.trunc(fileStats.mtimeMs) });
-        if (batch.length >= IMPORT_BATCH_SIZE) flush();
       }
-      flush();
+      await flush();
     }
 
     return importedCount;
@@ -1213,7 +1268,7 @@ export class CatalogService {
   async reconcileImportedFolders(): Promise<{ discovered: number; offline: number }> {
     const folders = this.#database.prepare('SELECT id, path FROM folders WHERE removed_at IS NULL').all() as { id: string; path: string }[];
     for (const folder of folders) {
-      this.#database.prepare('UPDATE assets SET offline_at = ? WHERE folder_id = ? AND removed_at IS NULL').run(Date.now(), folder.id);
+      await this.#markRootOffline(folder.id);
     }
     let discovered = 0;
     for (const folder of folders) {
@@ -1227,6 +1282,79 @@ export class CatalogService {
     return { discovered, offline: row.value };
   }
 
+  async synchronizeImportedRoot(rootPath: string): Promise<{ discovered: number; offline: number }> {
+    const canonicalPath = await realpath(rootPath).catch(() => rootPath);
+    const root = this.#database.prepare('SELECT id FROM folders WHERE path = ? AND removed_at IS NULL').get(canonicalPath) as { id: string } | undefined;
+    if (!root) return { discovered: 0, offline: 0 };
+    return this.synchronizeFolder(root.id);
+  }
+
+  async synchronizeImportedFile(rootPath: string, relativePath: string): Promise<void> {
+    const root = this.#database.prepare('SELECT id FROM folders WHERE path = ? AND removed_at IS NULL').get(rootPath) as { id: string } | undefined;
+    if (!root) return;
+    if (!relativePath || path.isAbsolute(relativePath) || relativePath.split(/[\\/]/u).some((part) => part === '..' || part === '.')) throw new Error('INVALID_WATCH_PATH');
+    if (relativePath.split(/[\\/]/u).some((part) => part.startsWith('.') || IGNORED_DIRECTORIES.has(part))) return;
+    const filePath = path.resolve(rootPath, relativePath);
+    if (!filePath.startsWith(rootPath + path.sep) || !isSupportedImage(filePath)) return;
+    const metadata = await stat(filePath).catch(() => null);
+    if (!metadata?.isFile()) {
+      this.#database.prepare('UPDATE assets SET offline_at = ? WHERE folder_id = ? AND path = ? AND removed_at IS NULL AND offline_at IS NULL')
+        .run(Date.now(), root.id, filePath);
+      return;
+    }
+    const modifiedAt = Math.trunc(metadata.mtimeMs);
+    this.#database.prepare(`
+      INSERT INTO assets (id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at, offline_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+      ON CONFLICT(path) DO UPDATE SET
+        folder_id = excluded.folder_id, file_name = excluded.file_name, extension = excluded.extension,
+        content_hash = CASE WHEN assets.size_bytes = excluded.size_bytes AND assets.modified_at = excluded.modified_at THEN assets.content_hash ELSE NULL END,
+        size_bytes = excluded.size_bytes, modified_at = excluded.modified_at,
+        removed_at = NULL, trashed_at = NULL, offline_at = NULL
+    `).run(randomUUID(), root.id, filePath, path.basename(filePath), path.extname(filePath).toLowerCase(), metadata.size, modifiedAt, Date.now());
+  }
+
+  async synchronizeImportedDirectory(rootPath: string, relativeFilePath: string): Promise<boolean> {
+    const root = this.#database.prepare('SELECT id FROM folders WHERE path = ? AND removed_at IS NULL').get(rootPath) as { id: string } | undefined;
+    if (!root) return true;
+    if (!relativeFilePath || path.isAbsolute(relativeFilePath) || relativeFilePath.includes('\0') || relativeFilePath.split(/[\\/]/u).some((part) => part === '..' || part === '.')) return false;
+    const changedPath = path.resolve(rootPath, relativeFilePath);
+    if (!changedPath.startsWith(rootPath + path.sep)) return false;
+    const directory = path.dirname(changedPath);
+    const changedMetadata = await stat(changedPath).catch(() => null);
+    if (changedMetadata?.isDirectory()) return false;
+    const directoryMetadata = await stat(directory).catch(() => null);
+    if (!directoryMetadata?.isDirectory()) return false;
+    const directoryRelative = path.relative(rootPath, directory);
+    if (directoryRelative.split(path.sep).some((part) => part.startsWith('.') || IGNORED_DIRECTORIES.has(part))) return true;
+
+    const prefix = directory + path.sep;
+    const known = new Set<string>();
+    const nestedPrefix = changedPath + path.sep;
+    if (this.#database.prepare('SELECT 1 FROM created_directories WHERE root_id = ? AND (path = ? OR (path >= ? AND path < ?)) LIMIT 1')
+      .get(root.id, changedPath, nestedPrefix, nestedPrefix + '\uffff')) return false;
+    if (this.#database.prepare('SELECT 1 FROM assets WHERE folder_id = ? AND path >= ? AND path < ? AND removed_at IS NULL LIMIT 1')
+      .get(root.id, nestedPrefix, nestedPrefix + '\uffff')) return false;
+    for (const row of this.#database.prepare(`
+      SELECT path FROM assets WHERE folder_id = ? AND path >= ? AND path < ? AND removed_at IS NULL
+    `).iterate(root.id, prefix, prefix + '\uffff') as Iterable<{ path: string }>) {
+      if (path.dirname(row.path) === directory) known.add(row.path);
+    }
+
+    let handle;
+    try { handle = await opendir(directory); } catch { return false; }
+    const found = new Set<string>();
+    for await (const entry of handle) {
+      if (entry.name.startsWith('.') || IGNORED_DIRECTORIES.has(entry.name)) continue;
+      if (entry.isDirectory() && path.join(directory, entry.name) === changedPath) return false;
+      if (entry.isFile() && isSupportedImage(entry.name)) found.add(entry.name);
+    }
+    for (const name of found) await this.synchronizeImportedFile(rootPath, path.relative(rootPath, path.join(directory, name)));
+    const markOffline = this.#database.prepare('UPDATE assets SET offline_at = ? WHERE folder_id = ? AND path = ? AND removed_at IS NULL AND offline_at IS NULL');
+    for (const file of known) if (!found.has(path.basename(file))) markOffline.run(Date.now(), root.id, file);
+    return true;
+  }
+
   resolveFolderPath(folderId: string): string | null {
     const directory = this.#resolveDirectory(folderId);
     return directory ? path.join(directory.rootPath, directory.relativePath) : null;
@@ -1235,8 +1363,7 @@ export class CatalogService {
   async synchronizeFolder(folderId: string): Promise<{ discovered: number; offline: number }> {
     const directory = this.#resolveDirectory(folderId);
     if (!directory) throw new Error('CATALOG_FOLDER_NOT_FOUND');
-    this.#database.prepare('UPDATE assets SET offline_at = ? WHERE folder_id = ? AND removed_at IS NULL')
-      .run(Date.now(), directory.rootId);
+    await this.#markRootOffline(directory.rootId);
     let discovered = 0;
     try {
       discovered = await this.importFolders([directory.rootPath]);
@@ -1248,6 +1375,28 @@ export class CatalogService {
       WHERE folder_id = ? AND offline_at IS NOT NULL AND removed_at IS NULL
     `).get(directory.rootId) as { value: number };
     return { discovered, offline: row.value };
+  }
+
+  async #markRootOffline(rootId: string): Promise<void> {
+    // The primary-key index keeps cursor progress monotonic and avoids a
+    // repeated temp sort of the entire root for every small batch.
+    const select = this.#database.prepare(`
+      SELECT id FROM assets INDEXED BY sqlite_autoindex_assets_1 WHERE folder_id = ? AND removed_at IS NULL AND id > ?
+      ORDER BY id ASC LIMIT ?
+    `);
+    const update = this.#database.prepare(`
+      UPDATE assets INDEXED BY sqlite_autoindex_assets_1 SET offline_at = ? WHERE folder_id = ? AND removed_at IS NULL
+        AND id > ? AND id <= ?
+    `);
+    let cursor = '';
+    while (true) {
+      const rows = select.all(rootId, cursor, RECONCILE_BATCH_SIZE) as { id: string }[];
+      if (rows.length === 0) break;
+      const lastId = rows[rows.length - 1]!.id;
+      update.run(Date.now(), rootId, cursor, lastId);
+      cursor = lastId;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
   }
 
   resolveAssetFile(assetId: string): { path: string; fileName: string; modifiedAt: number; sizeBytes: number } | null {

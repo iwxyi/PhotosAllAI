@@ -36,6 +36,7 @@ type ResultRow = {
   id: string;
   asset_id: string;
   batch_id: string;
+  input_sources: string | null;
   version: number;
   file_name: string;
   file_path: string;
@@ -150,6 +151,9 @@ export class GenerationService {
     }
     if (!columns.some((column) => column.name === 'purge_path')) {
       this.#database.exec('ALTER TABLE generation_results ADD COLUMN purge_path TEXT');
+    }
+    if (!columns.some((column) => column.name === 'input_sources')) {
+      this.#database.exec('ALTER TABLE generation_results ADD COLUMN input_sources TEXT');
     }
   }
 
@@ -496,13 +500,27 @@ export class GenerationService {
     if (provider.profile.purpose !== 'generation') throw new Error('PROVIDER_DOES_NOT_SUPPORT_GENERATION');
     const source = this.#catalog.resolveAssetFile(assetId);
     if (!source) throw new Error('ASSET_NOT_FOUND');
-    if (payload.sourceResultId && !this.list(assetId).some((result) => result.id === payload.sourceResultId)) throw new Error('GENERATION_SOURCE_RESULT_INVALID');
-    const previewPath = payload.sourceResultId ? this.resolveResultFile(payload.sourceResultId) : await this.#images.getOrCreate(assetId, 'preview');
-    if (!previewPath) throw new Error('ASSET_PREVIEW_NOT_FOUND');
-    const inputImage = await readFile(previewPath);
-
-    const sourceFormat = payload.sourceResultId ? detectImageFormat(inputImage) : 'jpg';
-    const bytes = await requestGeneratedImage(provider, payload.prompt, inputImage, signal, sourceFormat === 'jpg' ? 'image/jpeg' : `image/${sourceFormat}`);
+    if (payload.sourceResultId && payload.inputSources) throw new Error('GENERATION_INPUTS_CONFLICT');
+    const inputSources = payload.inputSources ?? (payload.sourceResultId ? [{ kind: 'result' as const, resultId: payload.sourceResultId }] : [{ kind: 'asset' as const, assetId }]);
+    if (inputSources[0]?.kind === 'asset' && inputSources[0].assetId !== assetId) throw new Error('GENERATION_PRIMARY_SOURCE_INVALID');
+    const primarySource = inputSources[0]!;
+    if (primarySource.kind === 'result' && !this.list(assetId).some((result) => result.id === primarySource.resultId)) throw new Error('GENERATION_SOURCE_RESULT_INVALID');
+    if (new Set(inputSources.map((input) => input.kind === 'asset' ? `asset:${input.assetId}` : `result:${input.resultId}`)).size !== inputSources.length) throw new Error('GENERATION_DUPLICATE_INPUT');
+    const inputs = await Promise.all(inputSources.map(async (input) => {
+      if (input.kind === 'asset') {
+        if (!this.#catalog.resolveAssetFile(input.assetId)) throw new Error('GENERATION_INPUT_ASSET_NOT_FOUND');
+        const file = await this.#images.getOrCreate(input.assetId, 'preview');
+        if (!file) throw new Error('ASSET_PREVIEW_NOT_FOUND');
+        return { bytes: await readFile(file), mime: 'image/jpeg' };
+      }
+      const file = this.resolveResultFile(input.resultId);
+      if (!file) throw new Error('GENERATION_INPUT_RESULT_NOT_FOUND');
+      const bytes = await readFile(file);
+      const format = detectImageFormat(bytes);
+      return { bytes, mime: format === 'jpg' ? 'image/jpeg' : `image/${format}` };
+    }));
+    if (inputs.reduce((total, input) => total + input.bytes.byteLength, 0) > 50 * 1024 * 1024) throw new Error('GENERATION_INPUTS_TOO_LARGE');
+    const bytes = await requestGeneratedImage(provider, payload.prompt, inputs, signal);
     signal?.throwIfAborted();
     const format = detectImageFormat(bytes);
     const id = randomUUID();
@@ -534,11 +552,11 @@ export class GenerationService {
       this.#database.prepare(`
         INSERT INTO generation_results (
           id, asset_id, batch_id, version, file_name, file_path, prompt,
-          provider_profile_id, template_id, template_version, storage_mode, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          provider_profile_id, template_id, template_version, storage_mode, input_sources, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id, assetId, payload.batchId, version, fileName, filePath, payload.prompt,
-        payload.providerProfileId, payload.templateId, payload.templateVersion, payload.storageMode, createdAt
+        payload.providerProfileId, payload.templateId, payload.templateVersion, payload.storageMode, JSON.stringify(inputSources), createdAt
       );
       await this.#writeManifest(batchDirectory, assetId, payload.batchId, provider.profile, payload.storageMode);
       if (this.#database.prepare('DELETE FROM generation_write_intents WHERE result_id = ?').run(id).changes !== 1) {
@@ -559,7 +577,7 @@ export class GenerationService {
     }
 
     return generationResultSchema.parse({
-      id, assetId, batchId: payload.batchId, version, fileName,
+      id, assetId, batchId: payload.batchId, inputSources, version, fileName,
       resultUrl: `photoresult://result/${id}`, prompt: payload.prompt,
       providerProfileId: payload.providerProfileId, templateId: payload.templateId,
       templateVersion: payload.templateVersion, storageMode: payload.storageMode,
@@ -569,14 +587,15 @@ export class GenerationService {
 
   async #writeManifest(directory: string, assetId: string, batchId: string, profile: ProviderProfile, storageMode: 'managed' | 'portable'): Promise<void> {
     const rows = this.#database.prepare(`
-      SELECT id, version, file_name, file_path, created_at FROM generation_results
+      SELECT id, version, file_name, file_path, input_sources, created_at FROM generation_results
       WHERE asset_id = ? AND batch_id = ? AND trashed_at IS NULL ORDER BY version ASC
-    `).all(assetId, batchId) as Array<{ id: string; version: number; file_name: string; file_path: string; created_at: number }>;
+    `).all(assetId, batchId) as Array<{ id: string; version: number; file_name: string; file_path: string; input_sources: string | null; created_at: number }>;
     const results = await Promise.all(rows.map(async (row) => {
       const resultBytes = await readFile(row.file_path);
       return {
         id: row.id,
         version: row.version,
+        inputSources: row.input_sources ? JSON.parse(row.input_sources) as unknown : [{ kind: 'asset', assetId }],
         fileName: row.file_name,
         format: path.extname(row.file_name).slice(1),
         byteSize: resultBytes.byteLength,
@@ -606,14 +625,15 @@ export class GenerationService {
     const destination = path.join(directory, 'manifest.json');
     const existing = JSON.parse(await readFile(destination, 'utf8')) as Record<string, unknown>;
     const rows = this.#database.prepare(`
-      SELECT id, version, file_name, file_path, created_at FROM generation_results
+      SELECT id, version, file_name, file_path, input_sources, created_at FROM generation_results
       WHERE asset_id = ? AND batch_id = ? AND trashed_at IS NULL ORDER BY version ASC
-    `).all(assetId, batchId) as Array<{ id: string; version: number; file_name: string; file_path: string; created_at: number }>;
+    `).all(assetId, batchId) as Array<{ id: string; version: number; file_name: string; file_path: string; input_sources: string | null; created_at: number }>;
     const results = await Promise.all(rows.map(async (row) => {
       const resultBytes = await readFile(row.file_path);
       return {
         id: row.id,
         version: row.version,
+        inputSources: row.input_sources ? JSON.parse(row.input_sources) as unknown : [{ kind: 'asset', assetId }],
         fileName: row.file_name,
         format: path.extname(row.file_name).slice(1),
         byteSize: resultBytes.byteLength,
@@ -633,7 +653,7 @@ export class GenerationService {
 
   #toResult(row: ResultRow): GenerationResult {
     return generationResultSchema.parse({
-      id: row.id, assetId: row.asset_id, batchId: row.batch_id, version: row.version,
+      id: row.id, assetId: row.asset_id, batchId: row.batch_id, inputSources: row.input_sources ? JSON.parse(row.input_sources) as unknown : [{ kind: 'asset', assetId: row.asset_id }], version: row.version,
       fileName: row.file_name, resultUrl: `photoresult://result/${row.id}`,
       prompt: row.prompt, providerProfileId: row.provider_profile_id,
       templateId: row.template_id, templateVersion: row.template_version, reviewState: row.review_state, createdAt: row.created_at
@@ -823,9 +843,8 @@ async function moveFileVerified(source: string, destination: string): Promise<vo
 async function requestGeneratedImage(
   provider: ResolvedProvider,
   prompt: string,
-  inputImage: Buffer,
-  signal?: AbortSignal,
-  inputMime = 'image/jpeg'
+  inputs: Array<{ bytes: Buffer; mime: string }>,
+  signal?: AbortSignal
 ): Promise<Buffer> {
   const aceData = provider.profile.kind === 'acedata-nano-banana';
   const endpoint = aceData
@@ -836,14 +855,16 @@ async function requestGeneratedImage(
         action: 'edit',
         model: provider.profile.modelId,
         prompt,
-        image_urls: [`data:${inputMime};base64,${inputImage.toString('base64')}`],
+        image_urls: inputs.map((input) => `data:${input.mime};base64,${input.bytes.toString('base64')}`),
         count: 1
       }
     : {
         model: provider.profile.modelId,
         prompt,
         n: 1,
-        image: { mime_type: inputMime, data: inputImage.toString('base64') }
+        image: inputs.length === 1
+          ? { mime_type: inputs[0]!.mime, data: inputs[0]!.bytes.toString('base64') }
+          : inputs.map((input) => ({ mime_type: input.mime, data: input.bytes.toString('base64') }))
       };
   const response = await fetchBounded(endpoint, {
     method: 'POST',

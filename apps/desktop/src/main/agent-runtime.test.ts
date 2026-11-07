@@ -268,4 +268,19 @@ describe('AgentRuntime', () => {
     expect(call.taskIds).toHaveLength(0);
     expect(save).not.toHaveBeenCalled();
   });
+  it('requires inspection and scope for every composition input before enqueueing', async () => {
+    const f = await fixture([finish]);
+    const s = f.runtime.get(f.session.id);
+    s.calls.push({ id: randomUUID(), name: 'runtime.plan', arguments: {}, status: 'done', approved: false, taskIds: [], resultIds: [], wakeAt: null, result: '{}' },
+      { id: randomUUID(), name: 'vision.inspect', arguments: { assetIds: ['a'] }, status: 'done', approved: false, taskIds: [], resultIds: [], wakeAt: null, result: '{}' });
+    const submit = f.defaults.find((tool) => tool.name === 'jobs.submit')!;
+    const call = { id: randomUUID(), name: 'jobs.submit', arguments: {}, status: 'executing' as const, approved: false, taskIds: [], resultIds: [], wakeAt: null, result: null };
+    const context = { session: s, call, signal: new AbortController().signal, save: vi.fn() };
+    const input = { kind: 'generation', assetIds: ['a'], providerProfileId: providerId, prompt: '把第二张照片的天空合成到第一张', inputSources: [{ kind: 'asset', assetId: 'a' }, { kind: 'asset', assetId: 'b' }] };
+    await expect(submit.execute(input, context)).rejects.toThrow('检查所有输入原图');
+    expect(f.tasks.list()).toHaveLength(0);
+    s.calls.push({ id: randomUUID(), name: 'vision.inspect', arguments: { assetIds: ['b'] }, status: 'done', approved: false, taskIds: [], resultIds: [], wakeAt: null, result: '{}' });
+    await submit.execute(input, context);
+    expect(f.tasks.list()[0]?.payload.inputSources).toEqual(input.inputSources);
+  });
 });

@@ -43,16 +43,22 @@ export function createAgentTools(d: AgentToolDependencies): AgentTool[] {
   const jobSchema = z.object({ assetIds: ids.max(100), providerProfileId: z.string().uuid(),
     kind: z.enum(['analysis', 'collection-analysis', 'generation']),
     prompt: z.string().max(20000).default(''), count: z.number().int().min(1).max(8).default(1),
-    sourceResultId: z.string().uuid().optional()
+    sourceResultId: z.string().uuid().optional(),
+    inputSources: z.array(z.discriminatedUnion('kind', [
+      z.object({ kind: z.literal('asset'), assetId: z.string().min(1) }),
+      z.object({ kind: z.literal('result'), resultId: z.string().uuid() })
+    ])).min(1).max(8).optional()
   }).strict().superRefine((v, ctx) => {
     if (v.kind === 'generation' && !v.prompt.trim()) ctx.addIssue({ code: 'custom', message: '生成需要明确提示词' });
     if (v.kind !== 'generation' && v.count !== 1) ctx.addIssue({ code: 'custom', message: '分析数量必须为 1' });
     if (v.kind === 'collection-analysis' && v.assetIds.length < 2) ctx.addIssue({ code: 'custom', message: '集合分析至少需要两张图片的分析结果' });
     if (v.kind === 'generation' && v.assetIds.length * v.count > 100) ctx.addIssue({ code: 'custom', message: '一次最多生成 100 张' });
     if (v.sourceResultId && (v.kind !== 'generation' || v.assetIds.length !== 1)) ctx.addIssue({ code: 'custom', message: '迭代源版本必须对应单张图片生成' });
+    if (v.inputSources && (v.kind !== 'generation' || v.assetIds.length !== 1)) ctx.addIssue({ code: 'custom', message: '组合输入每次对应一张输出图片' });
+    if (v.inputSources && v.sourceResultId) ctx.addIssue({ code: 'custom', message: '请使用 inputSources 指定全部输入' });
   });
   const jobs: AgentTool = {
-    name: 'jobs.submit', description: '提交图片分析、集合分析或 AI 生成并等待真实结果。只有视觉目标才使用分析与 vision.inspect；生成前应有针对当前目标的检查和方案。用 providers.list 选择可用模型。count 是每图数量；不同图片使用分别优化的 prompt；sourceResultId 可基于已有生成版迭代。',
+    name: 'jobs.submit', description: '提交图片分析、集合分析或 AI 生成并等待真实结果。生成可用 inputSources 按顺序指定 1–8 张原图或已有结果，首项是主图和输出归属；多图合成需在 prompt 写清各图角色。count 是本次候选数量。sourceResultId 是旧版单图迭代参数；优先使用 inputSources。必须先检查所有输入图片和引用的生成结果。',
     schema: jobSchema, approval: false, replayable: true,
     execute: async (raw, ctx) => {
       const args = jobSchema.parse(raw);
@@ -63,6 +69,17 @@ export function createAgentTools(d: AgentToolDependencies): AgentTool[] {
         if (args.assetIds.some((id) => !currentCalls.some((c) => c.name === 'vision.inspect' && c.status === 'done' && (c.arguments.assetIds as string[]).includes(id)))) throw new Error('生成前必须按当前要求实际检查每张图片，再决定如何生成。');
         if (args.sourceResultId && !d.generation.list(args.assetIds[0]!).some((r) => r.id === args.sourceResultId)) throw new Error('迭代源不属于当前图片');
         if (args.sourceResultId && !currentCalls.some((c) => c.name === 'vision.inspect' && c.status === 'done' && (c.arguments.resultIds as string[] | undefined)?.includes(args.sourceResultId!))) throw new Error('必须先检查迭代源版本，再根据实际问题继续修图。');
+        if (args.inputSources) {
+          const primary = args.inputSources[0]!;
+          const primaryResult = primary.kind === 'result' ? d.generation.list(args.assetIds[0]!).find((result) => result.id === primary.resultId) : null;
+          if (primary.kind === 'asset' && primary.assetId !== args.assetIds[0] || primary.kind === 'result' && !primaryResult) throw new Error('首个输入必须属于输出主图');
+          const sourceAssets = args.inputSources.filter((input): input is { kind: 'asset'; assetId: string } => input.kind === 'asset').map((input) => input.assetId);
+          scope(sourceAssets, ctx);
+          if (sourceAssets.some((id) => !currentCalls.some((call) => call.name === 'vision.inspect' && call.status === 'done' && (call.arguments.assetIds as string[] | undefined)?.includes(id)))) throw new Error('必须先检查所有输入原图');
+          const sourceResults = args.inputSources.filter((input): input is { kind: 'result'; resultId: string } => input.kind === 'result').map((input) => input.resultId);
+          if (sourceResults.some((id) => !ctx.session.assetIds.some((assetId) => d.generation.list(assetId).some((result) => result.id === id)))) throw new Error('生成结果超出会话图片范围');
+          if (sourceResults.some((id) => !currentCalls.some((call) => call.name === 'vision.inspect' && call.status === 'done' && (call.arguments.resultIds as string[] | undefined)?.includes(id)))) throw new Error('必须先检查所有输入生成结果');
+        }
       }
       if (!ctx.call.taskIds.length) {
         const profile = (await d.providers.list()).find((p) => p.id === args.providerProfileId && p.enabled);
@@ -84,7 +101,8 @@ export function createAgentTools(d: AgentToolDependencies): AgentTool[] {
           payload: args.kind === 'generation' ? {
             providerProfileId: args.providerProfileId, batchId: ctx.call.id, submissionId: ctx.call.id,
             prompt: args.prompt, resultIndex: index % args.count + 1, storageMode: 'managed', agentSessionId: ctx.session.id,
-            ...(args.sourceResultId ? { sourceResultId: args.sourceResultId } : {})
+            ...(args.sourceResultId ? { sourceResultId: args.sourceResultId } : {}),
+            ...(args.inputSources ? { inputSources: args.inputSources } : {})
           } : { providerProfileId: args.providerProfileId, mode: 'full', batchId: ctx.call.id,
             submissionId: ctx.call.id, assetIds: args.assetIds, agentSessionId: ctx.session.id }
         }, id);

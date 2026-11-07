@@ -1,7 +1,8 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { DesktopApi, MenuCommand } from '@photoallisai/contracts';
+import type { CatalogAsset, DesktopApi, MenuCommand } from '@photoallisai/contracts';
 
 const api: DesktopApi = {
+  cancelPreviewRequest: (requestId) => ipcRenderer.send('image.preview.cancel.v1', requestId),
   createAgentSession: (input) => ipcRenderer.invoke('agent.sessions.create.v1', input),
   getMcpStatus: () => ipcRenderer.invoke('agent.mcp.status.v1'),
   setMcpEnabled: (enabled) => ipcRenderer.invoke('agent.mcp.enable.v1', enabled),
@@ -15,17 +16,23 @@ const api: DesktopApi = {
   linkImageDirectory: (id) => ipcRenderer.invoke('image.link-directory.v1', id),
   openImages: (paths) => ipcRenderer.invoke('image.open.v1', paths),
   takePendingOpenImages: () => ipcRenderer.invoke('image.pending.v1'),
+  listTemporaryMediaPage: (input) => ipcRenderer.invoke('image.temporary.page.v1', input) as ReturnType<DesktopApi['listTemporaryMediaPage']>,
   onOpenImages: (listener) => {
     const handler = (_event: Electron.IpcRendererEvent, session: Parameters<typeof listener>[0]) => listener(session);
     ipcRenderer.on('image.opened.v1', handler);
     return () => ipcRenderer.removeListener('image.opened.v1', handler);
+  },
+  onOpenImagesProgress: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, session: Parameters<typeof listener>[0]) => listener(session);
+    ipcRenderer.on('image.open.progress.v1', handler);
+    return () => ipcRenderer.removeListener('image.open.progress.v1', handler);
   },
   getDroppedFilePaths: (files) => files.map((file) => webUtils.getPathForFile(file)).filter(Boolean),
   getFileWorkflowConfig: () => ipcRenderer.invoke('file-workflow.config.get.v1') as ReturnType<DesktopApi['getFileWorkflowConfig']>,
   saveFileWorkflowConfig: (input) => ipcRenderer.invoke('file-workflow.config.save.v1', input) as ReturnType<DesktopApi['saveFileWorkflowConfig']>,
   previewFileWorkflow: (input) => ipcRenderer.invoke('file-workflow.preview.v1', input) as ReturnType<DesktopApi['previewFileWorkflow']>,
   onCatalogChanged: (listener) => {
-    const handler = () => listener();
+    const handler = (_event: Electron.IpcRendererEvent, updatedAssets?: CatalogAsset[]) => listener(updatedAssets);
     ipcRenderer.on('catalog.changed.v1', handler);
     return () => ipcRenderer.removeListener('catalog.changed.v1', handler);
   },

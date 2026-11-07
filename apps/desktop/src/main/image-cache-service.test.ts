@@ -1,10 +1,11 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { ImageCacheService, writeCacheFileAtomically } from './image-cache-service';
+import { createQuickLookThumbnail, ImageCacheService, writeCacheFileAtomically } from './image-cache-service';
 
 const directories: string[] = [];
 
@@ -13,6 +14,11 @@ afterEach(async () => {
 });
 
 describe('image cache governance', () => {
+  it.skipIf(process.platform !== 'darwin' || process.env.PHOTOALLISAI_TEST_QUICKLOOK !== '1')('generates a Quick Look fallback in a separate process', async () => {
+    const fixture = path.resolve('apps/desktop/src/renderer/public/demo/portrait.jpg');
+    const thumbnail = await createQuickLookThumbnail(fixture, 128);
+    expect(thumbnail?.subarray(0, 8)).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  });
   it('reports and prunes oldest rebuildable previews to a byte budget', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-'));
     directories.push(directory);
@@ -27,7 +33,7 @@ describe('image cache governance', () => {
     await utimes(oldest, oldTime, oldTime);
     await utimes(newest, newTime, newTime);
     const service = new ImageCacheService(directory, {} as never);
-    expect(service.getPerformanceStats()).toEqual({ hits: 0, misses: 0, decodes: 0, decodeMsTotal: 0 });
+    expect(service.getPerformanceStats()).toMatchObject({ hits: 0, misses: 0, decodes: 0, decodeMsTotal: 0, queueWaitMsTotal: 0, createMsTotal: 0, sourceStatMsTotal: 0, nativeDecodeMsTotal: 0, jpegEncodeMsTotal: 0, cacheWriteMsTotal: 0, cachePayloadWriteMsTotal: 0, cachePublishMsTotal: 0, cacheCleanupMsTotal: 0 });
     await expect(new ImageCacheService(directory, {} as never, async () => ({ imageMagick: true, sips: false })).getDecoderCapabilities()).resolves.toEqual({ nativeImage: true, imageMagick: true, sips: false });
     await expect(new ImageCacheService(directory, {} as never, async () => ({ imageMagick: false, sips: true })).getDecoderCapabilities()).resolves.toEqual({ nativeImage: true, imageMagick: false, sips: true });
     expect(await service.getStats()).toEqual({ files: 2, bytes: 30 });
@@ -61,6 +67,90 @@ describe('image cache governance', () => {
     expect(await readFile(first!, 'utf8')).toBe('first-preview');
     expect(await readFile(second!, 'utf8')).toBe('second-preview');
     expect(first).not.toBe(second);
+  });
+
+  it('keeps a shared preview request alive when one consumer aborts', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-'));
+    directories.push(directory);
+    const assetId = 'shared-preview';
+    const key = `${assetId}-1234-10-thumbnail`;
+    const nested = path.join(directory, key.slice(0, 2));
+    const cached = path.join(nested, `${key}.jpg`);
+    await mkdir(nested, { recursive: true });
+    await writeFile(cached, 'cached-preview');
+    const service = new ImageCacheService(directory, {
+      resolveAssetFile: () => ({ path: '/source.jpg', fileName: 'source.jpg', modifiedAt: 1234, sizeBytes: 10 })
+    } as never);
+    const abandoned = new AbortController();
+    const active = new AbortController();
+
+    const first = service.getOrCreate(assetId, 'thumbnail', undefined, 'background', abandoned.signal);
+    const second = service.getOrCreate(assetId, 'thumbnail', undefined, 'visible', active.signal);
+    abandoned.abort();
+    await expect(first).resolves.toBeNull();
+    await expect(second).resolves.toBe(cached);
+    expect(service.getPerformanceStats().hits).toBe(1);
+    expect(service.getPerformanceStats()).toMatchObject({ abortedConsumers: 1, canceledQueued: 0 });
+  });
+
+  it('cancels a queued shared preview only after every consumer aborts', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-'));
+    directories.push(directory);
+    const cached = new Map<string, string>();
+    for (const assetId of ['active-one', 'active-two', 'waiting']) {
+      const key = `${assetId}-1234-10-thumbnail`;
+      const nested = path.join(directory, key.slice(0, 2));
+      const filePath = path.join(nested, `${key}.jpg`);
+      await mkdir(nested, { recursive: true });
+      await writeFile(filePath, 'cached-preview');
+      cached.set(assetId, filePath);
+    }
+    const service = new ImageCacheService(directory, {
+      resolveAssetFile: () => ({ path: '/source.jpg', fileName: 'source.jpg', modifiedAt: 1234, sizeBytes: 10 })
+    } as never);
+    const active = [
+      service.getOrCreate('active-one', 'thumbnail'),
+      service.getOrCreate('active-two', 'thumbnail')
+    ];
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const first = service.getOrCreate('waiting', 'thumbnail', undefined, 'background', firstController.signal);
+    const second = service.getOrCreate('waiting', 'thumbnail', undefined, 'visible', secondController.signal);
+
+    firstController.abort();
+    await expect(first).resolves.toBeNull();
+    expect(service.getPerformanceStats()).toMatchObject({ abortedConsumers: 1, canceledQueued: 0 });
+    secondController.abort();
+    await expect(second).resolves.toBeNull();
+    expect(service.getPerformanceStats()).toMatchObject({ abortedConsumers: 2, canceledQueued: 1 });
+    await Promise.all(active);
+    expect(service.getPerformanceStats().hits).toBe(2);
+
+    await expect(service.getOrCreate('waiting', 'thumbnail')).resolves.toBe(cached.get('waiting'));
+    expect(service.getPerformanceStats().hits).toBe(3);
+  });
+
+  it('reuses a temporary preview across session IDs and invalidates changed source metadata', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-'));
+    directories.push(directory);
+    const source = '/photos/photo.jpg';
+    const hash = createHash('sha256').update(source).digest('hex');
+    const cacheKey = (size: number) => `temporary-${hash}-1234-${size}-thumbnail`;
+    for (const [size, contents] of [[10, 'old'], [20, 'new']] as const) {
+      const key = cacheKey(size);
+      const nested = path.join(directory, key.slice(0, 2));
+      await mkdir(nested, { recursive: true });
+      await writeFile(path.join(nested, `${key}.jpg`), contents);
+    }
+    const service = new ImageCacheService(directory, {} as never);
+    const first = await service.getOrCreate('session-one', 'thumbnail', { path: source, modifiedAt: 1234, sizeBytes: 10 });
+    const reopened = await service.getOrCreate('session-two', 'thumbnail', { path: source, modifiedAt: 1234, sizeBytes: 10 });
+    const changed = await service.getOrCreate('session-three', 'thumbnail', { path: source, modifiedAt: 1234, sizeBytes: 20 });
+    expect(first).toBe(reopened);
+    expect(changed).not.toBe(first);
+    expect(await readFile(first!, 'utf8')).toBe('old');
+    expect(await readFile(changed!, 'utf8')).toBe('new');
+    expect(service.getPerformanceStats().hits).toBe(3);
   });
 
   it('removes only recognized regular cache temporary files', async () => {

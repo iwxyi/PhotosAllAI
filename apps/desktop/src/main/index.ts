@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { dirname, extname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, safeStorage, shell, type MenuItemConstructorOptions } from 'electron';
@@ -75,13 +75,16 @@ import {
   saveCatalogAlbumInputSchema,
   updateCatalogAlbumAssetsInputSchema,
   workspaceSessionSchema,
+  temporaryMediaPageInputSchema,
   menuStateSchema
 } from '@photoallisai/contracts';
 import { fileDetailsSchema, quickViewSessionSchema } from '@photoallisai/contracts';
 import type { AppSettings, MenuCommand, MenuState, QuickViewSession } from '@photoallisai/contracts';
 
-import { CatalogService, isSupportedImage } from './catalog-service';
-import { DIRECT_IMAGE_EXTENSIONS, ImageFileService } from './image-file-service';
+import { CatalogService } from './catalog-service';
+import { isDirectPreviewImage, ImageFileService } from './image-file-service';
+import { TemporaryMediaIndex } from './temporary-media-index';
+import { identifyMediaFormat, isSupportedBrowseMedia } from './media-format-registry';
 import { CatalogWatcher } from './catalog-watcher';
 import { AnalysisService } from './analysis-service';
 import { ImageCacheService, type ImageVariant } from './image-cache-service';
@@ -124,6 +127,7 @@ let fileWorkflows: FileWorkflowService;
 let catalogWatcher: CatalogWatcher;
 let imageCache: ImageCacheService;
 let imageFiles: ImageFileService;
+let temporaryMediaIndex: TemporaryMediaIndex;
 let pendingOpenPaths: string[] = [];
 let pendingOpenSession: QuickViewSession | null = null;
 let openingImages = Promise.resolve();
@@ -145,6 +149,7 @@ let libraryBackup: LibraryBackupService;
 let libraryRestore: LibraryRestoreService;
 let libraryIntegrity: LibraryIntegrityService;
 let contentHashTimer: NodeJS.Timeout | undefined;
+let catalogValidationTimer: NodeJS.Timeout | undefined;
 let contentHashPass: Promise<void> | undefined;
 let contentHashPassRunning = false;
 let shuttingDown = false;
@@ -183,9 +188,35 @@ function reportOpenFailure(error: unknown): void {
 }
 
 async function openImagePaths(paths: string[], notify = true): Promise<QuickViewSession> {
-  const operation = openingImages.then(() => imageFiles.open(paths));
+  const earlyProgress: QuickViewSession[] = [];
+  const openState: { sessionId: string | undefined } = { sessionId: undefined };
+  const operation = openingImages.then(() => imageFiles.open(paths, (progress) => {
+    const update = temporaryMediaIndex ? { ...progress, items: [], indexed: true, totalCount: imageFiles.pageTemporary(progress.sessionId!, 0, 1).totalCount } : progress;
+    if (!openState.sessionId) { earlyProgress.push(update); return; }
+    const pending = pendingOpenSession;
+    if (notify && pending && pending.sessionId === progress.sessionId) {
+      // The pending session belongs to the main process until the renderer takes it.
+      // Appending a batch in place avoids copying and validating the entire directory
+      // once per progress event (quadratic work for large directories).
+      if (!pending.indexed) pending.items.push(...progress.items);
+      pending.complete = progress.complete;
+      pending.totalCount = update.totalCount;
+      if (progress.complete && !pending.indexed) pending.items.sort((a, b) => a.fileName.localeCompare(b.fileName, undefined, { numeric: true }));
+      return;
+    }
+    mainWindow?.webContents.send('image.open.progress.v1', quickViewSessionSchema.parse(update));
+  }));
   openingImages = operation.then(() => undefined, () => undefined);
-  const session = quickViewSessionSchema.parse(await operation);
+  let session = quickViewSessionSchema.parse(await operation);
+  openState.sessionId = session.sessionId;
+  for (const progress of earlyProgress) {
+    if (progress.sessionId !== session.sessionId) continue;
+    if (!session.indexed) session.items.push(...progress.items);
+    session.complete = progress.complete;
+    if (session.indexed) session.totalCount = imageFiles.pageTemporary(session.sessionId!, 0, 1).totalCount;
+  }
+  if (session.complete && !session.indexed) session = { ...session, items: session.items.sort((a, b) => a.fileName.localeCompare(b.fileName, undefined, { numeric: true })) };
+  if (session.indexed) session = { ...session, items: session.items.filter((item) => item.id === session.selectedId), totalCount: imageFiles.pageTemporary(session.sessionId!, 0, 1).totalCount };
   if (notify) {
     pendingOpenSession = session;
     showMainWindow();
@@ -311,6 +342,10 @@ protocol.registerSchemesAsPrivileged([
   {
     scheme: 'photoresult',
     privileges: { standard: true, secure: true, supportFetchAPI: true }
+  },
+  {
+    scheme: 'photovideo',
+    privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true }
   }
 ]);
 
@@ -345,6 +380,10 @@ function registerIpc(): void {
     return openImagePaths(paths, false);
   });
   ipcMain.handle('image.pending.v1', () => { const session = pendingOpenSession; pendingOpenSession = null; return session; });
+  ipcMain.handle('image.temporary.page.v1', (_event, input: unknown) => {
+    const { sessionId, offset, limit, selectedId } = temporaryMediaPageInputSchema.parse(input);
+    return imageFiles.pageTemporary(sessionId, offset, limit, selectedId);
+  });
   ipcMain.handle('file-workflow.config.get.v1', () => fileWorkflows.get());
   ipcMain.handle('file-workflow.config.save.v1', async (_event, input: unknown) => {
     const saved = await fileWorkflows.save(fileWorkflowConfigSchema.parse(input));
@@ -494,7 +533,7 @@ function registerIpc(): void {
   );
   ipcMain.handle('catalog.metadata.update.v1', (_event, input: unknown) => {
     const updated = catalog.updateMetadata(updateCatalogMetadataInputSchema.parse(input));
-    for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1');
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1', updated);
     return updated;
   });
   ipcMain.handle('catalog.tags.update.v1', (_event, input: unknown) =>
@@ -786,10 +825,12 @@ function registerIpc(): void {
   });
   ipcMain.handle('generation.results.list.v1', (_event, input: unknown) => {
     const { assetId } = listGenerationResultsInputSchema.parse(input);
+    if (shuttingDown) return [];
     return generation.list(assetId);
   });
   ipcMain.handle('generation.results.trash.list.v1', (_event, input: unknown) => {
     const { assetId } = listGenerationResultsInputSchema.parse(input);
+    if (shuttingDown) return [];
     return generation.listTrashed(assetId);
   });
   ipcMain.handle('generation.result.trash.v1', (_event, input: unknown) =>
@@ -873,6 +914,20 @@ function createWindow(): BrowserWindow {
       sandbox: true
     }
   });
+  // Electron 37's visibilityChanged listener calls isVisible() after the native
+  // window may have been destroyed by a late show/hide event.
+  const visibilityChanged = window.listeners('show').find((listener) => listener.name === 'visibilityChanged');
+  if (visibilityChanged) {
+    const emitter = window as unknown as import('node:events').EventEmitter;
+    const guardVisibility = () => {
+      if (!window.isDestroyed() && !window.webContents.isDestroyed()) visibilityChanged();
+    };
+    for (const eventName of ['show', 'hide', 'minimize', 'maximize', 'restore']) {
+      emitter.removeListener(eventName, visibilityChanged as (...args: unknown[]) => void);
+      emitter.on(eventName, guardVisibility);
+    }
+  }
+  let closing = false;
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     const parsed = new URL(url);
@@ -897,16 +952,18 @@ function createWindow(): BrowserWindow {
   });
 
   window.once('ready-to-show', () => {
-    if (!window.isDestroyed() && !shuttingDown) {
+    if (!closing && !window.isDestroyed() && !shuttingDown) {
       window.show();
       window.focus();
     }
   });
-  window.on('closed', () => {
-    if (mainWindow === window) mainWindow = null;
+  window.on('close', () => {
+    closing = true;
   });
-  window.webContents.once('did-finish-load', () => {
-    if (!window.isDestroyed() && !shuttingDown) window.show();
+  window.on('closed', () => {
+    if (mainWindow === window) {
+      mainWindow = null;
+    }
   });
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -946,7 +1003,7 @@ app.on('open-file', (event, file) => {
 });
 app.on('second-instance', (_event, argv) => {
   showMainWindow();
-  const paths = argv.filter((arg) => isAbsolute(arg) && isSupportedImage(arg));
+  const paths = argv.filter((arg) => isAbsolute(arg) && isSupportedBrowseMedia(arg));
   if (paths.length) {
     if (startupReady) void openImagePaths(paths).catch(reportOpenFailure);
     else pendingOpenPaths.push(...paths);
@@ -955,9 +1012,30 @@ app.on('second-instance', (_event, argv) => {
 app.on('activate', showMainWindow);
 
 let startupStage = '准备启动';
+const startupStartedAt = performance.now();
+let startupStageStartedAt = startupStartedAt;
+function traceCrash(phase: string): void {
+  if (process.env.PHOTOALLISAI_CRASH_TRACE !== '1') return;
+  try {
+    const logPath = join(app.getPath('userData'), 'logs', 'crash-trace.log');
+    mkdirSync(dirname(logPath), { recursive: true });
+    appendFileSync(logPath, `${new Date().toISOString()} pid=${process.pid} ${phase}\n`);
+  } catch { /* Diagnostics must not change shutdown behavior. */ }
+}
+function enterStartupStage(stage: string): void {
+  if (process.env.PHOTOALLISAI_STARTUP_TRACE === '1') {
+    try {
+      const logPath = join(app.getPath('userData'), 'logs', 'startup-timing.log');
+      mkdirSync(dirname(logPath), { recursive: true });
+      appendFileSync(logPath, `${new Date().toISOString()} ${startupStage} ${Math.round(performance.now() - startupStageStartedAt)}ms total=${Math.round(performance.now() - startupStartedAt)}ms\n`);
+    } catch { /* Diagnostics must never block startup. */ }
+  }
+  startupStage = stage;
+  startupStageStartedAt = performance.now();
+}
 app.whenReady().then(async () => {
   if (!hasLock) return;
-  startupStage = '检查待恢复图库';
+  enterStartupStage('检查待恢复图库');
   const libraryDirectory = join(app.getPath('userData'), 'library');
   const prospectiveDatabasePath = join(libraryDirectory, 'catalog.sqlite');
   libraryBackup = new LibraryBackupService(prospectiveDatabasePath, join(libraryDirectory, 'generated'));
@@ -970,26 +1048,26 @@ app.whenReady().then(async () => {
   }
   mkdirSync(libraryDirectory, { recursive: true });
   const databasePath = prospectiveDatabasePath;
-  startupStage = '检查数据库与迁移';
+  enterStartupStage('检查数据库与迁移');
   const migration = new DatabaseMigrationService(databasePath);
   const migrationCheckpoint = await migration.prepare(APPLICATION_SCHEMA_VERSION);
-  startupStage = '读取工作区与设置';
+  enterStartupStage('读取工作区与设置');
   workspace = new WorkspaceService(databasePath);
   appSettings = new AppSettingsService(join(app.getPath('userData'), 'settings', 'app.json'));
   const initialAppSettings = await appSettings.get();
   appLocale = initialAppSettings.locale;
   databaseBackup = new DatabaseBackupService(databasePath);
-  startupStage = '初始化图库';
+  enterStartupStage('初始化图库');
   catalog = new CatalogService(databasePath);
-  imageFiles = new ImageFileService(catalog);
+  temporaryMediaIndex = new TemporaryMediaIndex();
+  imageFiles = new ImageFileService(catalog, temporaryMediaIndex);
   fileWorkflows = new FileWorkflowService(join(app.getPath('userData'), 'settings', 'file-workflows.json'), catalog);
-  startupStage = '检查关联文件夹';
-  await catalog.reconcileImportedFolders();
+  enterStartupStage('准备关联文件夹监听');
   catalogWatcher = new CatalogWatcher(catalog, { onChanged: () => {
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1');
   } });
   catalogWatcher.watchFolders(catalog.listFolderPaths());
-  startupStage = '初始化文件操作与任务';
+  enterStartupStage('初始化文件操作与任务');
   fileOperations = new FileOperationService(databasePath, undefined, {
     trashItem: (filePath) => shell.trashItem(filePath)
   }, process.platform, catalog);
@@ -1000,7 +1078,7 @@ app.whenReady().then(async () => {
   );
   await imageCache.cleanupTemporaryFiles();
   void imageCache.prune(initialAppSettings.cacheMaxBytes);
-  startupStage = '初始化模型服务';
+  enterStartupStage('初始化模型服务');
   providers = new ProviderService(join(app.getPath('userData'), 'settings', 'providers.json'), {
     available: () => safeStorage.isEncryptionAvailable(),
     encrypt: (value) => safeStorage.encryptString(value).toString('base64'),
@@ -1014,7 +1092,7 @@ app.whenReady().then(async () => {
     imageCache,
     catalog
   );
-  startupStage = '恢复中断的文件操作';
+  enterStartupStage('恢复中断的文件操作');
   const trashPurges = await generation.recoverInterruptedTrashPurges();
   const recoveredFileOperations = await fileOperations.recoverInterruptedOperations(async (change) => {
     await generation.relocatePortableResults(
@@ -1031,7 +1109,7 @@ app.whenReady().then(async () => {
   libraryIntegrity = new LibraryIntegrityService(databasePath, join(libraryDirectory, 'generated'));
   exportService = new ExportService(databasePath, generation);
   exportPresets = new ExportPresetService(databasePath);
-  startupStage = '完成数据库迁移';
+  enterStartupStage('完成数据库迁移');
   await migration.complete(APPLICATION_SCHEMA_VERSION, migrationCheckpoint);
   taskRunner = new TaskRunner(tasks, analysis, generation, {
     export: async (rawPayload, signal, taskId) => {
@@ -1049,7 +1127,7 @@ app.whenReady().then(async () => {
       return report;
     }
   }, new AgentProcessor({ catalog: { listAssets: catalog.listAssets.bind(catalog), updateMetadata: catalog.updateMetadata.bind(catalog), updateTags: catalog.updateTags.bind(catalog), removeFromCatalog: (input) => fileOperations.removeFromCatalog(input) }, files: { move: (input) => fileOperations.move(input) }, generation, providers }));
-  startupStage = '初始化 Agent';
+  enterStartupStage('初始化 Agent');
   const agentVision = new AgentVision(providers, imageCache, generation);
   const agentChanged = () => { for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1'); };
   const agentTools = [...createAgentTools({
@@ -1116,30 +1194,59 @@ app.whenReady().then(async () => {
   };
   scheduleContentHashPass();
 
-  startupStage = '注册图片协议';
+  enterStartupStage('注册图片协议');
+  const activePreviewRequests = new Map<string, AbortController>();
+  const canceledPreviewRequests = new Map<string, number>();
+  const validPreviewRequestId = (id: unknown): id is string => typeof id === 'string' && /^[0-9a-f-]{36}$/i.test(id);
+  ipcMain.on('image.preview.cancel.v1', (_event, id: unknown) => {
+    if (!validPreviewRequestId(id)) return;
+    const active = activePreviewRequests.get(id);
+    if (active) { active.abort(); return; }
+    const now = Date.now();
+    canceledPreviewRequests.set(id, now);
+    for (const [key, at] of canceledPreviewRequests) {
+      if (now - at > 5_000) canceledPreviewRequests.delete(key);
+    }
+    while (canceledPreviewRequests.size > 1_024) canceledPreviewRequests.delete(canceledPreviewRequests.keys().next().value!);
+  });
   protocol.handle('photoasset', async (request) => {
+    if (shuttingDown) return new Response('Shutting down', { status: 503 });
     const url = new URL(request.url);
     if (!['thumbnail', 'preview', 'original', 'temporary', 'temporary-thumbnail'].includes(url.host)) {
       return new Response('Not found', { status: 404 });
     }
     const assetId = url.pathname.slice(1);
+    if (url.host === 'temporary-thumbnail') traceCrash(`thumbnail-start ${assetId}`);
     if (!/^[0-9a-f-]{20,40}$/i.test(assetId)) return new Response('Invalid asset', { status: 400 });
+    const requestId = url.searchParams.get('requestId');
+    const controller = validPreviewRequestId(requestId) ? new AbortController() : null;
+    if (controller && requestId) {
+      activePreviewRequests.set(requestId, controller);
+      if (canceledPreviewRequests.delete(requestId) || request.signal.aborted) controller.abort();
+    }
+    const onAbort = () => controller?.abort();
+    if (controller) request.signal.addEventListener('abort', onAbort, { once: true });
+    const signal = controller?.signal ?? request.signal;
 
     try {
       if (url.host === 'original' || url.host === 'temporary' || url.host === 'temporary-thumbnail') {
         const source = imageFiles.resolve(assetId);
         if (!source) return new Response('Not found', { status: 404 });
-        if (url.host !== 'temporary-thumbnail' && DIRECT_IMAGE_EXTENSIONS.has(extname(source).toLowerCase())) return net.fetch(pathToFileURL(source).toString());
+        if (url.host !== 'temporary-thumbnail' && isDirectPreviewImage(source)) return net.fetch(pathToFileURL(source).toString());
         if (url.host === 'original') return new Response('Original decoding unavailable', { status: 415 });
         const metadata = await stat(source);
-        const preview = await imageCache.getOrCreate(assetId, url.host === 'temporary-thumbnail' ? 'thumbnail' : 'preview', { path: source, modifiedAt: metadata.mtimeMs, sizeBytes: metadata.size });
+        const preview = await imageCache.getOrCreate(assetId, url.host === 'temporary-thumbnail' ? 'thumbnail' : 'preview', { path: source, modifiedAt: metadata.mtimeMs, sizeBytes: metadata.size }, url.searchParams.get('priority') === 'visible' ? 'visible' : undefined, signal);
+        if (url.host === 'temporary-thumbnail') traceCrash(`thumbnail-done ${assetId}`);
         return preview ? net.fetch(pathToFileURL(preview).toString()) : new Response('Preview unavailable', { status: 422 });
       }
-      const imagePath = await imageCache.getOrCreate(assetId, url.host as ImageVariant);
+      const imagePath = await imageCache.getOrCreate(assetId, url.host as ImageVariant, undefined, url.searchParams.get('priority') === 'visible' ? 'visible' : undefined, signal);
       if (!imagePath) return new Response('Not found', { status: 404 });
       return net.fetch(pathToFileURL(imagePath).toString());
     } catch {
       return new Response('Preview unavailable', { status: 422 });
+    } finally {
+      if (controller) request.signal.removeEventListener('abort', onAbort);
+      if (requestId && activePreviewRequests.get(requestId) === controller) activePreviewRequests.delete(requestId);
     }
   });
 
@@ -1153,14 +1260,31 @@ app.whenReady().then(async () => {
     return net.fetch(pathToFileURL(resultPath).toString());
   });
 
-  startupStage = '注册应用接口';
+  protocol.handle('photovideo', (request) => {
+    const url = new URL(request.url);
+    if (url.host !== 'temporary') return new Response('Not found', { status: 404 });
+    const assetId = url.pathname.slice(1);
+    if (!/^[0-9a-f-]{20,40}$/i.test(assetId)) return new Response('Invalid asset', { status: 400 });
+    const source = imageFiles.resolve(assetId);
+    if (!source || identifyMediaFormat(source)?.kind !== 'video') return new Response('Not found', { status: 404 });
+    return net.fetch(pathToFileURL(source).toString(), { headers: request.headers });
+  });
+
+  enterStartupStage('注册应用接口');
   registerIpc();
   taskRunner.start();
   startupReady = true;
-  startupStage = '打开主窗口';
+  enterStartupStage('打开主窗口');
   showMainWindow();
+  enterStartupStage('主窗口已创建');
+  // Keep the last committed index available immediately. Validation of large
+  // imported roots can take minutes on external disks and must not gate UI.
+  catalogValidationTimer = setInterval(() => {
+    if (!shuttingDown && !tasks.hasActiveTasks()) catalogWatcher.refresh();
+  }, 30_000);
+  catalogValidationTimer.unref();
   buildApplicationMenu();
-  const startupPaths = [...pendingOpenPaths, ...process.argv.filter((arg) => isAbsolute(arg) && isSupportedImage(arg))];
+  const startupPaths = [...pendingOpenPaths, ...process.argv.filter((arg) => isAbsolute(arg) && isSupportedBrowseMedia(arg))];
   pendingOpenPaths = [];
   if (startupPaths.length) void openImagePaths([...new Set(startupPaths)]).catch(reportOpenFailure);
 }).catch((error: unknown) => {
@@ -1179,40 +1303,59 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', (event) => {
+  traceCrash('before-quit');
   if (shutdownFinished || !hasLock) return;
   event.preventDefault();
   if (shutdownStarted) return;
   shutdownStarted = true;
   shuttingDown = true;
+  traceCrash('shutdown-start');
   // Bound the entire shutdown, including watcher and database cleanup failures.
-  const deadline = setTimeout(() => app.exit(0), 10_000);
+  const deadline = setTimeout(() => {
+    console.error('[shutdown] cleanup timed out; terminating process');
+    process.exit(0);
+  }, 10_000);
   void (async () => {
     try {
       if (contentHashTimer) clearTimeout(contentHashTimer);
+      if (catalogValidationTimer) clearInterval(catalogValidationTimer);
+      traceCrash('watcher-stop-start');
       catalogWatcher?.stop();
+      traceCrash('watcher-stop-done');
       const result = await settleBeforeShutdown([
+        ...(imageCache ? [imageCache.stop().then(() => traceCrash('image-cache-stopped'))] : []),
         ...(taskRunner ? [taskRunner.stop()] : []),
         ...(agentRuntime ? [agentRuntime.stop()] : []),
         ...(agentMcp ? [agentMcp.stop()] : []),
         ...(contentHashPass ? [contentHashPass] : [])
       ], 9_000);
+      traceCrash(`services-stop-${result}`);
       if (result === 'timed-out') {
-        app.exit(0);
+        console.error('[shutdown] service stop timed out; terminating process');
+        process.exit(0);
         return;
       }
-      for (const service of [agentRuntime, workspace, generation, exportService, exportPresets, analysis, templates, tasks, fileOperations, catalog]) {
+      for (const [name, service] of Object.entries({ agentRuntime, workspace, generation, exportService, exportPresets, analysis, templates, tasks, fileOperations, catalog })) {
         try {
+          traceCrash(`close-${name}-start`);
           service?.close();
+          traceCrash(`close-${name}-done`);
         } catch (error) {
           console.error('[shutdown] failed to close service', error);
+          traceCrash(`close-${name}-error`);
         }
       }
+      temporaryMediaIndex.close();
+      traceCrash('temporary-index-close-done');
     } catch (error) {
       console.error('[shutdown] cleanup failed', error);
     } finally {
       shutdownFinished = true;
-      app.quit();
       clearTimeout(deadline);
+      // Quick Look promises must settle before Electron disposes the V8 isolate.
+      // A forced process.exit() alone also runs native teardown and is not a fix.
+      traceCrash('app-quit');
+      app.quit();
     }
   })();
 });

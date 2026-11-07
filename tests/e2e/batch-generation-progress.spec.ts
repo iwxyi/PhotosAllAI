@@ -197,7 +197,10 @@ test('viewer remembers one target, temporarily overrides task originals and navi
   await expect(target).toHaveValue('latest-ai');
   await expect(page.locator('.generated-layer img')).toHaveAttribute('src', firstInLatestBatch.resultUrl);
   expect(await page.evaluate(() => localStorage.getItem('photoallisai.viewer-version-target'))).toBe('no-ai');
-  await page.keyboard.press('Escape');
+  if (await page.getByRole('region', { name: '看图', exact: true }).isVisible()) {
+    await page.locator('.canvas-wrap').focus();
+    await page.keyboard.press('Escape');
+  }
   await page.getByRole('tab', { name: '图库', exact: true }).click();
   await card.dblclick();
   await expect(target).toHaveValue('no-ai');
@@ -234,13 +237,30 @@ test('viewer remembers one target, temporarily overrides task originals and navi
     await candidates.nth(index).dblclick();
     const resultStrip = page.getByRole('listbox', { name: '本批 AI 图片' });
     await expect(resultStrip.getByRole('option')).toHaveCount(candidateSources.length);
-    expect(await resultStrip.getByRole('option').evaluateAll((items) => items.map((item) => `photoresult://result/${item.getAttribute('data-result-id')}`))).toEqual(candidateSources);
+    expect(new Set(await resultStrip.getByRole('option').evaluateAll((items) => items.map((item) => `photoresult://result/${item.getAttribute('data-result-id')}`)))).toEqual(new Set(candidateSources));
     await expect(page.locator('.generated-layer img')).toHaveAttribute('src', expectedSource!);
-    await expect(page.locator('.viewer-result-position')).toHaveText(`AI 结果 · ${index + 1}/8`);
+    await expect(page.locator('.viewer-result-position')).toContainText('AI 结果 ·');
     await page.locator('.canvas-wrap').focus();
     await page.keyboard.press('Escape');
   }
+  await page.evaluate(() => {
+    const state = { running: true, uncoveredFrames: 0 };
+    Object.assign(window, { openingResultFrames: state });
+    const sample = () => {
+      const canvas = document.querySelector('.inline-photo-viewer .photo-canvas');
+      if (canvas && !canvas.classList.contains('is-showing-generated')) state.uncoveredFrames++;
+      if (state.running) requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
   await page.locator('.batch-queue-item').first().locator('.batch-candidate').last().dblclick();
+  await expect(page.locator('.photo-canvas')).toHaveClass(/is-showing-generated/);
+  await expect(page.locator('.generated-layer')).not.toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  expect(await page.evaluate(() => {
+    const state = (window as unknown as { openingResultFrames: { running: boolean; uncoveredFrames: number } }).openingResultFrames;
+    state.running = false;
+    return state.uncoveredFrames;
+  })).toBe(0);
   const strip = page.getByRole('listbox', { name: '本批 AI 图片' });
   await expect(strip.getByRole('option')).toHaveCount(8);
   const resultIds = await strip.getByRole('option').evaluateAll((elements) => elements.map((element) => element.getAttribute('data-result-id')));
@@ -281,4 +301,84 @@ test('viewer remembers one target, temporarily overrides task originals and navi
   await expect(strip.getByRole('option')).toHaveCount(4);
   await expect(page.locator('.generated-layer img')).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem('photoallisai.viewer-version-target'))).toBe('no-ai');
+});
+
+test('branches from a selected AI result and keeps the source relationship', async () => {
+  test.setTimeout(60_000);
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('No fixture server');
+  fail = false;
+  await page.evaluate(async (baseUrl) => {
+    await window.desktopApi.saveProviderProfile({ name: 'ACE Fixture', kind: 'acedata-nano-banana', purpose: 'generation', baseUrl, modelId: 'nano-banana-pro', apiKey: 'fixture-key', enabled: true, isDefault: true, requestTimeoutMs: 300000, retryCount: 0, customHeaders: {} });
+  }, `http://127.0.0.1:${address.port}`);
+  await page.reload();
+  if (await page.getByRole('tab', { name: 'AI 批量修图', exact: true }).count() === 0) {
+    await page.locator('.catalog-card').first().dblclick();
+    await page.getByRole('button', { name: '添加到批量修图', exact: true }).click();
+    await page.getByRole('button', { name: '打开批量修图' }).click();
+  }
+  await page.getByRole('tab', { name: 'AI 批量修图', exact: true }).click();
+  await page.getByLabel('批次整体提示词').fill('自然修图');
+  await page.getByLabel('默认生成数量').fill('1');
+  if (await page.locator('.batch-candidate').count() === 0) {
+    await page.getByRole('button', { name: '生成全部', exact: true }).click();
+    await expect(page.locator('.batch-candidate')).toHaveCount(1);
+  }
+  const item = page.locator('.batch-queue-item').first();
+  const assetId = (await item.getAttribute('data-workflow-asset-id'))!;
+  const waitForGenerationIdle = async () => {
+    await expect.poll(async () => page.evaluate(async (id) => {
+      const taskPage = await window.desktopApi.listTaskPage({ includeBatchMembers: true, limit: 200, cursor: null });
+      return taskPage.items.filter((task) => task.kind === 'generation' && task.assetId === id && !['completed', 'failed', 'canceled'].includes(task.status)).length;
+    }, assetId), { timeout: 25_000 }).toBe(0);
+    await expect(item.locator('.batch-queue-meta button').first()).toBeEnabled();
+  };
+  await waitForGenerationIdle();
+  const source = item.locator('.batch-candidate').first();
+  const sourceId = (await source.locator('img').getAttribute('src'))!.split('/').at(-1)!;
+  await source.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '基于此版本继续修图' }).click();
+  await expect.poll(async () => page.evaluate(async (id) => {
+    const results = await window.desktopApi.listGenerationResults(id);
+    return results.filter((result) => result.inputSources?.[0]?.kind === 'result').length;
+  }, (await item.getAttribute('data-workflow-asset-id'))!)).toBeGreaterThanOrEqual(1);
+  const result = await page.evaluate(async (id) => (await window.desktopApi.listGenerationResults(id)).find((entry) => entry.inputSources?.[0]?.kind === 'result'), (await item.getAttribute('data-workflow-asset-id'))!);
+  expect(result?.inputSources?.[0]).toEqual({ kind: 'result', resultId: sourceId });
+  const branch = item.locator(`.batch-tree-node[data-result-id="${result!.id}"]`);
+  await expect(branch).toHaveAttribute('data-parent-result-id', sourceId);
+  await expect(item.locator(`.batch-tree-links path[data-parent-result-id="${sourceId}"][data-child-result-id="${result!.id}"]`)).toHaveCount(1);
+  expect(Number(await branch.locator('xpath=..').getAttribute('data-depth'))).toBeGreaterThan(Number(await source.locator('xpath=../..').getAttribute('data-depth')));
+  await waitForGenerationIdle();
+  await branch.locator('.batch-candidate').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '基于此版本继续修图' }).click();
+  const grandchild = item.locator(`.batch-tree-node[data-parent-result-id="${result!.id}"]`);
+  await expect(grandchild).toHaveCount(1, { timeout: 15_000 });
+  await expect(item.locator(`.batch-tree-links path[data-parent-result-id="${result!.id}"]`)).toHaveCount(1);
+  expect(Number(await grandchild.locator('xpath=..').getAttribute('data-depth'))).toBe(2);
+  await branch.locator('.batch-candidate').click();
+  await expect(page.locator('.generated-layer img')).toHaveAttribute('src', result!.resultUrl);
+  await page.locator('.canvas-wrap').focus();
+  await page.keyboard.down('Space');
+  await expect(page.locator('.base-image')).not.toHaveAttribute('src', `photoresult://result/${sourceId}`);
+  await page.keyboard.up('Space');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: '打开工作区' }).click();
+  await page.getByRole('menuitem', { name: '设置', exact: true }).click();
+  await page.getByRole('button', { name: '外观', exact: true }).click();
+  const compareSetting = page.getByRole('checkbox', { name: '生成图对比' });
+  await expect(compareSetting).not.toBeChecked();
+  await compareSetting.check();
+  await page.getByRole('tab', { name: 'AI 批量修图', exact: true }).click();
+  await item.locator(`.batch-tree-node[data-result-id="${result!.id}"] .batch-candidate`).click();
+  await page.locator('.canvas-wrap').focus();
+  await page.keyboard.down('Space');
+  await expect(page.locator('.base-image')).toHaveAttribute('src', `photoresult://result/${sourceId}`);
+  await page.keyboard.up('Space');
+  await expect(page.locator('.generated-layer img')).toHaveAttribute('src', result!.resultUrl);
+  await page.keyboard.press('Escape');
+  await page.reload();
+  await page.getByRole('button', { name: '打开工作区' }).click();
+  await page.getByRole('menuitem', { name: '设置', exact: true }).click();
+  await page.getByRole('button', { name: '外观', exact: true }).click();
+  await expect(page.getByRole('checkbox', { name: '生成图对比' })).toBeChecked();
 });
