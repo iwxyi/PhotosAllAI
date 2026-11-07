@@ -172,13 +172,15 @@
 
 ## 资料
 
+2026-11-07 普通瀑布流 100,000 张 JPEG 首屏基线：`PHOTOALLISAI_PERF_COUNT=100000 PHOTOALLISAI_PERF_VIEW=masonry pnpm exec playwright test tests/e2e/catalog-real-media-perf.spec.ts --reporter=line` 在正常 macOS GUI 环境通过。使用同一真实 JPEG 的 100,000 个硬链接预填图库，首屏可解码图片约 3.252 秒；4 秒连续滚动帧间隔 p95 9.2 毫秒，挂载 95 张卡片；停滚可见缩略图约 505 毫秒完成；跳至已加载区域底部约 1.651 秒完成，新增 40 次解码。结束时 Tab 工作集约 516 MiB，主进程事件循环最大延迟约 323 毫秒。该测试只浏览了启动后已加载的页面，不能证明渲染端加载 100,000 张后的内存、随机跳转或长时稳定性；单格式同内容硬链接也不能代替混合素材验收。
+
 2026-11-07 普通瀑布流 10,000 张 JPEG 实测：`PHOTOALLISAI_PERF_COUNT=10000 PHOTOALLISAI_PERF_VIEW=masonry pnpm exec playwright test tests/e2e/catalog-real-media-perf.spec.ts --reporter=line` 在正常 macOS GUI 环境通过。由同一张真实 JPEG 建立 10,000 个硬链接，启动到首屏可解码图片约 1.850 秒；4 秒连续滚动帧间隔 p95 为 9 毫秒，滚动时挂载 78 张卡片，停滚后可见缩略图约 846 毫秒完成；跳到已加载区域底部后约 798 毫秒完成，新增 33 次解码。结束时 Tab 工作集约 488 MiB。受限环境中同一用例曾在 Electron 启动前失败，正常 GUI 环境重跑成功。测试只浏览启动后已加载的页面，不能证明 10,000 张全量装入渲染端后的性能，也不覆盖真实混合素材、外置盘、长期内存或正式安装包的启动稳定性。
 
 2026-11-07 瀑布流缩放锚点修复：按日分组的窗口化瀑布流在缩放重排后，焦点照片可能离开挂载窗口。缩放时现用布局保存的照片像素位置恢复滚动锚点；新增 Electron 回归检查缩放后焦点仍可见、位置接近缩放前、卡片数量有界。该测试使用 1,200 条合成索引；真实素材、高 DPI 与长时缩放仍需验证。
 
 2026-11-07 分组瀑布流窗口化：分组标题与按列排布的卡片共用绝对位置索引，滚动时按像素范围二分查找可见项，键盘跳到未挂载项时按完整照片序列定位。1,200 条按日分组的 Electron 回归覆盖顶部、中段、底部、标题和卡片挂载上限及末项键盘回退。该样本没有真实图片解码；仍需十万级高基数分组、混合媒体、缩放和长时间内存实测。
 
-2026-11-07 普通瀑布流窗口化：按列记录卡片像素位置，视口滚动时二分定位每列首个可见卡片，仅挂载视口及上下缓冲区；键盘移动到未挂载照片时按位置滚动。`PHOTOALLISAI_PERF_COUNT=1000 PHOTOALLISAI_PERF_VIEW=masonry pnpm exec playwright test tests/e2e/catalog-real-media-perf.spec.ts --reporter=line` 在当前 macOS GUI 环境通过，滚动时挂载 43 张卡片，帧间隔 p95 9.7 毫秒，末端跳转与键盘回退通过，Tab 工作集约 456 MiB。此前未窗口化同内容样本挂载 1,000 张、p95 41.7 毫秒、Tab 工作集约 834 MiB；两者均为单轮同盘同内容 JPEG，不能外推为稳定收益。分组瀑布流仍未窗口化；大规模真实混合素材、缩放和长时内存仍待验证。
+2026-11-07 普通瀑布流窗口化：按列记录卡片像素位置，视口滚动时二分定位每列首个可见卡片，仅挂载视口及上下缓冲区；键盘移动到未挂载照片时按位置滚动。`PHOTOALLISAI_PERF_COUNT=1000 PHOTOALLISAI_PERF_VIEW=masonry pnpm exec playwright test tests/e2e/catalog-real-media-perf.spec.ts --reporter=line` 在当前 macOS GUI 环境通过，滚动时挂载 43 张卡片，帧间隔 p95 9.7 毫秒，末端跳转与键盘回退通过，Tab 工作集约 456 MiB。此前未窗口化同内容样本挂载 1,000 张、p95 41.7 毫秒、Tab 工作集约 834 MiB；两者均为单轮同盘同内容 JPEG，不能外推为稳定收益。分组瀑布流已在后续改动中窗口化；大规模真实混合素材、缩放和长时内存仍待验证。
 
 - [Eagle 官方功能页](https://en.eagle.cool/)：快速浏览、悬停/空格预览与多维筛选。
 - [Lightroom Classic 浏览与比较](https://helpx.adobe.com/lightroom-classic/help/browse-compare-photos.html)：选片、活动项与多选、来源筛选。
