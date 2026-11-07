@@ -270,6 +270,8 @@ export const fileDetailsSchema = z.object({
   metadataWarning: z.string().optional()
 });
 export type FileDetails = z.infer<typeof fileDetailsSchema>;
+export const fileDetailsPageInputSchema = z.array(z.string().min(1)).min(1).max(256);
+export const fileDetailsPageSchema = z.record(z.string(), fileDetailsSchema.nullable());
 export const quickViewSessionSchema = z.object({
   items: z.array(catalogAssetSchema), selectedId: z.string(), directory: z.string(),
   sessionId: z.string().optional(), complete: z.boolean().optional(), indexed: z.boolean().optional(), totalCount: z.number().int().nonnegative().optional()
@@ -1166,6 +1168,7 @@ export interface DesktopApi {
   unregisterCatalogFolder(input: UnregisterCatalogFolderInput): Promise<UnregisterCatalogFolderReport>;
   revealCatalogAsset(assetId: string): Promise<boolean>;
   getFileDetails(assetId: string): Promise<FileDetails>;
+  getFileDetailsPage(assetIds: string[]): Promise<Record<string, FileDetails | null>>;
   openAssetExternally(assetId: string): Promise<void>;
   linkImageDirectory(assetId: string): Promise<void>;
   openImages(paths?: string[]): Promise<QuickViewSession | null>;

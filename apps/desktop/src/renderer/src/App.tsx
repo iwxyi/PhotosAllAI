@@ -2463,16 +2463,11 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     let active = true;
     const load = async () => {
       for (let pageStart = 0; active && pageStart < missing.length; pageStart += 256) {
-        const updates: Record<string, { modifiedAt: number | undefined; data: FileDetails | null }> = {};
-        for (let index = pageStart; active && index < Math.min(pageStart + 256, missing.length); index += 6) {
-          const batch = missing.slice(index, Math.min(index + 6, pageStart + 256));
-          const results = await Promise.all(batch.map(async (photo) => {
-            const data = await window.desktopApi.getFileDetails(photo.id).catch(() => null);
-            return [photo.id, { modifiedAt: photo.modifiedAt, data }] as const;
-          }));
-          Object.assign(updates, Object.fromEntries(results));
-        }
+        const batch = missing.slice(pageStart, pageStart + 256);
+        const details = await window.desktopApi.getFileDetailsPage(batch.map((photo) => photo.id)).catch(() => null);
+        if (!details) return;
         if (active) {
+          const updates = Object.fromEntries(batch.map((photo) => [photo.id, { modifiedAt: photo.modifiedAt, data: details[photo.id] ?? null }]));
           groupDetailsRef.current = { ...groupDetailsRef.current, ...updates };
           setGroupDetails(groupDetailsRef.current);
         }

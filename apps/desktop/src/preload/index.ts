@@ -12,6 +12,7 @@ const api: DesktopApi = {
   sendAgentMessage: (input) => ipcRenderer.invoke('agent.sessions.send.v1', input),
   controlAgentSession: (input) => ipcRenderer.invoke('agent.sessions.control.v1', input),
   getFileDetails: (id) => ipcRenderer.invoke('image.details.v1', id),
+  getFileDetailsPage: (ids) => ipcRenderer.invoke('image.details.page.v1', ids),
   openAssetExternally: (id) => ipcRenderer.invoke('image.open-external.v1', id),
   linkImageDirectory: (id) => ipcRenderer.invoke('image.link-directory.v1', id),
   openImages: (paths) => ipcRenderer.invoke('image.open.v1', paths),

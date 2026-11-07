@@ -78,7 +78,7 @@ import {
   temporaryMediaPageInputSchema,
   menuStateSchema
 } from '@photoallisai/contracts';
-import { fileDetailsSchema, quickViewSessionSchema } from '@photoallisai/contracts';
+import { fileDetailsPageInputSchema, fileDetailsPageSchema, fileDetailsSchema, quickViewSessionSchema } from '@photoallisai/contracts';
 import type { AppSettings, MenuCommand, MenuState, QuickViewSession } from '@photoallisai/contracts';
 
 import { CatalogService } from './catalog-service';
@@ -361,6 +361,16 @@ async function relocatePortableAfterFileOperation(
 
 function registerIpc(): void {
   ipcMain.handle('image.details.v1', async (_event, id: unknown) => fileDetailsSchema.parse(await imageFiles.details(validateImageId(id))));
+  ipcMain.handle('image.details.page.v1', async (_event, rawIds: unknown) => {
+    const ids = fileDetailsPageInputSchema.parse(rawIds);
+    const details: Record<string, Awaited<ReturnType<typeof imageFiles.details>> | null> = {};
+    for (let offset = 0; offset < ids.length; offset += 6) {
+      const entries = await Promise.all(ids.slice(offset, offset + 6).map(async (id) =>
+        [id, await imageFiles.details(id).catch(() => null)] as const));
+      Object.assign(details, Object.fromEntries(entries));
+    }
+    return fileDetailsPageSchema.parse(details);
+  });
   ipcMain.handle('image.open-external.v1', async (_event, id: unknown) => {
     const source = imageFiles.resolve(validateImageId(id));
     if (!source || !existsSync(source)) throw new Error('图片文件已移动或不可访问');
