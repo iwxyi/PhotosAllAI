@@ -5648,7 +5648,7 @@ export function App(): React.JSX.Element {
       const accumulated = [...page.items];
       let cursor = page.nextCursor;
       while (preserveLoaded && cursor && accumulated.length < loadedCount) {
-        const nextPage = await window.desktopApi.listCatalogAssetPage({ folderId, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: selectedSmartCollection, ...catalogFilterInput, favoriteOnly, sortBy, ...(sortDirection ? { sortDirection } : {}), query: searchQuery, cursor, limit: 200 });
+        const nextPage = await window.desktopApi.listCatalogAssetPage({ folderId, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: selectedSmartCollection, ...catalogFilterInput, favoriteOnly, sortBy, ...(sortDirection ? { sortDirection } : {}), query: searchQuery, cursor, limit: 500 });
         if (request !== catalogRequest.current) return;
         accumulated.push(...nextPage.items);
         cursor = nextPage.nextCursor;
@@ -5842,7 +5842,7 @@ export function App(): React.JSX.Element {
         ...(sortDirection ? { sortDirection } : {}),
         query: searchQuery,
         cursor: nextCursor,
-        limit: 200
+        limit: 500
       });
       if (request !== catalogRequest.current) return;
       const additions = mapCatalogAssets(page.items).filter((photo) => {

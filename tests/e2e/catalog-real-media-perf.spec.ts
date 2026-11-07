@@ -224,12 +224,20 @@ test('measures real JPEG catalog scrolling', async () => {
     }
     if (rendererLoadTo > 0) {
       await application.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0]?.hide(); });
-      const samples: Array<{ loaded: number; mounted: number; scrollHeight: number; tabKiB: number }> = [];
+      const cdp = await page.context().newCDPSession(page);
+      const samples: Array<{ loaded: number; mounted: number; scrollHeight: number; tabKiB: number; jsHeapMiB: number; elapsedMs: number }> = [];
+      const pagingStarted = performance.now();
+      const samplePage = async (loaded: number) => {
+        await cdp.send('HeapProfiler.collectGarbage');
+        const layout = await grid.evaluate((element) => ({ mounted: element.querySelectorAll('.catalog-card').length, scrollHeight: element.scrollHeight }));
+        const tabKiB = await application.evaluate(({ app }) => app.getAppMetrics().find((metric) => metric.type === 'Tab')?.memory.workingSetSize ?? 0);
+        const heap = await cdp.send('Runtime.getHeapUsage');
+        return { loaded, ...layout, tabKiB, jsHeapMiB: Math.round(heap.usedSize / 1024 / 1024), elapsedMs: Math.round(performance.now() - pagingStarted) };
+      };
       let previousLoaded = Number(await grid.getAttribute('data-loaded-count'));
       expect(previousLoaded, 'renderer target must exceed the pages already loaded during scrolling').toBeLessThan(rendererLoadTo);
-      const initialLayout = await grid.evaluate((element) => ({ mounted: element.querySelectorAll('.catalog-card').length, scrollHeight: element.scrollHeight }));
-      const initialTabKiB = await application.evaluate(({ app }) => app.getAppMetrics().find((metric) => metric.type === 'Tab')?.memory.workingSetSize ?? 0);
-      samples.push({ loaded: previousLoaded, ...initialLayout, tabKiB: initialTabKiB });
+      samples.push(await samplePage(previousLoaded));
+      let nextSampleAt = previousLoaded + 2_000;
       console.log(JSON.stringify({ count, viewMode, phase: 'renderer-page-progress', ...samples.at(-1) }));
       while (previousLoaded < rendererLoadTo) {
         await grid.evaluate((element) => { element.scrollTop = element.scrollHeight; });
@@ -237,10 +245,9 @@ test('measures real JPEG catalog scrolling', async () => {
         const loaded = Number(await grid.getAttribute('data-loaded-count'));
         expect(loaded).toBeGreaterThan(previousLoaded);
         previousLoaded = loaded;
-        if (loaded % 2_000 === 0 || loaded >= rendererLoadTo) {
-          const layout = await grid.evaluate((element) => ({ mounted: element.querySelectorAll('.catalog-card').length, scrollHeight: element.scrollHeight }));
-          const tabKiB = await application.evaluate(({ app }) => app.getAppMetrics().find((metric) => metric.type === 'Tab')?.memory.workingSetSize ?? 0);
-          samples.push({ loaded, ...layout, tabKiB });
+        if (loaded >= nextSampleAt || loaded >= rendererLoadTo) {
+          samples.push(await samplePage(loaded));
+          nextSampleAt = loaded + 2_000;
           console.log(JSON.stringify({ count, viewMode, phase: 'renderer-page-progress', ...samples.at(-1) }));
         }
         if (loaded >= count) break;
@@ -248,6 +255,7 @@ test('measures real JPEG catalog scrolling', async () => {
       expect(previousLoaded).toBeGreaterThanOrEqual(rendererLoadTo);
       expect(samples.every((entry) => entry.mounted < 150)).toBe(true);
       console.log(JSON.stringify({ count, viewMode, phase: 'renderer-page', requested: rendererLoadTo, loaded: previousLoaded, samples }));
+      await cdp.detach();
     }
     if (loadTo > 0) {
       await grid.evaluate((element) => { element.scrollTop = 0; });

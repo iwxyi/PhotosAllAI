@@ -174,6 +174,10 @@
 
 2026-11-07 渲染端连续分页基线：新增 `PHOTOALLISAI_PERF_RENDERER_LOAD_TO`，在隐藏 Electron 窗口中继续驱动实际图库分页，并记录已加载数、挂载卡片、滚动高度和 Tab 工作集；此前 `PHOTOALLISAI_PERF_LOAD_TO` 只测分页 IPC。正常 macOS GUI 环境运行 `PHOTOALLISAI_PERF_COUNT=10000 PHOTOALLISAI_PERF_RENDERER_LOAD_TO=10000 pnpm exec playwright test tests/e2e/catalog-real-media-perf.spec.ts --reporter=line` 通过；从已加载 2,200 张推进到 10,000 张，挂载卡片维持 75 张，Tab 工作集从 367,360 KiB 增至 381,904 KiB（中途 4,000/6,000/8,000 张分别为 373,584/377,104/379,216 KiB）。这是单轮同内容 JPEG 硬链接、隐藏窗口短时采样，未证明长期内存斜率或真实混合图库；它显示 DOM 窗口化并没有消除渲染端累计照片数据的内存增长，后续需有界页面缓存与随机位置查询，并复测内存和交互。
 
+2026-11-07 渲染端 30,000 张连续分页复测（原每页 200 项）：同内容 JPEG 硬链接、隐藏窗口，测试通过，挂载卡片始终约 75 张；从 2,200 张到 30,000 张，Tab 工作集由 367,104 KiB 到 483,984 KiB，过程峰值 487,600 KiB，受垃圾回收影响有明显波动。仅凭工作集无法稳定估计已保留的照片数据。后续页现改为每页 500 项，首屏仍为 200 项，以减少连续浏览时 IPC 和数组追加次数；该改动尚不是有界页面缓存。
+
+2026-11-07 渲染端保留堆基线（后续页 500 项）：正常 macOS GUI 环境运行 `PHOTOALLISAI_PERF_COUNT=10000 PHOTOALLISAI_PERF_RENDERER_LOAD_TO=10000 pnpm exec playwright test tests/e2e/catalog-real-media-perf.spec.ts --reporter=line` 通过。隐藏窗口下每约 2,000 张通过 CDP 主动收集垃圾并测量 JS 堆，已加载 2,700/4,700/6,700/8,700/10,000 张时分别为 11/14/18/20/23 MiB，挂载卡片均为 75 张；分页阶段约 4.6 秒，含采样与垃圾回收开销。这是单轮同内容 JPEG 样本，证明当前累计模型的保留堆随已加载项增长，不能外推到混合媒体或百万级；下一步是有界页面缓存、可回访的随机位置读取和选择状态独立存储，并以相同采样方式复测。
+
 2026-11-07 普通瀑布流 100,000 张 JPEG 首屏基线：`PHOTOALLISAI_PERF_COUNT=100000 PHOTOALLISAI_PERF_VIEW=masonry pnpm exec playwright test tests/e2e/catalog-real-media-perf.spec.ts --reporter=line` 在正常 macOS GUI 环境通过。使用同一真实 JPEG 的 100,000 个硬链接预填图库，首屏可解码图片约 3.252 秒；4 秒连续滚动帧间隔 p95 9.2 毫秒，挂载 95 张卡片；停滚可见缩略图约 505 毫秒完成；跳至已加载区域底部约 1.651 秒完成，新增 40 次解码。结束时 Tab 工作集约 516 MiB，主进程事件循环最大延迟约 323 毫秒。该测试只浏览了启动后已加载的页面，不能证明渲染端加载 100,000 张后的内存、随机跳转或长时稳定性；单格式同内容硬链接也不能代替混合素材验收。
 
 2026-11-07 普通瀑布流 10,000 张 JPEG 实测：`PHOTOALLISAI_PERF_COUNT=10000 PHOTOALLISAI_PERF_VIEW=masonry pnpm exec playwright test tests/e2e/catalog-real-media-perf.spec.ts --reporter=line` 在正常 macOS GUI 环境通过。由同一张真实 JPEG 建立 10,000 个硬链接，启动到首屏可解码图片约 1.850 秒；4 秒连续滚动帧间隔 p95 为 9 毫秒，滚动时挂载 78 张卡片，停滚后可见缩略图约 846 毫秒完成；跳到已加载区域底部后约 798 毫秒完成，新增 33 次解码。结束时 Tab 工作集约 488 MiB。受限环境中同一用例曾在 Electron 启动前失败，正常 GUI 环境重跑成功。测试只浏览启动后已加载的页面，不能证明 10,000 张全量装入渲染端后的性能，也不覆盖真实混合素材、外置盘、长期内存或正式安装包的启动稳定性。
