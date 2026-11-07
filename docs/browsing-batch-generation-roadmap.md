@@ -172,6 +172,8 @@
 
 ## 资料
 
+2026-11-07 普通瀑布流窗口化：按列记录卡片像素位置，视口滚动时二分定位每列首个可见卡片，仅挂载视口及上下缓冲区；键盘移动到未挂载照片时按位置滚动。`PHOTOALLISAI_PERF_COUNT=1000 PHOTOALLISAI_PERF_VIEW=masonry pnpm exec playwright test tests/e2e/catalog-real-media-perf.spec.ts --reporter=line` 在当前 macOS GUI 环境通过，滚动时挂载 43 张卡片，帧间隔 p95 9.7 毫秒，末端跳转与键盘回退通过，Tab 工作集约 456 MiB。此前未窗口化同内容样本挂载 1,000 张、p95 41.7 毫秒、Tab 工作集约 834 MiB；两者均为单轮同盘同内容 JPEG，不能外推为稳定收益。分组瀑布流仍未窗口化；大规模真实混合素材、缩放和长时内存仍待验证。
+
 - [Eagle 官方功能页](https://en.eagle.cool/)：快速浏览、悬停/空格预览与多维筛选。
 - [Lightroom Classic 浏览与比较](https://helpx.adobe.com/lightroom-classic/help/browse-compare-photos.html)：选片、活动项与多选、来源筛选。
 - [Lightroom Classic 性能指南](https://helpx.adobe.com/lightroom-classic/kb/optimize-performance-lightroom.html)：多级预览、缓存与后台负载。

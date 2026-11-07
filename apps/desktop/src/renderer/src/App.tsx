@@ -2629,7 +2629,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
   }, [aspectRatios]);
   useLayoutEffect(() => {
     const grid = gridRef.current;
-    if (!grid || (viewMode !== 'justified' && viewMode !== 'grid')) return;
+    if (!grid || (viewMode !== 'justified' && viewMode !== 'grid' && viewMode !== 'masonry')) return;
     const measure = () => {
       const style = getComputedStyle(grid);
       setGridWidth(grid.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight));
@@ -2657,6 +2657,29 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     return clamp(aspectRatios.get(src) ?? IMAGE_ASPECT_RATIOS.get(src) ?? 1.5, .25, 5);
   }, gridWidth, thumbnailSize) : null, [viewMode, gridWidth, photoGroups, previewPhoto, aspectRatios, thumbnailSize]);
   const justifiedSizes = justifiedLayout?.sizes ?? {};
+  const masonryLayout = useMemo(() => {
+    if (viewMode !== 'masonry' || grouped || gridWidth <= 0 || props.availablePhotos.length <= 500) return null;
+    const columnCount = Math.max(1, Math.floor((gridWidth + 10) / (thumbnailSize + 10)));
+    const width = (gridWidth - (columnCount - 1) * 10) / columnCount;
+    const columnHeights = Array<number>(columnCount).fill(0);
+    const columns: Array<Array<{ index: number; top: number; height: number }>> = Array.from({ length: columnCount }, () => []);
+    const positions = new Map<string, { top: number; left: number; width: number; height: number }>();
+    props.availablePhotos.forEach((photo, index) => {
+      const preview = previewPhoto(photo);
+      const src = preview.thumbnailSrc ?? preview.src;
+      const ratio = clamp(aspectRatios.get(src) ?? IMAGE_ASPECT_RATIOS.get(src) ?? 1.5, .25, 5);
+      const height = Math.ceil(width / ratio + 24 + 16 * (Number(photo.rating > 0) + Number(Boolean(photo.workflow)) + Number(Boolean(photo.workflowConflict))));
+      let column = 0;
+      for (let candidate = 1; candidate < columnCount; candidate += 1) {
+        if (columnHeights[candidate]! < columnHeights[column]!) column = candidate;
+      }
+      const top = columnHeights[column]!;
+      columns[column]!.push({ index, top, height });
+      positions.set(photo.id, { top: top + 16, left: 16 + column * (width + 10), width, height });
+      columnHeights[column] = top + height + 10;
+    });
+    return { columns, positions, height: Math.max(...columnHeights, 0) };
+  }, [viewMode, grouped, gridWidth, thumbnailSize, props.availablePhotos, previewPhoto, aspectRatios]);
   const orderedIds = useMemo(() => photoGroups.flatMap((group) => group.items.map((photo) => photo.id)), [photoGroups]);
   const selectedPhoto = useMemo(() => props.availablePhotos.find((photo) => selection.focusId === photo.id) ?? null, [props.availablePhotos, selection.focusId]);
   const { hasMore, loadingMore, onLoadMore } = props;
@@ -2686,13 +2709,13 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
       }, 100);
     }
     scrollSample.current = { top, at: now };
-    if (viewMode === 'list' || viewMode === 'grid' || viewMode === 'justified') {
+    if (viewMode === 'list' || viewMode === 'grid' || viewMode === 'justified' || viewMode === 'masonry') {
       const height = event.currentTarget.clientHeight;
       setListViewport((current) => current.top === top && current.height === height ? current : { top, height });
     }
   }, [loadMoreWhenNearEnd, viewMode]);
   useLayoutEffect(() => {
-    if (viewMode !== 'list' && viewMode !== 'grid' && viewMode !== 'justified') return;
+    if (viewMode !== 'list' && viewMode !== 'grid' && viewMode !== 'justified' && viewMode !== 'masonry') return;
     const element = gridRef.current;
     if (!element) return;
     const measure = () => setListViewport((current) => current.height === element.clientHeight ? current : { top: element.scrollTop, height: element.clientHeight });
@@ -2733,12 +2756,12 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     event.preventDefault();
     const cards = [...event.currentTarget.querySelectorAll<HTMLElement>('.catalog-card')];
     const currentIndex = Math.max(0, orderedIds.indexOf(selection.focusId ?? orderedIds[0]!));
-    const columns = viewMode === 'grid' && gridWidth > 0
+    const columns = (viewMode === 'grid' || masonryLayout) && gridWidth > 0
       ? Math.max(1, Math.floor((gridWidth + 10) / (thumbnailSize + 10)))
       : Math.max(1, cards.filter((card) => card.getBoundingClientRect().top === cards[0]?.getBoundingClientRect().top).length);
     const delta = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : event.key === 'ArrowUp' ? -columns : columns;
     let targetIndex = clamp(currentIndex + delta, 0, orderedIds.length - 1);
-    if (viewMode === 'masonry' || viewMode === 'justified' || grouped) {
+    if ((viewMode === 'masonry' && !masonryLayout) || viewMode === 'justified' || grouped) {
       const currentCard = cards.find((card) => card.dataset.assetId === orderedIds[currentIndex]);
       if (currentCard) {
       const current = currentCard.getBoundingClientRect();
@@ -2772,7 +2795,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     setSelection(next);
     props.onSelectedAssetChange(targetId);
     const targetCard = cards.find((card) => card.dataset.assetId === targetId);
-    if ((viewMode === 'grid' || (viewMode === 'justified' && !grouped)) && props.availablePhotos.length > 500) {
+    if ((viewMode === 'grid' || (viewMode === 'justified' && !grouped) || masonryLayout) && props.availablePhotos.length > 500) {
       // Keep keyboard focus on the stable viewport: cards outside the window
       // are unmounted, so focusing one would lose subsequent arrow events.
       event.currentTarget.focus({ preventScroll: true });
@@ -2801,6 +2824,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
           }
           top = (justifiedLayout.rows[low]?.top ?? 0) + 16;
         }
+        if (masonryLayout) top = masonryLayout.positions.get(targetId)?.top ?? top;
         event.currentTarget.scrollTop = top;
         setListViewport({ top, height: event.currentTarget.clientHeight });
       }
@@ -2914,9 +2938,27 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     const after = last ? Math.max(0, total - last.top - last.height - 10) : 0;
     return { rows: visible, before, after };
   }, [viewMode, grouped, props.availablePhotos.length, justifiedLayout, listViewport.top, listViewport.height]);
+  const masonryWindow = useMemo(() => {
+    if (!masonryLayout) return null;
+    const startY = Math.max(0, listViewport.top - 1_000);
+    const endY = listViewport.top + listViewport.height + 1_000;
+    const indices: number[] = [];
+    for (const column of masonryLayout.columns) {
+      let low = 0;
+      let high = column.length;
+      while (low < high) {
+        const middle = (low + high) >>> 1;
+        if (column[middle]!.top + column[middle]!.height <= startY) low = middle + 1;
+        else high = middle;
+      }
+      while (low < column.length && column[low]!.top < endY) indices.push(column[low++]!.index);
+    }
+    indices.sort((left, right) => left - right);
+    return { photos: indices.map((index) => props.availablePhotos[index]!) };
+  }, [masonryLayout, listViewport.top, listViewport.height, props.availablePhotos]);
   const gridVisiblePhotos = gridWindow ? props.availablePhotos.slice(gridWindow.startRow * gridColumns, gridWindow.endRow * gridColumns) : null;
   const justifiedVisibleGroups = justifiedWindow?.rows.map((row) => ({ key: `row:${row.start}`, title: '', count: row.end - row.start, items: props.availablePhotos.slice(row.start, row.end), showHeader: false }));
-  const gridVisibleGroups = justifiedVisibleGroups ?? groupedGridWindow?.groups ?? (gridVisiblePhotos ? [{ key: 'visible', title: '', count: gridVisiblePhotos.length, items: gridVisiblePhotos, showHeader: false }] : photoGroups.map((group) => ({ ...group, count: group.items.length, showHeader: grouped })));
+  const gridVisibleGroups = justifiedVisibleGroups ?? groupedGridWindow?.groups ?? (masonryWindow ? [{ key: 'visible', title: '', count: masonryWindow.photos.length, items: masonryWindow.photos, showHeader: false }] : gridVisiblePhotos ? [{ key: 'visible', title: '', count: gridVisiblePhotos.length, items: gridVisiblePhotos, showHeader: false }] : photoGroups.map((group) => ({ ...group, count: group.items.length, showHeader: grouped })));
   const listGroups = viewMode === 'list' ? listWindow?.groups ?? photoGroups.map((group) => ({ ...group, count: group.items.length, showHeader: grouped })) : [];
   const listRows = listGroups.flatMap((group) => [...(group.showHeader ? [<header className="catalog-group-heading" key={`group:${group.key}`}><strong>{group.title}</strong><span title="当前已加载的照片数量">{group.count} 张</span></header>] : []), ...group.items.map((photo) => <div className={`catalog-list-row${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}`} style={listStyle} role="option" aria-selected={selection.selectedIds.has(photo.id)} tabIndex={0} key={photo.id} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onKeyDown={(event) => { if (event.key === 'Enter') props.onOpenViewer(photo.id, orderedIds); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onDoubleClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
     {selectButton(photo)}{columns.map((column) => <span className={`catalog-list-cell catalog-list-cell-${column.id}`} key={column.id}>{field(photo, column.id)}</span>)}
@@ -2947,7 +2989,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
         ) : viewMode === 'list' ? (
           <section className={`catalog-list-view${listWindow ? ' is-windowed' : ''}`} role="listbox" aria-multiselectable="true" ref={gridRef} tabIndex={0} onScroll={handleCatalogScroll} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a' && !(event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]'))) { event.preventDefault(); setSelection(selectAll(orderedIds)); } }} aria-label="图库列表视图"><div className="catalog-list-header" style={listStyle} onContextMenu={(event) => { event.preventDefault(); setColumnMenu({ x: event.clientX, y: event.clientY }); }}><input className="catalog-list-select" type="checkbox" aria-label="全选当前列表" title="全选当前列表" checked={allVisibleSelected} ref={(element) => { if (element) element.indeterminate = someVisibleSelected && !allVisibleSelected; }} onChange={() => setSelection(allVisibleSelected ? { selectedIds: new Set(), anchorId: null, focusId: null } : selectAll(orderedIds))} />{columns.map((column) => <span key={column.id}>{column.label}</span>)}</div>{listWindow && <div aria-hidden="true" style={{ height: listWindow.before }} />}{listRows}{listWindow && <div aria-hidden="true" style={{ height: listWindow.after }} />}{props.hasMore && <button className="catalog-load-more" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? '加载中…' : '加载更多'}</button>}</section>
         ) : (
-          <section className={`catalog-grid${viewMode === 'masonry' ? ' catalog-masonry' : ''}${viewMode === 'justified' ? ' catalog-justified' : ''}${grouped ? ' is-grouped' : ''}${gridWindow || groupedGridWindow || justifiedWindow ? ' is-windowed' : ''}`} style={{ '--thumbnail-size': `${thumbnailSize}px`, '--thumbnail-height': `${Math.round(thumbnailSize * 112 / 155)}px`, '--virtual-row-height': `${gridRowHeight}px` } as React.CSSProperties} role="listbox" aria-label="图库照片" aria-multiselectable="true" data-loaded-count={props.availablePhotos.length} ref={gridRef} tabIndex={0} onScroll={handleCatalogScroll} onPointerDown={(event) => {
+          <section className={`catalog-grid${viewMode === 'masonry' ? ' catalog-masonry' : ''}${viewMode === 'justified' ? ' catalog-justified' : ''}${grouped ? ' is-grouped' : ''}${gridWindow || groupedGridWindow || justifiedWindow || masonryWindow ? ' is-windowed' : ''}`} style={{ '--thumbnail-size': `${thumbnailSize}px`, '--thumbnail-height': `${Math.round(thumbnailSize * 112 / 155)}px`, '--virtual-row-height': `${gridRowHeight}px` } as React.CSSProperties} role="listbox" aria-label="图库照片" aria-multiselectable="true" data-loaded-count={props.availablePhotos.length} ref={gridRef} tabIndex={0} onScroll={handleCatalogScroll} onPointerDown={(event) => {
             if (event.button !== 0 || (event.target !== event.currentTarget && !(event.target instanceof Element && event.target.classList.contains('catalog-group-grid')))) return;
             event.currentTarget.setPointerCapture(event.pointerId);
             marqueeOriginRef.current = { x: event.clientX, y: event.clientY, additive: event.metaKey || event.ctrlKey || event.shiftKey, initialIds: new Set(selection.selectedIds) };
@@ -2985,12 +3027,13 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
             {gridWindow && gridWindow.startRow > 0 && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: gridWindow.startRow * gridRowStride - 10 }} />}
             {groupedGridWindow && groupedGridWindow.before > 0 && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: groupedGridWindow.before - 10 }} />}
             {justifiedWindow && justifiedWindow.before > 0 && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: justifiedWindow.before }} />}
+            {masonryWindow && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: masonryLayout!.height }} />}
             {gridVisibleGroups.flatMap((group, groupIndex) => {
               const cards = group.items.map((photo) => {
                 const preview = previewPhoto(photo);
                 const justifiedSize = justifiedSizes[photo.id];
                 const metadataHeight = 24 + 16 * (Number(photo.rating > 0) + Number(Boolean(photo.workflow)) + Number(Boolean(photo.workflowConflict)));
-                return <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} style={viewMode === 'masonry' ? { gridRowEnd: `span ${Math.ceil(cardWidth / (aspectRatios.get(preview.thumbnailSrc ?? preview.src) ?? IMAGE_ASPECT_RATIOS.get(preview.thumbnailSrc ?? preview.src) ?? 1.5) + metadataHeight + 10)}` } : viewMode === 'justified' && justifiedSize ? { width: justifiedSize.width, '--thumbnail-height': `${justifiedSize.height}px` } as React.CSSProperties : undefined} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable key={photo.id} onDragStart={(event) => { preparePhotoDrag(event, photo, selection); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
+                return <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} style={masonryWindow ? masonryLayout!.positions.get(photo.id) : viewMode === 'masonry' ? { gridRowEnd: `span ${Math.ceil(cardWidth / (aspectRatios.get(preview.thumbnailSrc ?? preview.src) ?? IMAGE_ASPECT_RATIOS.get(preview.thumbnailSrc ?? preview.src) ?? 1.5) + metadataHeight + 10)}` } : viewMode === 'justified' && justifiedSize ? { width: justifiedSize.width, '--thumbnail-height': `${justifiedSize.height}px` } as React.CSSProperties : undefined} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable key={photo.id} onDragStart={(event) => { preparePhotoDrag(event, photo, selection); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
               <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{preview.thumbnailSrc || preview.src ? <CatalogImage src={preview.thumbnailSrc ?? preview.src} previewSrc={preview.src} defer={fastScrolling} onAspectRatio={viewMode === 'masonry' || viewMode === 'justified' ? (ratio) => refreshAspectRatio(preview.thumbnailSrc ?? preview.src, ratio) : undefined} /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
               <span className="catalog-photo-badges"><PhotoFlag photo={photo} /></span>
               <span className="catalog-card-meta"><strong title={photo.fileName}>{photo.fileName}</strong>{photo.rating > 0 && <span className="catalog-card-rating" aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}{photo.workflow && <small title={`${photo.workflow.name} · 按规则关联`}>{photo.workflow.members.length} 版本</small>}{photo.workflowConflict && <small title="多条流程规则同时匹配，已保留独立显示">规则冲突</small>}</span>

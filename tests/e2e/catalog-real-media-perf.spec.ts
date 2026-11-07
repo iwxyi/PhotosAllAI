@@ -207,10 +207,10 @@ test('measures real JPEG catalog scrolling', async () => {
     }));
     console.log(JSON.stringify({ count, viewMode, firstScreenMs, ...sample, thumbnailSettleMs, decodedImages, cachePerformance, jump, jumpSettleMs, jumpDecodes, jumpPerformance, memory }));
     expect(sample.scrollTop).toBeGreaterThan(0);
-    if (viewMode === 'grid' || viewMode === 'justified') expect(sample.mountedCards).toBeLessThan(150);
+    expect(sample.mountedCards).toBeLessThan(150);
     expect(jump.scrollTop).toBeGreaterThan(jump.viewportHeight * 2);
     expect(jumpDecodes).toBeLessThan(120);
-    if (viewMode === 'justified') {
+    if (viewMode === 'justified' || viewMode === 'masonry') {
       const lastCard = grid.locator('.catalog-card').last();
       const selectedId = await lastCard.getAttribute('data-asset-id');
       await lastCard.click();
