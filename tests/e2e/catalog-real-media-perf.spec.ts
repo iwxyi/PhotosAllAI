@@ -11,13 +11,15 @@ const count = Number(process.env.PHOTOALLISAI_PERF_COUNT ?? 1_000);
 const profileMain = process.env.PHOTOALLISAI_PROFILE_MAIN === '1';
 const abortProbe = process.env.PHOTOALLISAI_ABORT_PROBE === '1';
 const loadTo = Number(process.env.PHOTOALLISAI_PERF_LOAD_TO ?? 0);
+const rendererLoadTo = Number(process.env.PHOTOALLISAI_PERF_RENDERER_LOAD_TO ?? 0);
 const viewMode = process.env.PHOTOALLISAI_PERF_VIEW ?? 'grid';
 const source = path.resolve('apps/desktop/src/renderer/public/demo/portrait.jpg');
 
 test('measures real JPEG catalog scrolling', async () => {
-  test.setTimeout(loadTo > 0 ? Math.max(120_000, Math.min(1_200_000, loadTo * 30)) : profileMain ? 180_000 : 120_000);
+  test.setTimeout(Math.max(loadTo, rendererLoadTo) > 0 ? Math.max(120_000, Math.min(1_200_000, Math.max(loadTo, rendererLoadTo) * 30)) : profileMain ? 180_000 : 120_000);
   if (!Number.isSafeInteger(count) || count < 100 || count > 100_000) throw new RangeError('PHOTOALLISAI_PERF_COUNT must be 100..100000');
   if (!Number.isSafeInteger(loadTo) || loadTo < 0 || loadTo > count) throw new RangeError('PHOTOALLISAI_PERF_LOAD_TO must be 0..PHOTOALLISAI_PERF_COUNT');
+  if (!Number.isSafeInteger(rendererLoadTo) || rendererLoadTo < 0 || rendererLoadTo > count) throw new RangeError('PHOTOALLISAI_PERF_RENDERER_LOAD_TO must be 0..PHOTOALLISAI_PERF_COUNT');
   if (!['grid', 'masonry', 'justified'].includes(viewMode)) throw new RangeError('PHOTOALLISAI_PERF_VIEW must be grid, masonry, or justified');
   const root = await mkdtemp(path.join(tmpdir(), 'photoallisai-real-media-perf-'));
   const userData = path.join(root, 'user-data');
@@ -219,6 +221,33 @@ test('measures real JPEG catalog scrolling', async () => {
       await page.keyboard.press('ArrowLeft');
       await expect(grid.locator('.catalog-card.is-focused')).toBeInViewport();
       await expect(grid.locator('.catalog-card.is-focused')).not.toHaveAttribute('data-asset-id', selectedId ?? '');
+    }
+    if (rendererLoadTo > 0) {
+      await application.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0]?.hide(); });
+      const samples: Array<{ loaded: number; mounted: number; scrollHeight: number; tabKiB: number }> = [];
+      let previousLoaded = Number(await grid.getAttribute('data-loaded-count'));
+      expect(previousLoaded, 'renderer target must exceed the pages already loaded during scrolling').toBeLessThan(rendererLoadTo);
+      const initialLayout = await grid.evaluate((element) => ({ mounted: element.querySelectorAll('.catalog-card').length, scrollHeight: element.scrollHeight }));
+      const initialTabKiB = await application.evaluate(({ app }) => app.getAppMetrics().find((metric) => metric.type === 'Tab')?.memory.workingSetSize ?? 0);
+      samples.push({ loaded: previousLoaded, ...initialLayout, tabKiB: initialTabKiB });
+      console.log(JSON.stringify({ count, viewMode, phase: 'renderer-page-progress', ...samples.at(-1) }));
+      while (previousLoaded < rendererLoadTo) {
+        await grid.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+        await expect.poll(() => grid.getAttribute('data-loaded-count'), { timeout: 15_000 }).not.toBe(String(previousLoaded));
+        const loaded = Number(await grid.getAttribute('data-loaded-count'));
+        expect(loaded).toBeGreaterThan(previousLoaded);
+        previousLoaded = loaded;
+        if (loaded % 2_000 === 0 || loaded >= rendererLoadTo) {
+          const layout = await grid.evaluate((element) => ({ mounted: element.querySelectorAll('.catalog-card').length, scrollHeight: element.scrollHeight }));
+          const tabKiB = await application.evaluate(({ app }) => app.getAppMetrics().find((metric) => metric.type === 'Tab')?.memory.workingSetSize ?? 0);
+          samples.push({ loaded, ...layout, tabKiB });
+          console.log(JSON.stringify({ count, viewMode, phase: 'renderer-page-progress', ...samples.at(-1) }));
+        }
+        if (loaded >= count) break;
+      }
+      expect(previousLoaded).toBeGreaterThanOrEqual(rendererLoadTo);
+      expect(samples.every((entry) => entry.mounted < 150)).toBe(true);
+      console.log(JSON.stringify({ count, viewMode, phase: 'renderer-page', requested: rendererLoadTo, loaded: previousLoaded, samples }));
     }
     if (loadTo > 0) {
       await grid.evaluate((element) => { element.scrollTop = 0; });
