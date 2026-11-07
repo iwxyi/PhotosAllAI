@@ -248,6 +248,10 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 .catalog-grid.catalog-masonry > .catalog-card { height: calc(100% - 10px); grid-template-rows: minmax(0, 1fr) auto; }
 .catalog-masonry .catalog-load-more { grid-column: 1 / -1; grid-row-end: span 80; }
 .catalog-grid.catalog-justified { display: flex; flex-wrap: wrap; align-content: flex-start; align-items: flex-start; }
+.catalog-grid.catalog-justified.is-windowed { row-gap: 0; }
+.catalog-justified.is-windowed > .catalog-grid-spacer { flex: 0 0 100%; }
+.catalog-justified-row { display: flex; flex: 0 0 100%; gap: 10px; align-items: flex-start; margin-bottom: 10px; }
+.catalog-justified-row > .catalog-card { flex: none; max-width: 100%; }
 .catalog-justified > .catalog-card { flex: none; max-width: 100%; }
 .catalog-justified > .catalog-photo-group, .catalog-justified > .catalog-load-more { flex: 0 0 100%; }
 .catalog-card-image > img { position: relative; z-index: 1; width: 100%; height: 100%; display: block; object-fit: cover; opacity: 0; transition: opacity 100ms ease-out; }.catalog-card-image > img.is-ready { opacity: 1; }

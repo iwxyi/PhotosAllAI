@@ -2353,9 +2353,12 @@ function collectionTitle(props: Pick<LibraryWorkspaceProps, 'catalogFolders' | '
   return props.searchQuery ? `搜索：${props.searchQuery}` : '所有照片';
 }
 
-function justifiedCardSizes(groups: { items: Photo[] }[], ratioFor: (photo: Photo) => number, width: number, targetHeight: number): Record<string, { width: number; height: number }> {
+function justifiedCardLayout(groups: { items: Photo[] }[], ratioFor: (photo: Photo) => number, width: number, targetHeight: number): { sizes: Record<string, { width: number; height: number }>; rows: Array<{ start: number; end: number; top: number; height: number }> } {
   const sizes: Record<string, { width: number; height: number }> = {};
+  const rows: Array<{ start: number; end: number; top: number; height: number }> = [];
   const gap = 10;
+  let itemIndex = 0;
+  let rowTop = 0;
   for (const group of groups) {
     let row: Photo[] = [];
     let ratioSum = 0;
@@ -2364,6 +2367,11 @@ function justifiedCardSizes(groups: { items: Photo[] }[], ratioFor: (photo: Phot
       const fitHeight = (width - gap * (row.length - 1)) / ratioSum;
       const height = last ? Math.min(targetHeight, fitHeight) : Math.min(targetHeight * 1.35, fitHeight);
       for (const photo of row) sizes[photo.id] = { width: height * ratioFor(photo), height };
+      const metadataHeight = Math.max(...row.map((photo) => 23 + 16 * (Number(photo.rating > 0) + Number(Boolean(photo.workflow)) + Number(Boolean(photo.workflowConflict)))));
+      const rowHeight = height + metadataHeight;
+      rows.push({ start: itemIndex, end: itemIndex + row.length, top: rowTop, height: rowHeight });
+      itemIndex += row.length;
+      rowTop += rowHeight + gap;
       row = [];
       ratioSum = 0;
     };
@@ -2375,7 +2383,7 @@ function justifiedCardSizes(groups: { items: Photo[] }[], ratioFor: (photo: Phot
     }
     placeRow(true);
   }
-  return sizes;
+  return { sizes, rows };
 }
 
 function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMenu?: (event: React.MouseEvent, photo: Photo) => void }): React.JSX.Element {
@@ -2609,7 +2617,16 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     const frame = requestAnimationFrame(() => { zoomAnchor.current = null; });
     return () => cancelAnimationFrame(frame);
   }, [thumbnailSize, cardWidth]);
-  const [aspectRatios, setAspectRatios] = useState<Record<string, number>>({});
+  const [aspectRatios, setAspectRatios] = useState(() => new Map(IMAGE_ASPECT_RATIOS));
+  const aspectRatioFrame = useRef<number | null>(null);
+  useEffect(() => () => { if (aspectRatioFrame.current !== null) cancelAnimationFrame(aspectRatioFrame.current); }, []);
+  const refreshAspectRatio = useCallback((src: string, ratio: number) => {
+    if (aspectRatios.get(src) === ratio || aspectRatioFrame.current !== null) return;
+    aspectRatioFrame.current = requestAnimationFrame(() => {
+      aspectRatioFrame.current = null;
+      setAspectRatios(new Map(IMAGE_ASPECT_RATIOS));
+    });
+  }, [aspectRatios]);
   useLayoutEffect(() => {
     const grid = gridRef.current;
     if (!grid || (viewMode !== 'justified' && viewMode !== 'grid')) return;
@@ -2634,11 +2651,12 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     observer.observe(grid);
     return () => observer.disconnect();
   }, [viewMode, props.availablePhotos.length, thumbnailSize, grouped]);
-  const justifiedSizes = useMemo(() => viewMode === 'justified' && gridWidth > 0 ? justifiedCardSizes(photoGroups, (photo) => {
+  const justifiedLayout = useMemo(() => viewMode === 'justified' && gridWidth > 0 ? justifiedCardLayout(photoGroups, (photo) => {
     const preview = previewPhoto(photo);
     const src = preview.thumbnailSrc ?? preview.src;
-    return clamp(aspectRatios[src] ?? IMAGE_ASPECT_RATIOS.get(src) ?? 1.5, .25, 5);
-  }, gridWidth, thumbnailSize) : {}, [viewMode, gridWidth, photoGroups, previewPhoto, aspectRatios, thumbnailSize]);
+    return clamp(aspectRatios.get(src) ?? IMAGE_ASPECT_RATIOS.get(src) ?? 1.5, .25, 5);
+  }, gridWidth, thumbnailSize) : null, [viewMode, gridWidth, photoGroups, previewPhoto, aspectRatios, thumbnailSize]);
+  const justifiedSizes = justifiedLayout?.sizes ?? {};
   const orderedIds = useMemo(() => photoGroups.flatMap((group) => group.items.map((photo) => photo.id)), [photoGroups]);
   const selectedPhoto = useMemo(() => props.availablePhotos.find((photo) => selection.focusId === photo.id) ?? null, [props.availablePhotos, selection.focusId]);
   const { hasMore, loadingMore, onLoadMore } = props;
@@ -2668,13 +2686,13 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
       }, 100);
     }
     scrollSample.current = { top, at: now };
-    if (viewMode === 'list' || viewMode === 'grid') {
+    if (viewMode === 'list' || viewMode === 'grid' || viewMode === 'justified') {
       const height = event.currentTarget.clientHeight;
       setListViewport((current) => current.top === top && current.height === height ? current : { top, height });
     }
   }, [loadMoreWhenNearEnd, viewMode]);
   useLayoutEffect(() => {
-    if (viewMode !== 'list' && viewMode !== 'grid') return;
+    if (viewMode !== 'list' && viewMode !== 'grid' && viewMode !== 'justified') return;
     const element = gridRef.current;
     if (!element) return;
     const measure = () => setListViewport((current) => current.height === element.clientHeight ? current : { top: element.scrollTop, height: element.clientHeight });
@@ -2754,7 +2772,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     setSelection(next);
     props.onSelectedAssetChange(targetId);
     const targetCard = cards.find((card) => card.dataset.assetId === targetId);
-    if (viewMode === 'grid' && props.availablePhotos.length > 500) {
+    if ((viewMode === 'grid' || (viewMode === 'justified' && !grouped)) && props.availablePhotos.length > 500) {
       // Keep keyboard focus on the stable viewport: cards outside the window
       // are unmounted, so focusing one would lose subsequent arrow events.
       event.currentTarget.focus({ preventScroll: true });
@@ -2772,6 +2790,16 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
           }
           const group = groupedGridLayout[low];
           if (group) top = group.rowsStart + Math.floor((targetIndex - group.startIndex) / columns) * rowHeight;
+        }
+        if (viewMode === 'justified' && justifiedLayout) {
+          let low = 0;
+          let high = justifiedLayout.rows.length;
+          while (low < high) {
+            const middle = (low + high) >>> 1;
+            if (justifiedLayout.rows[middle]!.end <= targetIndex) low = middle + 1;
+            else high = middle;
+          }
+          top = (justifiedLayout.rows[low]?.top ?? 0) + 16;
         }
         event.currentTarget.scrollTop = top;
         setListViewport({ top, height: event.currentTarget.clientHeight });
@@ -2864,8 +2892,31 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     const top = Math.min(listViewport.top, maximumTop);
     return { startRow: Math.max(0, Math.floor(top / gridRowStride) - 5), endRow: Math.min(totalRows, Math.ceil((top + listViewport.height) / gridRowStride) + 5) };
   })() : null;
+  const justifiedWindow = useMemo(() => {
+    if (viewMode !== 'justified' || grouped || props.availablePhotos.length <= 500 || !justifiedLayout?.rows.length) return null;
+    const rows = justifiedLayout.rows;
+    const total = rows[rows.length - 1]!.top + rows[rows.length - 1]!.height + 10;
+    const top = Math.min(listViewport.top, Math.max(0, total - listViewport.height));
+    const startY = Math.max(0, top - 1_000);
+    const endY = top + listViewport.height + 1_000;
+    let low = 0;
+    let high = rows.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (rows[middle]!.top + rows[middle]!.height <= startY) low = middle + 1;
+      else high = middle;
+    }
+    const start = low;
+    while (low < rows.length && rows[low]!.top < endY) low += 1;
+    const visible = rows.slice(start, low);
+    const before = visible[0]?.top ?? total;
+    const last = visible[visible.length - 1];
+    const after = last ? Math.max(0, total - last.top - last.height - 10) : 0;
+    return { rows: visible, before, after };
+  }, [viewMode, grouped, props.availablePhotos.length, justifiedLayout, listViewport.top, listViewport.height]);
   const gridVisiblePhotos = gridWindow ? props.availablePhotos.slice(gridWindow.startRow * gridColumns, gridWindow.endRow * gridColumns) : null;
-  const gridVisibleGroups = groupedGridWindow?.groups ?? (gridVisiblePhotos ? [{ key: 'visible', title: '', count: gridVisiblePhotos.length, items: gridVisiblePhotos, showHeader: false }] : photoGroups.map((group) => ({ ...group, count: group.items.length, showHeader: grouped })));
+  const justifiedVisibleGroups = justifiedWindow?.rows.map((row) => ({ key: `row:${row.start}`, title: '', count: row.end - row.start, items: props.availablePhotos.slice(row.start, row.end), showHeader: false }));
+  const gridVisibleGroups = justifiedVisibleGroups ?? groupedGridWindow?.groups ?? (gridVisiblePhotos ? [{ key: 'visible', title: '', count: gridVisiblePhotos.length, items: gridVisiblePhotos, showHeader: false }] : photoGroups.map((group) => ({ ...group, count: group.items.length, showHeader: grouped })));
   const listGroups = viewMode === 'list' ? listWindow?.groups ?? photoGroups.map((group) => ({ ...group, count: group.items.length, showHeader: grouped })) : [];
   const listRows = listGroups.flatMap((group) => [...(group.showHeader ? [<header className="catalog-group-heading" key={`group:${group.key}`}><strong>{group.title}</strong><span title="当前已加载的照片数量">{group.count} 张</span></header>] : []), ...group.items.map((photo) => <div className={`catalog-list-row${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}`} style={listStyle} role="option" aria-selected={selection.selectedIds.has(photo.id)} tabIndex={0} key={photo.id} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onKeyDown={(event) => { if (event.key === 'Enter') props.onOpenViewer(photo.id, orderedIds); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onDoubleClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
     {selectButton(photo)}{columns.map((column) => <span className={`catalog-list-cell catalog-list-cell-${column.id}`} key={column.id}>{field(photo, column.id)}</span>)}
@@ -2896,7 +2947,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
         ) : viewMode === 'list' ? (
           <section className={`catalog-list-view${listWindow ? ' is-windowed' : ''}`} role="listbox" aria-multiselectable="true" ref={gridRef} tabIndex={0} onScroll={handleCatalogScroll} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a' && !(event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]'))) { event.preventDefault(); setSelection(selectAll(orderedIds)); } }} aria-label="图库列表视图"><div className="catalog-list-header" style={listStyle} onContextMenu={(event) => { event.preventDefault(); setColumnMenu({ x: event.clientX, y: event.clientY }); }}><input className="catalog-list-select" type="checkbox" aria-label="全选当前列表" title="全选当前列表" checked={allVisibleSelected} ref={(element) => { if (element) element.indeterminate = someVisibleSelected && !allVisibleSelected; }} onChange={() => setSelection(allVisibleSelected ? { selectedIds: new Set(), anchorId: null, focusId: null } : selectAll(orderedIds))} />{columns.map((column) => <span key={column.id}>{column.label}</span>)}</div>{listWindow && <div aria-hidden="true" style={{ height: listWindow.before }} />}{listRows}{listWindow && <div aria-hidden="true" style={{ height: listWindow.after }} />}{props.hasMore && <button className="catalog-load-more" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? '加载中…' : '加载更多'}</button>}</section>
         ) : (
-          <section className={`catalog-grid${viewMode === 'masonry' ? ' catalog-masonry' : ''}${viewMode === 'justified' ? ' catalog-justified' : ''}${grouped ? ' is-grouped' : ''}${gridWindow || groupedGridWindow ? ' is-windowed' : ''}`} style={{ '--thumbnail-size': `${thumbnailSize}px`, '--thumbnail-height': `${Math.round(thumbnailSize * 112 / 155)}px`, '--virtual-row-height': `${gridRowHeight}px` } as React.CSSProperties} role="listbox" aria-label="图库照片" aria-multiselectable="true" data-loaded-count={props.availablePhotos.length} ref={gridRef} tabIndex={0} onScroll={handleCatalogScroll} onPointerDown={(event) => {
+          <section className={`catalog-grid${viewMode === 'masonry' ? ' catalog-masonry' : ''}${viewMode === 'justified' ? ' catalog-justified' : ''}${grouped ? ' is-grouped' : ''}${gridWindow || groupedGridWindow || justifiedWindow ? ' is-windowed' : ''}`} style={{ '--thumbnail-size': `${thumbnailSize}px`, '--thumbnail-height': `${Math.round(thumbnailSize * 112 / 155)}px`, '--virtual-row-height': `${gridRowHeight}px` } as React.CSSProperties} role="listbox" aria-label="图库照片" aria-multiselectable="true" data-loaded-count={props.availablePhotos.length} ref={gridRef} tabIndex={0} onScroll={handleCatalogScroll} onPointerDown={(event) => {
             if (event.button !== 0 || (event.target !== event.currentTarget && !(event.target instanceof Element && event.target.classList.contains('catalog-group-grid')))) return;
             event.currentTarget.setPointerCapture(event.pointerId);
             marqueeOriginRef.current = { x: event.clientX, y: event.clientY, additive: event.metaKey || event.ctrlKey || event.shiftKey, initialIds: new Set(selection.selectedIds) };
@@ -2933,22 +2984,25 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
           }}>
             {gridWindow && gridWindow.startRow > 0 && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: gridWindow.startRow * gridRowStride - 10 }} />}
             {groupedGridWindow && groupedGridWindow.before > 0 && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: groupedGridWindow.before - 10 }} />}
-            {gridVisibleGroups.flatMap((group) => {
+            {justifiedWindow && justifiedWindow.before > 0 && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: justifiedWindow.before }} />}
+            {gridVisibleGroups.flatMap((group, groupIndex) => {
               const cards = group.items.map((photo) => {
                 const preview = previewPhoto(photo);
                 const justifiedSize = justifiedSizes[photo.id];
                 const metadataHeight = 24 + 16 * (Number(photo.rating > 0) + Number(Boolean(photo.workflow)) + Number(Boolean(photo.workflowConflict)));
-                return <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} style={viewMode === 'masonry' ? { gridRowEnd: `span ${Math.ceil(cardWidth / (aspectRatios[preview.thumbnailSrc ?? preview.src] ?? 1.5) + metadataHeight + 10)}` } : viewMode === 'justified' && justifiedSize ? { width: justifiedSize.width, '--thumbnail-height': `${justifiedSize.height}px` } as React.CSSProperties : undefined} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable key={photo.id} onDragStart={(event) => { preparePhotoDrag(event, photo, selection); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
-              <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{preview.thumbnailSrc || preview.src ? <CatalogImage src={preview.thumbnailSrc ?? preview.src} previewSrc={preview.src} defer={fastScrolling} onAspectRatio={viewMode === 'masonry' || viewMode === 'justified' ? (ratio) => { const src = preview.thumbnailSrc ?? preview.src; setAspectRatios((current) => current[src] === ratio ? current : { ...current, [src]: ratio }); } : undefined} /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
+                return <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} style={viewMode === 'masonry' ? { gridRowEnd: `span ${Math.ceil(cardWidth / (aspectRatios.get(preview.thumbnailSrc ?? preview.src) ?? IMAGE_ASPECT_RATIOS.get(preview.thumbnailSrc ?? preview.src) ?? 1.5) + metadataHeight + 10)}` } : viewMode === 'justified' && justifiedSize ? { width: justifiedSize.width, '--thumbnail-height': `${justifiedSize.height}px` } as React.CSSProperties : undefined} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable key={photo.id} onDragStart={(event) => { preparePhotoDrag(event, photo, selection); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
+              <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{preview.thumbnailSrc || preview.src ? <CatalogImage src={preview.thumbnailSrc ?? preview.src} previewSrc={preview.src} defer={fastScrolling} onAspectRatio={viewMode === 'masonry' || viewMode === 'justified' ? (ratio) => refreshAspectRatio(preview.thumbnailSrc ?? preview.src, ratio) : undefined} /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
               <span className="catalog-photo-badges"><PhotoFlag photo={photo} /></span>
               <span className="catalog-card-meta"><strong title={photo.fileName}>{photo.fileName}</strong>{photo.rating > 0 && <span className="catalog-card-rating" aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}{photo.workflow && <small title={`${photo.workflow.name} · 按规则关联`}>{photo.workflow.members.length} 版本</small>}{photo.workflowConflict && <small title="多条流程规则同时匹配，已保留独立显示">规则冲突</small>}</span>
             </button>;
               });
               // Keep cards under the same parent so grouping preserves decoded images and focus.
-              return group.showHeader ? [<header className="catalog-photo-group catalog-group-heading" key={`group:${group.key}`}><strong>{group.title}</strong><span title="当前已加载的照片数量">{group.count} 张</span></header>, ...cards] : cards;
+              return justifiedWindow ? [<div className="catalog-justified-row" key={group.key} style={{ height: justifiedWindow.rows[groupIndex]!.height }}>{cards}</div>]
+                : group.showHeader ? [<header className="catalog-photo-group catalog-group-heading" key={`group:${group.key}`}><strong>{group.title}</strong><span title="当前已加载的照片数量">{group.count} 张</span></header>, ...cards] : cards;
             })}
             {gridWindow && gridWindow.endRow * gridColumns < props.availablePhotos.length && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: (Math.ceil(props.availablePhotos.length / gridColumns) - gridWindow.endRow) * gridRowStride - 10 }} />}
             {groupedGridWindow && groupedGridWindow.after > 10 && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: groupedGridWindow.after - 10 }} />}
+            {justifiedWindow && justifiedWindow.after > 0 && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: justifiedWindow.after }} />}
             {props.hasMore && <button className="catalog-load-more" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? '加载中…' : '加载更多'}</button>}
             {marquee && <span className="selection-marquee" style={marquee} aria-hidden="true" />}
           </section>

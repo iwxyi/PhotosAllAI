@@ -11,12 +11,14 @@ const count = Number(process.env.PHOTOALLISAI_PERF_COUNT ?? 1_000);
 const profileMain = process.env.PHOTOALLISAI_PROFILE_MAIN === '1';
 const abortProbe = process.env.PHOTOALLISAI_ABORT_PROBE === '1';
 const loadTo = Number(process.env.PHOTOALLISAI_PERF_LOAD_TO ?? 0);
+const viewMode = process.env.PHOTOALLISAI_PERF_VIEW ?? 'grid';
 const source = path.resolve('apps/desktop/src/renderer/public/demo/portrait.jpg');
 
 test('measures real JPEG catalog scrolling', async () => {
   test.setTimeout(loadTo > 0 ? Math.max(120_000, Math.min(1_200_000, loadTo * 30)) : profileMain ? 180_000 : 120_000);
   if (!Number.isSafeInteger(count) || count < 100 || count > 100_000) throw new RangeError('PHOTOALLISAI_PERF_COUNT must be 100..100000');
   if (!Number.isSafeInteger(loadTo) || loadTo < 0 || loadTo > count) throw new RangeError('PHOTOALLISAI_PERF_LOAD_TO must be 0..PHOTOALLISAI_PERF_COUNT');
+  if (!['grid', 'masonry', 'justified'].includes(viewMode)) throw new RangeError('PHOTOALLISAI_PERF_VIEW must be grid, masonry, or justified');
   const root = await mkdtemp(path.join(tmpdir(), 'photoallisai-real-media-perf-'));
   const userData = path.join(root, 'user-data');
   const media = path.join(root, 'media');
@@ -50,13 +52,13 @@ test('measures real JPEG catalog scrolling', async () => {
       env: { ...process.env, PHOTOALLISAI_USER_DATA: userData }
     });
     const page = await application.firstWindow();
-    const gridButton = page.getByRole('button', { name: '网格视图', exact: true });
-    if (!(await gridButton.isVisible())) {
+    const viewButton = page.getByRole('button', { name: viewMode === 'grid' ? '网格视图' : viewMode === 'masonry' ? '瀑布流视图' : '等高瀑布流', exact: true });
+    if (!(await viewButton.isVisible())) {
       await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
       await page.getByRole('checkbox', { name: '视图', exact: true }).check();
       await page.keyboard.press('Escape');
     }
-    await gridButton.click();
+    await viewButton.click();
     const grid = page.getByRole('listbox', { name: '图库照片' });
     await expect(grid).toBeVisible();
     try {
@@ -69,7 +71,7 @@ test('measures real JPEG catalog scrolling', async () => {
     }
     const firstScreenMs = Math.round(performance.now() - started);
     const beforeScroll = await page.evaluate(async () => window.desktopApi.getDiagnosticSnapshot());
-    console.log(JSON.stringify({ count, phase: 'before-scroll', firstScreenMs, cache: beforeScroll.cache, catalogWatcher: beforeScroll.catalogWatcher }));
+    console.log(JSON.stringify({ count, viewMode, phase: 'before-scroll', firstScreenMs, cache: beforeScroll.cache, catalogWatcher: beforeScroll.catalogWatcher }));
     if (abortProbe) {
       const probe = await page.evaluate(async () => {
         const requests = Array.from({ length: 50 }, (_, index) => {
@@ -203,11 +205,21 @@ test('measures real JPEG catalog scrolling', async () => {
       processes: app.getAppMetrics().map((metric) => ({ type: metric.type, pid: metric.pid, workingSetKiB: metric.memory.workingSetSize })),
       version: app.getVersion()
     }));
-    console.log(JSON.stringify({ count, firstScreenMs, ...sample, thumbnailSettleMs, decodedImages, cachePerformance, jump, jumpSettleMs, jumpDecodes, jumpPerformance, memory }));
+    console.log(JSON.stringify({ count, viewMode, firstScreenMs, ...sample, thumbnailSettleMs, decodedImages, cachePerformance, jump, jumpSettleMs, jumpDecodes, jumpPerformance, memory }));
     expect(sample.scrollTop).toBeGreaterThan(0);
-    expect(sample.mountedCards).toBeLessThan(150);
+    if (viewMode === 'grid' || viewMode === 'justified') expect(sample.mountedCards).toBeLessThan(150);
     expect(jump.scrollTop).toBeGreaterThan(jump.viewportHeight * 2);
     expect(jumpDecodes).toBeLessThan(120);
+    if (viewMode === 'justified') {
+      const lastCard = grid.locator('.catalog-card').last();
+      const selectedId = await lastCard.getAttribute('data-asset-id');
+      await lastCard.click();
+      await grid.evaluate((element) => { element.scrollTop = 0; });
+      await grid.focus();
+      await page.keyboard.press('ArrowLeft');
+      await expect(grid.locator('.catalog-card.is-focused')).toBeInViewport();
+      await expect(grid.locator('.catalog-card.is-focused')).not.toHaveAttribute('data-asset-id', selectedId ?? '');
+    }
     if (loadTo > 0) {
       await grid.evaluate((element) => { element.scrollTop = 0; });
       const pagingStarted = performance.now();
