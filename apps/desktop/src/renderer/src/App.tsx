@@ -2453,29 +2453,34 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
   const { minimumRating, ratingOperator, flags, colors } = props.photoFilters;
   const filtered = Boolean(props.searchQuery.trim() || minimumRating !== null || flags.length || colors.length || props.favoriteOnly);
   const [groupDetails, setGroupDetails] = useState<Record<string, { modifiedAt: number | undefined; data: FileDetails | null }>>({});
-  const detailRequests = useRef(new Set<string>());
+  const groupDetailsRef = useRef(groupDetails);
   const needsDetails = props.photoFilters.groupBy.some((dimension) => metadataDimensions.has(dimension));
   const missingDetails = useMemo(() => needsDetails && !props.isDemo ? props.availablePhotos.filter((photo) => !groupDetails[photo.id] || groupDetails[photo.id]?.modifiedAt !== photo.modifiedAt) : [], [needsDetails, props.isDemo, props.availablePhotos, groupDetails]);
   useEffect(() => {
     if (!needsDetails || props.isDemo) return;
-    const missing = props.availablePhotos.filter((photo) => (!groupDetails[photo.id] || groupDetails[photo.id]?.modifiedAt !== photo.modifiedAt) && !detailRequests.current.has(photo.id));
+    const missing = props.availablePhotos.filter((photo) => !groupDetailsRef.current[photo.id] || groupDetailsRef.current[photo.id]?.modifiedAt !== photo.modifiedAt);
     if (!missing.length) return;
     let active = true;
     const load = async () => {
-      for (let index = 0; active && index < missing.length; index += 6) {
-        const batch = missing.slice(index, index + 6);
-        batch.forEach((photo) => detailRequests.current.add(photo.id));
-        const results = await Promise.all(batch.map(async (photo) => {
-          const data = await window.desktopApi.getFileDetails(photo.id).catch(() => null);
-          return [photo.id, { modifiedAt: photo.modifiedAt, data }] as const;
-        }));
-        batch.forEach((photo) => detailRequests.current.delete(photo.id));
-        if (active) setGroupDetails((current) => ({ ...current, ...Object.fromEntries(results) }));
+      for (let pageStart = 0; active && pageStart < missing.length; pageStart += 256) {
+        const updates: Record<string, { modifiedAt: number | undefined; data: FileDetails | null }> = {};
+        for (let index = pageStart; active && index < Math.min(pageStart + 256, missing.length); index += 6) {
+          const batch = missing.slice(index, Math.min(index + 6, pageStart + 256));
+          const results = await Promise.all(batch.map(async (photo) => {
+            const data = await window.desktopApi.getFileDetails(photo.id).catch(() => null);
+            return [photo.id, { modifiedAt: photo.modifiedAt, data }] as const;
+          }));
+          Object.assign(updates, Object.fromEntries(results));
+        }
+        if (active) {
+          groupDetailsRef.current = { ...groupDetailsRef.current, ...updates };
+          setGroupDetails(groupDetailsRef.current);
+        }
       }
     };
     void load();
     return () => { active = false; };
-  }, [needsDetails, props.isDemo, props.availablePhotos, groupDetails]);
+  }, [needsDetails, props.isDemo, props.availablePhotos]);
   const metadata = useMemo(() => Object.fromEntries(props.availablePhotos.flatMap((photo) => {
     const entry = groupDetails[photo.id];
     return entry && entry.modifiedAt === photo.modifiedAt ? [[photo.id, entry.data]] : [];
