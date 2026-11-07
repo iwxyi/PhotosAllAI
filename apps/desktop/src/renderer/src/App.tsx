@@ -3134,7 +3134,6 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
   const [generationAssetId, setGenerationAssetId] = useState<string | null>(null);
   const [rawCompanion, setRawCompanion] = useState<Photo | null>(null);
   const [filmstripRawCompanions, setFilmstripRawCompanions] = useState<Record<string, Photo>>({});
-  const filmstripRawIds = JSON.stringify(availablePhotos.map((photo) => photo.id));
   useEffect(() => {
     if (isDemo || filmstripVersionTarget !== 'raw') return;
     let active = true;
@@ -3156,7 +3155,7 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
       if (active) setFilmstripRawCompanions(next);
     })().catch(() => undefined);
     return () => { active = false; };
-  }, [isDemo, filmstripVersionTarget, filmstripRawIds, availablePhotos]);
+  }, [isDemo, filmstripVersionTarget, availablePhotos]);
   const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
   const [tagEditorOpen, setTagEditorOpen] = useState(false);
   const [tagDraft, setTagDraft] = useState('');
@@ -3186,7 +3185,9 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     : props.resultSequence?.filter((result) => result.assetId === selected.id) ?? [];
   const orderedIds = useMemo(() => {
     const ids = availablePhotos.map((photo) => photo.id);
-    return view === 'viewer' && filmstripVisibleIds ? ids.filter((id) => filmstripVisibleIds.includes(id)) : ids;
+    if (view !== 'viewer' || !filmstripVisibleIds) return ids;
+    const visible = new Set(filmstripVisibleIds);
+    return ids.filter((id) => visible.has(id));
   }, [availablePhotos, filmstripVisibleIds, view]);
   useEffect(() => {
     if (view !== 'viewer') return;
@@ -5910,7 +5911,12 @@ export function App(): React.JSX.Element {
     ?? availablePhotos.find((photo) => photo.id === selectedAssetId)
     ?? availablePhotos[0];
   const contextSelectedIds = useMemo(() => quickPhoto ? new Set<string>() : viewerPhoto ? new Set([viewerPhoto.id]) : sharedSelection.selectedIds, [quickPhoto, viewerPhoto, sharedSelection.selectedIds]);
-  const contextPhotos = useMemo(() => quickPhoto ? [] : viewerPhoto ? [viewerPhoto, ...viewerPhotos.filter((photo) => photo.id !== viewerPhoto.id), ...availablePhotos.filter((photo) => photo.id !== viewerPhoto.id && !viewerPhotos.some((item) => item.id === photo.id))] : availablePhotos, [quickPhoto, viewerPhoto, viewerPhotos, availablePhotos]);
+  const contextPhotos = useMemo(() => {
+    if (quickPhoto) return [];
+    if (!viewerPhoto) return availablePhotos;
+    const viewerIds = new Set(viewerPhotos.map((photo) => photo.id));
+    return [viewerPhoto, ...viewerPhotos.filter((photo) => photo.id !== viewerPhoto.id), ...availablePhotos.filter((photo) => photo.id !== viewerPhoto.id && !viewerIds.has(photo.id))];
+  }, [quickPhoto, viewerPhoto, viewerPhotos, availablePhotos]);
   const addAssetsToWorkflow = useCallback((assetIds: string[]) => {
     const validIds = assetIds.filter((id) => contextPhotos.some((photo) => photo.id === id));
     if (validIds.length === 0) return;

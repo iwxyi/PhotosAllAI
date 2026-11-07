@@ -77,7 +77,7 @@ test('switches portrait and landscape previews without painting the previous ima
     for (const id of ['photo-4', 'photo-1', 'photo-5', 'photo-3', 'photo-1']) {
       await viewer.locator(`.thumb[data-asset-id="${id}"]`).click();
       const expected = await viewer.locator(`.thumb[data-asset-id="${id}"] img`).getAttribute('src');
-      await expect(viewer.locator('.base-image')).toHaveAttribute('src', expected!);
+      await expect.poll(() => viewer.locator('.base-image').evaluate((image) => (image as HTMLImageElement).src)).toBe(expected!);
       await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
     }
     await viewer.locator('.filmstrip').focus();
