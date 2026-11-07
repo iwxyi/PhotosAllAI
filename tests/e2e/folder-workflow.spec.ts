@@ -1,8 +1,14 @@
 import { copyFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { _electron as electron, expect, test } from '@playwright/test';
+import { _electron as electron, expect, test, type Locator } from '@playwright/test';
 import { CatalogService } from '../../apps/desktop/src/main/catalog-service';
+
+const thumbnailSources = (images: Locator) => images.evaluateAll((elements) => elements.map((element) => {
+  const url = new URL((element as HTMLImageElement).src);
+  url.search = '';
+  return url.href;
+}));
 
 test('configures dynamic workflows, browses stages, and refreshes external output', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'photo-workflow-e2e-'));
@@ -55,12 +61,12 @@ test('configures dynamic workflows, browses stages, and refreshes external outpu
     await expect(versionTarget).toHaveValue('no-ai');
     await page.keyboard.up('Space');
     await expect(viewer.locator('.base-image')).toHaveAttribute('src', currentSource);
-    await expect.poll(() => viewer.locator('.thumb img').evaluateAll((images) => images.map((image) => image.getAttribute('src')))).toEqual(expect.arrayContaining([colorThumbnail, fallbackThumbnail]));
+    await expect.poll(() => thumbnailSources(viewer.locator('.thumb img'))).toEqual(expect.arrayContaining([colorThumbnail, fallbackThumbnail]));
     const colorTarget = await versionTarget.locator('option').filter({ hasText: '调色' }).getAttribute('value');
     await versionTarget.selectOption(colorTarget!);
-    await expect.poll(() => viewer.locator('.thumb img').evaluateAll((images) => images.map((image) => image.getAttribute('src')))).toEqual(expect.arrayContaining([colorThumbnail, fallbackThumbnail]));
+    await expect.poll(() => thumbnailSources(viewer.locator('.thumb img'))).toEqual(expect.arrayContaining([colorThumbnail, fallbackThumbnail]));
     await versionTarget.selectOption('preferred-ai');
-    await expect.poll(() => viewer.locator('.thumb img').evaluateAll((images) => images.map((image) => image.getAttribute('src')))).toEqual(expect.arrayContaining([colorThumbnail, fallbackThumbnail]));
+    await expect.poll(() => thumbnailSources(viewer.locator('.thumb img'))).toEqual(expect.arrayContaining([colorThumbnail, fallbackThumbnail]));
     await versionTarget.selectOption('no-ai');
     await expect(viewer.locator('.base-image')).toHaveClass(/is-ready/);
     const original = await stages.locator('option').filter({ hasText: '原图' }).getAttribute('value');
@@ -81,7 +87,7 @@ test('configures dynamic workflows, browses stages, and refreshes external outpu
     const catalogTarget = page.getByLabel('图库流程版本', { exact: true });
     await expect(catalogTarget).toHaveValue('no-ai');
     await catalogTarget.selectOption(colorTarget!);
-    await expect.poll(() => page.locator('.catalog-card img').evaluateAll((images) => images.map((image) => image.getAttribute('src')))).toEqual(expect.arrayContaining([assets.find((asset) => asset.id === noAiStage)!.thumbnailUrl, assets.find((asset) => asset.fileName === 'DSC2.jpg')!.thumbnailUrl]));
+    await expect.poll(() => thumbnailSources(page.locator('.catalog-card img'))).toEqual(expect.arrayContaining([assets.find((asset) => asset.id === noAiStage)!.thumbnailUrl, assets.find((asset) => asset.fileName === 'DSC2.jpg')!.thumbnailUrl]));
     await page.screenshot({ path: 'test-results/catalog-workflow-version.png' });
     await page.reload();
     await expect(page.locator('.catalog-card')).toHaveCount(2);
@@ -140,9 +146,9 @@ test('shows a matching RAW in version controls and compares the JPEG original ag
     await expect(catalogTarget.locator('option').first()).toBeEnabled();
     const jpeg = page.locator('.catalog-card').filter({ hasText: 'A.jpg' });
     const raw = page.locator('.catalog-card').filter({ hasText: 'A.dng' });
-    const rawImage = await raw.locator('img').getAttribute('src');
+    const rawImage = (await thumbnailSources(raw.locator('img')))[0];
     await catalogTarget.selectOption('raw');
-    await expect(jpeg.locator('img')).toHaveAttribute('src', rawImage!);
+    await expect.poll(() => thumbnailSources(jpeg.locator('img'))).toEqual([rawImage]);
     await jpeg.dblclick();
     const viewer = page.getByRole('region', { name: '看图', exact: true });
     const target = viewer.getByRole('combobox', { name: '切换目标版本' });
@@ -150,7 +156,7 @@ test('shows a matching RAW in version controls and compares the JPEG original ag
     await expect(viewer.locator('.version-switcher button').filter({ hasText: 'RAW' })).toBeVisible();
     const rawSource = (await page.evaluate(() => window.desktopApi.listCatalogAssets())).find((asset) => asset.fileName === 'A.dng')!.previewUrl;
     await expect(viewer.locator('.base-image')).toHaveAttribute('src', rawSource);
-    await expect(viewer.locator('.thumb[data-asset-id] img').first()).toHaveAttribute('src', rawImage!);
+    await expect.poll(() => thumbnailSources(viewer.locator('.thumb[data-asset-id] img').first())).toEqual([rawImage]);
     await target.selectOption('stage:original');
     const originalSource = (await page.evaluate(() => window.desktopApi.listCatalogAssets())).find((asset) => asset.fileName === 'A.jpg')!.previewUrl.replace('://preview/', '://original/');
     await viewer.locator('.canvas-wrap').focus();
