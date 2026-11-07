@@ -214,6 +214,16 @@ test('keeps daily grouped masonry cards and headings windowed', async () => {
   await page.keyboard.press('ArrowLeft');
   await expect(grid.locator('.catalog-card.is-focused')).toHaveAttribute('data-asset-id', 'window-photo-1198');
   await expect(grid.locator('.catalog-card.is-focused')).toBeInViewport();
+  const focusedBeforeZoom = await grid.locator('.catalog-card.is-focused').boundingBox();
+  await grid.locator('.catalog-card.is-focused').evaluate((card) => {
+    const bounds = card.getBoundingClientRect();
+    card.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: -160, clientX: bounds.left + bounds.width / 2, clientY: bounds.top + bounds.height / 2 }));
+  });
+  await expect.poll(() => grid.evaluate((element) => element.scrollHeight)).not.toBe(height);
+  await expect(grid.locator('.catalog-card.is-focused')).toBeInViewport();
+  expect(await grid.locator('.catalog-card').count()).toBeLessThan(100);
+  const focusedAfterZoom = await grid.locator('.catalog-card.is-focused').boundingBox();
+  expect(Math.abs((focusedAfterZoom?.y ?? 0) - (focusedBeforeZoom?.y ?? 0))).toBeLessThan(100);
   await page.getByRole('button', { name: '按日期分组', exact: true }).click();
 });
 

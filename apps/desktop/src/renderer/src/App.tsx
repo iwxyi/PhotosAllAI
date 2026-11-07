@@ -2607,16 +2607,6 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     return () => grid.removeEventListener('wheel', wheel);
   }, [viewMode, props.availablePhotos.length]);
   useEffect(() => { try { localStorage.setItem('photoallisai.thumbnail-size', String(thumbnailSize)); } catch { /* restricted storage */ } }, [thumbnailSize]);
-  useLayoutEffect(() => {
-    const grid = gridRef.current;
-    const anchor = zoomAnchor.current;
-    if (grid && anchor) {
-      const card = [...grid.querySelectorAll<HTMLElement>('.catalog-card')].find((item) => item.dataset.assetId === anchor.id);
-      if (card) grid.scrollTop += card.getBoundingClientRect().top - anchor.top;
-    }
-    const frame = requestAnimationFrame(() => { zoomAnchor.current = null; });
-    return () => cancelAnimationFrame(frame);
-  }, [thumbnailSize, cardWidth]);
   const [aspectRatios, setAspectRatios] = useState(() => new Map(IMAGE_ASPECT_RATIOS));
   const aspectRatioFrame = useRef<number | null>(null);
   useEffect(() => () => { if (aspectRatioFrame.current !== null) cancelAnimationFrame(aspectRatioFrame.current); }, []);
@@ -2688,6 +2678,20 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     }
     return { columns, headings, positions, height: groupTop };
   }, [viewMode, grouped, gridWidth, thumbnailSize, props.availablePhotos.length, photoGroups, previewPhoto, aspectRatios]);
+  useLayoutEffect(() => {
+    const grid = gridRef.current;
+    const anchor = zoomAnchor.current;
+    if (grid && anchor) {
+      const position = masonryLayout?.positions.get(anchor.id);
+      if (position) grid.scrollTop = position.top - (anchor.top - grid.getBoundingClientRect().top);
+      else {
+        const card = [...grid.querySelectorAll<HTMLElement>('.catalog-card')].find((item) => item.dataset.assetId === anchor.id);
+        if (card) grid.scrollTop += card.getBoundingClientRect().top - anchor.top;
+      }
+    }
+    const frame = requestAnimationFrame(() => { zoomAnchor.current = null; });
+    return () => cancelAnimationFrame(frame);
+  }, [thumbnailSize, cardWidth, masonryLayout]);
   const orderedIds = useMemo(() => photoGroups.flatMap((group) => group.items.map((photo) => photo.id)), [photoGroups]);
   const selectedPhoto = useMemo(() => props.availablePhotos.find((photo) => selection.focusId === photo.id) ?? null, [props.availablePhotos, selection.focusId]);
   const { hasMore, loadingMore, onLoadMore } = props;
