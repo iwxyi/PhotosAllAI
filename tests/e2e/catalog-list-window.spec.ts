@@ -43,7 +43,7 @@ test.afterAll(async () => {
   if (root) await rm(root, { recursive: true, force: true });
 });
 
-async function showView(mode: '列表视图' | '网格视图') {
+async function showView(mode: '列表视图' | '网格视图' | '瀑布流视图') {
   const button = page.getByRole('button', { name: mode, exact: true });
   if (!(await button.isVisible())) {
     await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
@@ -176,6 +176,44 @@ test('keeps grouped grid cards and headings windowed during large jumps', async 
   await expect(grid.locator('.catalog-card.is-focused')).toHaveAttribute('data-asset-id', 'window-photo-1198');
   await expect(grid.locator('.catalog-card.is-focused')).toBeInViewport();
   expect(await grid.evaluate((element) => element.scrollHeight)).toBe(scrollHeight);
+  await page.getByRole('button', { name: '按日期分组', exact: true }).click();
+});
+
+test('keeps daily grouped masonry cards and headings windowed', async () => {
+  await showView('瀑布流视图');
+  const grid = page.getByRole('listbox', { name: '图库照片' });
+  for (let pageIndex = 0; pageIndex < 12; pageIndex += 1) {
+    await grid.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await expect.poll(() => page.locator('.catalog-toolbar-count').textContent()).toContain('1200');
+    if (await page.locator('.catalog-load-more').count() === 0) break;
+  }
+  await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
+  await page.getByRole('checkbox', { name: '分组:日期', exact: true }).check();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: '按日期分组', exact: true }).click();
+  await expect(grid).toHaveClass(/is-windowed/);
+  const height = await grid.evaluate((element) => element.scrollHeight);
+  for (const fraction of [0, 0.2, 0.5, 0.8, 1]) {
+    await grid.evaluate((element, position) => { element.scrollTop = element.scrollHeight * position; }, fraction);
+    await expect.poll(() => grid.locator('.catalog-photo-group').count()).toBeGreaterThan(0);
+    await expect.poll(() => grid.evaluate((element) => {
+      const viewport = element.getBoundingClientRect();
+      return [...element.querySelectorAll('.catalog-card')].some((card) => {
+        const rect = card.getBoundingClientRect();
+        return rect.bottom > viewport.top && rect.top < viewport.bottom;
+      });
+    })).toBe(true);
+    expect(await grid.locator('.catalog-photo-group').count()).toBeLessThan(100);
+    expect(await grid.locator('.catalog-card').count()).toBeLessThan(100);
+    expect(await grid.evaluate((element) => element.scrollHeight)).toBe(height);
+  }
+  await expect(grid.locator('.catalog-card').last()).toContainText('PHOTO_1199.jpg');
+  await grid.locator('.catalog-card').last().click();
+  await grid.evaluate((element) => { element.scrollTop = 0; });
+  await grid.focus();
+  await page.keyboard.press('ArrowLeft');
+  await expect(grid.locator('.catalog-card.is-focused')).toHaveAttribute('data-asset-id', 'window-photo-1198');
+  await expect(grid.locator('.catalog-card.is-focused')).toBeInViewport();
   await page.getByRole('button', { name: '按日期分组', exact: true }).click();
 });
 

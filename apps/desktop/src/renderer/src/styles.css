@@ -248,6 +248,7 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 .catalog-grid.catalog-masonry > .catalog-card { height: calc(100% - 10px); grid-template-rows: minmax(0, 1fr) auto; }
 .catalog-grid.catalog-masonry.is-windowed { position: relative; grid-auto-rows: auto; row-gap: 10px; }
 .catalog-grid.catalog-masonry.is-windowed > .catalog-card { position: absolute; grid-row-end: auto; grid-template-rows: minmax(0, 1fr) auto; }
+.catalog-grid.catalog-masonry.is-windowed > .catalog-photo-group { position: absolute; grid-row-end: auto; width: auto; }
 .catalog-masonry .catalog-load-more { grid-column: 1 / -1; grid-row-end: span 80; }
 .catalog-grid.catalog-justified { display: flex; flex-wrap: wrap; align-content: flex-start; align-items: flex-start; }
 .catalog-grid.catalog-justified.is-windowed { row-gap: 0; }

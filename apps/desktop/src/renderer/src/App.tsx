@@ -2658,13 +2658,19 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
   }, gridWidth, thumbnailSize) : null, [viewMode, gridWidth, photoGroups, previewPhoto, aspectRatios, thumbnailSize]);
   const justifiedSizes = justifiedLayout?.sizes ?? {};
   const masonryLayout = useMemo(() => {
-    if (viewMode !== 'masonry' || grouped || gridWidth <= 0 || props.availablePhotos.length <= 500) return null;
+    if (viewMode !== 'masonry' || gridWidth <= 0 || props.availablePhotos.length <= 500) return null;
     const columnCount = Math.max(1, Math.floor((gridWidth + 10) / (thumbnailSize + 10)));
     const width = (gridWidth - (columnCount - 1) * 10) / columnCount;
     const columnHeights = Array<number>(columnCount).fill(0);
-    const columns: Array<Array<{ index: number; top: number; height: number }>> = Array.from({ length: columnCount }, () => []);
+    const columns: Array<Array<{ photo: Photo; index: number; top: number; height: number }>> = Array.from({ length: columnCount }, () => []);
+    const headings: Array<{ key: string; title: string; count: number; top: number }> = [];
     const positions = new Map<string, { top: number; left: number; width: number; height: number }>();
-    props.availablePhotos.forEach((photo, index) => {
+    let groupTop = 0;
+    let itemIndex = 0;
+    for (const group of photoGroups) {
+      if (grouped) headings.push({ key: group.key, title: group.title, count: group.items.length, top: groupTop + 16 });
+      columnHeights.fill(groupTop + (grouped ? 63 : 0));
+      for (const photo of group.items) {
       const preview = previewPhoto(photo);
       const src = preview.thumbnailSrc ?? preview.src;
       const ratio = clamp(aspectRatios.get(src) ?? IMAGE_ASPECT_RATIOS.get(src) ?? 1.5, .25, 5);
@@ -2674,12 +2680,14 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
         if (columnHeights[candidate]! < columnHeights[column]!) column = candidate;
       }
       const top = columnHeights[column]!;
-      columns[column]!.push({ index, top, height });
+      columns[column]!.push({ photo, index: itemIndex++, top: top + 16, height });
       positions.set(photo.id, { top: top + 16, left: 16 + column * (width + 10), width, height });
       columnHeights[column] = top + height + 10;
-    });
-    return { columns, positions, height: Math.max(...columnHeights, 0) };
-  }, [viewMode, grouped, gridWidth, thumbnailSize, props.availablePhotos, previewPhoto, aspectRatios]);
+      }
+      groupTop = Math.max(...columnHeights);
+    }
+    return { columns, headings, positions, height: groupTop };
+  }, [viewMode, grouped, gridWidth, thumbnailSize, props.availablePhotos.length, photoGroups, previewPhoto, aspectRatios]);
   const orderedIds = useMemo(() => photoGroups.flatMap((group) => group.items.map((photo) => photo.id)), [photoGroups]);
   const selectedPhoto = useMemo(() => props.availablePhotos.find((photo) => selection.focusId === photo.id) ?? null, [props.availablePhotos, selection.focusId]);
   const { hasMore, loadingMore, onLoadMore } = props;
@@ -2761,7 +2769,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
       : Math.max(1, cards.filter((card) => card.getBoundingClientRect().top === cards[0]?.getBoundingClientRect().top).length);
     const delta = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : event.key === 'ArrowUp' ? -columns : columns;
     let targetIndex = clamp(currentIndex + delta, 0, orderedIds.length - 1);
-    if ((viewMode === 'masonry' && !masonryLayout) || viewMode === 'justified' || grouped) {
+    if ((viewMode === 'masonry' && !masonryLayout) || viewMode === 'justified' || (grouped && viewMode !== 'masonry')) {
       const currentCard = cards.find((card) => card.dataset.assetId === orderedIds[currentIndex]);
       if (currentCard) {
       const current = currentCard.getBoundingClientRect();
@@ -2942,7 +2950,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     if (!masonryLayout) return null;
     const startY = Math.max(0, listViewport.top - 1_000);
     const endY = listViewport.top + listViewport.height + 1_000;
-    const indices: number[] = [];
+    const visible: Array<{ photo: Photo; index: number }> = [];
     for (const column of masonryLayout.columns) {
       let low = 0;
       let high = column.length;
@@ -2951,11 +2959,20 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
         if (column[middle]!.top + column[middle]!.height <= startY) low = middle + 1;
         else high = middle;
       }
-      while (low < column.length && column[low]!.top < endY) indices.push(column[low++]!.index);
+      while (low < column.length && column[low]!.top < endY) visible.push(column[low++]!);
     }
-    indices.sort((left, right) => left - right);
-    return { photos: indices.map((index) => props.availablePhotos[index]!) };
-  }, [masonryLayout, listViewport.top, listViewport.height, props.availablePhotos]);
+    let headingStart = 0;
+    let headingEnd = masonryLayout.headings.length;
+    while (headingStart < headingEnd) {
+      const middle = (headingStart + headingEnd) >>> 1;
+      if (masonryLayout.headings[middle]!.top + 53 <= startY) headingStart = middle + 1;
+      else headingEnd = middle;
+    }
+    headingEnd = headingStart;
+    while (headingEnd < masonryLayout.headings.length && masonryLayout.headings[headingEnd]!.top < endY) headingEnd += 1;
+    visible.sort((left, right) => left.index - right.index);
+    return { photos: visible.map((item) => item.photo), headings: masonryLayout.headings.slice(headingStart, headingEnd) };
+  }, [masonryLayout, listViewport.top, listViewport.height]);
   const gridVisiblePhotos = gridWindow ? props.availablePhotos.slice(gridWindow.startRow * gridColumns, gridWindow.endRow * gridColumns) : null;
   const justifiedVisibleGroups = justifiedWindow?.rows.map((row) => ({ key: `row:${row.start}`, title: '', count: row.end - row.start, items: props.availablePhotos.slice(row.start, row.end), showHeader: false }));
   const gridVisibleGroups = justifiedVisibleGroups ?? groupedGridWindow?.groups ?? (masonryWindow ? [{ key: 'visible', title: '', count: masonryWindow.photos.length, items: masonryWindow.photos, showHeader: false }] : gridVisiblePhotos ? [{ key: 'visible', title: '', count: gridVisiblePhotos.length, items: gridVisiblePhotos, showHeader: false }] : photoGroups.map((group) => ({ ...group, count: group.items.length, showHeader: grouped })));
@@ -3028,6 +3045,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
             {groupedGridWindow && groupedGridWindow.before > 0 && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: groupedGridWindow.before - 10 }} />}
             {justifiedWindow && justifiedWindow.before > 0 && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: justifiedWindow.before }} />}
             {masonryWindow && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: masonryLayout!.height }} />}
+            {masonryWindow?.headings.map((heading) => <header className="catalog-photo-group catalog-group-heading" key={`group:${heading.key}`} style={{ top: heading.top, left: 16, right: 16 }}><strong>{heading.title}</strong><span title="当前已加载的照片数量">{heading.count} 张</span></header>)}
             {gridVisibleGroups.flatMap((group, groupIndex) => {
               const cards = group.items.map((photo) => {
                 const preview = previewPhoto(photo);
