@@ -162,6 +162,8 @@
 
 2026-11-07 位置分页基线：图库分页接口新增可选 `offset`，与游标互斥；排序、越界位置及总数回归通过。10 万条合成索引的 200 项位置页，offset 0/50,000/99,000 在文件名排序下约 2/4/5 毫秒，评分排序约 1/3/6 毫秒，修改时间排序约 1/4/5 毫秒；7 项常规性能测试通过。这些仅是本机同步数据库查询时间。渲染端仍累计 `catalogPhotos`，分组和键盘选择依赖完整已加载 ID 序列；后续必须实现视口页面缓存及独立选择索引，测 10 万以上混合媒体的随机跳转、内存上界和 UI 输入延迟。
 
+2026-11-07 分组详情请求增量：元数据分组的文件详情改为每页最多 256 项的一次 IPC，主进程每批最多 6 项并发读取；渲染端按页合并详情，避免每 6 项重建一次分组状态。`pnpm typecheck`、`pnpm build` 和 `tests/e2e/catalog-browse.spec.ts` 的 1 项 Electron 分组用例通过。此测试只覆盖功能正确性；尚未测大量 RAW/HEIC 混合素材下的详情读取吞吐、分组完成时间、主进程输入延迟与内存。详情仍需逐文件 `stat` 和元数据解析，不能以 IPC 次数减少推断总耗时达标。
+
 2026-11-07 百万级位置分页补测：`CATALOG_MILLION_BENCH=1 pnpm exec vitest run apps/desktop/src/main/catalog-performance.test.ts --reporter=verbose` 的 8 项测试通过。100 万条合成索引中，200 项位置页在 offset 500,000 时三种排序分别为 173/130/25 毫秒，在 offset 990,000 时为 40/37/167 毫秒；均为本机单次测量，受缓存和负载影响明显。同步 `OFFSET` 扫描在深位置可能阻塞主进程上百毫秒，不可直接作为高频滚动定位方案；应设计有序锚点或游标跳转，并在真实 Electron 窗口测输入延迟。
 
 2026-11-07 启动崩溃隔离探针：新增 `node apps/desktop/tests/diagnostics/run-startup-probe.mjs`，只启动 Electron、在主脚本首行打印标记、等待 `app.whenReady()` 后退出，不加载产品代码。受限运行环境中该探针 PID 51796 以 `SIGABRT` 退出，`mainScriptStarted=false`、`appReady=false`、标准错误为空；与用户提供的 `HIServices _RegisterApplication` 启动栈相符。这证明该次受限环境启动失败发生在任何项目主进程脚本之前，不能归因于图库分页或 SQLite。仍需在正常 GUI 环境运行同一探针并将其与正式应用的系统报告按 PID、时间和启动阶段日志对照；正式使用中的闪退尚未定因。
