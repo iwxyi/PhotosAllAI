@@ -28,7 +28,7 @@ interface AnalysisProcessor {
 }
 
 interface GenerationProcessor {
-  generate(assetId: string, payload: unknown, signal?: AbortSignal): Promise<unknown>;
+  generate(assetId: string, payload: unknown, signal?: AbortSignal, requestId?: string): Promise<unknown>;
 }
 
 interface ExportProcessor {
@@ -40,9 +40,10 @@ interface AgentProcessor {
 }
 
 export class TaskRunner {
-  #running = false;
+  static readonly #generationKinds = ['generation', 'agent'] as const;
+  static readonly #catalogKinds = ['analysis', 'collection-analysis', 'export'] as const;
   #stopped = false;
-  #drainPromise: Promise<void> | null = null;
+  readonly #lanes = new Map<string, Promise<void>>();
   readonly #controllers = new Map<string, AbortController>();
   readonly #tasks: TaskQueue;
   readonly #analysis: AnalysisProcessor;
@@ -72,7 +73,7 @@ export class TaskRunner {
   stop(): Promise<void> {
     this.#stopped = true;
     for (const controller of this.#controllers.values()) controller.abort();
-    return this.#drainPromise ?? Promise.resolve();
+    return Promise.all([...this.#lanes.values()]).then(() => undefined);
   }
 
   cancel(taskId: string): void {
@@ -80,15 +81,23 @@ export class TaskRunner {
   }
 
   wake(): void {
-    if (this.#running || this.#stopped) return;
-    this.#running = true;
-    this.#drainPromise = Promise.resolve().then(() => this.#drain());
+    if (this.#stopped) return;
+    this.#wakeLane('generation', TaskRunner.#generationKinds);
+    this.#wakeLane('catalog', TaskRunner.#catalogKinds);
   }
 
-  async #drain(): Promise<void> {
-    try {
+  #wakeLane(name: string, kinds: readonly PersistedTask['kind'][]): void {
+    if (this.#lanes.has(name)) return;
+    const promise = Promise.resolve().then(() => this.#runLane(kinds)).finally(() => {
+      this.#lanes.delete(name);
+      if (!this.#stopped && this.#tasks.hasQueued(kinds)) this.#wakeLane(name, kinds);
+    });
+    this.#lanes.set(name, promise);
+  }
+
+  async #runLane(kinds: readonly PersistedTask['kind'][]): Promise<void> {
       while (!this.#stopped) {
-        const task = this.#tasks.claimNext(['analysis', 'collection-analysis', 'generation', 'agent', 'export']);
+        const task = this.#tasks.claimNext(kinds);
         if (!task) break;
         const controller = new AbortController();
         this.#controllers.set(task.id, controller);
@@ -108,21 +117,26 @@ export class TaskRunner {
             taskResult = collectionAnalysisReportSchema.parse(await this.#analysis.analyzeCollection(payload.assetIds, payload.providerProfileId, controller.signal, payload.locale));
           } else if (task.kind === 'generation') {
             const payload = generationTaskPayloadSchema.parse(task.payload);
-            const generated = await this.#generation.generate(task.assetId!, payload, controller.signal);
+            const generated = await this.#generation.generate(task.assetId!, payload, controller.signal, task.id);
             if (generated && typeof generated === 'object') taskResult = { generation: generated };
           } else if (task.kind === 'agent') {
             const payload = agentTaskPayloadSchema.parse(task.payload);
-            taskResult = agentTaskResultSchema.parse(await this.#agent.run(payload, controller.signal, (progress) => {
-              const current = this.#tasks.find(task.id);
-              if (current && current.status !== 'paused' && current.status !== 'canceled') {
-                this.#tasks.reportProgress(task.id, progress);
-              }
-            }));
+            let acceptingProgress = true;
+            try {
+              taskResult = agentTaskResultSchema.parse(await this.#agent.run(payload, controller.signal, (progress) => {
+                if (!acceptingProgress || controller.signal.aborted || this.#stopped) return;
+                const current = this.#tasks.find(task.id);
+                if (current?.status === 'processing') this.#tasks.reportProgress(task.id, progress);
+              }));
+            } finally {
+              acceptingProgress = false;
+            }
           } else {
             const payload = exportTaskPayloadSchema.parse(task.payload);
             taskResult = exportReportSchema.parse(await this.#export.export(payload, controller.signal, task.id));
           }
-          if (!this.#tasks.find(task.id)) continue;
+          const current = this.#tasks.find(task.id);
+          if (controller.signal.aborted || this.#stopped || current?.status !== 'processing') continue;
           this.#tasks.advance(task.id, 'downloading', 0.85);
           this.#tasks.advance(task.id, 'saving', 0.95);
           if (task.kind === 'export' && taskResult && Number(taskResult.failed) > 0) {
@@ -132,21 +146,20 @@ export class TaskRunner {
           }
         } catch (error) {
           const current = this.#tasks.find(task.id);
-          if (!this.#stopped && current && current.status !== 'paused' && current.status !== 'canceled' && current.status !== 'failed') {
+          if (!controller.signal.aborted && !this.#stopped && current && (current.status === 'preparing' || current.status === 'processing')) {
             const fallback = task.kind === 'generation' ? 'GENERATION_FAILED' : task.kind === 'agent' ? 'AGENT_FAILED' : task.kind === 'export' ? 'EXPORT_FAILED' : task.kind === 'collection-analysis' ? 'COLLECTION_ANALYSIS_FAILED' : 'ANALYSIS_FAILED';
-            const errorCode = normalizeTaskErrorCode(error, fallback);
+            const normalized = normalizeTaskErrorCode(error, fallback);
+            const errorCode = task.kind === 'generation' && (
+              (error instanceof Error && 'generationOutcomeUncertain' in error && error.generationOutcomeUncertain === true)
+              ||
+              /^PROVIDER_HTTP_5\d{2}(?::|$)/u.test(normalized)
+              || ['PROVIDER_REQUEST_TIMEOUT', 'PROVIDER_CONNECTION_FAILED'].includes(normalized)
+            ) ? 'GENERATION_RESULT_UNCERTAIN' : normalized;
             this.#tasks.advance(task.id, 'failed', current.progress, errorCode);
           }
         } finally {
           this.#controllers.delete(task.id);
         }
       }
-    } finally {
-      this.#running = false;
-      this.#drainPromise = null;
-      if (!this.#stopped && this.#tasks.hasQueued(['analysis', 'collection-analysis', 'generation', 'agent', 'export'])) {
-        this.wake();
-      }
-    }
   }
 }

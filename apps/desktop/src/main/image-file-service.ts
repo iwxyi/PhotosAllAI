@@ -122,7 +122,10 @@ export class ImageFileService {
       const handle = await opendir(directory);
       await this.#discoverEntries(handle, directory, selectedPath, selectedId, sessionId, generation, onProgress);
     } catch {
-      if (generation === this.#openGeneration) onProgress({ items: [], selectedId, directory, sessionId, complete: true });
+      if (generation === this.#openGeneration) {
+        await this.temporaryIndex?.finishAsync(sessionId).catch(() => undefined);
+        if (generation === this.#openGeneration) onProgress({ items: [], selectedId, directory, sessionId, complete: true });
+      }
     }
   }
 

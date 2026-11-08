@@ -72,6 +72,67 @@ describe('analysis task runner', () => {
     queue.close();
   });
 
+  it('ignores agent progress reported after shutdown begins', async () => {
+    const queue = await tasks();
+    const task = queue.enqueue({ kind: 'agent', assetId: null, payload: {
+      instruction: 'Review the selection', steps: [{ id: 'select', kind: 'select', selection: { limit: 30 } }]
+    } });
+    let reportProgress!: (progress: number) => void;
+    let resolveRun!: (value: unknown) => void;
+    const run = vi.fn((_payload: unknown, _signal?: AbortSignal, onProgress?: (progress: number) => void) => {
+      reportProgress = onProgress!;
+      return new Promise((resolve) => { resolveRun = resolve; });
+    });
+    const runner = new TaskRunner(queue, { analyze: vi.fn() }, { generate: vi.fn() }, undefined, { run });
+    runner.start();
+    await vi.waitFor(() => expect(queue.find(task.id)?.status).toBe('processing'));
+    const progress = queue.find(task.id)!.progress;
+
+    const stopped = runner.stop();
+    reportProgress(0.8);
+    expect(queue.find(task.id)?.progress).toBe(progress);
+    resolveRun({ selectedAssetIds: [], removedAssetIds: [], ratedAssetIds: [], generatedResultIds: [], movedAssetIds: [], completedSteps: [], skippedSteps: [], warnings: [], dryRun: false });
+    await stopped;
+    expect(queue.find(task.id)?.status).toBe('processing');
+    queue.close();
+  });
+
+  it('ignores progress from an old agent attempt after the resumed attempt starts', async () => {
+    const queue = await tasks();
+    const task = queue.enqueue({ kind: 'agent', assetId: null, payload: {
+      instruction: 'Review the selection', steps: [{ id: 'select', kind: 'select', selection: { limit: 30 } }]
+    } });
+    let oldProgress!: (progress: number) => void;
+    let resolveFirst!: (value: unknown) => void;
+    let resolveSecond!: (value: unknown) => void;
+    let attempt = 0;
+    const run = vi.fn((_payload: unknown, _signal?: AbortSignal, onProgress?: (progress: number) => void) =>
+      new Promise((resolve) => {
+        if (attempt++ === 0) {
+          oldProgress = onProgress!;
+          resolveFirst = resolve;
+        } else {
+          resolveSecond = resolve;
+        }
+      })
+    );
+    const runner = new TaskRunner(queue, { analyze: vi.fn() }, { generate: vi.fn() }, undefined, { run });
+    runner.start();
+    await vi.waitFor(() => expect(queue.find(task.id)?.status).toBe('processing'));
+    queue.pause(task.id);
+    queue.resume(task.id);
+    resolveFirst({});
+    await vi.waitFor(() => expect(run).toHaveBeenCalledTimes(2));
+
+    const progress = queue.find(task.id)!.progress;
+    oldProgress(0.8);
+    expect(queue.find(task.id)?.progress).toBe(progress);
+    resolveSecond({});
+    await vi.waitFor(() => expect(queue.find(task.id)?.status).toBe('completed'));
+    await runner.stop();
+    queue.close();
+  });
+
   it('keeps an actively paused task paused after aborting its processor', async () => {
     const queue = await tasks();
     const task = queue.enqueue({ kind: 'analysis', assetId: 'asset-paused', payload: { providerProfileId, mode: 'full' } });
@@ -91,6 +152,55 @@ describe('analysis task runner', () => {
     await vi.waitFor(() => expect(receivedSignal?.aborted).toBe(true));
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(queue.find(task.id)?.status).toBe('paused');
+    await runner.stop();
+    queue.close();
+  });
+
+  it('ignores a late result from a paused attempt after the task resumes', async () => {
+    const queue = await tasks();
+    const task = queue.enqueue({ kind: 'analysis', assetId: 'asset-resumed', payload: { providerProfileId, mode: 'full' } });
+    let resolveFirst!: (value: unknown) => void;
+    const analyze = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValueOnce({ id: 'new-revision', result: { summary: 'current attempt' } });
+    const runner = new TaskRunner(queue, { analyze }, { generate: vi.fn() });
+    runner.start();
+    await vi.waitFor(() => expect(queue.find(task.id)?.status).toBe('processing'));
+
+    queue.pause(task.id);
+    runner.cancel(task.id);
+    queue.resume(task.id);
+    resolveFirst({ id: 'old-revision', result: { summary: 'stale attempt' } });
+
+    await vi.waitFor(() => expect(queue.find(task.id)?.status).toBe('completed'));
+    expect(analyze).toHaveBeenCalledTimes(2);
+    expect(queue.find(task.id)?.result).toEqual({
+      analysisRevisionId: 'new-revision', analysis: { summary: 'current attempt' }
+    });
+    await runner.stop();
+    queue.close();
+  });
+
+  it('ignores a late failure from an attempt that was paused and resumed', async () => {
+    const queue = await tasks();
+    const task = queue.enqueue({ kind: 'analysis', assetId: 'asset-retry', payload: { providerProfileId, mode: 'full' } });
+    let rejectFirst!: (reason: Error) => void;
+    const analyze = vi.fn()
+      .mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject; }))
+      .mockResolvedValueOnce({ id: 'retry-revision', result: { summary: 'retry succeeded' } });
+    const runner = new TaskRunner(queue, { analyze }, { generate: vi.fn() });
+    runner.start();
+    await vi.waitFor(() => expect(queue.find(task.id)?.status).toBe('processing'));
+
+    queue.pause(task.id);
+    queue.resume(task.id);
+    rejectFirst(new Error('PROVIDER_HTTP_429'));
+
+    await vi.waitFor(() => expect(queue.find(task.id)?.status).toBe('completed'));
+    expect(analyze).toHaveBeenCalledTimes(2);
+    expect(queue.find(task.id)?.result).toEqual({
+      analysisRevisionId: 'retry-revision', analysis: { summary: 'retry succeeded' }
+    });
     await runner.stop();
     queue.close();
   });
@@ -207,9 +317,82 @@ describe('analysis task runner', () => {
     runner.start();
 
     await vi.waitFor(() => expect(queue.list()[0]?.status).toBe('completed'));
-    expect(generate).toHaveBeenCalledWith('asset-2', expect.objectContaining(payload), expect.any(AbortSignal));
+    expect(generate).toHaveBeenCalledWith('asset-2', expect.objectContaining(payload), expect.any(AbortSignal), expect.any(String));
     expect(generate.mock.calls[0]?.[2].aborted).toBe(false);
     runner.stop();
+    queue.close();
+  });
+
+  it('keeps catalog analysis responsive while a generation request is in flight', async () => {
+    const queue = await tasks();
+    let resolveGeneration!: (value: unknown) => void;
+    const generate = vi.fn(() => new Promise((resolve) => { resolveGeneration = resolve; }));
+    const analyze = vi.fn().mockResolvedValue({ id: 'revision-concurrent', result: { summary: 'ready' } });
+    queue.enqueue({ kind: 'generation', assetId: 'asset-generation', payload: {
+      providerProfileId, batchId: '4fdbbb8a-8c33-484a-9719-2d36d61c4f66', prompt: 'Generate', resultIndex: 1
+    } });
+    const analysis = queue.enqueue({ kind: 'analysis', assetId: 'asset-analysis', payload: { providerProfileId, mode: 'full' } });
+    const runner = new TaskRunner(queue, { analyze }, { generate });
+    runner.start();
+
+    await vi.waitFor(() => expect(generate).toHaveBeenCalled());
+    await vi.waitFor(() => expect(queue.find(analysis.id)?.status).toBe('completed'));
+    expect(queue.find(analysis.id)?.result).toEqual({
+      analysisRevisionId: 'revision-concurrent', analysis: { summary: 'ready' }
+    });
+    expect(queue.list().find((task) => task.kind === 'generation')?.status).toBe('processing');
+    resolveGeneration({});
+    await runner.stop();
+    queue.close();
+  });
+
+  it('marks a generation gateway failure as uncertain instead of bulk retryable', async () => {
+    const queue = await tasks();
+    const task = queue.enqueue({ kind: 'generation', assetId: 'asset-uncertain', payload: {
+      providerProfileId, batchId: '4fdbbb8a-8c33-484a-9719-2d36d61c4f66', prompt: 'Generate', resultIndex: 1
+    } });
+    const runner = new TaskRunner(queue, { analyze: vi.fn() }, {
+      generate: vi.fn().mockRejectedValue(new Error('PROVIDER_HTTP_503: gateway unavailable'))
+    });
+    runner.start();
+    await vi.waitFor(() => expect(queue.find(task.id)?.status).toBe('failed'));
+    expect(queue.find(task.id)?.errorCode).toBe('GENERATION_RESULT_UNCERTAIN');
+    expect(queue.retryFailedGenerations()).toEqual({ retried: 0, remaining: 0 });
+    await runner.stop();
+    queue.close();
+  });
+
+  it('marks a successful provider response that cannot be saved as uncertain', async () => {
+    const queue = await tasks();
+    const task = queue.enqueue({ kind: 'generation', assetId: 'asset-invalid-result', payload: {
+      providerProfileId, batchId: '4fdbbb8a-8c33-484a-9719-2d36d61c4f66', prompt: 'Generate', resultIndex: 1
+    } });
+    const error = Object.assign(new Error('PROVIDER_IMAGE_MISSING'), { generationOutcomeUncertain: true });
+    const runner = new TaskRunner(queue, { analyze: vi.fn() }, { generate: vi.fn().mockRejectedValue(error) });
+    runner.start();
+    await vi.waitFor(() => expect(queue.find(task.id)?.status).toBe('failed'));
+    expect(queue.find(task.id)?.errorCode).toBe('GENERATION_RESULT_UNCERTAIN');
+    await runner.stop();
+    queue.close();
+  });
+
+  it('wakes an idle catalog lane when analysis is queued during generation', async () => {
+    const queue = await tasks();
+    let resolveGeneration!: (value: unknown) => void;
+    const generate = vi.fn(() => new Promise((resolve) => { resolveGeneration = resolve; }));
+    queue.enqueue({ kind: 'generation', assetId: 'asset-generation', payload: {
+      providerProfileId, batchId: '4fdbbb8a-8c33-484a-9719-2d36d61c4f66', prompt: 'Generate', resultIndex: 1
+    } });
+    const runner = new TaskRunner(queue, { analyze: vi.fn().mockResolvedValue({ id: 'revision-late', result: {} }) }, { generate });
+    runner.start();
+    await vi.waitFor(() => expect(generate).toHaveBeenCalled());
+
+    const analysis = queue.enqueue({ kind: 'analysis', assetId: 'asset-late', payload: { providerProfileId, mode: 'full' } });
+    runner.wake();
+    await vi.waitFor(() => expect(queue.find(analysis.id)?.status).toBe('completed'));
+    expect(queue.list().find((task) => task.kind === 'generation')?.status).toBe('processing');
+    resolveGeneration({});
+    await runner.stop();
     queue.close();
   });
 

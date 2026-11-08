@@ -124,7 +124,8 @@ test('Agent autonomously inspects, edits, verifies, and opens results; MCP is us
   await page.getByRole('menuitem', { name: '设置' }).click();
   await page.getByRole('button', { name: 'MCP', exact: true }).click();
   const mcpToggle = page.getByLabel('开启 MCP 服务');
-  if (!(await mcpToggle.isChecked())) await mcpToggle.check();
+  if (!(await mcpToggle.isChecked())) await mcpToggle.click();
+  await expect(mcpToggle).toBeChecked();
   await expect(page.locator('.mcp-connection-card code')).toContainText('127.0.0.1');
   if (await mcpToggle.isChecked()) await mcpToggle.click();
   await expect(mcpToggle).not.toBeChecked();
@@ -141,6 +142,8 @@ test('Agent autonomously inspects, edits, verifies, and opens results; MCP is us
 test('Agent iterates from an inspected generated version and reviews the verified result', async () => {
   test.setTimeout(60_000);
   await page.keyboard.press('Escape');
+  await page.getByRole('tab', { name: '图库', exact: true }).click();
+  await page.getByRole('button', { name: 'Agent', exact: true }).click();
   await page.getByLabel('Agent 会话').selectOption('__new__');
   await page.getByRole('textbox', { name: 'Agent 输入' }).fill('验证迭代修图：修好肤质，检查后继续修正，保留我的首选设置。');
   await page.getByRole('button', { name: '发送 Agent 指令' }).click();
@@ -160,6 +163,8 @@ test('Agent iterates from an inspected generated version and reviews the verifie
 test('Agent clarification, readable confirmation, close and restart preserve the session', async () => {
   test.setTimeout(60_000);
   await page.keyboard.press('Escape');
+  await page.getByRole('tab', { name: '图库', exact: true }).click();
+  await page.getByRole('button', { name: 'Agent', exact: true }).click();
   await page.getByLabel('Agent 会话').selectOption('__new__');
   const input = page.getByRole('textbox', { name: 'Agent 输入' });
   await input.fill('验证会话交互：先问我保留内容，再申请移出图片；拒绝后等待。');

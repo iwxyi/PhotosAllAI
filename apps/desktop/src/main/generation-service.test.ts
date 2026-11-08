@@ -9,6 +9,7 @@ import type { ProviderProfile } from '@photoallisai/contracts';
 
 import { GenerationService, isPrivateAddress, validateGeneratedImageUrl } from './generation-service';
 import { publishTemporaryFileSafely } from './safe-file-write';
+import { TaskService } from './task-service';
 
 const temporaryDirectories: string[] = [];
 const servers: Server[] = [];
@@ -96,6 +97,30 @@ function payload(resultIndex = 1) {
 }
 
 describe('managed generation results', () => {
+  it('does not replay a paid generation POST after a gateway error', async () => {
+    let requests = 0;
+    const { service } = await fixture(
+      () => ({ error: { message: 'gateway unavailable' } }),
+      undefined, undefined, undefined, 'nanobanana-compatible',
+      () => { requests += 1; }, 503
+    );
+    await expect(service.generate('asset-1', payload(), undefined, 'f88f9e7c-e90f-457e-9a8d-18f6d7f6ef2b'))
+      .rejects.toThrow('PROVIDER_HTTP_503');
+    expect(requests).toBe(1);
+  });
+
+  it('marks a successful provider response without an image as uncertain', async () => {
+    const { service } = await fixture(() => ({ data: [] }));
+    await expect(service.generate('asset-1', payload())).rejects.toMatchObject({ generationOutcomeUncertain: true });
+    service.close();
+  });
+
+  it('marks an invalid image returned after a successful generation as uncertain', async () => {
+    const { service } = await fixture(() => ({ data: [{ b64_json: Buffer.from('not an image').toString('base64') }] }));
+    await expect(service.generate('asset-1', payload())).rejects.toMatchObject({ generationOutcomeUncertain: true });
+    service.close();
+  });
+
   it('preserves the provider reason when generation is rejected with HTTP 403', async () => {
     const { service } = await fixture(
       () => ({ error: { message: 'model access denied for this account' } }),
@@ -210,7 +235,9 @@ describe('managed generation results', () => {
     const manifestPath = path.join(batchDirectory, 'manifest.json');
     const previousManifest = await readFile(manifestPath, 'utf8');
 
-    await expect(service.generate('asset-1', payload(2))).rejects.toThrow('simulated manifest publish failure');
+    await expect(service.generate('asset-1', payload(2))).rejects.toMatchObject({
+      message: 'simulated manifest publish failure', generationOutcomeUncertain: true
+    });
 
     expect(service.list('asset-1')).toHaveLength(1);
     expect(await readFile(manifestPath, 'utf8')).toBe(previousManifest);
@@ -619,7 +646,7 @@ describe('managed generation results', () => {
     service.close();
   });
 
-  it('rolls back an interrupted generated-result write and refreshes its manifest', async () => {
+  it('preserves a published image without a result row for reconciliation', async () => {
     const { service, directory, sourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
     const result = await service.generate('asset-1', payload());
     const filePath = service.resolveResultFile(result.id)!;
@@ -633,13 +660,195 @@ describe('managed generation results', () => {
       ) VALUES (?, ?, ?, ?, ?, ?, 'managed', ?)
     `).run(result.id, 'asset-1', batchId, result.fileName, filePath, temporaryPath, Date.now());
 
-    await expect(service.recoverInterruptedWrites()).resolves.toEqual({ total: 1, recovered: 1, failed: 0 });
-    await expect(service.recoverInterruptedWrites()).resolves.toEqual({ total: 0, recovered: 0, failed: 0 });
-    await expect(stat(filePath)).rejects.toMatchObject({ code: 'ENOENT' });
-    await expect(stat(temporaryPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(service.recoverInterruptedWrites()).resolves.toEqual({ total: 1, recovered: 0, failed: 1 });
+    expect(await readFile(filePath)).toEqual(png);
+    expect(await readFile(temporaryPath, 'utf8')).toBe('interrupted-temporary-payload');
     const manifest = JSON.parse(await readFile(path.join(path.dirname(filePath), 'manifest.json'), 'utf8')) as { results: unknown[] };
-    expect(manifest.results).toEqual([]);
+    expect(manifest.results).toHaveLength(1);
+    expect((database.prepare('SELECT COUNT(*) AS value FROM generation_write_intents').get() as { value: number }).value).toBe(1);
     expect(await readFile(sourcePath, 'utf8')).toBe('untouched-original');
+    database.close();
+    service.close();
+  });
+
+  it('cleans an interrupted write before its result file was published', async () => {
+    const { service, directory } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const filePath = path.join(directory, 'managed', 'generated', 'as', 'asset-1', batchId, 'pending.png');
+    const temporaryPath = `${filePath}.4321.60cae5ec-b718-41a2-8389-b87c4db28edf.tmp`;
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(temporaryPath, 'incomplete-temporary-payload');
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    database.prepare(`
+      INSERT INTO generation_write_intents (
+        result_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'managed', ?)
+    `).run('pending-unpublished', 'asset-1', batchId, 'pending.png', filePath, temporaryPath, Date.now());
+
+    await expect(service.recoverInterruptedWrites()).resolves.toEqual({ total: 1, recovered: 1, failed: 0 });
+    await expect(stat(temporaryPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((database.prepare('SELECT COUNT(*) AS value FROM generation_write_intents').get() as { value: number }).value).toBe(0);
+    database.close();
+    service.close();
+  });
+
+  it('keeps a committed generated result when startup finds its stale write intent', async () => {
+    const { service, directory } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', payload());
+    const filePath = service.resolveResultFile(result.id)!;
+    const temporaryPath = `${filePath}.4321.60cae5ec-b718-41a2-8389-b87c4db28edf.tmp`;
+    await writeFile(temporaryPath, 'stale-temporary-payload');
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    database.prepare(`
+      INSERT INTO generation_write_intents (
+        result_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'managed', ?)
+    `).run(result.id, 'asset-1', batchId, result.fileName, filePath, temporaryPath, Date.now());
+    await writeFile(path.join(path.dirname(filePath), 'manifest.json'), '{"results":[]}');
+
+    await expect(service.recoverInterruptedWrites()).resolves.toEqual({ total: 1, recovered: 1, failed: 0 });
+    expect(service.list('asset-1').map((item) => item.id)).toContain(result.id);
+    expect(await readFile(filePath)).toEqual(png);
+    await expect(stat(temporaryPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    const manifest = JSON.parse(await readFile(path.join(path.dirname(filePath), 'manifest.json'), 'utf8')) as { results: Array<{ id: string }> };
+    expect(manifest.results.map((item) => item.id)).toContain(result.id);
+    expect((database.prepare('SELECT COUNT(*) AS value FROM generation_write_intents').get() as { value: number }).value).toBe(0);
+    database.close();
+    service.close();
+  });
+
+  it('finds a committed generation by its stable task ID only while its file exists', async () => {
+    const { service } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const taskId = 'd012fd4c-8cf6-4663-ab1b-4db814a718e1';
+    const result = await service.generate('asset-1', payload(), undefined, taskId);
+    expect((await service.findCommittedTaskResult(taskId))?.id).toBe(result.id);
+    await rm(service.resolveResultFile(result.id)!);
+    expect(await service.findCommittedTaskResult(taskId)).toBeNull();
+    service.close();
+  });
+
+  it('does not reconcile a committed task to an empty or wrong-format image', async () => {
+    const { service } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const taskId = '56143662-63d9-4f15-8936-29b8e1150c93';
+    const result = await service.generate('asset-1', payload(), undefined, taskId);
+    const filePath = service.resolveResultFile(result.id)!;
+    await writeFile(filePath, Buffer.alloc(0));
+    expect(await service.findCommittedTaskResult(taskId)).toBeNull();
+    await writeFile(filePath, Buffer.from('not-a-png-image'));
+    expect(await service.findCommittedTaskResult(taskId)).toBeNull();
+    await expect(service.generate('asset-1', payload(), undefined, taskId)).rejects.toThrow('GENERATION_RESULT_UNCERTAIN');
+    service.close();
+  });
+
+  it('returns a committed task result without sending another paid generation request', async () => {
+    let requests = 0;
+    const { service } = await fixture(
+      () => ({ data: [{ b64_json: png.toString('base64') }] }),
+      undefined, undefined, undefined, 'nanobanana-compatible', () => { requests += 1; }
+    );
+    const taskId = 'a889fa84-a960-4fa8-bbd7-c05b2730cc4f';
+    const first = await service.generate('asset-1', payload(), undefined, taskId);
+    const second = await service.generate('asset-1', payload(), undefined, taskId);
+    expect(second.id).toBe(first.id);
+    await expect(service.generate('asset-1', {
+      ...payload(), inputSources: [{ kind: 'asset', assetId: 'asset-1' }, { kind: 'asset', assetId: 'other-asset' }]
+    }, undefined, taskId)).rejects.toThrow('GENERATION_TASK_RESULT_CONFLICT');
+    await expect(service.generate('asset-1', {
+      ...payload(), templateId: '66a30ee9-bdca-44df-acd4-af42379c68a9', templateVersion: 1
+    }, undefined, taskId)).rejects.toThrow('GENERATION_TASK_RESULT_CONFLICT');
+    expect(requests).toBe(1);
+    expect(service.list('asset-1')).toHaveLength(1);
+    service.close();
+  });
+
+  it('does not resend a paid request while the same task has an unresolved write intent', async () => {
+    let requests = 0;
+    const { service, directory } = await fixture(
+      () => ({ data: [{ b64_json: png.toString('base64') }] }),
+      undefined, undefined, undefined, 'nanobanana-compatible', () => { requests += 1; }
+    );
+    const taskId = 'b31e18bf-31e3-4322-8ae7-6ad880665361';
+    const filePath = path.join(directory, 'managed', 'generated', 'as', 'asset-1', batchId, 'pending.png');
+    const temporaryPath = `${filePath}.4321.60cae5ec-b718-41a2-8389-b87c4db28edf.tmp`;
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, png);
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    database.prepare(`
+      INSERT INTO generation_write_intents (
+        result_id, task_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'managed', ?)
+    `).run('pending-result', taskId, 'asset-1', batchId, 'pending.png', filePath, temporaryPath, Date.now());
+
+    await expect(service.generate('asset-1', payload(), undefined, taskId)).rejects.toThrow('GENERATION_RESULT_UNCERTAIN');
+    expect(requests).toBe(0);
+    expect(await readFile(filePath)).toEqual(png);
+    database.close();
+    service.close();
+  });
+
+  it('keeps a task-linked temporary write on restart and blocks a later paid retry', async () => {
+    let requests = 0;
+    const { service, directory } = await fixture(
+      () => ({ data: [{ b64_json: png.toString('base64') }] }),
+      undefined, undefined, undefined, 'nanobanana-compatible', () => { requests += 1; }
+    );
+    const taskId = '7bc454d9-a78b-4d60-8aee-26727d8d5211';
+    const filePath = path.join(directory, 'managed', 'generated', 'as', 'asset-1', batchId, 'pending.png');
+    const temporaryPath = `${filePath}.4321.60cae5ec-b718-41a2-8389-b87c4db28edf.tmp`;
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(temporaryPath, png);
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    database.prepare(`
+      INSERT INTO generation_write_intents (
+        result_id, task_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'managed', ?)
+    `).run('pending-task-result', taskId, 'asset-1', batchId, 'pending.png', filePath, temporaryPath, Date.now());
+
+    await expect(service.recoverInterruptedWrites()).resolves.toEqual({ total: 1, recovered: 0, failed: 1 });
+    expect(await readFile(temporaryPath)).toEqual(png);
+    expect((database.prepare('SELECT task_id FROM generation_write_intents WHERE result_id = ?').get('pending-task-result') as { task_id: string }).task_id).toBe(taskId);
+    await expect(service.generate('asset-1', payload(), undefined, taskId)).rejects.toThrow('GENERATION_RESULT_UNCERTAIN');
+    expect(requests).toBe(0);
+    database.close();
+    service.close();
+  });
+
+  it('reconciles a persisted generation task after a crash between result commit and task completion', async () => {
+    const { service, directory } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const databaseFile = path.join(directory, 'catalog.sqlite');
+    let tasks = new TaskService(databaseFile);
+    const task = tasks.enqueue({ kind: 'generation', assetId: 'asset-1', payload: payload() });
+    tasks.claimNext(['generation']);
+    tasks.advance(task.id, 'processing', 0.5);
+    const result = await service.generate('asset-1', payload(), undefined, task.id);
+    tasks.close();
+    tasks = new TaskService(databaseFile);
+    expect(tasks.find(task.id)).toMatchObject({ status: 'failed', errorCode: 'GENERATION_RESULT_UNCERTAIN' });
+    await service.recoverInterruptedWrites();
+    for (const taskId of tasks.uncertainGenerationTaskIds()) {
+      const committed = await service.findCommittedTaskResult(taskId);
+      if (committed) tasks.recoverCommittedGeneration(taskId, committed);
+    }
+    expect(tasks.find(task.id)).toMatchObject({ status: 'completed', result: { generation: { id: result.id } } });
+    tasks.close();
+    service.close();
+  });
+
+  it('leaves a committed result for review when its file is missing during recovery', async () => {
+    const { service, directory } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const result = await service.generate('asset-1', payload());
+    const filePath = service.resolveResultFile(result.id)!;
+    const temporaryPath = `${filePath}.4321.60cae5ec-b718-41a2-8389-b87c4db28edf.tmp`;
+    const database = new DatabaseSync(path.join(directory, 'catalog.sqlite'));
+    database.prepare(`
+      INSERT INTO generation_write_intents (
+        result_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'managed', ?)
+    `).run(result.id, 'asset-1', batchId, result.fileName, filePath, temporaryPath, Date.now());
+    await rm(filePath);
+
+    await expect(service.recoverInterruptedWrites()).resolves.toEqual({ total: 1, recovered: 0, failed: 1 });
+    expect(service.list('asset-1').map((item) => item.id)).toContain(result.id);
+    expect((database.prepare('SELECT COUNT(*) AS value FROM generation_write_intents').get() as { value: number }).value).toBe(1);
     database.close();
     service.close();
   });
@@ -718,8 +927,8 @@ describe('managed generation results', () => {
     `).get(result.id) as { file_path: string; temporary_path: string };
     expect(intent.file_path).toContain(path.join('moved', '_PhotoAllIsAI', 'RENAMED__ASSET1'));
     expect(intent.temporary_path).toBe(`${intent.file_path}.4321.785c8b89-1d25-4d82-af73-37286ce03d10.tmp`);
-    await expect(service.recoverInterruptedWrites()).resolves.toEqual({ total: 1, recovered: 1, failed: 0 });
-    await expect(stat(intent.file_path)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(service.recoverInterruptedWrites()).resolves.toEqual({ total: 1, recovered: 0, failed: 1 });
+    expect(await readFile(intent.file_path)).toEqual(png);
     database.close();
     service.close();
   });

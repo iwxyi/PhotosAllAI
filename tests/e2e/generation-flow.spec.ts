@@ -143,7 +143,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await expect(page.getByText('可清理背景的人像')).toBeVisible({ timeout: 10_000 });
   await page.getByLabel('搜索图库').fill('');
 
-  await page.getByRole('button', { name: '添加本图到批量修图' }).click();
+  await page.getByRole('button', { name: '添加到批量修图', exact: true }).click();
   await page.getByRole('button', { name: '打开批量修图' }).click();
   await expect(page.locator('.batch-queue-item')).toHaveCount(1);
   await page.getByRole('button', { name: '生成全部' }).click();
@@ -196,6 +196,8 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await expect(page.getByRole('button', { name: '已加入修图列表' })).toBeVisible();
   await page.getByRole('button', { name: '打开批量修图' }).click();
   await page.getByRole('button', { name: '生成全部' }).click();
+  await page.getByRole('alertdialog', { name: '重新生成全部图片？' })
+    .getByRole('button', { name: '重新生成' }).click();
   await expect(page.getByText('V2', { exact: true })).toBeVisible({ timeout: 10_000 });
   await page.locator('.batch-candidate').last().dblclick();
   await page.locator('.canvas-wrap').click({ button: 'right' });

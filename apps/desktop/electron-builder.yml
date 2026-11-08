@@ -9,6 +9,7 @@ files:
   - package.json
 asar: true
 compression: maximum
+afterSign: apps/desktop/build/after-sign.cjs
 fileAssociations:
   - ext: [jpg, jpeg, png, webp, gif, avif, bmp, ico, heic, heif, tif, tiff, dng, cr2, cr3, nef, nrw, arw, raf, rw2, orf, pef]
     name: Image
@@ -20,6 +21,7 @@ mac:
     - zip
   hardenedRuntime: true
   gatekeeperAssess: false
+  notarize: true
 win:
   target:
     - target: nsis

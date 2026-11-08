@@ -119,6 +119,23 @@ describe('temporary image browsing', () => {
     expect(updates.length).toBeGreaterThan(1);
   });
 
+  it('finishes the temporary index when sibling discovery cannot open the directory', async () => {
+    const { directory, resolveAssetFile } = await setup();
+    const index = new TemporaryMediaIndex();
+    const finish = vi.spyOn(index, 'finishAsync');
+    const service = new ImageFileService({ resolveAssetFile }, index);
+    const selected = path.join(directory, 'selected.jpg');
+    await writeFile(selected, '');
+    const updates: Awaited<ReturnType<ImageFileService['open']>>[] = [];
+    const session = await service.open([selected], (update) => updates.push(update));
+    await rm(directory, { recursive: true, force: true });
+
+    await vi.waitFor(() => expect(updates.at(-1)?.complete).toBe(true));
+    expect(finish).toHaveBeenCalledWith(session.sessionId);
+    expect(service.pageTemporary(session.sessionId!, 0, 10).items).toHaveLength(1);
+    index.close();
+  });
+
   it('opens video alongside images for temporary browsing without indexing it as an image', async () => {
     const { directory, service } = await setup();
     const video = path.join(directory, 'clip.mp4');

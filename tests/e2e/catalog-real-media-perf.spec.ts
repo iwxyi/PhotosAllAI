@@ -14,6 +14,7 @@ const loadTo = Number(process.env.PHOTOALLISAI_PERF_LOAD_TO ?? 0);
 const rendererLoadTo = Number(process.env.PHOTOALLISAI_PERF_RENDERER_LOAD_TO ?? 0);
 const viewMode = process.env.PHOTOALLISAI_PERF_VIEW ?? 'grid';
 const mixedMedia = process.env.PHOTOALLISAI_PERF_MIXED_MEDIA === '1';
+const sustainedCycles = Number(process.env.PHOTOALLISAI_PERF_CYCLES ?? 0);
 const source = path.resolve('apps/desktop/src/renderer/public/demo/portrait.jpg');
 const mixedSources = [
   'test_data/2025.09.14 苏州旗袍-茹意、33/33-园林/833A1252.jpeg',
@@ -23,11 +24,12 @@ const mixedSources = [
 ].map((file) => path.resolve(file));
 
 test('measures real catalog image scrolling', async () => {
-  test.setTimeout(Math.max(loadTo, rendererLoadTo) > 0 ? Math.max(120_000, Math.min(1_200_000, Math.max(loadTo, rendererLoadTo) * 30)) : profileMain ? 180_000 : 120_000);
+  test.setTimeout(Math.max(Math.max(loadTo, rendererLoadTo) > 0 ? Math.max(120_000, Math.min(1_200_000, Math.max(loadTo, rendererLoadTo) * 30)) : profileMain ? 180_000 : 120_000, sustainedCycles * 15_000 + 120_000));
   if (!Number.isSafeInteger(count) || count < 100 || count > 100_000) throw new RangeError('PHOTOALLISAI_PERF_COUNT must be 100..100000');
   if (!Number.isSafeInteger(loadTo) || loadTo < 0 || loadTo > count) throw new RangeError('PHOTOALLISAI_PERF_LOAD_TO must be 0..PHOTOALLISAI_PERF_COUNT');
   if (!Number.isSafeInteger(rendererLoadTo) || rendererLoadTo < 0 || rendererLoadTo > count) throw new RangeError('PHOTOALLISAI_PERF_RENDERER_LOAD_TO must be 0..PHOTOALLISAI_PERF_COUNT');
   if (!['grid', 'masonry', 'justified'].includes(viewMode)) throw new RangeError('PHOTOALLISAI_PERF_VIEW must be grid, masonry, or justified');
+  if (!Number.isSafeInteger(sustainedCycles) || sustainedCycles < 0 || sustainedCycles > 100) throw new RangeError('PHOTOALLISAI_PERF_CYCLES must be 0..100');
   const root = await mkdtemp(path.join(tmpdir(), 'photoallisai-real-media-perf-'));
   const userData = path.join(root, 'user-data');
   const media = path.join(root, 'media');
@@ -266,6 +268,49 @@ test('measures real catalog image scrolling', async () => {
       expect(samples.every((entry) => entry.mounted < 150)).toBe(true);
       console.log(JSON.stringify({ count, viewMode, phase: 'renderer-page', requested: rendererLoadTo, loaded: previousLoaded, samples }));
       await cdp.detach();
+    }
+    if (sustainedCycles > 0) {
+      if (rendererLoadTo > 0) await application.evaluate(({ BrowserWindow }) => { BrowserWindow.getAllWindows()[0]?.show(); });
+      const cdp = await page.context().newCDPSession(page);
+      const samples: Array<{ cycle: number; position: number; loaded: number; settleMs: number; mounted: number; tabKiB: number; browserKiB: number; heapMiB: number; eventLoopDelayMaxMs: number }> = [];
+      try {
+        for (let cycle = 0; cycle < sustainedCycles; cycle++) {
+          const position = [0, 0.25, 0.5, 0.75, 1][cycle % 5]!;
+          const startedAt = performance.now();
+          await grid.evaluate((element, fraction) => { element.scrollTop = element.scrollHeight * fraction; }, position);
+          await expect.poll(() => grid.evaluate((element) => {
+            const viewport = element.getBoundingClientRect();
+            const visible = [...element.querySelectorAll<HTMLImageElement>('.catalog-card img')]
+              .filter((image) => { const rect = image.getBoundingClientRect(); return rect.bottom > viewport.top && rect.top < viewport.bottom; });
+            return visible.length > 0 && visible.every((image) => image.naturalWidth > 0);
+          }), { timeout: 15_000 }).toBe(true);
+          await cdp.send('HeapProfiler.collectGarbage');
+          const [layout, metrics, heap, diagnostic] = await Promise.all([
+            grid.evaluate((element) => ({ mounted: element.querySelectorAll('.catalog-card').length, loaded: Number(element.getAttribute('data-loaded-count')) })),
+            application.evaluate(({ app }) => app.getAppMetrics().map((metric) => ({ type: metric.type, workingSetKiB: metric.memory.workingSetSize }))),
+            cdp.send('Runtime.getHeapUsage'),
+            page.evaluate(() => window.desktopApi.getDiagnosticSnapshot())
+          ]);
+          const sample = {
+            cycle: cycle + 1, position, ...layout, settleMs: Math.round(performance.now() - startedAt),
+            tabKiB: metrics.find((metric) => metric.type === 'Tab')?.workingSetKiB ?? 0,
+            browserKiB: metrics.find((metric) => metric.type === 'Browser')?.workingSetKiB ?? 0,
+            heapMiB: Math.round(heap.usedSize / 1024 / 1024),
+            eventLoopDelayMaxMs: diagnostic.cache.performance.eventLoopDelayMaxMs
+          };
+          samples.push(sample);
+          expect(layout.mounted).toBeLessThan(150);
+          console.log(JSON.stringify({ count, viewMode, mixedMedia, phase: 'sustained-browse', ...sample }));
+        }
+        if (samples.length >= 10 && samples[4]!.loaded === samples.at(-1)!.loaded) {
+          const baseline = samples[4]!;
+          const last = samples.at(-1)!;
+          expect(last.tabKiB - baseline.tabKiB, 'Tab working set grew more than 100 MiB after warmup').toBeLessThan(100 * 1024);
+          expect(last.heapMiB - baseline.heapMiB, 'Retained JS heap grew more than 40 MiB after warmup').toBeLessThan(40);
+        }
+      } finally {
+        await cdp.detach();
+      }
     }
     if (loadTo > 0) {
       await grid.evaluate((element) => { element.scrollTop = 0; });

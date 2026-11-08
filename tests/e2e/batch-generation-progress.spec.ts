@@ -80,6 +80,13 @@ test('direct generation shows batch and image progress, retains candidates and r
   const progress = page.getByRole('region', { name: '本批生成进度' });
   await expect(progress).toBeVisible();
   await expect(page.getByRole('button', { name: '生成中…', exact: true })).toBeDisabled();
+  await page.getByRole('tab', { name: '图库', exact: true }).click();
+  await expect(page.locator('.catalog-card')).toHaveCount(2);
+  await page.locator('.catalog-card').first().dblclick();
+  await expect(page.getByRole('region', { name: '看图', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await page.getByRole('tab', { name: 'AI 批量修图', exact: true }).click();
+  await expect(progress).toBeVisible();
   await expect(items.first()).not.toContainText('待识别');
   await expect(progress).toContainText('完成 2/4 · 失败 2', { timeout: 25_000 });
   await expect(progress).toContainText('失败 2');
@@ -106,6 +113,7 @@ test('direct generation shows batch and image progress, retains candidates and r
 
 test('viewer remembers one target, temporarily overrides task originals and navigates batch results', async () => {
   test.setTimeout(90_000);
+  await page.getByLabel('默认生成数量').fill('2');
   await page.getByRole('button', { name: '生成全部', exact: true }).click();
   await page.getByRole('alertdialog', { name: '重新生成全部图片？' }).getByRole('button', { name: '重新生成' }).click();
   await expect.poll(async () => page.evaluate(async () => {

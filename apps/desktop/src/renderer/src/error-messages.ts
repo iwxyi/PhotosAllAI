@@ -3,6 +3,7 @@ export function generationFailureMessage(code: string | null | undefined): strin
   const detail = detailParts.join(': ');
   const explain = (message: string) => detail ? `${message}（服务端详情：${detail}）` : message;
   switch (base) {
+    case 'GENERATION_RESULT_UNCERTAIN': return '应用中断前可能已提交生成请求。请先到模型服务核对结果和费用，再决定是否重试；重试可能再次计费。';
     case 'PROVIDER_HTTP_400': return explain('生图请求被拒绝，请检查模型 ID、接口类型及提示词。');
     case 'PROVIDER_HTTP_403': return explain('生图请求被拒绝，请检查账号权限、模型权限、内容策略或参考图权限。');
     case 'PROVIDER_IMAGE_MISSING': return explain('接口没有返回生成图片，请重试或检查接口兼容性。');

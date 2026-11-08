@@ -79,6 +79,22 @@ describe('temporary media index', () => {
     index.close();
   });
 
+  it('can restart sorting after records arrive during an earlier sort', async () => {
+    const index = new TemporaryMediaIndex();
+    index.begin('growing');
+    index.insert('growing', Array.from({ length: 30_000 }, (_, number) => ({
+      id: `id-${number}`, file: `/photos/photo${30_000 - number}.jpg`
+    })));
+    const firstSort = index.finishAsync('growing');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    index.insert('growing', [{ id: 'new', file: '/photos/photo0.jpg' }]);
+    await firstSort;
+    await index.finishAsync('growing');
+    expect(index.page('growing', 0, 1).items[0]?.id).toBe('new');
+    expect(index.position('growing', 'id-0')).toBe(30_000);
+    index.close();
+  });
+
   it('resolves files from a shared directory and mixed explicit paths', () => {
     const index = new TemporaryMediaIndex();
     index.begin('mixed');

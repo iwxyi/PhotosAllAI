@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { EventEmitter } from 'node:events';
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
@@ -764,7 +765,8 @@ function registerIpc(): void {
       retry: ['failed', 'canceled'], pause: ['queued', 'preparing', 'uploading', 'processing', 'downloading'],
       resume: ['paused'], cancel: ['draft', 'queued', 'paused', 'preparing', 'uploading', 'processing', 'downloading']
     }[input.action];
-    const targets = tasks.batchForTask(input.taskId).filter((task) => eligible.includes(task.status));
+    const targets = tasks.batchForTask(input.taskId).filter((task) => eligible.includes(task.status)
+      && !(input.action === 'retry' && task.errorCode === 'GENERATION_RESULT_UNCERTAIN'));
     for (const task of targets) {
       tasks[input.action](task.id);
       if (input.action === 'pause' || input.action === 'cancel') taskRunner.cancel(task.id);
@@ -789,7 +791,7 @@ function registerIpc(): void {
     return toRendererTask(task);
   });
   ipcMain.handle('tasks.retry-all-failed.v1', () => {
-    const failed = tasks.list().filter((task) => task.status === 'failed');
+    const failed = tasks.list().filter((task) => task.status === 'failed' && task.errorCode !== 'GENERATION_RESULT_UNCERTAIN');
     for (const task of failed) tasks.retry(task.id);
     if (failed.length) taskRunner.wake();
     return failed.length;
@@ -928,7 +930,7 @@ function createWindow(): BrowserWindow {
   // window may have been destroyed by a late show/hide event.
   const visibilityChanged = window.listeners('show').find((listener) => listener.name === 'visibilityChanged');
   if (visibilityChanged) {
-    const emitter = window as unknown as import('node:events').EventEmitter;
+    const emitter = window as unknown as EventEmitter;
     const guardVisibility = () => {
       if (!window.isDestroyed() && !window.webContents.isDestroyed()) visibilityChanged();
     };
@@ -1110,6 +1112,10 @@ app.whenReady().then(async () => {
     );
   });
   const generationWrites = await generation.recoverInterruptedWrites();
+  for (const taskId of tasks.uncertainGenerationTaskIds()) {
+    const committed = await generation.findCommittedTaskResult(taskId);
+    if (committed) tasks.recoverCommittedGeneration(taskId, committed);
+  }
   startupRecovery = {
     trashPurges,
     fileOperations: recoveredFileOperations,

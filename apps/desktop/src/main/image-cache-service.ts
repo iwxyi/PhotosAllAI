@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import path from 'node:path';
 
 import { nativeImage } from 'electron';
+import sharp from 'sharp';
 
 import type { CatalogService } from './catalog-service';
 import { publishTemporaryFileSafely } from './safe-file-write';
@@ -317,15 +318,30 @@ export class ImageCacheService {
     if (!sourceMetadata.isFile() || sourceMetadata.size === 0) throw new Error('IMAGE_PREVIEW_UNAVAILABLE');
     await mkdir(path.dirname(destination), { recursive: true });
     const nativeStartedAt = performance.now();
-    let image = nativeImage.createEmpty();
+    let image: Electron.NativeImage | null = null;
     let encoded: Buffer | null = null;
     const format = identifyMediaFormat(sourcePath);
-    if (specification.width === variants.thumbnail.width && sourceMetadata.size >= 8 * 1024 * 1024 && (format?.id === 'jpeg' || format?.id === 'png')) {
-      const capabilities = await this.getDecoderCapabilities();
-      if (capabilities.imageMagick) {
-        const externalStartedAt = performance.now();
-        encoded = await this.#decodeWithImageMagick(sourcePath, specification);
-        this.#externalDecodeMsTotal += performance.now() - externalStartedAt;
+    if (format?.id === 'tiff') {
+      const externalStartedAt = performance.now();
+      encoded = await this.#decodeWithSharp(sourcePath, specification);
+      this.#externalDecodeMsTotal += performance.now() - externalStartedAt;
+    }
+    if (!encoded && specification.width === variants.thumbnail.width && sourceMetadata.size >= 8 * 1024 * 1024 && (format?.id === 'jpeg' || format?.id === 'png')) {
+      const externalStartedAt = performance.now();
+      encoded = await this.#decodeWithSharp(sourcePath, specification);
+      this.#externalDecodeMsTotal += performance.now() - externalStartedAt;
+      if (!encoded) {
+        const capabilities = await this.getDecoderCapabilities();
+        if (format?.id === 'jpeg' && capabilities.sips) {
+          const fallbackStartedAt = performance.now();
+          encoded = await this.#decodeWithSips(sourcePath, destination, specification);
+          this.#externalDecodeMsTotal += performance.now() - fallbackStartedAt;
+        }
+        if (!encoded && capabilities.imageMagick) {
+          const fallbackStartedAt = performance.now();
+          encoded = await this.#decodeWithImageMagick(sourcePath, specification);
+          this.#externalDecodeMsTotal += performance.now() - fallbackStartedAt;
+        }
       }
     }
     if (!encoded) {
@@ -333,7 +349,7 @@ export class ImageCacheService {
       image = nativeImage.createFromPath(sourcePath);
       this.#nativeReadMsTotal += performance.now() - readStartedAt;
     }
-    if (!encoded && !image.isEmpty()) {
+    if (!encoded && image && !image.isEmpty()) {
       const size = image.getSize();
       const scale = Math.min(specification.width / size.width, specification.height / size.height, 1);
       const resizeStartedAt = performance.now();
@@ -360,10 +376,10 @@ export class ImageCacheService {
       }
     }
     this.#nativeDecodeMsTotal += performance.now() - nativeStartedAt;
-    if (image.isEmpty() && !encoded) throw new Error('IMAGE_PREVIEW_UNAVAILABLE');
+    if (!encoded && (!image || image.isEmpty())) throw new Error('IMAGE_PREVIEW_UNAVAILABLE');
 
     const encodeStartedAt = performance.now();
-    const bytes = encoded ?? image.toJPEG(specification.quality);
+    const bytes = encoded ?? image!.toJPEG(specification.quality);
     this.#jpegEncodeMsTotal += performance.now() - encodeStartedAt;
     const writeStartedAt = performance.now();
     const result = await writeCacheFileAtomically(destination, bytes, (stage, durationMs) => {
@@ -380,6 +396,20 @@ export class ImageCacheService {
     const imageMagick = await this.#decodeWithImageMagick(sourcePath, specification);
     if (imageMagick) return imageMagick;
     return this.#decodeWithSips(sourcePath, destination, specification);
+  }
+
+  async #decodeWithSharp(sourcePath: string, specification: { width: number; height: number; quality: number }): Promise<Buffer | null> {
+    try {
+      const output = await sharp(sourcePath)
+        .rotate()
+        .resize(specification.width, specification.height, { fit: 'inside', withoutEnlargement: true })
+        .flatten({ background: '#ffffff' })
+        .jpeg({ quality: specification.quality })
+        .toBuffer();
+      return output.length > 0 && output.length <= 20 * 1024 * 1024 ? output : null;
+    } catch {
+      return null;
+    }
   }
 
   async #decodeVideoFrame(sourcePath: string, specification: { width: number; height: number; quality: number }): Promise<Buffer | null> {
@@ -453,15 +483,15 @@ export async function createQuickLookThumbnail(sourcePath: string, size: number)
 }
 
 async function defaultDecoderProbe(): Promise<DecoderCapabilities> {
-  const probe = async (command: string): Promise<boolean> => {
+  const probe = async (command: string, versionArgument: string): Promise<boolean> => {
     try {
-      await execFile(command, ['-version'], { timeout: 5_000, windowsHide: true });
+      await execFile(command, [versionArgument], { timeout: 5_000, windowsHide: true });
       return true;
     } catch {
       return false;
     }
   };
-  const [imageMagick, sips] = await Promise.all([probe('magick'), process.platform === 'darwin' ? probe('sips') : Promise.resolve(false)]);
+  const [imageMagick, sips] = await Promise.all([probe('magick', '-version'), process.platform === 'darwin' ? probe('sips', '-v') : Promise.resolve(false)]);
   return { imageMagick, sips };
 }
 

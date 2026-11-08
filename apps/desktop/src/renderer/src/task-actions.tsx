@@ -9,7 +9,7 @@ const TaskActionsContext = createContext<{ busy: boolean; remove: (input: Delete
 export function TaskBatchButtons({ tasks }: { tasks: PersistedTask[] }) {
   const { busy, remove, batchAction } = useContext(TaskActionsContext);
   const first = tasks[0]!;
-  const retryable = tasks.some((task) => ['failed', 'canceled'].includes(task.status));
+  const retryable = tasks.some((task) => ['failed', 'canceled'].includes(task.status) && task.errorCode !== 'GENERATION_RESULT_UNCERTAIN');
   return <span className="task-batch-actions" onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}>
     <button type="button" title="重试失败或取消项" aria-label="重试批次失败项" disabled={busy || !retryable} onClick={() => batchAction({ taskId: first.id, action: 'retry' })}><RotateCcw size={14} /></button>
     <button type="button" title="删除批次" aria-label="删除批次" disabled={busy} onClick={() => remove({ scope: 'batch', taskId: first.id })}><X size={14} /></button>
@@ -99,7 +99,10 @@ export function TaskActions({ tasks, onOpenViewer, onEditTask, children }: {
         <span className="folder-menu-separator" />
       </> : <>
       {task.assetId && <><button type="button" role="menuitem" onClick={() => { onOpenViewer(task.assetId!, members.flatMap((item) => item.assetId ? [item.assetId] : [])); setMenu(null); }}><Image size={14} />查看图片</button><button type="button" role="menuitem" onClick={() => { void perform(async () => { if (!await window.desktopApi.revealCatalogAsset(task.assetId!)) throw new Error('ASSET_UNAVAILABLE'); }); }}><FolderOpen size={14} />打开原图位置</button><span className="folder-menu-separator" /></>}
-      {['failed', 'canceled'].includes(task.status) && <button type="button" role="menuitem" disabled={busy} onClick={() => { void perform(() => window.desktopApi.retryTask(task.id)); }}><RotateCcw size={14} />重试任务</button>}
+      {['failed', 'canceled'].includes(task.status) && <button type="button" role="menuitem" disabled={busy} onClick={() => {
+        if (task.errorCode === 'GENERATION_RESULT_UNCERTAIN' && !window.confirm('此生成请求的远端结果未知。请先在模型服务核对结果和费用；继续重试可能再次计费。确认继续？')) return;
+        void perform(() => window.desktopApi.retryTask(task.id));
+      }}><RotateCcw size={14} />重试任务</button>}
       {['queued', 'preparing', 'uploading', 'processing', 'downloading'].includes(task.status) && <button type="button" role="menuitem" disabled={busy} onClick={() => { void perform(() => window.desktopApi.pauseTask(task.id)); }}><Pause size={14} />暂停任务</button>}
       {task.status === 'paused' && <button type="button" role="menuitem" disabled={busy} onClick={() => { void perform(() => window.desktopApi.resumeTask(task.id)); }}><Play size={14} />恢复任务</button>}
       {['queued', 'paused', 'preparing', 'uploading', 'processing', 'downloading'].includes(task.status) && <button type="button" role="menuitem" disabled={busy} onClick={() => { void perform(() => window.desktopApi.cancelTask(task.id)); }}><X size={14} />取消任务</button>}

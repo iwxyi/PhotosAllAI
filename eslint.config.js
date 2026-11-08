@@ -21,5 +21,10 @@ export default tseslint.config(
       '@typescript-eslint/consistent-type-imports': 'error',
       '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }]
     }
+  },
+  {
+    files: ['**/tests/diagnostics/*.{cjs,mjs}', 'apps/desktop/build/*.cjs'],
+    languageOptions: { globals: { ...globals.node, ...globals.browser } },
+    rules: { '@typescript-eslint/no-require-imports': 'off' }
   }
 );

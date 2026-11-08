@@ -327,17 +327,23 @@ let catalogImageObserver: IntersectionObserver | undefined;
 const catalogImageActiveVisibility = new Map<Element, (visible: boolean) => void>();
 let catalogImageActiveObserver: IntersectionObserver | undefined;
 
-function CatalogImage({ src, previewSrc, alt = '', onAspectRatio, defer = false }: { src: string; previewSrc?: string; alt?: string; onAspectRatio?: ((ratio: number) => void) | undefined; defer?: boolean }): React.JSX.Element {
+function CatalogImage({ src, previewSrc, alt = '', onAspectRatio, defer = false, eager = false }: { src: string; previewSrc?: string; alt?: string; onAspectRatio?: ((ratio: number) => void) | undefined; defer?: boolean; eager?: boolean }): React.JSX.Element {
   const ref = useRef<HTMLImageElement>(null);
   const [nearViewport, setNearViewport] = useState(false);
   const [inViewport, setInViewport] = useState(false);
   const [request, setRequest] = useState<{ src: string; id: string; attempt: number; visible: boolean }>();
   const [displayed, setDisplayed] = useState<{ base: string; src: string; ready: boolean }>();
+  const [outgoingSrc, setOutgoingSrc] = useState<string | null>(null);
   const [needsPreview, setNeedsPreview] = useState(false);
   const [retry, setRetry] = useState<{ src: string; attempt: number }>({ src, attempt: 0 });
   const [retryReady, setRetryReady] = useState(false);
   const onAspectRatioRef = useRef(onAspectRatio);
   useLayoutEffect(() => { onAspectRatioRef.current = onAspectRatio; }, [onAspectRatio]);
+  useEffect(() => {
+    if (!outgoingSrc) return;
+    const timer = window.setTimeout(() => setOutgoingSrc(null), 150);
+    return () => window.clearTimeout(timer);
+  }, [outgoingSrc]);
   useEffect(() => { setRetry({ src, attempt: 0 }); setRetryReady(false); }, [src]);
   useEffect(() => {
     const element = ref.current;
@@ -360,11 +366,11 @@ function CatalogImage({ src, previewSrc, alt = '', onAspectRatio, defer = false 
     };
   }, []);
   useEffect(() => {
-    if (!nearViewport || defer) { setRequest(undefined); return; }
+    if ((!nearViewport && !eager) || defer) { setRequest(undefined); return; }
     const id = crypto.randomUUID();
     setRequest({ src, id, attempt: retry.attempt, visible: inViewport });
     return () => window.desktopApi.cancelPreviewRequest(id);
-  }, [nearViewport, defer, src, retry.attempt, inViewport]);
+  }, [nearViewport, eager, defer, src, retry.attempt, inViewport]);
   useEffect(() => {
     if (retry.src !== src || retry.attempt === 0 || !nearViewport) return;
     const timer = window.setTimeout(() => setRetryReady(true), Math.min(200 * 2 ** (retry.attempt - 1), 1_600));
@@ -406,20 +412,23 @@ function CatalogImage({ src, previewSrc, alt = '', onAspectRatio, defer = false 
     ? retryUrl ?? (retry.attempt > 0 ? undefined : prioritizedSrc)
     : undefined;
   const trackedUrl = requestedUrl?.startsWith('photoasset://') ? `${requestedUrl}${requestedUrl.includes('?') ? '&' : '?'}requestId=${request!.id}` : requestedUrl;
-  return <img ref={ref} className={current?.ready ? 'is-ready' : ''} src={current?.ready ? current.src : nearViewport && !defer ? trackedUrl : undefined} alt={alt} decoding="async" onError={(event) => {
+  const previousSrc = current?.ready ? outgoingSrc : displayed?.ready ? displayed.src : null;
+  return <>{previousSrc && <img className={`catalog-image-previous${current?.ready ? ' is-fading' : ''}`} src={previousSrc} alt="" aria-hidden="true" />}
+  <img ref={ref} className={current?.ready ? 'is-ready' : ''} src={current?.ready ? current.src : (nearViewport || eager) && !defer ? trackedUrl : undefined} alt={alt} decoding="async" onError={(event) => {
     if (!event.currentTarget.getAttribute('src') || !src.startsWith('photoasset://') || retry.src !== src || retry.attempt >= 3) return;
     setRetryReady(false);
     setRetry({ src, attempt: retry.attempt + 1 });
   }} onLoad={(event) => {
     const image = event.currentTarget;
     if (!image.getAttribute('src')) return;
+    if (displayed?.ready && displayed.base !== src) setOutgoingSrc(displayed.src);
     setDisplayed((previous) => previous?.base === src && previous.ready ? previous : { base: src, src: image.src, ready: true });
     if (image.naturalHeight > 0) {
       const ratio = image.naturalWidth / image.naturalHeight;
       rememberImageAspectRatio(src, ratio);
       onAspectRatioRef.current?.(ratio);
     }
-  }} />;
+  }} /></>;
 }
 
 type CompareMode = 'single' | 'split';
@@ -2226,7 +2235,7 @@ function TaskBatchGroup({ tasks, photos: providedPhotos, children, onOpenViewer:
     ? <span className="task-batch-image"><img src={batchPhoto.thumbnailSrc || batchPhoto.src} alt="" />{assetCount > 1 && <b>{assetCount}</b>}</span>
     : <TaskKindIcon kind={first.kind} />;
   const summary = <><ChevronRight size={14} />{batchIcon}<span className="task-batch-heading"><span className="task-batch-title-row"><strong>{title}</strong><small className="task-batch-time">{formatTaskTime(startedAt)}（用时 {formatTaskDuration(startedAt, stats.active + stats.queued + stats.paused > 0 ? Date.now() : lastUpdatedAt)}）</small></span><small>{first.kind === 'generation' ? `${assetCount || 1} 张图片 · ${stats.total} 个版本` : `${taskImageName(first, photos)}${tasks.length > 1 ? ` 等 ${stats.total} 项` : ` · ${stats.total} 项`}`}</small></span><span className="task-batch-counts"><span>成功 {stats.completed}</span>{(!compact || stats.active > 0) && <span>处理中 {stats.active}</span>}{(!compact || stats.queued > 0) && <span>等待 {stats.queued}</span>}{stats.paused > 0 && <span>暂停 {stats.paused}</span>}{(!compact || stats.failed > 0) && <span className={stats.failed > 0 ? 'failed-count' : ''}>失败 {stats.failed}</span>}{stats.canceled > 0 && <span>取消 {stats.canceled}</span>}</span><progress aria-label="批次进度" max={Math.max(stats.total, 1)} value={stats.settled} /></>;
-  return <details ref={detailRef} className={`task-batch-group${compact ? ' is-compact' : ''}`}><summary className="task-batch-summary" data-task-batch={first.id}>{summary}<TaskBatchButtons tasks={tasks} /></summary><div className="task-batch-members">{children ?? tasks.map((task) => { const photo = photos.find((item) => item.id === task.assetId); return <div className="task-batch-member" key={task.id}><div className="task-row task-activity-row" data-task-id={task.id}><button className="task-member-preview" data-label-color={photo?.labelColor ?? undefined} type="button" disabled={!photo || !onOpenViewer} onClick={() => { if (photo && onOpenViewer) onOpenViewer(photo.id); }} aria-label={photo ? `预览 ${photo.fileName}` : '任务图片预览'}>{(photo?.thumbnailSrc || photo?.src) ? <img src={photo.thumbnailSrc || photo.src} alt={photo.fileName} /> : <TaskKindIcon kind={task.kind} />}</button><span className="task-title"><strong>{taskImageName(task, photos)}</strong><small>{taskScope(task)}</small></span><span className={`task-state state-${task.status}`}>{taskStage(task)}</span></div>{task.status === 'failed' && ((task.kind === 'analysis' || task.kind === 'collection-analysis') ? <AnalysisFailure code={task.errorCode} taskId={task.id} className="task-analysis-failure" /> : <div className="task-analysis-failure" role="alert">{task.kind === 'export' ? exportFailureMessage(task.errorCode ?? '') : '任务执行失败'} <code>{task.errorCode}</code></div>)}<TaskAnalysisResult task={task} /><TaskOutput task={task} photos={photos} batchTasks={tasks} onOpenViewer={openViewer} />{task.kind === 'export' && task.result && <div className="task-analysis-result">成功 {Number(task.result.succeeded) || 0} · 失败 {Number(task.result.failed) || 0}{exportTaskReport(task)?.files.map((file) => <p key={file.resultId}>{file.fileName}</p>)}{exportTaskReport(task)?.failures.map((failure) => <p key={failure.resultId}>{exportFailureMessage(failure.errorCode)} · {failure.errorCode}</p>)}</div>}</div>; })}</div></details>;
+  return <details ref={detailRef} className={`task-batch-group${compact ? ' is-compact' : ''}`}><summary className="task-batch-summary" data-task-batch={first.id}>{summary}<TaskBatchButtons tasks={tasks} /></summary><div className="task-batch-members">{children ?? tasks.map((task) => { const photo = photos.find((item) => item.id === task.assetId); return <div className="task-batch-member" key={task.id}><div className="task-row task-activity-row" data-task-id={task.id}><button className="task-member-preview" data-label-color={photo?.labelColor ?? undefined} type="button" disabled={!photo || !onOpenViewer} onClick={() => { if (photo && onOpenViewer) onOpenViewer(photo.id); }} aria-label={photo ? `预览 ${photo.fileName}` : '任务图片预览'}>{(photo?.thumbnailSrc || photo?.src) ? <img src={photo.thumbnailSrc || photo.src} alt={photo.fileName} /> : <TaskKindIcon kind={task.kind} />}</button><span className="task-title"><strong>{taskImageName(task, photos)}</strong><small>{taskScope(task)}</small></span><span className={`task-state state-${task.status}`}>{taskStage(task)}</span></div>{task.status === 'failed' && ((task.kind === 'analysis' || task.kind === 'collection-analysis') ? <AnalysisFailure code={task.errorCode} taskId={task.id} className="task-analysis-failure" /> : <div className="task-analysis-failure" role="alert">{task.kind === 'export' ? exportFailureMessage(task.errorCode ?? '') : task.kind === 'generation' ? generationFailureMessage(task.errorCode) : '任务执行失败'} <code>{task.errorCode}</code></div>)}<TaskAnalysisResult task={task} /><TaskOutput task={task} photos={photos} batchTasks={tasks} onOpenViewer={openViewer} />{task.kind === 'export' && task.result && <div className="task-analysis-result">成功 {Number(task.result.succeeded) || 0} · 失败 {Number(task.result.failed) || 0}{exportTaskReport(task)?.files.map((file) => <p key={file.resultId}>{file.fileName}</p>)}{exportTaskReport(task)?.failures.map((failure) => <p key={failure.resultId}>{exportFailureMessage(failure.errorCode)} · {failure.errorCode}</p>)}</div>}</div>; })}</div></details>;
 }
 
 function TaskBar({ panelVisibility, onTogglePanel, suspended, open, onToggle, onOpenTaskCenter, onOpenViewer: openViewer, tasks, counts, photos }: { panelVisibility: { left: boolean; right: boolean }; onTogglePanel: (side: 'left' | 'right') => void; suspended: boolean; open: boolean; onToggle: () => void; onOpenTaskCenter: () => void; onOpenViewer: OpenTaskViewer; tasks: PersistedTask[] | null; counts?: Pick<TaskPage, 'activeCount' | 'queuedCount' | 'failedCount' | 'pausedCount'>; photos: Photo[] }): React.JSX.Element {
@@ -2696,6 +2705,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     return () => cancelAnimationFrame(frame);
   }, [thumbnailSize, cardWidth, masonryLayout]);
   const orderedIds = useMemo(() => photoGroups.flatMap((group) => group.items.map((photo) => photo.id)), [photoGroups]);
+  const eagerCatalogIds = useMemo(() => new Set(props.availablePhotos.slice(0, 32).map((photo) => photo.id)), [props.availablePhotos]);
   const selectedPhoto = useMemo(() => props.availablePhotos.find((photo) => selection.focusId === photo.id) ?? null, [props.availablePhotos, selection.focusId]);
   const { hasMore, loadingMore, onLoadMore } = props;
   const [fastScrolling, setFastScrolling] = useState(false);
@@ -2863,7 +2873,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
   const selectButton = (photo: Photo) => <input className="catalog-list-select" type="checkbox" aria-label={`选择 ${photo.fileName}`} checked={selection.selectedIds.has(photo.id)} onClick={(event) => event.stopPropagation()} onChange={() => selectPhoto(photo, 'toggle')} />;
   const photoImage = (photo: Photo) => {
     const preview = previewPhoto(photo);
-    return <span className="catalog-list-thumb">{preview.thumbnailSrc || preview.src ? <CatalogImage src={preview.thumbnailSrc ?? preview.src} alt="" defer={fastScrolling} /> : <Image size={18} />}</span>;
+    return <span className="catalog-list-thumb">{preview.thumbnailSrc || preview.src ? <CatalogImage src={preview.thumbnailSrc ?? preview.src} alt="" defer={fastScrolling} eager={eagerCatalogIds.has(photo.id)} /> : <Image size={18} />}</span>;
   };
   const columns = catalogColumns.filter((column) => visibleColumns.includes(column.id));
   const listStyle = { gridTemplateColumns: `24px ${columns.map((column) => column.width).join(' ')}` };
@@ -3070,7 +3080,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
                 const justifiedSize = justifiedSizes[photo.id];
                 const metadataHeight = 24 + 16 * (Number(photo.rating > 0) + Number(Boolean(photo.workflow)) + Number(Boolean(photo.workflowConflict)));
                 return <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} style={masonryWindow ? masonryLayout!.positions.get(photo.id) : viewMode === 'masonry' ? { gridRowEnd: `span ${Math.ceil(cardWidth / (aspectRatios.get(preview.thumbnailSrc ?? preview.src) ?? IMAGE_ASPECT_RATIOS.get(preview.thumbnailSrc ?? preview.src) ?? 1.5) + metadataHeight + 10)}` } : viewMode === 'justified' && justifiedSize ? { width: justifiedSize.width, '--thumbnail-height': `${justifiedSize.height}px` } as React.CSSProperties : undefined} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable key={photo.id} onDragStart={(event) => { preparePhotoDrag(event, photo, selection); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
-              <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{preview.thumbnailSrc || preview.src ? <CatalogImage src={preview.thumbnailSrc ?? preview.src} previewSrc={preview.src} defer={fastScrolling} onAspectRatio={viewMode === 'masonry' || viewMode === 'justified' ? (ratio) => refreshAspectRatio(preview.thumbnailSrc ?? preview.src, ratio) : undefined} /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
+              <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{preview.thumbnailSrc || preview.src ? <CatalogImage src={preview.thumbnailSrc ?? preview.src} previewSrc={preview.src} defer={fastScrolling} eager={eagerCatalogIds.has(photo.id)} onAspectRatio={viewMode === 'masonry' || viewMode === 'justified' ? (ratio) => refreshAspectRatio(preview.thumbnailSrc ?? preview.src, ratio) : undefined} /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
               <span className="catalog-photo-badges"><PhotoFlag photo={photo} /></span>
               <span className="catalog-card-meta"><strong title={photo.fileName}>{photo.fileName}</strong>{photo.rating > 0 && <span className="catalog-card-rating" aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}{photo.workflow && <small title={`${photo.workflow.name} · 按规则关联`}>{photo.workflow.members.length} 版本</small>}{photo.workflowConflict && <small title="多条流程规则同时匹配，已保留独立显示">规则冲突</small>}</span>
             </button>;
@@ -4148,6 +4158,7 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
   };
   const retryGeneration = async (failed: PersistedTask[]) => {
     if (submitting.current || failed.length === 0) return;
+    if (failed.some((task) => task.errorCode === 'GENERATION_RESULT_UNCERTAIN') && !window.confirm('部分生成请求的远端结果未知。请先在模型服务核对结果和费用；继续重试可能再次计费。确认继续？')) return;
     submitting.current = true;
     setBusy(true);
     try {
@@ -4595,7 +4606,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
             <label><span>Model ID</span><input required placeholder="模型标识" value={form.modelId} onChange={(event) => patchForm('modelId', event.target.value)} /></label>
             <div className="form-grid two-columns">
               <label><span>请求超时</span><select aria-label="模型请求超时" value={form.requestTimeoutMs} onChange={(event) => patchForm('requestTimeoutMs', Number(event.target.value))}><option value={30_000}>30 秒</option><option value={60_000}>60 秒</option><option value={120_000}>2 分钟</option><option value={300_000}>5 分钟</option><option value={600_000}>10 分钟</option></select></label>
-              <label><span>自动重试</span><select aria-label="模型自动重试次数" value={form.retryCount} onChange={(event) => patchForm('retryCount', Number(event.target.value))}><option value={0}>不重试</option><option value={1}>1 次</option><option value={2}>2 次</option><option value={3}>3 次</option><option value={5}>5 次</option></select><small>仅针对限流、网关和服务暂不可用；取消任务会中断等待。</small></label>
+              <label><span>自动重试</span><select aria-label="模型自动重试次数" value={form.retryCount} onChange={(event) => patchForm('retryCount', Number(event.target.value))}><option value={0}>不重试</option><option value={1}>1 次</option><option value={2}>2 次</option><option value={3}>3 次</option><option value={5}>5 次</option></select><small>适用于视觉分析等可安全重试的请求；付费生成不会自动重发。取消任务会中断等待。</small></label>
             </div>
             <label><span>自定义请求头</span><textarea aria-label="模型自定义请求头" rows={4} spellCheck={false} value={customHeadersText} onChange={(event) => { setCustomHeadersText(event.target.value); setMessage(''); }} /><small>使用 JSON 对象；认证、Cookie、Host、来源及传输层请求头不可覆盖。敏感凭据请只填写 API Key。</small></label>
             <label><span>API Key</span><div className="secret-input"><KeyRound size={14} /><input type="password" autoComplete="off" placeholder={form.id ? '留空以保留已保存凭据' : '输入服务密钥'} value={form.apiKey ?? ''} onChange={(event) => patchForm('apiKey', event.target.value)} /></div><small>密钥保存在应用配置中，不写入图库数据库、日志或导出清单；可随配置迁移到其他设备。</small></label>
@@ -4641,7 +4652,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
         </>}
         {settingsSection === 'tasks' && <section className="settings-section settings-info-section">
           <div className="settings-heading"><h2>队列执行</h2></div>
-          <div className="settings-info-grid"><article><strong>并发策略</strong><span>图片分析与生成按队列顺序执行，等待中的任务可在任务中心调整。</span></article><article><strong>失败恢复</strong><span>失败任务保留错误状态和重试次数，不会覆盖已完成版本。</span></article><article><strong>取消边界</strong><span>取消只作用于尚未提交结果的任务，已落盘版本继续保留。</span></article></div>
+          <div className="settings-info-grid"><article><strong>并发策略</strong><span>生成与 Agent 共用一条执行链，分析与导出共用另一条；等待中的任务可在任务中心调整。</span></article><article><strong>失败恢复</strong><span>失败任务保留错误状态和重试次数；远端结果未知的生成需先核对再重试。</span></article><article><strong>取消边界</strong><span>取消只作用于尚未提交结果的任务，已落盘版本继续保留。</span></article></div>
         </section>}
         {settingsSection === 'shortcuts' && <section className="settings-section settings-info-section">
           <div className="settings-heading"><h2>快捷键</h2></div>
@@ -4977,7 +4988,7 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
           {task.status === 'failed' && (task.kind === 'analysis' || task.kind === 'collection-analysis') && <AnalysisFailure code={task.errorCode} taskId={task.id} className="task-analysis-failure" />}
           <TaskAnalysisResult task={task} />
           <TaskOutput task={task} photos={photos} batchTasks={batch.tasks} onOpenViewer={onOpenViewer} />
-          {task.status === 'failed' && task.kind !== 'analysis' && task.kind !== 'collection-analysis' && <div className="task-analysis-failure" role="alert">{task.kind === 'export' ? exportFailureMessage(task.errorCode ?? '') : '任务执行失败'} <code>{task.errorCode}</code></div>}
+          {task.status === 'failed' && task.kind !== 'analysis' && task.kind !== 'collection-analysis' && <div className="task-analysis-failure" role="alert">{task.kind === 'export' ? exportFailureMessage(task.errorCode ?? '') : task.kind === 'generation' ? generationFailureMessage(task.errorCode) : '任务执行失败'} <code>{task.errorCode}</code></div>}
           {reportOpen && report && <section className="export-task-report" aria-label="导出报告">
             <header><span><strong>导出报告</strong><small>{report.canceled ? '已取消' : report.failed > 0 ? '部分项目未导出' : '所有文件均已导出'}</small></span><button className="secondary-action compact" type="button" onClick={async () => { if (!await window.desktopApi.revealExportDestination(task.id)) setMessage('导出目录已移动或暂时无法打开。'); }}><FolderOpen size={13} />打开导出目录</button></header>
             <div className="export-report-summary"><span>总计 <strong>{report.total}</strong></span><span>成功 <strong>{report.succeeded}</strong></span><span className={report.failed > 0 ? 'has-failures' : ''}>失败 <strong>{report.failed}</strong></span></div>
@@ -5578,6 +5589,7 @@ export function App(): React.JSX.Element {
   const [sortBy, setSortBy] = useState<CatalogSort>('fileName');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc' | undefined>('asc');
   const catalogRequest = useRef(0);
+  const smartCollectionsRequest = useRef(0);
   const catalogPagePending = useRef(false);
   const loadedCatalogCount = useRef(0);
   const loadedCatalogIds = useRef(new Set<string>());
@@ -5646,6 +5658,7 @@ export function App(): React.JSX.Element {
 
   const refreshCatalog = useCallback(async (folderId: string | null = selectedFolderId, preserveLoaded = false) => {
     const request = ++catalogRequest.current;
+    const collectionsRequest = ++smartCollectionsRequest.current;
     catalogRefreshInFlight.current = true;
     const loadedCount = preserveLoaded ? loadedCatalogCount.current : 200;
     catalogPagePending.current = false;
@@ -5682,7 +5695,7 @@ export function App(): React.JSX.Element {
       setCatalogFolders(folders);
       setCatalogTags(tags);
       setCatalogAlbums(albums);
-      setCatalogSmartCollections(smartCollections);
+      if (collectionsRequest === smartCollectionsRequest.current) setCatalogSmartCollections(smartCollections);
       if (selectedFolderId && !folders.some((folder) => folder.id === selectedFolderId)) setSelectedFolderId(null);
       if (selectedTagId && !tags.some((tag) => tag.id === selectedTagId)) setSelectedTagId(null);
       if (selectedAlbumId && !albums.some((album) => album.id === selectedAlbumId)) setSelectedAlbumId(null);
@@ -5722,6 +5735,12 @@ export function App(): React.JSX.Element {
     setCatalogPhotos((current) => current.map((photo) => patches.has(photo.id) ? { ...photo, ...patches.get(photo.id)! } : photo));
     setViewerPhotos((current) => current.map((photo) => patches.has(photo.id) ? { ...photo, ...patches.get(photo.id)! } : photo));
     setViewerPhoto((current) => current && patches.has(current.id) ? { ...current, ...patches.get(current.id)! } : current);
+    const collectionsRequest = ++smartCollectionsRequest.current;
+    void window.desktopApi.listCatalogSmartCollections().then((collections) => {
+      if (collectionsRequest === smartCollectionsRequest.current) setCatalogSmartCollections(collections);
+    }).catch(() => {
+      if (collectionsRequest === smartCollectionsRequest.current) void refreshCatalog(selectedFolderId, true);
+    });
   }), [favoriteOnly, loadingMore, photoFilters.colors.length, photoFilters.flags.length, photoFilters.minimumRating, refreshCatalog, selectedFolderId, selectedSmartCollection, sortBy]);
 
   useEffect(() => {

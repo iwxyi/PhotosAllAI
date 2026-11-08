@@ -8,16 +8,13 @@ permissions:
   contents: write
 
 jobs:
-  package:
+  quality:
     strategy:
+      fail-fast: false
       matrix:
-        include:
-          - os: macos-14
-            command: package:mac
-          - os: windows-2022
-            command: package:win
+        os: [macos-14, windows-2022]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -28,18 +25,192 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Build signed package when credentials are configured
-        run: pnpm ${{ matrix.command }}
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm test:e2e
+
+  package:
+    needs: quality
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            command: package:mac
+          - os: windows-2022
+            command: package:win
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.12.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify release tag and package versions
+        shell: bash
+        run: |
+          node -e 'const root = require("./package.json").version; const desktop = require("./apps/desktop/package.json").version; const tag = process.env.GITHUB_REF_NAME; if (root !== desktop || tag !== `v${desktop}`) { console.error(`Release version mismatch: tag=${tag}, root=${root}, desktop=${desktop}`); process.exit(1); }'
+      - name: Require release signing credentials
+        shell: bash
         env:
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MAC_CSC_LINK || secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MAC_CSC_KEY_PASSWORD || secrets.WIN_CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for name in CSC_LINK CSC_KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "Missing release credential: $name" >&2
+              exit 1
+            fi
+          done
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            for name in APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+              if [[ -z "${!name}" ]]; then
+                echo "Missing release credential: $name" >&2
+                exit 1
+              fi
+            done
+          fi
+      - name: Build signed package when credentials are configured
+        run: pnpm ${{ matrix.command }}
+        env:
+          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MAC_CSC_LINK || secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MAC_CSC_KEY_PASSWORD || secrets.WIN_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Verify macOS application signature
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          for arch in x64 arm64; do
+            if [[ "$arch" == x64 ]]; then
+              app_path="release/mac/PhotoAllIsAI.app"
+            else
+              app_path="release/mac-arm64/PhotoAllIsAI.app"
+            fi
+            test -d "$app_path"
+            codesign --verify --deep --strict --verbose=2 "$app_path"
+            codesign -dv --verbose=2 "$app_path" 2>&1 | grep -F "TeamIdentifier=$APPLE_TEAM_ID"
+            xcrun stapler validate "$app_path"
+            spctl --assess --type execute --verbose=2 "$app_path"
+            test -s "release/PhotoAllIsAI-${GITHUB_REF_NAME#v}-mac-${arch}.dmg"
+            archive="release/PhotoAllIsAI-${GITHUB_REF_NAME#v}-mac-${arch}.zip"
+            test -s "$archive"
+            extracted="$(mktemp -d)"
+            ditto -x -k "$archive" "$extracted"
+            archived_app="$extracted/PhotoAllIsAI.app"
+            test -x "$archived_app/Contents/MacOS/PhotoAllIsAI"
+            codesign --verify --deep --strict --verbose=2 "$archived_app"
+            codesign -dv --verbose=2 "$archived_app" 2>&1 | grep -F "TeamIdentifier=$APPLE_TEAM_ID"
+            xcrun stapler validate "$archived_app"
+            if [[ "$arch" == x64 ]]; then expected_arch=x86_64; else expected_arch=arm64; fi
+            lipo "$archived_app/Contents/MacOS/PhotoAllIsAI" -verify_arch "$expected_arch"
+            if [[ "$expected_arch" == "$(uname -m)" ]]; then
+              node tests/diagnostics/packaged-app-smoke.cjs "$archived_app/Contents/MacOS/PhotoAllIsAI"
+            fi
+            rm -rf "$extracted"
+          done
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Staple and verify macOS disk images
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          for arch in x64 arm64; do
+            dmg_path="release/PhotoAllIsAI-${GITHUB_REF_NAME#v}-mac-${arch}.dmg"
+            xcrun stapler staple "$dmg_path"
+            xcrun stapler validate "$dmg_path"
+            mountpoint="$(mktemp -d)"
+            hdiutil attach -readonly -nobrowse -mountpoint "$mountpoint" "$dmg_path"
+            mounted_app="$mountpoint/PhotoAllIsAI.app"
+            test -x "$mounted_app/Contents/MacOS/PhotoAllIsAI"
+            codesign --verify --deep --strict --verbose=2 "$mounted_app"
+            codesign -dv --verbose=2 "$mounted_app" 2>&1 | grep -F "TeamIdentifier=$APPLE_TEAM_ID"
+            xcrun stapler validate "$mounted_app"
+            if [[ "$arch" == x64 ]]; then expected_arch=x86_64; else expected_arch=arm64; fi
+            lipo "$mounted_app/Contents/MacOS/PhotoAllIsAI" -verify_arch "$expected_arch"
+            if [[ "$expected_arch" == "$(uname -m)" ]]; then
+              node tests/diagnostics/packaged-app-smoke.cjs "$mounted_app/Contents/MacOS/PhotoAllIsAI"
+            fi
+            hdiutil detach "$mountpoint"
+            rmdir "$mountpoint"
+          done
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Verify Windows installer signature
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $installer = Join-Path release "PhotoAllIsAI-$version-win-x64.exe"
+          $archive = Join-Path release "PhotoAllIsAI-$version-win-x64.zip"
+          if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "Missing Windows installer: $installer" }
+          if ((Get-Item -LiteralPath $installer).Length -eq 0) { throw "Empty Windows installer: $installer" }
+          if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) { throw "Missing Windows archive: $archive" }
+          if ((Get-Item -LiteralPath $archive).Length -eq 0) { throw "Empty Windows archive: $archive" }
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -ne 'Valid') {
+            throw "Invalid signature on $installer`: $($signature.Status)"
+          }
+          $extracted = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
+          try {
+            Expand-Archive -LiteralPath $archive -DestinationPath $extracted
+            $executable = Join-Path $extracted 'PhotoAllIsAI.exe'
+            $asar = Join-Path $extracted 'resources/app.asar'
+            if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) { throw "Missing executable in Windows archive" }
+            if (-not (Test-Path -LiteralPath $asar -PathType Leaf)) { throw "Missing application in Windows archive" }
+            $archiveSignature = Get-AuthenticodeSignature -LiteralPath $executable
+            if ($archiveSignature.Status -ne 'Valid') {
+              throw "Invalid signature in Windows archive: $($archiveSignature.Status)"
+            }
+            node tests/diagnostics/packaged-app-smoke.cjs $executable
+            if ($LASTEXITCODE -ne 0) { throw "Windows archive smoke test failed: $LASTEXITCODE" }
+          } finally {
+            if (Test-Path -LiteralPath $extracted) { Remove-Item -LiteralPath $extracted -Recurse -Force }
+          }
+      - name: Smoke test Windows installation
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $installer = (Resolve-Path -LiteralPath "release/PhotoAllIsAI-$version-win-x64.exe").Path
+          $installDir = Join-Path $env:RUNNER_TEMP 'PhotoAllIsAI-install-smoke'
+          $installedApp = Join-Path $installDir 'PhotoAllIsAI.exe'
+          $uninstaller = Join-Path $installDir 'Uninstall PhotoAllIsAI.exe'
+          try {
+            $process = Start-Process -FilePath $installer -ArgumentList @('/S', "/D=$installDir") -Wait -PassThru
+            if ($process.ExitCode -ne 0) { throw "Installer exited with code $($process.ExitCode)" }
+            if (-not (Test-Path -LiteralPath $installedApp -PathType Leaf)) { throw 'Installed executable is missing' }
+            if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) { throw 'Uninstaller is missing' }
+            if (-not (Test-Path -LiteralPath (Join-Path $installDir 'resources/app.asar') -PathType Leaf)) {
+              throw 'Installed application archive is missing'
+            }
+            $signature = Get-AuthenticodeSignature -LiteralPath $installedApp
+            if ($signature.Status -ne 'Valid') { throw "Invalid installed executable signature: $($signature.Status)" }
+            node tests/diagnostics/packaged-app-smoke.cjs $installedApp
+            if ($LASTEXITCODE -ne 0) { throw "Installed application smoke test failed: $LASTEXITCODE" }
+          } finally {
+            if (Test-Path -LiteralPath $uninstaller -PathType Leaf) {
+              $process = Start-Process -FilePath $uninstaller -ArgumentList @('/S', "_?=$installDir") -Wait -PassThru
+              if ($process.ExitCode -ne 0) { throw "Uninstaller exited with code $($process.ExitCode)" }
+            }
+          }
+          if (Test-Path -LiteralPath $installedApp -PathType Leaf) { throw 'Uninstall left the executable behind' }
       - uses: actions/upload-artifact@v4
         with:
           name: PhotoAllIsAI-${{ matrix.os }}
-          path: release/*
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.exe
           if-no-files-found: error
 
   publish:
@@ -51,4 +222,7 @@ jobs:
           path: release
       - uses: softprops/action-gh-release@v2
         with:
-          files: release/**/*
+          files: |
+            release/**/*.dmg
+            release/**/*.zip
+            release/**/*.exe

@@ -110,3 +110,49 @@ test('batch and image menus have separate scopes and running batch deletion requ
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('uncertain generation stays out of batch retry and requires confirmation for individual retry', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-uncertain-task-'));
+  const library = path.join(directory, 'library');
+  await mkdir(library);
+  const service = new TaskService(path.join(library, 'catalog.sqlite'));
+  const batchId = '4fdbbb8a-8c33-484a-9719-2d36d61c4f66';
+  const providerProfileId = 'cf9c8a2a-e903-45c9-b531-129a0d4fbe5d';
+  const makeFailed = (assetId: string, errorCode: string) => {
+    const task = service.enqueue({ kind: 'generation', assetId, payload: {
+      providerProfileId, batchId, prompt: 'Generate', resultIndex: 1, submissionId: batchId
+    } });
+    service.claimNext(['generation']);
+    service.advance(task.id, 'processing', 0.5);
+    service.advance(task.id, 'failed', 0.5, errorCode);
+    return task;
+  };
+  const uncertain = makeFailed('asset-uncertain', 'GENERATION_RESULT_UNCERTAIN');
+  const ordinary = makeFailed('asset-ordinary', 'GENERATION_FAILED');
+  service.close();
+  const app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js')], env: { ...process.env, PHOTOALLISAI_USER_DATA: directory } });
+  try {
+    const page = await app.firstWindow();
+    await page.getByRole('button', { name: '打开工作区', exact: true }).click();
+    await page.getByRole('menuitem', { name: '任务中心', exact: true }).click();
+    const batch = page.locator('.task-center-page .task-batch-group').filter({ has: page.locator(`[data-task-id="${uncertain.id}"]`) });
+    await expect(batch).toContainText('先到模型服务核对结果和费用');
+    await batch.locator(':scope > summary').getByRole('button', { name: '重试批次失败项' }).click();
+    await expect.poll(() => page.evaluate((id) => window.desktopApi.getTask(id).then((task) => task?.attempt), ordinary.id)).toBe(1);
+    expect(await page.evaluate((id) => window.desktopApi.getTask(id).then((task) => task?.attempt), uncertain.id)).toBe(0);
+
+    await batch.locator(':scope > summary').click();
+    await batch.locator(`[data-task-id="${uncertain.id}"]`).click({ button: 'right' });
+    let message = '';
+    page.once('dialog', async (confirmation) => {
+      message = confirmation.message();
+      await confirmation.dismiss();
+    });
+    await page.getByRole('menuitem', { name: '重试任务' }).click();
+    expect(message).toContain('再次计费');
+    expect(await page.evaluate((id) => window.desktopApi.getTask(id).then((task) => task?.attempt), uncertain.id)).toBe(0);
+  } finally {
+    await app.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

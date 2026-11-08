@@ -1,5 +1,3 @@
-/* eslint-disable @typescript-eslint/no-require-imports -- Standalone Electron CommonJS entry point. */
-/* global require */
 const process = require("node:process");
 const { Buffer } = require("node:buffer");
 const { app, nativeImage } = require('electron');

@@ -1,9 +1,10 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
+import sharp from 'sharp';
 
 import { createQuickLookThumbnail, ImageCacheService, writeCacheFileAtomically } from './image-cache-service';
 
@@ -14,6 +15,47 @@ afterEach(async () => {
 });
 
 describe('image cache governance', () => {
+  it('decodes a large PNG thumbnail with the bundled decoder', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-'));
+    directories.push(directory);
+    const source = path.join(directory, 'large.png');
+    await sharp({ create: { width: 2048, height: 2048, channels: 3, background: '#c0c0c0' } })
+      .png({ compressionLevel: 0 }).toFile(source);
+    const metadata = await stat(source);
+    expect(metadata.size).toBeGreaterThan(8 * 1024 * 1024);
+    const service = new ImageCacheService(path.join(directory, 'cache'), {} as never, async () => ({ imageMagick: false, sips: false }));
+    try {
+      const thumbnail = await service.getOrCreate('large', 'thumbnail', {
+        path: source, modifiedAt: metadata.mtimeMs, sizeBytes: metadata.size
+      });
+      expect(thumbnail).not.toBeNull();
+      expect(await sharp(thumbnail!).metadata()).toMatchObject({ format: 'jpeg', width: 384, height: 384 });
+      expect(service.getPerformanceStats()).toMatchObject({ decodes: 1, misses: 1 });
+    } finally {
+      await service.stop();
+    }
+  });
+
+  it('decodes TIFF without external tools or platform thumbnail codecs', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-tiff-'));
+    directories.push(directory);
+    const source = path.join(directory, 'camera.tiff');
+    await sharp({ create: { width: 720, height: 480, channels: 3, background: '#4277aa' } })
+      .tiff().toFile(source);
+    const metadata = await stat(source);
+    const service = new ImageCacheService(path.join(directory, 'cache'), {} as never, async () => ({ imageMagick: false, sips: false }));
+    try {
+      const preview = await service.getOrCreate('tiff', 'preview', {
+        path: source, modifiedAt: metadata.mtimeMs, sizeBytes: metadata.size
+      });
+      expect(preview).not.toBeNull();
+      expect(await sharp(preview!).metadata()).toMatchObject({ format: 'jpeg', width: 720, height: 480 });
+      expect(service.getPerformanceStats()).toMatchObject({ decodes: 1, nativeReadMsTotal: 0 });
+    } finally {
+      await service.stop();
+    }
+  });
+
   it.skipIf(process.platform !== 'darwin' || process.env.PHOTOALLISAI_TEST_QUICKLOOK !== '1')('generates a Quick Look fallback in a separate process', async () => {
     const fixture = path.resolve('apps/desktop/src/renderer/public/demo/portrait.jpg');
     const thumbnail = await createQuickLookThumbnail(fixture, 128);

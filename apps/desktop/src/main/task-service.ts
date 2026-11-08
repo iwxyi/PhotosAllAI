@@ -7,6 +7,7 @@ import {
   deleteTasksInputSchema,
   type DeleteTasksInput,
   generationTaskPayloadSchema,
+  generationResultSchema,
   listTaskPageInputSchema,
   moveQueuedTaskInputSchema,
   persistedTaskSchema,
@@ -17,6 +18,7 @@ import {
   updateQueuedGenerationTaskInputSchema,
   updateQueuedGenerationTasksInputSchema,
   type EnqueueTaskInput,
+  type GenerationResult,
   type ListTaskPageInput,
   type MoveQueuedTaskInput,
   type PersistedTask,
@@ -122,8 +124,8 @@ export class TaskService {
     const now = Date.now();
     const placeholders = INTERRUPTED_STATUSES.map(() => '?').join(', ');
     const interrupted = this.#database
-      .prepare(`SELECT id, status FROM tasks WHERE status IN (${placeholders})`)
-      .all(...INTERRUPTED_STATUSES) as Pick<TaskRow, 'id' | 'status'>[];
+      .prepare(`SELECT id, kind, status FROM tasks WHERE status IN (${placeholders})`)
+      .all(...INTERRUPTED_STATUSES) as Pick<TaskRow, 'id' | 'kind' | 'status'>[];
 
     if (interrupted.length === 0) return;
     this.#database.exec('BEGIN IMMEDIATE');
@@ -132,13 +134,25 @@ export class TaskService {
         UPDATE tasks SET status = 'queued', progress = 0, attempt = attempt + 1,
           error_code = 'APP_INTERRUPTED', updated_at = ? WHERE id = ?
       `);
+      const markUncertainGeneration = this.#database.prepare(`
+        UPDATE tasks SET status = 'failed', error_code = 'GENERATION_RESULT_UNCERTAIN', updated_at = ? WHERE id = ?
+      `);
       const event = this.#database.prepare(`
         INSERT INTO task_events (task_id, from_status, to_status, occurred_at, details_json)
         VALUES (?, ?, 'queued', ?, '{"reason":"app_interrupted"}')
       `);
+      const uncertainEvent = this.#database.prepare(`
+        INSERT INTO task_events (task_id, from_status, to_status, occurred_at, details_json)
+        VALUES (?, ?, 'failed', ?, '{"reason":"generation_result_uncertain"}')
+      `);
       for (const task of interrupted) {
-        update.run(now, task.id);
-        event.run(task.id, task.status, now);
+        if (task.kind === 'generation' && task.status !== 'preparing') {
+          markUncertainGeneration.run(now, task.id);
+          uncertainEvent.run(task.id, task.status, now);
+        } else {
+          update.run(now, task.id);
+          event.run(task.id, task.status, now);
+        }
       }
       this.#database.exec('COMMIT');
     } catch (error) {
@@ -158,6 +172,47 @@ export class TaskService {
   find(taskId: string): PersistedTask | null {
     const row = this.#database.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as TaskRow | undefined;
     return row ? this.#toTask(row) : null;
+  }
+
+  recoverCommittedGeneration(taskId: string, result: GenerationResult): PersistedTask {
+    const task = this.#get(taskId);
+    if (task.kind !== 'generation' || task.status !== 'failed' || task.errorCode !== 'GENERATION_RESULT_UNCERTAIN') return task;
+    const payload = generationTaskPayloadSchema.safeParse(task.payload);
+    const committed = generationResultSchema.safeParse(result);
+    const expectedInputs = payload.success
+      ? payload.data.inputSources ?? (payload.data.sourceResultId
+        ? [{ kind: 'result' as const, resultId: payload.data.sourceResultId }]
+        : [{ kind: 'asset' as const, assetId: task.assetId ?? '' }])
+      : [];
+    if (!payload.success || !committed.success || task.assetId !== result.assetId
+      || payload.data.batchId !== result.batchId || payload.data.providerProfileId !== result.providerProfileId
+      || payload.data.prompt !== result.prompt || payload.data.storageMode !== result.storageMode
+      || payload.data.templateId !== result.templateId || payload.data.templateVersion !== result.templateVersion
+      || JSON.stringify(expectedInputs) !== JSON.stringify(result.inputSources)) return task;
+    const now = Date.now();
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      this.#database.prepare(`
+        UPDATE tasks SET status = 'completed', progress = 1, result_json = ?, error_code = NULL, updated_at = ?
+        WHERE id = ? AND status = 'failed' AND error_code = 'GENERATION_RESULT_UNCERTAIN'
+      `).run(JSON.stringify({ generation: result }), now, taskId);
+      this.#database.prepare(`
+        INSERT INTO task_events (task_id, from_status, to_status, occurred_at, details_json)
+        VALUES (?, 'failed', 'completed', ?, '{"reason":"committed_generation_recovered"}')
+      `).run(taskId, now);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    return this.#get(taskId);
+  }
+
+  uncertainGenerationTaskIds(): string[] {
+    return (this.#database.prepare(`
+      SELECT id FROM tasks WHERE kind = 'generation' AND status = 'failed'
+        AND error_code = 'GENERATION_RESULT_UNCERTAIN'
+    `).all() as Array<{ id: string }>).map((row) => row.id);
   }
 
   listBatch(kind: PersistedTask['kind'], batchId: string): PersistedTask[] {
@@ -554,7 +609,7 @@ export class TaskService {
     const input = retryFailedGenerationTasksInputSchema.parse(rawInput);
     const failed = this.#database.prepare(`
       SELECT id FROM tasks
-      WHERE kind = 'generation' AND status = 'failed'
+      WHERE kind = 'generation' AND status = 'failed' AND error_code != 'GENERATION_RESULT_UNCERTAIN'
       ORDER BY updated_at ASC, id ASC
       LIMIT ?
     `).all(input.limit) as { id: string }[];

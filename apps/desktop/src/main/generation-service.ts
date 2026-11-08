@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { access, copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
+import { access, copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -34,6 +34,7 @@ type VerifiedFileMover = typeof moveFileVerified;
 
 type ResultRow = {
   id: string;
+  task_id: string | null;
   asset_id: string;
   batch_id: string;
   input_sources: string | null;
@@ -54,6 +55,7 @@ type ResultRow = {
 
 type GenerationWriteIntentRow = {
   result_id: string;
+  task_id: string | null;
   asset_id: string;
   batch_id: string;
   file_name: string;
@@ -127,6 +129,7 @@ export class GenerationService {
         ON generation_results(asset_id, version DESC);
       CREATE TABLE IF NOT EXISTS generation_write_intents (
         result_id TEXT PRIMARY KEY,
+        task_id TEXT,
         asset_id TEXT NOT NULL,
         batch_id TEXT NOT NULL,
         file_name TEXT NOT NULL,
@@ -155,6 +158,15 @@ export class GenerationService {
     if (!columns.some((column) => column.name === 'input_sources')) {
       this.#database.exec('ALTER TABLE generation_results ADD COLUMN input_sources TEXT');
     }
+    if (!columns.some((column) => column.name === 'task_id')) {
+      this.#database.exec('ALTER TABLE generation_results ADD COLUMN task_id TEXT');
+    }
+    this.#database.exec('CREATE UNIQUE INDEX IF NOT EXISTS generation_result_task_idx ON generation_results(task_id) WHERE task_id IS NOT NULL');
+    const intentColumns = this.#database.prepare('PRAGMA table_info(generation_write_intents)').all() as { name: string }[];
+    if (!intentColumns.some((column) => column.name === 'task_id')) {
+      this.#database.exec('ALTER TABLE generation_write_intents ADD COLUMN task_id TEXT');
+    }
+    this.#database.exec('CREATE UNIQUE INDEX IF NOT EXISTS generation_write_intent_task_idx ON generation_write_intents(task_id) WHERE task_id IS NOT NULL');
   }
 
   close(): void {
@@ -179,6 +191,18 @@ export class GenerationService {
   resolveResultFile(resultId: string): string | null {
     const row = this.#database.prepare('SELECT file_path FROM generation_results WHERE id = ? AND trashed_at IS NULL').get(resultId) as { file_path: string } | undefined;
     return row?.file_path ?? null;
+  }
+
+  async findCommittedTaskResult(taskId: string): Promise<GenerationResult | null> {
+    const row = this.#database.prepare('SELECT * FROM generation_results WHERE task_id = ? AND trashed_at IS NULL')
+      .get(taskId) as ResultRow | undefined;
+    if (!row) return null;
+    const directory = this.#expectedResultDirectory(row.asset_id, row.batch_id, row.storage_mode);
+    if (!directory || path.basename(row.file_name) !== row.file_name
+      || path.resolve(row.file_path) !== path.resolve(directory, row.file_name)
+      || !await this.#isSafeResultDirectory(row.asset_id, row.storage_mode, directory)
+      || !await isRecoverableImageFile(row.file_path, row.file_name)) return null;
+    return this.#toResult(row);
   }
 
   async trash(resultId: string): Promise<TrashedGenerationResult> {
@@ -385,7 +409,7 @@ export class GenerationService {
 
   async recoverInterruptedWrites(): Promise<GenerationWriteRecoveryReport> {
     const rows = this.#database.prepare(`
-      SELECT result_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode
+      SELECT result_id, task_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode
       FROM generation_write_intents ORDER BY created_at ASC
     `).all() as GenerationWriteIntentRow[];
     let recovered = 0;
@@ -400,6 +424,41 @@ export class GenerationService {
         continue;
       }
       try {
+        const committed = this.#database.prepare(`
+          SELECT asset_id, batch_id, file_name, file_path, storage_mode
+          FROM generation_results WHERE id = ?
+        `).get(row.result_id) as Pick<ResultRow, 'asset_id' | 'batch_id' | 'file_name' | 'file_path' | 'storage_mode'> | undefined;
+        if (committed) {
+          if (committed.asset_id !== row.asset_id || committed.batch_id !== row.batch_id
+            || committed.file_name !== row.file_name || committed.file_path !== row.file_path
+            || committed.storage_mode !== row.storage_mode) throw new Error('GENERATION_WRITE_RECOVERY_RESULT_CONFLICT');
+          const resultFile = await inspectOptionalRegularFile(row.file_path);
+          const temporaryFile = await inspectOptionalRegularFile(row.temporary_path);
+          if (!resultFile || temporaryFile === false) throw new Error('GENERATION_WRITE_RECOVERY_FILE_MISSING_OR_UNSAFE');
+          await this.#refreshManifest(directory, row.asset_id, row.batch_id);
+          if (temporaryFile) await unlink(row.temporary_path);
+          if (this.#database.prepare('DELETE FROM generation_write_intents WHERE result_id = ?').run(row.result_id).changes !== 1) {
+            throw new Error('GENERATION_WRITE_INTENT_CONCURRENT_CHANGE');
+          }
+          recovered += 1;
+          continue;
+        }
+        // The provider may already have charged for this image. A crash after
+        // publishing the file but before inserting its result row must leave
+        // the image and intent available for manual reconciliation.
+        const publishedFile = await inspectOptionalRegularFile(row.file_path);
+        if (publishedFile) {
+          failed += 1;
+          continue;
+        }
+        if (publishedFile === false) throw new Error('GENERATION_WRITE_RECOVERY_PATH_UNSAFE');
+        // Once a paid request has produced a task-linked write intent, the
+        // absence of a published file does not prove the provider did not run.
+        // Preserve the intent so a later retry cannot silently send again.
+        if (row.task_id) {
+          failed += 1;
+          continue;
+        }
         for (const candidate of [row.temporary_path, row.file_path]) {
           const entry = await inspectOptionalRegularFile(candidate);
           if (entry === false) throw new Error('GENERATION_WRITE_RECOVERY_PATH_UNSAFE');
@@ -494,14 +553,32 @@ export class GenerationService {
     return this.#toResult(updated);
   }
 
-  async generate(assetId: string, rawPayload: unknown, signal?: AbortSignal): Promise<GenerationResult> {
+  async generate(assetId: string, rawPayload: unknown, signal?: AbortSignal, requestId?: string): Promise<GenerationResult> {
     const payload = generationTaskPayloadSchema.parse(rawPayload);
+    const inputSources = payload.inputSources ?? (payload.sourceResultId ? [{ kind: 'result' as const, resultId: payload.sourceResultId }] : [{ kind: 'asset' as const, assetId }]);
+    if (requestId) {
+      const previous = await this.findCommittedTaskResult(requestId);
+      if (previous) {
+        if (previous.assetId !== assetId || previous.batchId !== payload.batchId
+          || previous.providerProfileId !== payload.providerProfileId || previous.prompt !== payload.prompt
+          || previous.storageMode !== payload.storageMode || previous.templateId !== payload.templateId
+          || previous.templateVersion !== payload.templateVersion
+          || JSON.stringify(previous.inputSources) !== JSON.stringify(inputSources)) throw new Error('GENERATION_TASK_RESULT_CONFLICT');
+        return previous;
+      }
+      const recorded = this.#database.prepare('SELECT 1 FROM generation_results WHERE task_id = ?').get(requestId);
+      const pendingWrite = this.#database.prepare('SELECT 1 FROM generation_write_intents WHERE task_id = ?').get(requestId);
+      if (recorded || pendingWrite) {
+        const error = new Error('GENERATION_RESULT_UNCERTAIN');
+        Object.assign(error, { generationOutcomeUncertain: true });
+        throw error;
+      }
+    }
     const provider = await this.#providers.resolve(payload.providerProfileId);
     if (provider.profile.purpose !== 'generation') throw new Error('PROVIDER_DOES_NOT_SUPPORT_GENERATION');
     const source = this.#catalog.resolveAssetFile(assetId);
     if (!source) throw new Error('ASSET_NOT_FOUND');
     if (payload.sourceResultId && payload.inputSources) throw new Error('GENERATION_INPUTS_CONFLICT');
-    const inputSources = payload.inputSources ?? (payload.sourceResultId ? [{ kind: 'result' as const, resultId: payload.sourceResultId }] : [{ kind: 'asset' as const, assetId }]);
     if (inputSources[0]?.kind === 'asset' && inputSources[0].assetId !== assetId) throw new Error('GENERATION_PRIMARY_SOURCE_INVALID');
     const primarySource = inputSources[0]!;
     if (primarySource.kind === 'result' && !this.list(assetId).some((result) => result.id === primarySource.resultId)) throw new Error('GENERATION_SOURCE_RESULT_INVALID');
@@ -520,9 +597,14 @@ export class GenerationService {
       return { bytes, mime: format === 'jpg' ? 'image/jpeg' : `image/${format}` };
     }));
     if (inputs.reduce((total, input) => total + input.bytes.byteLength, 0) > 50 * 1024 * 1024) throw new Error('GENERATION_INPUTS_TOO_LARGE');
-    const bytes = await requestGeneratedImage(provider, payload.prompt, inputs, signal);
+    const bytes = await requestGeneratedImage(provider, payload.prompt, inputs, signal, requestId);
     signal?.throwIfAborted();
-    const format = detectImageFormat(bytes);
+    let format: 'png' | 'jpg' | 'webp';
+    try { format = detectImageFormat(bytes); }
+    catch (error) {
+      if (error instanceof Error) Object.assign(error, { generationOutcomeUncertain: true });
+      throw error;
+    }
     const id = randomUUID();
     const maximum = this.#database.prepare(`
       SELECT COALESCE(MAX(version), 0) AS value FROM generation_results WHERE asset_id = ?
@@ -539,9 +621,9 @@ export class GenerationService {
     const createdAt = Date.now();
     this.#database.prepare(`
       INSERT INTO generation_write_intents (
-        result_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, assetId, payload.batchId, fileName, filePath, temporaryPath, payload.storageMode, createdAt);
+        result_id, task_id, asset_id, batch_id, file_name, file_path, temporary_path, storage_mode, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, requestId ?? null, assetId, payload.batchId, fileName, filePath, temporaryPath, payload.storageMode, createdAt);
     let published = false;
     try {
       await mkdir(batchDirectory, { recursive: true });
@@ -551,11 +633,11 @@ export class GenerationService {
       signal?.throwIfAborted();
       this.#database.prepare(`
         INSERT INTO generation_results (
-          id, asset_id, batch_id, version, file_name, file_path, prompt,
+          id, task_id, asset_id, batch_id, version, file_name, file_path, prompt,
           provider_profile_id, template_id, template_version, storage_mode, input_sources, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        id, assetId, payload.batchId, version, fileName, filePath, payload.prompt,
+        id, requestId ?? null, assetId, payload.batchId, version, fileName, filePath, payload.prompt,
         payload.providerProfileId, payload.templateId, payload.templateVersion, payload.storageMode, JSON.stringify(inputSources), createdAt
       );
       await this.#writeManifest(batchDirectory, assetId, payload.batchId, provider.profile, payload.storageMode);
@@ -573,6 +655,7 @@ export class GenerationService {
         await this.#refreshManifest(batchDirectory, assetId, payload.batchId).catch(() => { cleanupFailed = true; });
       }
       if (!cleanupFailed) this.#database.prepare('DELETE FROM generation_write_intents WHERE result_id = ?').run(id);
+      if (error instanceof Error) Object.assign(error, { generationOutcomeUncertain: true });
       throw error;
     }
 
@@ -763,6 +846,31 @@ async function inspectOptionalRegularFile(filePath: string): Promise<Awaited<Ret
   }
 }
 
+async function isRecoverableImageFile(filePath: string, fileName: string): Promise<boolean> {
+  const entry = await inspectOptionalRegularFile(filePath);
+  if (!entry || entry.size === 0 || entry.size > MAX_RESULT_BYTES) return false;
+  const expected = path.extname(fileName).slice(1).toLowerCase();
+  if (!['png', 'jpg', 'webp'].includes(expected)) return false;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.ino !== entry.ino || opened.dev !== entry.dev || opened.size !== entry.size) return false;
+    const bytes = Buffer.alloc(Math.min(12, entry.size));
+    await handle.read(bytes, 0, bytes.length, 0);
+    if (expected === 'jpg') {
+      const end = Buffer.alloc(2);
+      await handle.read(end, 0, 2, entry.size - 2);
+      return bytes[0] === 0xff && bytes[1] === 0xd8 && end[0] === 0xff && end[1] === 0xd9;
+    }
+    return detectImageFormat(bytes) === expected;
+  } catch {
+    return false;
+  } finally {
+    await handle?.close();
+  }
+}
+
 function isGenerationTemporaryPath(temporaryPath: string, filePath: string): boolean {
   if (path.dirname(path.resolve(temporaryPath)) !== path.dirname(path.resolve(filePath))) return false;
   const suffix = path.basename(temporaryPath).slice(path.basename(filePath).length);
@@ -844,7 +952,8 @@ async function requestGeneratedImage(
   provider: ResolvedProvider,
   prompt: string,
   inputs: Array<{ bytes: Buffer; mime: string }>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  requestId?: string
 ): Promise<Buffer> {
   const aceData = provider.profile.kind === 'acedata-nano-banana';
   const endpoint = aceData
@@ -868,33 +977,43 @@ async function requestGeneratedImage(
       };
   const response = await fetchBounded(endpoint, {
     method: 'POST',
-    headers: createProviderRequestHeaders(provider.profile.customHeaders, provider.apiKey),
+    headers: {
+      ...createProviderRequestHeaders(provider.profile.customHeaders, provider.apiKey),
+      ...(requestId ? { 'Idempotency-Key': requestId } : {})
+    },
     redirect: 'error',
     body: JSON.stringify(body)
   }, {
     maxBytes: MAX_PROVIDER_RESPONSE_BYTES,
     timeoutMs: provider.profile.requestTimeoutMs ?? GENERATION_TIMEOUT_MS,
-    retryCount: provider.profile.retryCount,
+    // A successful paid generation may be followed by a lost response or a gateway error.
+    // Replaying this POST without confirmed provider idempotency can charge twice.
+    retryCount: 0,
     signal
   });
   if (!response.ok) throw new Error(providerHttpError(response.status, response.bytes.toString('utf8')));
-  const payload: unknown = JSON.parse(response.bytes.toString('utf8'));
-  const candidate = extractImageCandidate(payload);
-  if (candidate.base64) {
-    const bytes = Buffer.from(candidate.base64, 'base64');
+  try {
+    const payload: unknown = JSON.parse(response.bytes.toString('utf8'));
+    const candidate = extractImageCandidate(payload);
+    if (candidate.base64) {
+      const bytes = Buffer.from(candidate.base64, 'base64');
+      if (bytes.byteLength === 0 || bytes.byteLength > MAX_RESULT_BYTES) throw new Error('GENERATED_IMAGE_INVALID_SIZE');
+      return bytes;
+    }
+    if (!candidate.url) throw new Error('PROVIDER_IMAGE_MISSING');
+    const url = validateGeneratedImageUrl(provider.profile.baseUrl, candidate.url);
+    const download = await downloadPinned(
+      url,
+      { maxBytes: MAX_RESULT_BYTES, timeoutMs: DOWNLOAD_TIMEOUT_MS, signal },
+      isPrivateNetworkAddress
+    );
+    const bytes = download.bytes;
     if (bytes.byteLength === 0 || bytes.byteLength > MAX_RESULT_BYTES) throw new Error('GENERATED_IMAGE_INVALID_SIZE');
     return bytes;
+  } catch (error) {
+    if (error instanceof Error) Object.assign(error, { generationOutcomeUncertain: true });
+    throw error;
   }
-  if (!candidate.url) throw new Error('PROVIDER_IMAGE_MISSING');
-  const url = validateGeneratedImageUrl(provider.profile.baseUrl, candidate.url);
-  const download = await downloadPinned(
-    url,
-    { maxBytes: MAX_RESULT_BYTES, timeoutMs: DOWNLOAD_TIMEOUT_MS, signal },
-    isPrivateNetworkAddress
-  );
-  const bytes = download.bytes;
-  if (bytes.byteLength === 0 || bytes.byteLength > MAX_RESULT_BYTES) throw new Error('GENERATED_IMAGE_INVALID_SIZE');
-  return bytes;
 }
 
 function providerHttpError(status: number, body: string): string {

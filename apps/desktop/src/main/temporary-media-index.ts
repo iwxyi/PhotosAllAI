@@ -90,13 +90,13 @@ export class TemporaryMediaIndex {
     for (let index = 0; index < sorted.length; index += 1) {
       const entry = sorted[index]!;
       positions.set(entry.id, index);
-      entry.sortKey = undefined;
       if ((index & 8_191) === 8_191) {
         if (!current()) return;
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
     }
     if (!current()) return;
+    for (const entry of sorted) entry.sortKey = undefined;
     this.#entries = sorted;
     this.#positions = positions;
     this.#complete = true;

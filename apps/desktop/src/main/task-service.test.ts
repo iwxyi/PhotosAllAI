@@ -364,8 +364,82 @@ describe('persistent task service', () => {
 
     const recoveredService = new TaskService(file);
     const recovered = recoveredService.list()[0];
-    expect(recovered).toMatchObject({ status: 'queued', progress: 0, attempt: 1, errorCode: 'APP_INTERRUPTED' });
+    expect(recovered).toMatchObject({ status: 'failed', progress: 0.6, attempt: 0, errorCode: 'GENERATION_RESULT_UNCERTAIN' });
     recoveredService.close();
+  });
+
+  it('marks an uncertain generation complete after its committed result is verified', async () => {
+    const tasks = new TaskService(await databasePath());
+    const providerProfileId = '08f00b2a-c2ef-43c8-aea7-6ebec183bd17';
+    const batchId = '19d42fac-a42a-405a-8a82-b67154f259a3';
+    const task = tasks.enqueue({ kind: 'generation', assetId: 'asset-1', payload: {
+      providerProfileId, batchId, prompt: 'generate', resultIndex: 1, storageMode: 'managed'
+    } });
+    tasks.claimNext(['generation']);
+    tasks.advance(task.id, 'processing', 0.5);
+    tasks.advance(task.id, 'failed', 0.5, 'GENERATION_RESULT_UNCERTAIN');
+    expect(tasks.uncertainGenerationTaskIds()).toEqual([task.id]);
+    const result = {
+      id: '62e53fe5-d369-46a3-9bcc-1d7aa283307f', assetId: 'asset-1', batchId, version: 1,
+      inputSources: [{ kind: 'asset' as const, assetId: 'asset-1' }],
+      fileName: 'result.png', resultUrl: 'photoresult://result/62e53fe5-d369-46a3-9bcc-1d7aa283307f',
+      prompt: 'generate', providerProfileId, templateId: null, templateVersion: null,
+      storageMode: 'managed' as const, reviewState: 'undecided' as const, createdAt: Date.now()
+    };
+    expect(tasks.recoverCommittedGeneration(task.id, { ...result, assetId: 'other-asset' })).toMatchObject({ status: 'failed' });
+    expect(tasks.recoverCommittedGeneration(task.id, { ...result, inputSources: [{ kind: 'asset', assetId: 'other-asset' }] })).toMatchObject({ status: 'failed' });
+    expect(tasks.recoverCommittedGeneration(task.id, result)).toMatchObject({
+      status: 'completed', progress: 1, errorCode: null, result: { generation: { id: result.id } }
+    });
+    expect(tasks.uncertainGenerationTaskIds()).toEqual([]);
+    tasks.close();
+  });
+
+  it('checks explicit and branched input sources before reconciling a result', async () => {
+    const tasks = new TaskService(await databasePath());
+    const providerProfileId = '08f00b2a-c2ef-43c8-aea7-6ebec183bd17';
+    const batchId = '19d42fac-a42a-405a-8a82-b67154f259a3';
+    const sourceResultId = '62e53fe5-d369-46a3-9bcc-1d7aa283307f';
+    const inputSources = [{ kind: 'asset' as const, assetId: 'asset-1' }, { kind: 'result' as const, resultId: sourceResultId }];
+    const basePayload = { providerProfileId, batchId, prompt: 'generate', resultIndex: 1, storageMode: 'managed' };
+    const result = {
+      id: 'd7d4b047-cba3-4899-88f6-78f62bc3d357', assetId: 'asset-1', batchId, version: 1,
+      inputSources, fileName: 'result.png', resultUrl: 'photoresult://result/d7d4b047-cba3-4899-88f6-78f62bc3d357',
+      prompt: 'generate', providerProfileId, templateId: null, templateVersion: null,
+      storageMode: 'managed' as const, reviewState: 'undecided' as const, createdAt: Date.now()
+    };
+    for (const [payload, expected] of [
+      [{ ...basePayload, inputSources }, inputSources],
+      [{ ...basePayload, sourceResultId }, [{ kind: 'result' as const, resultId: sourceResultId }]]
+    ] as const) {
+      const task = tasks.enqueue({ kind: 'generation', assetId: 'asset-1', payload });
+      tasks.claimNext(['generation']);
+      tasks.advance(task.id, 'processing', 0.5);
+      tasks.advance(task.id, 'failed', 0.5, 'GENERATION_RESULT_UNCERTAIN');
+      const incorrect = expected.length > 1 ? [...expected].reverse() : [{ kind: 'asset' as const, assetId: 'asset-1' }];
+      expect(tasks.recoverCommittedGeneration(task.id, { ...result, inputSources: incorrect }))
+        .toMatchObject({ status: 'failed' });
+      expect(tasks.recoverCommittedGeneration(task.id, { ...result, inputSources: [...expected] }))
+        .toMatchObject({ status: 'completed' });
+    }
+    tasks.close();
+  });
+
+  it('excludes uncertain generation outcomes from bulk retry', async () => {
+    const tasks = new TaskService(await databasePath());
+    const uncertain = tasks.enqueue({ kind: 'generation', assetId: 'asset-uncertain', payload: {} });
+    tasks.claimNext(['generation']);
+    tasks.advance(uncertain.id, 'processing', 0.5);
+    tasks.advance(uncertain.id, 'failed', 0.5, 'GENERATION_RESULT_UNCERTAIN');
+    const retryable = tasks.enqueue({ kind: 'generation', assetId: 'asset-retryable', payload: {} });
+    tasks.claimNext(['generation']);
+    tasks.advance(retryable.id, 'processing', 0.5);
+    tasks.advance(retryable.id, 'failed', 0.5, 'GENERATION_FAILED');
+
+    expect(tasks.retryFailedGenerations()).toEqual({ retried: 1, remaining: 1 });
+    expect(tasks.find(uncertain.id)?.status).toBe('failed');
+    expect(tasks.find(retryable.id)?.status).toBe('queued');
+    tasks.close();
   });
 
   it('edits only queued generation prompts and records the validated snapshot', async () => {

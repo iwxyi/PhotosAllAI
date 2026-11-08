@@ -5,3 +5,13 @@ packages:
 onlyBuiltDependencies:
   - electron
   - esbuild
+
+supportedArchitectures:
+  os:
+    - current
+    - darwin
+    - win32
+  cpu:
+    - current
+    - x64
+    - arm64
