@@ -2353,7 +2353,7 @@ function collectionTitle(props: Pick<LibraryWorkspaceProps, 'catalogFolders' | '
   return props.searchQuery ? `搜索：${props.searchQuery}` : '所有照片';
 }
 
-function justifiedCardLayout(groups: { items: Photo[] }[], ratioFor: (photo: Photo) => number, width: number, targetHeight: number): { sizes: Record<string, { width: number; height: number }>; rows: Array<{ start: number; end: number; top: number; height: number }> } {
+function justifiedCardLayout(groups: { items: Photo[] }[], ratioFor: (photo: Photo) => number, width: number, targetHeight: number, viewportHeight: number): { sizes: Record<string, { width: number; height: number }>; rows: Array<{ start: number; end: number; top: number; height: number }> } {
   const sizes: Record<string, { width: number; height: number }> = {};
   const rows: Array<{ start: number; end: number; top: number; height: number }> = [];
   const gap = 10;
@@ -2365,7 +2365,8 @@ function justifiedCardLayout(groups: { items: Photo[] }[], ratioFor: (photo: Pho
     const placeRow = (last: boolean) => {
       if (!row.length) return;
       const fitHeight = (width - gap * (row.length - 1)) / ratioSum;
-      const height = last ? Math.min(targetHeight, fitHeight) : Math.min(targetHeight * 1.35, fitHeight);
+      const maximumHeight = Math.max(100, viewportHeight * .55);
+      const height = last ? Math.min(targetHeight, fitHeight, maximumHeight) : Math.min(targetHeight * 1.35, fitHeight, maximumHeight);
       for (const photo of row) sizes[photo.id] = { width: height * ratioFor(photo), height };
       const metadataHeight = Math.max(...row.map((photo) => 23 + 16 * (Number(photo.rating > 0) + Number(Boolean(photo.workflow)) + Number(Boolean(photo.workflowConflict)))));
       const rowHeight = height + metadataHeight;
@@ -2647,7 +2648,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     const preview = previewPhoto(photo);
     const src = preview.thumbnailSrc ?? preview.src;
     return clamp(aspectRatios.get(src) ?? IMAGE_ASPECT_RATIOS.get(src) ?? 1.5, .25, 5);
-  }, gridWidth, thumbnailSize) : null, [viewMode, gridWidth, photoGroups, previewPhoto, aspectRatios, thumbnailSize]);
+  }, gridWidth, thumbnailSize, listViewport.height) : null, [viewMode, gridWidth, photoGroups, previewPhoto, aspectRatios, thumbnailSize, listViewport.height]);
   const justifiedSizes = justifiedLayout?.sizes ?? {};
   const masonryLayout = useMemo(() => {
     if (viewMode !== 'masonry' || gridWidth <= 0 || props.availablePhotos.length <= 500) return null;
