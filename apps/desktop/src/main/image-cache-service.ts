@@ -46,6 +46,9 @@ export class ImageCacheService {
   #createMsTotal = 0;
   #sourceStatMsTotal = 0;
   #nativeDecodeMsTotal = 0;
+  #nativeReadMsTotal = 0;
+  #nativeResizeMsTotal = 0;
+  #externalDecodeMsTotal = 0;
   #jpegEncodeMsTotal = 0;
   #cacheWriteMsTotal = 0;
   #cachePayloadWriteMsTotal = 0;
@@ -114,6 +117,9 @@ export class ImageCacheService {
       createMsTotal: Math.round(this.#createMsTotal * 100) / 100,
       sourceStatMsTotal: Math.round(this.#sourceStatMsTotal * 100) / 100,
       nativeDecodeMsTotal: Math.round(this.#nativeDecodeMsTotal * 100) / 100,
+      nativeReadMsTotal: Math.round(this.#nativeReadMsTotal * 100) / 100,
+      nativeResizeMsTotal: Math.round(this.#nativeResizeMsTotal * 100) / 100,
+      externalDecodeMsTotal: Math.round(this.#externalDecodeMsTotal * 100) / 100,
       jpegEncodeMsTotal: Math.round(this.#jpegEncodeMsTotal * 100) / 100,
       cacheWriteMsTotal: Math.round(this.#cacheWriteMsTotal * 100) / 100,
       cachePayloadWriteMsTotal: Math.round(this.#cachePayloadWriteMsTotal * 100) / 100,
@@ -297,17 +303,22 @@ export class ImageCacheService {
     await mkdir(path.dirname(destination), { recursive: true });
     const nativeStartedAt = performance.now();
     let image = nativeImage.createFromPath(sourcePath);
+    this.#nativeReadMsTotal += performance.now() - nativeStartedAt;
     let encoded: Buffer | null = null;
     if (!image.isEmpty()) {
       const size = image.getSize();
       const scale = Math.min(specification.width / size.width, specification.height / size.height, 1);
+      const resizeStartedAt = performance.now();
       image = image.resize({
         width: Math.max(1, Math.round(size.width * scale)),
         height: Math.max(1, Math.round(size.height * scale)),
         quality: specification.resizeQuality
       });
+      this.#nativeResizeMsTotal += performance.now() - resizeStartedAt;
     } else {
+      const externalStartedAt = performance.now();
       encoded = await this.#decodeWithExternalTools(sourcePath, destination, specification);
+      this.#externalDecodeMsTotal += performance.now() - externalStartedAt;
       if (!encoded) {
         if (process.platform === 'darwin') {
           const quickLook = await createQuickLookThumbnail(sourcePath, Math.max(specification.width, specification.height));
