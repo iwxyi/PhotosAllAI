@@ -194,6 +194,8 @@
 
 2026-11-08 混合图片压测入口：`PHOTOALLISAI_PERF_MIXED_MEDIA=1` 让真实媒体 Electron 压测在两张 JPEG 和两张 PNG 间轮转，保留原单张 JPEG 模式用于前后对比。正常 macOS GUI 环境以 1,000 张硬链接运行网格用例通过：源文件约 6.9–20.7 MB，首屏可解码约 5.326 秒，4 秒连续滚动帧间隔 p95 9.2 毫秒，停滚可见缩略图约 12 毫秒完成；结束时 Tab 工作集约 386 MiB，主进程事件循环最大延迟约 410 毫秒。受限 GUI 环境同命令在 Electron 启动前失败，正常 GUI 环境重跑成功。这是四个文件重复硬链接的单轮热/冷缓存未严格控制样本，既不是独立 1,000 张真实素材，也不覆盖 HEIC、RAW、视频、外置盘或长期内存；下一步扩大独立素材与格式矩阵，重复采样首屏、解码队列和输入延迟，并继续实现有界渲染端页面缓存。
 
+2026-11-08 大图缩略图解码：混合样本的分段计时显示，改动前 `nativeImage.createFromPath` 累计约 6.9 秒，缩放约 0.6 秒，主进程事件循环最大延迟约 433 毫秒。超过 8 MiB 的 JPEG/PNG 缩略图现优先由已安装的 ImageMagick 子进程解码；不可用或失败时回退原生路径。相同 1,000 张、四种源文件循环硬链接的网格用例在正常 macOS GUI 环境连续三轮通过，首屏可解码约 2.0–2.1 秒，主进程事件循环最大延迟约 155–163 毫秒，滚动帧间隔 p95 约 9.0–9.2 毫秒；停滚后缩略图完成约 2.9 秒。改动前首屏单轮约 5.9 秒，事件循环最大延迟约 433 毫秒。样本、缓存和设备负载未严格控制；这一优化依赖目标设备安装 ImageMagick，正式安装包、无 ImageMagick 回退、独立大图库、外置盘与长时内存均未验证。下一步要降低停滚等待并确认可随应用分发的隔离解码方案。
+
 - [Eagle 官方功能页](https://en.eagle.cool/)：快速浏览、悬停/空格预览与多维筛选。
 - [Lightroom Classic 浏览与比较](https://helpx.adobe.com/lightroom-classic/help/browse-compare-photos.html)：选片、活动项与多选、来源筛选。
 - [Lightroom Classic 性能指南](https://helpx.adobe.com/lightroom-classic/kb/optimize-performance-lightroom.html)：多级预览、缓存与后台负载。
