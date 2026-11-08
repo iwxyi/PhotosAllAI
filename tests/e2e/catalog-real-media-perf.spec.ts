@@ -13,9 +13,16 @@ const abortProbe = process.env.PHOTOALLISAI_ABORT_PROBE === '1';
 const loadTo = Number(process.env.PHOTOALLISAI_PERF_LOAD_TO ?? 0);
 const rendererLoadTo = Number(process.env.PHOTOALLISAI_PERF_RENDERER_LOAD_TO ?? 0);
 const viewMode = process.env.PHOTOALLISAI_PERF_VIEW ?? 'grid';
+const mixedMedia = process.env.PHOTOALLISAI_PERF_MIXED_MEDIA === '1';
 const source = path.resolve('apps/desktop/src/renderer/public/demo/portrait.jpg');
+const mixedSources = [
+  'test_data/2025.09.14 苏州旗袍-茹意、33/33-园林/833A1252.jpeg',
+  'test_data/2025.09.14 苏州旗袍-茹意、33/33-园林/833A1287.jpeg',
+  'test_data/2023.11.25 杭州之门-光绘/WechatIMG601.png',
+  'test_data/2023.11.25 杭州之门-光绘/DSC04042.png'
+].map((file) => path.resolve(file));
 
-test('measures real JPEG catalog scrolling', async () => {
+test('measures real catalog image scrolling', async () => {
   test.setTimeout(Math.max(loadTo, rendererLoadTo) > 0 ? Math.max(120_000, Math.min(1_200_000, Math.max(loadTo, rendererLoadTo) * 30)) : profileMain ? 180_000 : 120_000);
   if (!Number.isSafeInteger(count) || count < 100 || count > 100_000) throw new RangeError('PHOTOALLISAI_PERF_COUNT must be 100..100000');
   if (!Number.isSafeInteger(loadTo) || loadTo < 0 || loadTo > count) throw new RangeError('PHOTOALLISAI_PERF_LOAD_TO must be 0..PHOTOALLISAI_PERF_COUNT');
@@ -27,7 +34,8 @@ test('measures real JPEG catalog scrolling', async () => {
   let application: Awaited<ReturnType<typeof electron.launch>> | undefined;
   try {
     await mkdir(media, { recursive: true });
-    const size = (await stat(source)).size;
+    const sources = mixedMedia ? mixedSources : [source];
+    const sourceSizes = await Promise.all(sources.map(async (file) => (await stat(file)).size));
     const databasePath = path.join(userData, 'library', 'catalog.sqlite');
     await mkdir(path.dirname(databasePath), { recursive: true });
     new CatalogService(databasePath).close();
@@ -36,14 +44,16 @@ test('measures real JPEG catalog scrolling', async () => {
       .run('perf-media', media, 'Perf Media', 1);
     const insert = database.prepare(`
       INSERT INTO assets (id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at)
-      VALUES (?, 'perf-media', ?, ?, '.jpg', ?, ?, 1)
+      VALUES (?, 'perf-media', ?, ?, ?, ?, ?, 1)
     `);
     database.exec('BEGIN IMMEDIATE');
     for (let index = 0; index < count; index += 1) {
-      const name = `PHOTO_${String(index).padStart(6, '0')}.jpg`;
+      const sample = index % sources.length;
+      const extension = path.extname(sources[sample]!);
+      const name = `PHOTO_${String(index).padStart(6, '0')}${extension}`;
       const file = path.join(media, name);
-      await link(source, file);
-      insert.run(index.toString(16).padStart(32, '0'), file, name, size, Date.UTC(2020, 0, 1) + index * 1000);
+      await link(sources[sample]!, file);
+      insert.run(index.toString(16).padStart(32, '0'), file, name, extension, sourceSizes[sample]!, Date.UTC(2020, 0, 1) + index * 1000);
     }
     database.exec('COMMIT');
     database.close();
@@ -73,7 +83,7 @@ test('measures real JPEG catalog scrolling', async () => {
     }
     const firstScreenMs = Math.round(performance.now() - started);
     const beforeScroll = await page.evaluate(async () => window.desktopApi.getDiagnosticSnapshot());
-    console.log(JSON.stringify({ count, viewMode, phase: 'before-scroll', firstScreenMs, cache: beforeScroll.cache, catalogWatcher: beforeScroll.catalogWatcher }));
+    console.log(JSON.stringify({ count, viewMode, mixedMedia, sources: sources.map((file, index) => ({ file, bytes: sourceSizes[index] })), phase: 'before-scroll', firstScreenMs, cache: beforeScroll.cache, catalogWatcher: beforeScroll.catalogWatcher }));
     if (abortProbe) {
       const probe = await page.evaluate(async () => {
         const requests = Array.from({ length: 50 }, (_, index) => {

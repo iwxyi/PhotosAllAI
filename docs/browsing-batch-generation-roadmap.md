@@ -192,6 +192,8 @@
 
 2026-11-07 普通瀑布流窗口化：按列记录卡片像素位置，视口滚动时二分定位每列首个可见卡片，仅挂载视口及上下缓冲区；键盘移动到未挂载照片时按位置滚动。`PHOTOALLISAI_PERF_COUNT=1000 PHOTOALLISAI_PERF_VIEW=masonry pnpm exec playwright test tests/e2e/catalog-real-media-perf.spec.ts --reporter=line` 在当前 macOS GUI 环境通过，滚动时挂载 43 张卡片，帧间隔 p95 9.7 毫秒，末端跳转与键盘回退通过，Tab 工作集约 456 MiB。此前未窗口化同内容样本挂载 1,000 张、p95 41.7 毫秒、Tab 工作集约 834 MiB；两者均为单轮同盘同内容 JPEG，不能外推为稳定收益。分组瀑布流已在后续改动中窗口化；大规模真实混合素材、缩放和长时内存仍待验证。
 
+2026-11-08 混合图片压测入口：`PHOTOALLISAI_PERF_MIXED_MEDIA=1` 让真实媒体 Electron 压测在两张 JPEG 和两张 PNG 间轮转，保留原单张 JPEG 模式用于前后对比。正常 macOS GUI 环境以 1,000 张硬链接运行网格用例通过：源文件约 6.9–20.7 MB，首屏可解码约 5.326 秒，4 秒连续滚动帧间隔 p95 9.2 毫秒，停滚可见缩略图约 12 毫秒完成；结束时 Tab 工作集约 386 MiB，主进程事件循环最大延迟约 410 毫秒。受限 GUI 环境同命令在 Electron 启动前失败，正常 GUI 环境重跑成功。这是四个文件重复硬链接的单轮热/冷缓存未严格控制样本，既不是独立 1,000 张真实素材，也不覆盖 HEIC、RAW、视频、外置盘或长期内存；下一步扩大独立素材与格式矩阵，重复采样首屏、解码队列和输入延迟，并继续实现有界渲染端页面缓存。
+
 - [Eagle 官方功能页](https://en.eagle.cool/)：快速浏览、悬停/空格预览与多维筛选。
 - [Lightroom Classic 浏览与比较](https://helpx.adobe.com/lightroom-classic/help/browse-compare-photos.html)：选片、活动项与多选、来源筛选。
 - [Lightroom Classic 性能指南](https://helpx.adobe.com/lightroom-classic/kb/optimize-performance-lightroom.html)：多级预览、缓存与后台负载。
