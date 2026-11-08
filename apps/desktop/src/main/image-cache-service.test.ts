@@ -69,7 +69,7 @@ describe('image cache governance', () => {
     expect(first).not.toBe(second);
   });
 
-  it('keeps a shared preview request alive when one consumer aborts', async () => {
+  it('serves cached previews without waiting for the decode queue', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-'));
     directories.push(directory);
     const assetId = 'shared-preview';
@@ -89,11 +89,10 @@ describe('image cache governance', () => {
     abandoned.abort();
     await expect(first).resolves.toBeNull();
     await expect(second).resolves.toBe(cached);
-    expect(service.getPerformanceStats().hits).toBe(1);
-    expect(service.getPerformanceStats()).toMatchObject({ abortedConsumers: 1, canceledQueued: 0 });
+    expect(service.getPerformanceStats()).toMatchObject({ hits: 1, decodes: 0, queueWaitMsTotal: 0, canceledQueued: 0 });
   });
 
-  it('cancels a queued shared preview only after every consumer aborts', async () => {
+  it('does not decode cached previews when consumers abort', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-'));
     directories.push(directory);
     const cached = new Map<string, string>();
@@ -119,10 +118,10 @@ describe('image cache governance', () => {
 
     firstController.abort();
     await expect(first).resolves.toBeNull();
-    expect(service.getPerformanceStats()).toMatchObject({ abortedConsumers: 1, canceledQueued: 0 });
+    expect(service.getPerformanceStats()).toMatchObject({ decodes: 0, canceledQueued: 0 });
     secondController.abort();
     await expect(second).resolves.toBeNull();
-    expect(service.getPerformanceStats()).toMatchObject({ abortedConsumers: 2, canceledQueued: 1 });
+    expect(service.getPerformanceStats()).toMatchObject({ decodes: 0, canceledQueued: 0 });
     await Promise.all(active);
     expect(service.getPerformanceStats().hits).toBe(2);
 

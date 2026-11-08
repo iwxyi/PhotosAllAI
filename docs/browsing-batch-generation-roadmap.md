@@ -196,6 +196,8 @@
 
 2026-11-08 大图缩略图解码：混合样本的分段计时显示，改动前 `nativeImage.createFromPath` 累计约 6.9 秒，缩放约 0.6 秒，主进程事件循环最大延迟约 433 毫秒。超过 8 MiB 的 JPEG/PNG 缩略图现优先由已安装的 ImageMagick 子进程解码；不可用或失败时回退原生路径。相同 1,000 张、四种源文件循环硬链接的网格用例在正常 macOS GUI 环境连续三轮通过，首屏可解码约 2.0–2.1 秒，主进程事件循环最大延迟约 155–163 毫秒，滚动帧间隔 p95 约 9.0–9.2 毫秒；停滚后缩略图完成约 2.9 秒。改动前首屏单轮约 5.9 秒，事件循环最大延迟约 433 毫秒。样本、缓存和设备负载未严格控制；这一优化依赖目标设备安装 ImageMagick，正式安装包、无 ImageMagick 回退、独立大图库、外置盘与长时内存均未验证。下一步要降低停滚等待并确认可随应用分发的隔离解码方案。
 
+2026-11-08 缓存命中路径：已生成的缩略图现在直接检查磁盘缓存并返回，不再等待两个解码槽；缓存缺失仍进入有界队列，且并发缺失请求在入队前重新检查进行中的任务以保持合并。缓存服务与队列共 18 项单测通过，类型检查与构建通过。尚未在 Electron 中量测滚回已缓存视口的尾延迟；首次解码和约 2.9 秒的停滚等待仍需独立优化。
+
 - [Eagle 官方功能页](https://en.eagle.cool/)：快速浏览、悬停/空格预览与多维筛选。
 - [Lightroom Classic 浏览与比较](https://helpx.adobe.com/lightroom-classic/help/browse-compare-photos.html)：选片、活动项与多选、来源筛选。
 - [Lightroom Classic 性能指南](https://helpx.adobe.com/lightroom-classic/kb/optimize-performance-lightroom.html)：多级预览、缓存与后台负载。

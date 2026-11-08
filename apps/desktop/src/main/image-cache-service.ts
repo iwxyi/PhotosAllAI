@@ -203,6 +203,21 @@ export class ImageCacheService {
       return this.#waitForConsumer(cacheKey, existing, signal);
     }
 
+    // A cached preview does not need a decoder slot. Keep disk hits responsive
+    // while slow source images occupy both workers.
+    if (await isRegularFile(destination)) {
+      if (signal?.aborted || this.#closed) return null;
+      this.#hits += 1;
+      await this.#touch(destination);
+      return signal?.aborted || this.#closed ? null : destination;
+    }
+    if (signal?.aborted || this.#closed) return null;
+    const pending = this.#inFlight.get(cacheKey);
+    if (pending) {
+      if (priority === 'visible') this.#decodeQueue.promote(cacheKey);
+      return this.#waitForConsumer(cacheKey, pending, signal);
+    }
+
     const startedAt = performance.now();
     let createStartedAt: number | null = null;
     const operation = this.#decodeQueue.enqueue(async () => {
