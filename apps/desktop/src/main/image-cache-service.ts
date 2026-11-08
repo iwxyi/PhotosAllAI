@@ -302,10 +302,23 @@ export class ImageCacheService {
     if (!sourceMetadata.isFile() || sourceMetadata.size === 0) throw new Error('IMAGE_PREVIEW_UNAVAILABLE');
     await mkdir(path.dirname(destination), { recursive: true });
     const nativeStartedAt = performance.now();
-    let image = nativeImage.createFromPath(sourcePath);
-    this.#nativeReadMsTotal += performance.now() - nativeStartedAt;
+    let image = nativeImage.createEmpty();
     let encoded: Buffer | null = null;
-    if (!image.isEmpty()) {
+    const format = identifyMediaFormat(sourcePath);
+    if (specification.width === variants.thumbnail.width && sourceMetadata.size >= 8 * 1024 * 1024 && (format?.id === 'jpeg' || format?.id === 'png')) {
+      const capabilities = await this.getDecoderCapabilities();
+      if (capabilities.imageMagick) {
+        const externalStartedAt = performance.now();
+        encoded = await this.#decodeWithImageMagick(sourcePath, specification);
+        this.#externalDecodeMsTotal += performance.now() - externalStartedAt;
+      }
+    }
+    if (!encoded) {
+      const readStartedAt = performance.now();
+      image = nativeImage.createFromPath(sourcePath);
+      this.#nativeReadMsTotal += performance.now() - readStartedAt;
+    }
+    if (!encoded && !image.isEmpty()) {
       const size = image.getSize();
       const scale = Math.min(specification.width / size.width, specification.height / size.height, 1);
       const resizeStartedAt = performance.now();
@@ -315,7 +328,7 @@ export class ImageCacheService {
         quality: specification.resizeQuality
       });
       this.#nativeResizeMsTotal += performance.now() - resizeStartedAt;
-    } else {
+    } else if (!encoded) {
       const externalStartedAt = performance.now();
       encoded = await this.#decodeWithExternalTools(sourcePath, destination, specification);
       this.#externalDecodeMsTotal += performance.now() - externalStartedAt;
