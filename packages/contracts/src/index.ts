@@ -177,7 +177,8 @@ export const workspaceSessionSchema = z.object({
   library: z.object({
     selectedFolderId: z.string().min(1).nullable(),
     selectedAlbumId: z.string().uuid().nullable(),
-    selectedSmartCollection: z.enum(['recent', 'favorites', 'unrated', 'unanalyzed', 'generated', 'to-review']).nullable(),
+    selectedFolderIds: z.array(z.string().min(1)).max(500).default([]),
+    selectedSmartCollection: z.string().min(1).nullable(),
     selectedTagId: z.string().uuid().nullable(),
     selectedAssetId: z.string().min(1).nullable(),
     favoriteOnly: z.boolean(),
@@ -299,7 +300,7 @@ export const listCatalogAssetsInputSchema = z.object({
   folderId: z.string().min(1).nullable().default(null),
   tagId: z.string().uuid().nullable().default(null),
   albumId: z.string().uuid().nullable().default(null),
-  smartCollection: z.enum(['recent', 'favorites', 'unrated', 'unanalyzed', 'generated', 'to-review']).nullable().default(null),
+  smartCollection: z.string().min(1).nullable().default(null),
   favoriteOnly: z.boolean().default(false),
   folderIds: z.array(z.string().min(1)).max(500).default([]),
   dateFrom: z.number().nonnegative().nullable().default(null),
@@ -407,11 +408,37 @@ export const updateCatalogAlbumAssetsInputSchema = z.object({
 });
 export type UpdateCatalogAlbumAssetsInput = z.infer<typeof updateCatalogAlbumAssetsInputSchema>;
 
+export const smartCollectionScopeSchema = z.object({
+  all: z.boolean().default(true),
+  favorites: z.boolean().default(false),
+  folders: z.boolean().default(false),
+  albums: z.boolean().default(false),
+  folderIds: z.array(z.string().min(1)).max(500).default([]),
+  albumIds: z.array(z.string().uuid()).max(500).default([])
+});
+export const smartCollectionConditionSchema = z.object({
+  field: z.enum(['rating', 'favorite', 'flag', 'labelColor', 'tag', 'fileName', 'folderName', 'format', 'sizeBytes', 'modifiedAt', 'importedAt', 'importedWithinDays', 'offline', 'analyzed', 'generated', 'reviewState', 'albumName', 'width', 'height', 'cameraMake', 'cameraModel', 'lensMake', 'lensModel', 'city', 'country', 'takenAt', 'exposureSeconds', 'aperture', 'focalLength', 'iso']),
+  operator: z.enum(['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'contains', 'notContains', 'startsWith', 'endsWith', 'regex', 'isSet', 'isNotSet']),
+  value: z.union([z.string().max(500), z.number().finite(), z.boolean(), z.null()])
+});
+export const smartCollectionRuleSchema = z.object({
+  version: z.literal(1),
+  scope: smartCollectionScopeSchema,
+  match: z.enum(['all', 'any']),
+  conditions: z.array(smartCollectionConditionSchema).max(50)
+});
+export type SmartCollectionRule = z.infer<typeof smartCollectionRuleSchema>;
 export const catalogSmartCollectionSchema = z.object({
-  id: z.enum(['recent', 'favorites', 'unrated', 'unanalyzed', 'generated', 'to-review']),
-  assetCount: z.number().int().nonnegative()
+  id: z.string().min(1),
+  name: z.string().min(1).max(120),
+  rule: smartCollectionRuleSchema,
+  assetCount: z.number().int().nonnegative(),
+  isDefault: z.boolean(),
+  indexing: z.boolean().default(false)
 });
 export type CatalogSmartCollection = z.infer<typeof catalogSmartCollectionSchema>;
+export const saveSmartCollectionInputSchema = z.object({ id: z.string().min(1).optional(), name: z.string().trim().min(1).max(120), rule: smartCollectionRuleSchema });
+export type SaveSmartCollectionInput = z.infer<typeof saveSmartCollectionInputSchema>;
 
 export const moveCatalogAssetsInputSchema = z.object({
   assetIds: z.array(z.string().min(1)).min(1).max(10_000),
@@ -440,6 +467,13 @@ export type MoveCatalogAssetsReport = z.infer<typeof moveCatalogAssetsReportSche
 
 export const copyCatalogAssetsInputSchema = moveCatalogAssetsInputSchema;
 export type CopyCatalogAssetsInput = z.infer<typeof copyCatalogAssetsInputSchema>;
+export const copyDisplayedFilesInputSchema = z.object({
+  items: z.array(z.discriminatedUnion('kind', [
+    z.object({ kind: z.literal('asset'), assetId: z.string().min(1) }),
+    z.object({ kind: z.literal('result'), resultId: z.string().uuid() })
+  ])).min(1).max(1000)
+});
+export type CopyDisplayedFilesInput = z.infer<typeof copyDisplayedFilesInputSchema>;
 
 export const copyCatalogAssetsReportSchema = z.object({
   operationId: z.string().uuid(),
@@ -1147,6 +1181,8 @@ export interface DesktopApi {
   deleteCatalogTag(tagId: DeleteCatalogTagInput): Promise<void>;
   listCatalogAlbums(): Promise<CatalogAlbum[]>;
   listCatalogSmartCollections(): Promise<CatalogSmartCollection[]>;
+  saveCatalogSmartCollection(input: SaveSmartCollectionInput): Promise<CatalogSmartCollection>;
+  deleteCatalogSmartCollection(id: string): Promise<void>;
   saveCatalogAlbum(input: SaveCatalogAlbumInput): Promise<CatalogAlbum>;
   deleteCatalogAlbum(albumId: string): Promise<void>;
   updateCatalogAlbumAssets(input: UpdateCatalogAlbumAssetsInput): Promise<CatalogAlbum>;
@@ -1154,6 +1190,11 @@ export interface DesktopApi {
   updateCatalogTags(input: UpdateCatalogTagsInput): Promise<CatalogTag[]>;
   moveCatalogAssets(input: MoveCatalogAssetsInput): Promise<MoveCatalogAssetsReport>;
   copyCatalogAssets(input: CopyCatalogAssetsInput): Promise<CopyCatalogAssetsReport>;
+  copyDisplayedFiles(input: CopyDisplayedFilesInput): Promise<number>;
+  copyDisplayedImage(input: CopyDisplayedFilesInput): Promise<void>;
+  importExternalMedia(input: { paths: string[]; targetFolderId?: string | null }): Promise<number>;
+  pasteExternalMedia(input: { targetFolderId?: string | null }): Promise<number>;
+  startDisplayedFilesDrag(input: CopyDisplayedFilesInput): void;
   previewCatalogCompanions(assetIds: string[]): Promise<CatalogCompanionPreview>;
   renameCatalogAsset(input: RenameCatalogAssetInput): Promise<RenameCatalogAssetReport>;
   renameCatalogAssets(input: RenameCatalogAssetsInput): Promise<RenameCatalogAssetsReport>;
@@ -1169,6 +1210,7 @@ export interface DesktopApi {
   synchronizeCatalogFolder(folderId: string): Promise<CatalogFolderSyncReport>;
   revealCatalogFolder(folderId: string): Promise<boolean>;
   unregisterCatalogFolder(input: UnregisterCatalogFolderInput): Promise<UnregisterCatalogFolderReport>;
+  trashCatalogFolder(folderId: string): Promise<void>;
   revealCatalogAsset(assetId: string): Promise<boolean>;
   getFileDetails(assetId: string): Promise<FileDetails>;
   getFileDetailsPage(assetIds: string[]): Promise<Record<string, FileDetails | null>>;
@@ -1179,7 +1221,6 @@ export interface DesktopApi {
   listTemporaryMediaPage(input: TemporaryMediaPageInput): Promise<TemporaryMediaPage>;
   onOpenImages(listener: (session: QuickViewSession) => void): () => void;
   onOpenImagesProgress(listener: (session: QuickViewSession) => void): () => void;
-  trashCatalogFolder(folderId: string): Promise<void>;
   getDroppedFilePaths(files: File[]): string[];
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;

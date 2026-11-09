@@ -11,6 +11,8 @@ import {
   catalogFolderSchema,
   relinkCatalogFolderResultSchema,
   catalogSmartCollectionSchema,
+  saveSmartCollectionInputSchema,
+  smartCollectionRuleSchema,
   catalogTagSchema,
   deleteCatalogTagInputSchema,
   listCatalogAssetsInputSchema,
@@ -29,6 +31,9 @@ import {
   type UnregisterCatalogFolderReport,
   unregisterCatalogFolderReportSchema,
   type CatalogSmartCollection,
+  type FileDetails,
+  type SmartCollectionRule,
+  type SaveSmartCollectionInput,
   type CatalogTag,
   type ListCatalogAssetsInput,
   type SaveCatalogAlbumInput,
@@ -40,15 +45,15 @@ import {
 } from '@photoallisai/contracts';
 
 import { normalizeSearchText, tokenizeSearchText } from './search-index';
-import { isSupportedImage } from './media-format-registry';
+import { isSupportedBrowseMedia } from './media-format-registry';
 export { isSupportedImage } from './media-format-registry';
 
 const IGNORED_DIRECTORIES = new Set(['_PhotoAllIsAI', '.git', 'node_modules']);
-const RECENT_IMPORT_WINDOW_MS = 30 * 24 * 60 * 60 * 1_000;
 const IMPORT_BATCH_SIZE = 256;
 const IMPORT_STAT_CONCURRENCY = 16;
 const RECONCILE_BATCH_SIZE = 256;
 const COUNT_CACHE_LIMIT = 64;
+const EXIF_FIELDS = new Set(['width', 'height', 'cameraMake', 'cameraModel', 'lensMake', 'lensModel', 'city', 'country', 'takenAt', 'exposureSeconds', 'aperture', 'focalLength', 'iso']);
 
 type AssetRow = {
   id: string;
@@ -107,7 +112,7 @@ async function* walkImages(root: string): AsyncGenerator<string> {
       const entryPath = path.join(current, entry.name);
       if (entry.isDirectory() && !IGNORED_DIRECTORIES.has(entry.name)) {
         directories.push(entryPath);
-      } else if (entry.isFile() && isSupportedImage(entry.name)) {
+      } else if (entry.isFile() && isSupportedBrowseMedia(entry.name)) {
         yield entryPath;
       }
     }
@@ -121,9 +126,12 @@ export class CatalogService {
   #folderCache: CatalogFolder[] | null = null;
   #folderCacheVersion = '';
   #directoryLookup = new Map<string, { rootId: string; rootPath: string; relativePath: string }>();
+  #externalRelocations: RelinkCatalogFolderOperationResult['relocations'] = [];
 
   constructor(databasePath: string) {
     this.#database = new DatabaseSync(databasePath);
+    this.#database.function('smart_regexp', (pattern: unknown, candidate: unknown) =>
+      typeof pattern === 'string' && typeof candidate === 'string' && new RegExp(pattern, 'iu').test(candidate) ? 1 : 0);
     this.#database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.#migrate();
   }
@@ -304,13 +312,62 @@ export class CatalogService {
         COMMIT;
       `);
     }
+    const smartVersion = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    const hadSmartCollections = this.#tableExists('smart_collections');
+    if (smartVersion.user_version < 13 || !hadSmartCollections) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS smart_collections (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, rule_json TEXT NOT NULL,
+          is_default INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+        );
+        ${smartVersion.user_version < 13 ? 'PRAGMA user_version = 13;' : ''}
+        COMMIT;
+      `);
+      if (!hadSmartCollections) this.#seedDefaultSmartCollections();
+    }
+    const exifVersion = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (exifVersion.user_version < 14 || !this.#tableExists('asset_exif')) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS asset_exif (
+          asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
+          source_size INTEGER NOT NULL, source_modified_at INTEGER NOT NULL,
+          width REAL, height REAL, camera_make TEXT, camera_model TEXT,
+          lens_make TEXT, lens_model TEXT, city TEXT, country TEXT,
+          taken_at INTEGER, exposure_seconds REAL, aperture REAL, focal_length REAL, iso REAL
+        );
+        CREATE INDEX IF NOT EXISTS asset_exif_camera_idx ON asset_exif(camera_make, camera_model);
+        CREATE INDEX IF NOT EXISTS asset_exif_taken_idx ON asset_exif(taken_at);
+        CREATE INDEX IF NOT EXISTS asset_exif_iso_idx ON asset_exif(iso);
+        ${exifVersion.user_version < 14 ? 'PRAGMA user_version = 14;' : ''}
+        COMMIT;
+      `);
+    }
     this.#ensureCreatedDirectories();
+  }
+
+  #seedDefaultSmartCollections(): void {
+    const defaults: Array<[string, string, SmartCollectionRule['conditions']]> = [
+      ['recent', '最近 30 天', [{ field: 'importedWithinDays', operator: 'lte', value: 30 }]],
+      ['favorites', '收藏', [{ field: 'favorite', operator: 'eq', value: true }]],
+      ['unrated', '未评分', [{ field: 'rating', operator: 'eq', value: 0 }]],
+      ['unanalyzed', '等待 AI 分析', [{ field: 'analyzed', operator: 'eq', value: false }]],
+      ['generated', '已生成', [{ field: 'generated', operator: 'eq', value: true }]],
+      ['to-review', '待审阅', [{ field: 'reviewState', operator: 'eq', value: 'undecided' }]]
+    ];
+    const insert = this.#database.prepare('INSERT OR IGNORE INTO smart_collections (id, name, rule_json, is_default, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)');
+    const now = Date.now();
+    for (const [id, name, conditions] of defaults) {
+      insert.run(id, name, JSON.stringify({ version: 1, scope: { all: true, favorites: false, folderIds: [], albumIds: [] }, match: 'all', conditions }), now, now);
+    }
   }
 
   close(): void {
     this.#countCache.clear();
     this.#folderCache = null;
     this.#directoryLookup.clear();
+    this.#externalRelocations = [];
     this.#database.close();
   }
 
@@ -364,9 +421,6 @@ export class CatalogService {
   listAssetPage(rawInput: ListCatalogAssetsInput): CatalogAssetPage {
     const input = listCatalogAssetsInputSchema.parse(rawInput);
     if (input.cursor && input.offset !== undefined) throw new RangeError('Use either cursor or offset for catalog paging');
-    const activeGenerationPredicate = this.#tableExists('generation_results') && this.#columnExists('generation_results', 'trashed_at')
-      ? 'trashed_at IS NULL'
-      : '1';
     const baseConditions: string[] = ['removed_at IS NULL'];
     const baseValues: (string | number)[] = [];
     if (input.assetIds) {
@@ -392,24 +446,11 @@ export class CatalogService {
       baseConditions.push('id IN (SELECT asset_id FROM album_assets WHERE album_id = ?)');
       baseValues.push(input.albumId);
     }
-    if (input.smartCollection === 'recent') {
-      baseConditions.push('imported_at >= ?');
-      baseValues.push(Date.now() - RECENT_IMPORT_WINDOW_MS);
-    }
-    if (input.smartCollection === 'favorites') baseConditions.push('favorite = 1');
-    if (input.smartCollection === 'unrated') baseConditions.push('rating = 0');
-    if (input.smartCollection === 'unanalyzed' && this.#tableExists('analysis_revisions')) {
-      baseConditions.push('id NOT IN (SELECT asset_id FROM analysis_revisions)');
-    }
-    if (input.smartCollection === 'generated') {
-      baseConditions.push(this.#tableExists('generation_results')
-        ? `id IN (SELECT asset_id FROM generation_results WHERE ${activeGenerationPredicate})`
-        : '0');
-    }
-    if (input.smartCollection === 'to-review') {
-      baseConditions.push(this.#tableExists('generation_results')
-        ? `id IN (SELECT asset_id FROM generation_results WHERE review_state = 'undecided' AND ${activeGenerationPredicate})`
-        : '0');
+    if (input.smartCollection) {
+      const rule = this.#findSmartCollectionRule(input.smartCollection);
+      const compiled = rule ? this.#compileSmartCollection(rule) : { sql: '0', values: [] };
+      baseConditions.push(compiled.sql);
+      baseValues.push(...compiled.values);
     }
     if (input.favoriteOnly) baseConditions.push('favorite = 1');
     if (input.folderIds.length) {
@@ -715,6 +756,8 @@ export class CatalogService {
   }
 
   async relinkFolder(folderId: string, requestedPath: string): Promise<RelinkCatalogFolderOperationResult> {
+    const directory = this.#resolveDirectory(folderId);
+    if (directory?.relativePath) return this.#relinkChildFolder(folderId, directory, requestedPath);
     const folder = this.#database.prepare('SELECT id, path FROM folders WHERE id = ? AND removed_at IS NULL')
       .get(folderId) as { id: string; path: string } | undefined;
     if (!folder) throw new Error('CATALOG_FOLDER_NOT_FOUND');
@@ -839,6 +882,99 @@ export class CatalogService {
     };
   }
 
+  async #relinkChildFolder(
+    folderId: string,
+    directory: { rootId: string; rootPath: string; relativePath: string },
+    requestedPath: string
+  ): Promise<RelinkCatalogFolderOperationResult> {
+    const oldPath = path.join(directory.rootPath, directory.relativePath);
+    const nextPath = await realpath(requestedPath);
+    if (!(await stat(nextPath)).isDirectory()) throw new Error('TARGET_NOT_DIRECTORY');
+    if (!nextPath.startsWith(`${directory.rootPath}${path.sep}`) || nextPath === oldPath)
+      throw new Error('RELINK_TARGET_OUTSIDE_ASSOCIATED_ROOT');
+    if (await stat(oldPath).then(() => true).catch(() => false)) throw new Error('RELINK_SOURCE_STILL_PRESENT');
+    const prefix = `${oldPath}${path.sep}`;
+    const existing = (this.#database.prepare(`
+      SELECT id, path, file_name, size_bytes, modified_at, content_hash FROM assets
+      WHERE folder_id = ? AND path >= ? AND path < ? AND removed_at IS NULL
+    `).all(directory.rootId, prefix, `${prefix}\uffff`) as RelinkAsset[]);
+    const files: RelinkFile[] = [];
+    for await (const filePath of walkImages(nextPath)) {
+      const metadata = await stat(filePath);
+      files.push({ path: filePath, relative: path.relative(nextPath, filePath), size: metadata.size, modifiedAt: Math.trunc(metadata.mtimeMs) });
+    }
+    const exact = new Map(existing.map((asset) => [path.relative(oldPath, asset.path), asset]));
+    const matches = new Map<string, RelinkAsset>();
+    const usedAssetIds = new Set<string>();
+    for (const file of files) {
+      const asset = exact.get(file.relative);
+      if (!asset) continue;
+      matches.set(file.path, asset);
+      usedAssetIds.add(asset.id);
+    }
+    const remainingAssets = groupUnique(existing.filter((asset) => !usedAssetIds.has(asset.id)), relinkMetadataKey);
+    const remainingFiles = groupUnique(files.filter((file) => !matches.has(file.path)), relinkMetadataKey);
+    for (const [key, asset] of remainingAssets) {
+      const file = remainingFiles.get(key);
+      if (!asset || !file) continue;
+      matches.set(file.path, asset);
+      usedAssetIds.add(asset.id);
+    }
+    const indexed = this.#database.prepare('SELECT id, rating, favorite, label_color, flag FROM assets WHERE path = ? AND removed_at IS NULL');
+    for (const file of files) {
+      const target = indexed.get(file.path) as { id: string; rating: number; favorite: number; label_color: string | null; flag: string } | undefined;
+      if (!target || target.id === matches.get(file.path)?.id) continue;
+      if (!matches.has(file.path)) continue;
+      const hasLinks = ['asset_tags', 'album_assets', 'analysis_revisions', 'generation_results', 'generation_write_intents', 'tasks', 'file_operation_items'].some((table) =>
+        this.#tableExists(table) && Boolean(this.#database.prepare(`SELECT 1 FROM ${table} WHERE asset_id = ? LIMIT 1`).get(target.id))
+      ) || (this.#tableExists('file_operation_items') && Boolean(this.#database.prepare('SELECT 1 FROM file_operation_items WHERE result_asset_id = ? LIMIT 1').get(target.id)));
+      if (target.rating || target.favorite || target.label_color || target.flag !== 'unflagged' || hasLinks)
+        throw new Error('RELINK_TARGET_HAS_EDITED_ASSETS');
+    }
+    const scopeChanges = this.#scopeRelocations(oldPath, nextPath, directory.rootId, directory.rootPath);
+    const relocations: RelinkCatalogFolderOperationResult['relocations'] = [];
+    let discovered = 0;
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const removeDuplicate = this.#database.prepare('DELETE FROM assets WHERE path = ? AND id <> ?');
+      const update = this.#database.prepare(`
+        UPDATE assets SET path = ?, file_name = ?, extension = ?, size_bytes = ?, modified_at = ?, offline_at = NULL,
+          content_hash = CASE WHEN size_bytes = ? AND modified_at = ? THEN content_hash ELSE NULL END WHERE id = ?
+      `);
+      const insert = this.#database.prepare(`
+        INSERT OR IGNORE INTO assets (id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at, offline_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+      `);
+      for (const file of files) {
+        const asset = matches.get(file.path);
+        if (asset) {
+          const duplicate = indexed.get(file.path) as { id: string } | undefined;
+          if (duplicate && duplicate.id !== asset.id) {
+            this.#database.prepare('DELETE FROM asset_search WHERE asset_id = ?').run(duplicate.id);
+            this.#database.prepare('DELETE FROM asset_search_tokens WHERE asset_id = ?').run(duplicate.id);
+          }
+          removeDuplicate.run(file.path, asset.id);
+          const nextFileName = path.basename(file.path);
+          update.run(file.path, nextFileName, path.extname(file.path).toLowerCase(), file.size, file.modifiedAt,
+            file.size, file.modifiedAt, asset.id);
+          relocations.push({ assetId: asset.id, previousPath: asset.path, nextPath: file.path,
+            previousFileName: asset.file_name, nextFileName });
+        } else if (insert.run(randomUUID(), directory.rootId, file.path, path.basename(file.path),
+          path.extname(file.path).toLowerCase(), file.size, file.modifiedAt, Date.now()).changes === 1) discovered += 1;
+      }
+      this.#relocateCreatedDirectories(directory.rootId, oldPath, directory.rootId, nextPath);
+      this.#applyScopeRelocations(scopeChanges);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    const nextId = stableDirectoryId(directory.rootId, path.relative(directory.rootPath, nextPath));
+    const folder = this.listFolders().find((item) => item.id === nextId);
+    if (!folder) throw new Error('CATALOG_FOLDER_NOT_FOUND');
+    return { ...relinkCatalogFolderResultSchema.parse({ folder, matched: matches.size, discovered, offline: folder.offlineCount }), relocations };
+  }
+
   #ensureCreatedDirectories(): void {
     this.#database.exec('CREATE TABLE IF NOT EXISTS created_directories (root_id TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE, path TEXT NOT NULL, PRIMARY KEY(root_id, path))');
   }
@@ -871,16 +1007,17 @@ export class CatalogService {
     }
   }
 
-  async renameFolder(input: RenameCatalogFolderInput): Promise<RenameCatalogFolderResult> {
+  async renameFolder(input: RenameCatalogFolderInput): Promise<RenameCatalogFolderResult & { relocations: MoveCatalogFolderOperationResult['relocations'] }> {
     if (!input.name.trim() || input.name === '.' || input.name === '..' || /[\\/]/u.test(input.name) || input.name.includes('\0')) throw new Error('INVALID_FOLDER_NAME');
     const directory = this.#resolveDirectory(input.folderId);
     if (!directory) throw new Error('CATALOG_FOLDER_NOT_FOUND');
     const oldPath = path.join(directory.rootPath, directory.relativePath);
     const nextPath = path.join(path.dirname(oldPath), input.name);
+    const scopeChanges = this.#scopeRelocations(oldPath, nextPath, directory.rootId, directory.relativePath ? directory.rootPath : nextPath);
     if (oldPath === nextPath) {
       const folder = this.listFolders().find((item) => item.id === input.folderId);
       if (!folder) throw new Error('CATALOG_FOLDER_NOT_FOUND');
-      return { folder };
+      return { folder, relocations: [] };
     }
     try {
       await stat(nextPath);
@@ -892,16 +1029,21 @@ export class CatalogService {
     await rename(oldPath, nextPath);
     const prefix = `${oldPath}${path.sep}`;
     const nextPrefix = `${nextPath}${path.sep}`;
+    const relocations: MoveCatalogFolderOperationResult['relocations'] = [];
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       const assets = this.#database.prepare('SELECT id, path FROM assets WHERE folder_id = ? AND removed_at IS NULL').all(directory.rootId) as Array<{ id: string; path: string }>;
       const updateAsset = this.#database.prepare('UPDATE assets SET path = ?, offline_at = NULL WHERE id = ?');
       for (const asset of assets) {
-        if (asset.path === oldPath) updateAsset.run(nextPath, asset.id);
-        else if (asset.path.startsWith(prefix)) updateAsset.run(`${nextPrefix}${asset.path.slice(prefix.length)}`, asset.id);
+        const relocated = asset.path === oldPath ? nextPath : asset.path.startsWith(prefix) ? `${nextPrefix}${asset.path.slice(prefix.length)}` : null;
+        if (relocated) {
+          updateAsset.run(relocated, asset.id);
+          relocations.push({ assetId: asset.id, previousPath: asset.path, nextPath: relocated, previousFileName: path.basename(asset.path), nextFileName: path.basename(relocated) });
+        }
       }
       if (directory.relativePath === '') this.#database.prepare('UPDATE folders SET path = ?, name = ? WHERE id = ?').run(nextPath, input.name, directory.rootId);
       this.#relocateCreatedDirectories(directory.rootId, oldPath, directory.rootId, nextPath);
+      this.#applyScopeRelocations(scopeChanges);
       this.#database.exec('COMMIT');
     } catch (error) {
       this.#database.exec('ROLLBACK');
@@ -911,7 +1053,7 @@ export class CatalogService {
     const nextId = directory.relativePath ? stableDirectoryId(directory.rootId, path.relative(directory.rootPath, nextPath)) : directory.rootId;
     const folder = this.listFolders().find((item) => item.id === nextId);
     if (!folder) throw new Error('CATALOG_FOLDER_NOT_FOUND');
-    return { folder };
+    return { folder, relocations };
   }
 
   async moveFolder(input: MoveCatalogFolderInput): Promise<MoveCatalogFolderOperationResult> {
@@ -922,6 +1064,7 @@ export class CatalogService {
     const sourcePath = path.join(source.rootPath, source.relativePath);
     const targetPath = path.join(target.rootPath, target.relativePath);
     const nextPath = path.join(targetPath, path.basename(sourcePath));
+    const scopeChanges = this.#scopeRelocations(sourcePath, nextPath, target.rootId, target.rootPath);
     const sourcePrefix = `${sourcePath}${path.sep}`;
     if (targetPath === sourcePath || targetPath.startsWith(sourcePrefix)) throw new Error('FOLDER_MOVE_INTO_DESCENDANT');
     if (path.dirname(sourcePath) === targetPath) throw new Error('FOLDER_ALREADY_IN_TARGET');
@@ -946,6 +1089,7 @@ export class CatalogService {
       const update = this.#database.prepare('UPDATE assets SET folder_id = ?, path = ?, offline_at = NULL WHERE id = ?');
       for (const item of relocations) update.run(target.rootId, item.nextPath, item.assetId);
       this.#relocateCreatedDirectories(source.rootId, sourcePath, target.rootId, nextPath);
+      this.#applyScopeRelocations(scopeChanges);
       this.#database.prepare('INSERT OR IGNORE INTO created_directories (root_id, path) VALUES (?, ?)').run(target.rootId, nextPath);
       if (source.relativePath === '') this.#database.prepare('UPDATE folders SET removed_at = ? WHERE id = ? AND removed_at IS NULL').run(Date.now(), source.rootId);
       this.#database.exec('COMMIT');
@@ -987,34 +1131,209 @@ export class CatalogService {
   }
 
   listSmartCollections(): CatalogSmartCollection[] {
-    const count = (condition: string, ...values: Array<string | number>): number => {
-      const row = this.#database.prepare(`
-        SELECT COUNT(*) AS value FROM assets WHERE removed_at IS NULL AND (${condition})
-      `).get(...values) as { value: number };
-      return row.value;
-    };
-    const hasAnalysis = this.#tableExists('analysis_revisions');
-    const hasGeneration = this.#tableExists('generation_results');
-    const activeGenerationPredicate = hasGeneration && this.#columnExists('generation_results', 'trashed_at')
-      ? 'trashed_at IS NULL'
-      : '1';
-    return [
-      catalogSmartCollectionSchema.parse({ id: 'recent', assetCount: count('imported_at >= ?', Date.now() - RECENT_IMPORT_WINDOW_MS) }),
-      catalogSmartCollectionSchema.parse({ id: 'favorites', assetCount: count('favorite = 1') }),
-      catalogSmartCollectionSchema.parse({ id: 'unrated', assetCount: count('rating = 0') }),
-      catalogSmartCollectionSchema.parse({
-        id: 'unanalyzed',
-        assetCount: hasAnalysis ? count('id NOT IN (SELECT asset_id FROM analysis_revisions)') : count('1')
-      }),
-      catalogSmartCollectionSchema.parse({
-        id: 'generated',
-        assetCount: hasGeneration ? count(`id IN (SELECT asset_id FROM generation_results WHERE ${activeGenerationPredicate})`) : 0
-      }),
-      catalogSmartCollectionSchema.parse({
-        id: 'to-review',
-        assetCount: hasGeneration ? count(`id IN (SELECT asset_id FROM generation_results WHERE review_state = 'undecided' AND ${activeGenerationPredicate})`) : 0
-      })
-    ];
+    const rows = this.#database.prepare('SELECT id, name, rule_json, is_default FROM smart_collections ORDER BY is_default DESC, created_at, name COLLATE NOCASE').all() as Array<{ id: string; name: string; rule_json: string; is_default: number }>;
+    let missingExif: boolean | null = null;
+    return rows.map((row) => {
+      const rule = smartCollectionRuleSchema.parse(JSON.parse(row.rule_json));
+      const { sql, values } = this.#compileSmartCollection(rule);
+      const count = this.#database.prepare(`SELECT COUNT(*) AS value FROM assets WHERE removed_at IS NULL AND (${sql})`).get(...values) as { value: number };
+      if (rule.conditions.some((condition) => EXIF_FIELDS.has(condition.field)) && missingExif === null) missingExif = this.listExifIndexCandidates(1).length > 0;
+      return catalogSmartCollectionSchema.parse({ id: row.id, name: row.name, rule, assetCount: count.value, isDefault: Boolean(row.is_default), indexing: rule.conditions.some((condition) => EXIF_FIELDS.has(condition.field)) && missingExif });
+    });
+  }
+
+  hasExifSmartCollections(): boolean {
+    const rows = this.#database.prepare('SELECT rule_json FROM smart_collections').all() as Array<{ rule_json: string }>;
+    return rows.some((row) => smartCollectionRuleSchema.parse(JSON.parse(row.rule_json)).conditions.some((condition) => EXIF_FIELDS.has(condition.field)));
+  }
+
+  listExifIndexCandidates(limit = 16, afterId = ''): string[] {
+    return (this.#database.prepare(`
+      SELECT assets.id FROM assets LEFT JOIN asset_exif ON asset_exif.asset_id = assets.id
+      WHERE assets.removed_at IS NULL AND assets.offline_at IS NULL
+        AND assets.id > ? AND (asset_exif.asset_id IS NULL OR asset_exif.source_size != assets.size_bytes OR asset_exif.source_modified_at != assets.modified_at)
+      ORDER BY assets.id LIMIT ?
+    `).all(afterId, limit) as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  saveExifDetails(assetId: string, details: FileDetails): void {
+    const asset = this.resolveAssetFile(assetId);
+    if (!asset || asset.sizeBytes !== details.sizeBytes || asset.modifiedAt !== Math.trunc(details.modifiedAt)) return;
+    this.#database.prepare(`
+      INSERT INTO asset_exif (asset_id, source_size, source_modified_at, width, height, camera_make, camera_model, lens_make, lens_model, city, country, taken_at, exposure_seconds, aperture, focal_length, iso)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(asset_id) DO UPDATE SET
+        source_size = excluded.source_size, source_modified_at = excluded.source_modified_at,
+        width = excluded.width, height = excluded.height, camera_make = excluded.camera_make, camera_model = excluded.camera_model,
+        lens_make = excluded.lens_make, lens_model = excluded.lens_model, city = excluded.city, country = excluded.country,
+        taken_at = excluded.taken_at, exposure_seconds = excluded.exposure_seconds, aperture = excluded.aperture,
+        focal_length = excluded.focal_length, iso = excluded.iso
+    `).run(assetId, asset.sizeBytes, asset.modifiedAt, details.width ?? null, details.height ?? null,
+      details.cameraMake ?? null, details.cameraModel ?? null, details.lensMake ?? null, details.lensModel ?? null,
+      details.city ?? null, details.country ?? null, details.takenAt ? Date.parse(details.takenAt) : null,
+      details.exposureSeconds ?? null, details.aperture ?? null, details.focalLength ?? null, details.iso ?? null);
+    this.#countCache.clear();
+  }
+
+  saveSmartCollection(rawInput: SaveSmartCollectionInput): CatalogSmartCollection {
+    const input = saveSmartCollectionInputSchema.parse(rawInput);
+    this.#compileSmartCollection(input.rule);
+    const id = input.id ?? randomUUID();
+    const now = Date.now();
+    if (input.id) {
+      if (!this.#database.prepare('SELECT 1 FROM smart_collections WHERE id = ?').get(id)) throw new Error('SMART_COLLECTION_NOT_FOUND');
+      this.#database.prepare('UPDATE smart_collections SET name = ?, rule_json = ?, updated_at = ? WHERE id = ?').run(input.name, JSON.stringify(input.rule), now, id);
+    } else {
+      this.#database.prepare('INSERT INTO smart_collections (id, name, rule_json, is_default, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)').run(id, input.name, JSON.stringify(input.rule), now, now);
+    }
+    return this.listSmartCollections().find((item) => item.id === id)!;
+  }
+
+  deleteSmartCollection(id: string): void {
+    this.#database.prepare('DELETE FROM smart_collections WHERE id = ?').run(id);
+  }
+
+  #findSmartCollectionRule(id: string): SmartCollectionRule | null {
+    const row = this.#database.prepare('SELECT rule_json FROM smart_collections WHERE id = ?').get(id) as { rule_json: string } | undefined;
+    return row ? smartCollectionRuleSchema.parse(JSON.parse(row.rule_json)) : null;
+  }
+
+  #scopeRelocations(sourcePath: string, nextPath: string, targetRootId: string, targetRootPath: string): Map<string, string> {
+    const changes = new Map<string, string>();
+    for (const folder of this.listFolders()) {
+      const directory = this.#resolveDirectory(folder.id);
+      if (!directory) continue;
+      const currentPath = path.join(directory.rootPath, directory.relativePath);
+      if (currentPath !== sourcePath && !currentPath.startsWith(`${sourcePath}${path.sep}`)) continue;
+      const relocated = currentPath === sourcePath ? nextPath : path.join(nextPath, path.relative(sourcePath, currentPath));
+      const relative = path.relative(targetRootPath, relocated);
+      changes.set(folder.id, relative && relative !== '.' ? stableDirectoryId(targetRootId, relative) : targetRootId);
+    }
+    return changes;
+  }
+
+  #applyScopeRelocations(changes: Map<string, string>): void {
+    if (!changes.size) return;
+    const rows = this.#database.prepare('SELECT id, rule_json FROM smart_collections').all() as Array<{ id: string; rule_json: string }>;
+    const update = this.#database.prepare('UPDATE smart_collections SET rule_json = ?, updated_at = ? WHERE id = ?');
+    for (const row of rows) {
+      const rule = smartCollectionRuleSchema.parse(JSON.parse(row.rule_json));
+      const nextIds = [...new Set(rule.scope.folderIds.map((id) => changes.get(id) ?? id))];
+      if (nextIds.every((id, index) => id === rule.scope.folderIds[index]) && nextIds.length === rule.scope.folderIds.length) continue;
+      update.run(JSON.stringify({ ...rule, scope: { ...rule.scope, folderIds: nextIds } }), Date.now(), row.id);
+    }
+  }
+
+  #compileSmartCollection(rule: SmartCollectionRule): { sql: string; values: Array<string | number> } {
+    const values: Array<string | number> = [];
+    const scopeParts: string[] = [];
+    if (rule.scope.all) scopeParts.push('1');
+    if (rule.scope.favorites) scopeParts.push('favorite = 1');
+    if (rule.scope.folders) scopeParts.push('folder_id IN (SELECT id FROM folders WHERE removed_at IS NULL)');
+    if (rule.scope.albums) scopeParts.push('id IN (SELECT asset_id FROM album_assets)');
+    for (const id of rule.scope.folderIds) {
+      const directory = this.#resolveDirectory(id);
+      if (!directory) continue;
+      if (!directory.relativePath) {
+        scopeParts.push('folder_id = ?');
+        values.push(directory.rootId);
+      } else {
+        const absolute = path.join(directory.rootPath, directory.relativePath);
+        scopeParts.push("(folder_id = ? AND (path LIKE ? ESCAPE '\\' OR path = ?))");
+        values.push(directory.rootId, `${escapeLike(absolute + path.sep)}%`, absolute);
+      }
+    }
+    if (rule.scope.albumIds.length) {
+      scopeParts.push(`id IN (SELECT asset_id FROM album_assets WHERE album_id IN (${rule.scope.albumIds.map(() => '?').join(',')}))`);
+      values.push(...rule.scope.albumIds);
+    }
+    const conditions: string[] = [];
+    for (const condition of rule.conditions) {
+      const { field, operator, value } = condition;
+      const compare = (expression: string, kind: 'number' | 'string' | 'boolean'): string => {
+        if (operator === 'isSet' || operator === 'isNotSet') return `${expression} IS ${operator === 'isSet' ? 'NOT ' : ''}NULL`;
+        if (kind === 'number' && (typeof value !== 'number' || !Number.isFinite(value))) throw new Error('SMART_COLLECTION_INVALID_VALUE');
+        if (kind === 'string' && typeof value !== 'string') throw new Error('SMART_COLLECTION_INVALID_VALUE');
+        if (kind === 'boolean' && typeof value !== 'boolean') throw new Error('SMART_COLLECTION_INVALID_VALUE');
+        if (operator === 'regex') {
+          if (kind !== 'string' || typeof value !== 'string') throw new Error('SMART_COLLECTION_INVALID_OPERATOR');
+          validateSmartRegex(value);
+          values.push(value);
+          return `smart_regexp(?, ${expression}) = 1`;
+        }
+        if (operator === 'contains' || operator === 'notContains' || operator === 'startsWith' || operator === 'endsWith') {
+          if (kind !== 'string') throw new Error('SMART_COLLECTION_INVALID_OPERATOR');
+          const escaped = escapeLike(value as string);
+          values.push(operator === 'startsWith' ? `${escaped}%` : operator === 'endsWith' ? `%${escaped}` : `%${escaped}%`);
+          return `${expression} ${operator === 'notContains' ? 'NOT ' : ''}LIKE ? ESCAPE '\\'`;
+        }
+        const sqlOperator = { eq: '=', ne: '<>', gt: '>', gte: '>=', lt: '<', lte: '<=' }[operator];
+        if (!sqlOperator || (kind === 'boolean' && !['eq', 'ne'].includes(operator))) throw new Error('SMART_COLLECTION_INVALID_OPERATOR');
+        values.push(kind === 'boolean' ? Number(value) : value as string | number);
+        return `${expression}${kind === 'string' ? ' COLLATE NOCASE' : ''} ${sqlOperator} ?`;
+      };
+      const columns: Partial<Record<typeof field, [string, 'number' | 'string' | 'boolean']>> = {
+        rating: ['rating', 'number'], favorite: ['favorite', 'boolean'], flag: ['flag', 'string'], labelColor: ['label_color', 'string'],
+        fileName: ['file_name', 'string'], format: ["SUBSTR(extension, 2)", 'string'], sizeBytes: ['size_bytes', 'number'],
+        modifiedAt: ['modified_at', 'number'], importedAt: ['imported_at', 'number'], offline: ['(offline_at IS NOT NULL)', 'boolean']
+      };
+      if (columns[field]) {
+        const [expression, kind] = columns[field]!;
+        conditions.push(compare(expression, kind));
+      } else if (EXIF_FIELDS.has(field)) {
+        const exifColumns: Record<string, [string, 'number' | 'string']> = {
+          width: ['width', 'number'], height: ['height', 'number'], cameraMake: ['camera_make', 'string'],
+          cameraModel: ['camera_model', 'string'], lensMake: ['lens_make', 'string'], lensModel: ['lens_model', 'string'],
+          city: ['city', 'string'], country: ['country', 'string'], takenAt: ['taken_at', 'number'],
+          exposureSeconds: ['exposure_seconds', 'number'], aperture: ['aperture', 'number'], focalLength: ['focal_length', 'number'], iso: ['iso', 'number']
+        };
+        const [column, kind] = exifColumns[field]!;
+        const comparison = compare(`asset_exif.${column}`, kind);
+        conditions.push(`EXISTS (SELECT 1 FROM asset_exif WHERE asset_exif.asset_id = assets.id AND asset_exif.source_size = assets.size_bytes AND asset_exif.source_modified_at = assets.modified_at AND ${comparison})`);
+      } else if (field === 'importedWithinDays') {
+        if (typeof value !== 'number' || value < 0 || !Number.isFinite(value) || operator !== 'lte') throw new Error('SMART_COLLECTION_INVALID_VALUE');
+        values.push(Date.now() - value * 86_400_000);
+        conditions.push('imported_at >= ?');
+      } else if (field === 'analyzed' || field === 'generated') {
+        if (typeof value !== 'boolean' || !['eq', 'ne'].includes(operator)) throw new Error('SMART_COLLECTION_INVALID_VALUE');
+        const table = field === 'analyzed' ? 'analysis_revisions' : 'generation_results';
+        const exists = this.#tableExists(table);
+        const active = field === 'generated' && exists && this.#columnExists(table, 'trashed_at') ? ' AND trashed_at IS NULL' : '';
+        const expression = exists ? `EXISTS (SELECT 1 FROM ${table} WHERE asset_id = assets.id${active})` : '0';
+        conditions.push((operator === 'eq') === value ? expression : `NOT (${expression})`);
+      } else if (field === 'reviewState') {
+        if (typeof value !== 'string' || !['undecided', 'accepted', 'preferred', 'rejected'].includes(value) || !['eq', 'ne'].includes(operator)) throw new Error('SMART_COLLECTION_INVALID_VALUE');
+        if (!this.#tableExists('generation_results')) { conditions.push('0'); continue; }
+        const active = this.#columnExists('generation_results', 'trashed_at') ? ' AND trashed_at IS NULL' : '';
+        values.push(value);
+        conditions.push(`${operator === 'ne' ? 'NOT ' : ''}EXISTS (SELECT 1 FROM generation_results WHERE asset_id = assets.id AND review_state = ?${active})`);
+      } else if (field === 'tag' || field === 'albumName') {
+        if (typeof value !== 'string' || !['eq', 'ne', 'contains', 'notContains', 'startsWith', 'endsWith', 'regex'].includes(operator)) throw new Error('SMART_COLLECTION_INVALID_VALUE');
+        const table = field === 'tag' ? 'asset_tags JOIN tags ON tags.id = asset_tags.tag_id' : 'album_assets JOIN albums ON albums.id = album_assets.album_id';
+        const assetColumn = field === 'tag' ? 'asset_tags.asset_id' : 'album_assets.asset_id';
+        const nameColumn = field === 'tag' ? 'tags.name' : 'albums.name';
+        const negative = operator === 'ne' || operator === 'notContains';
+        const positiveOperator = operator === 'ne' ? 'eq' : operator === 'notContains' ? 'contains' : operator;
+        if (operator === 'regex') validateSmartRegex(value);
+        const pattern = positiveOperator === 'eq' || positiveOperator === 'regex' ? value : positiveOperator === 'startsWith' ? `${escapeLike(value)}%` : positiveOperator === 'endsWith' ? `%${escapeLike(value)}` : `%${escapeLike(value)}%`;
+        values.push(pattern);
+        conditions.push(`${negative ? 'NOT ' : ''}EXISTS (SELECT 1 FROM ${table} WHERE ${assetColumn} = assets.id AND ${positiveOperator === 'regex' ? `smart_regexp(?, ${nameColumn}) = 1` : `${nameColumn} ${positiveOperator === 'eq' ? 'COLLATE NOCASE = ?' : "LIKE ? ESCAPE '\\'"}`})`);
+      } else if (field === 'folderName') {
+        if (typeof value !== 'string' || !['eq', 'ne', 'contains', 'notContains', 'regex'].includes(operator)) throw new Error('SMART_COLLECTION_INVALID_VALUE');
+        const regex = operator === 'regex' ? validateSmartRegex(value) : null;
+        const folders = this.listFolders().filter((folder) => regex ? regex.test(folder.name) : operator === 'eq' || operator === 'ne' ? folder.name.toLocaleLowerCase() === value.toLocaleLowerCase() : folder.name.toLocaleLowerCase().includes(value.toLocaleLowerCase()));
+        const ids = folders.map((folder) => folder.id);
+        const clauses = ids.map((id) => {
+          const directory = this.#resolveDirectory(id)!;
+          if (!directory.relativePath) { values.push(directory.rootId); return 'folder_id = ?'; }
+          const absolute = path.join(directory.rootPath, directory.relativePath);
+          values.push(directory.rootId, `${escapeLike(absolute + path.sep)}%`);
+          return "(folder_id = ? AND path LIKE ? ESCAPE '\\')";
+        });
+        conditions.push(`${operator === 'ne' || operator === 'notContains' ? 'NOT ' : ''}(${clauses.length ? clauses.join(' OR ') : '0'})`);
+      }
+    }
+    return { sql: `(${scopeParts.length ? scopeParts.join(' OR ') : '0'}) AND (${conditions.length ? conditions.join(rule.match === 'all' ? ' AND ' : ' OR ') : '1'})`, values };
   }
 
   saveAlbum(rawInput: SaveCatalogAlbumInput): CatalogAlbum {
@@ -1345,7 +1664,7 @@ export class CatalogService {
     if (!relativePath || path.isAbsolute(relativePath) || relativePath.split(/[\\/]/u).some((part) => part === '..' || part === '.')) throw new Error('INVALID_WATCH_PATH');
     if (relativePath.split(/[\\/]/u).some((part) => part.startsWith('.') || IGNORED_DIRECTORIES.has(part))) return;
     const filePath = path.resolve(rootPath, relativePath);
-    if (!filePath.startsWith(rootPath + path.sep) || !isSupportedImage(filePath)) return;
+    if (!filePath.startsWith(rootPath + path.sep) || !isSupportedBrowseMedia(filePath)) return;
     const metadata = await stat(filePath).catch(() => null);
     if (!metadata?.isFile()) {
       this.#database.prepare('UPDATE assets SET offline_at = ? WHERE folder_id = ? AND path = ? AND removed_at IS NULL AND offline_at IS NULL')
@@ -1397,7 +1716,7 @@ export class CatalogService {
     for await (const entry of handle) {
       if (entry.name.startsWith('.') || IGNORED_DIRECTORIES.has(entry.name)) continue;
       if (entry.isDirectory() && path.join(directory, entry.name) === changedPath) return false;
-      if (entry.isFile() && isSupportedImage(entry.name)) found.add(entry.name);
+      if (entry.isFile() && isSupportedBrowseMedia(entry.name)) found.add(entry.name);
     }
     for (const name of found) await this.synchronizeImportedFile(rootPath, path.relative(rootPath, path.join(directory, name)));
     const markOffline = this.#database.prepare('UPDATE assets SET offline_at = ? WHERE folder_id = ? AND path = ? AND removed_at IS NULL AND offline_at IS NULL');
@@ -1413,6 +1732,7 @@ export class CatalogService {
   async synchronizeFolder(folderId: string): Promise<{ discovered: number; offline: number }> {
     const directory = this.#resolveDirectory(folderId);
     if (!directory) throw new Error('CATALOG_FOLDER_NOT_FOUND');
+    const scanStartedAt = Date.now();
     await this.#markRootOffline(directory.rootId);
     let discovered = 0;
     try {
@@ -1420,11 +1740,96 @@ export class CatalogService {
     } catch {
       // An inaccessible root remains offline and is reported to the caller.
     }
+    if (discovered > 0) discovered -= await this.#reconcileExternalFolderRenames(directory.rootId, directory.rootPath, scanStartedAt);
     const row = this.#database.prepare(`
       SELECT COUNT(*) AS value FROM assets
       WHERE folder_id = ? AND offline_at IS NOT NULL AND removed_at IS NULL
     `).get(directory.rootId) as { value: number };
     return { discovered, offline: row.value };
+  }
+
+  takeExternalRelocations(): RelinkCatalogFolderOperationResult['relocations'] {
+    return this.#externalRelocations.splice(0);
+  }
+
+  async #reconcileExternalFolderRenames(rootId: string, rootPath: string, scanStartedAt: number): Promise<number> {
+    const oldAssets = this.#database.prepare(`
+      SELECT id, path, file_name, size_bytes, modified_at, content_hash FROM assets
+      WHERE folder_id = ? AND removed_at IS NULL AND offline_at IS NOT NULL
+    `).all(rootId) as RelinkAsset[];
+    const newAssets = this.#database.prepare(`
+      SELECT id, path, file_name, size_bytes, modified_at, content_hash, rating, favorite, label_color, flag
+      FROM assets WHERE folder_id = ? AND removed_at IS NULL AND offline_at IS NULL AND imported_at >= ?
+    `).all(rootId, scanStartedAt) as Array<RelinkAsset & { rating: number; favorite: number; label_color: string | null; flag: string }>;
+    if (!oldAssets.length || !newAssets.length) return 0;
+    const key = (asset: RelinkAsset) => `${normalizeRelativePath(asset.file_name)}:${relinkMetadataKey(asset)}`;
+    const uniqueOld = groupUnique(oldAssets, key);
+    const uniqueNew = groupUnique(newAssets, key);
+    const sourceExists = new Map<string, boolean>();
+    const relocations: RelinkCatalogFolderOperationResult['relocations'] = [];
+    const duplicates: string[] = [];
+    const scopeCandidates = new Map<string, string | null>();
+    for (const [fingerprint, oldAsset] of uniqueOld) {
+      const newAsset = uniqueNew.get(fingerprint);
+      if (!oldAsset || !newAsset || oldAsset.path === newAsset.path) continue;
+      const oldDirectory = path.dirname(oldAsset.path);
+      const nextDirectory = path.dirname(newAsset.path);
+      if (oldDirectory === nextDirectory) continue;
+      let exists = sourceExists.get(oldDirectory);
+      if (exists === undefined) {
+        exists = await stat(oldDirectory).then(() => true).catch(() => false);
+        sourceExists.set(oldDirectory, exists);
+      }
+      if (exists || newAsset.rating || newAsset.favorite || newAsset.label_color || newAsset.flag !== 'unflagged') continue;
+      if (oldAsset.content_hash && oldAsset.content_hash !== await hashFile(newAsset.path).catch(() => null)) continue;
+      const linked = ['asset_tags', 'album_assets', 'analysis_revisions', 'generation_results', 'generation_write_intents', 'tasks', 'file_operation_items'].some((table) =>
+        this.#tableExists(table) && Boolean(this.#database.prepare(`SELECT 1 FROM ${table} WHERE asset_id = ? LIMIT 1`).get(newAsset.id))
+      ) || (this.#tableExists('file_operation_items') && Boolean(this.#database.prepare('SELECT 1 FROM file_operation_items WHERE result_asset_id = ? LIMIT 1').get(newAsset.id)));
+      if (linked) continue;
+      relocations.push({ assetId: oldAsset.id, previousPath: oldAsset.path, nextPath: newAsset.path,
+        previousFileName: oldAsset.file_name, nextFileName: newAsset.file_name });
+      duplicates.push(newAsset.id);
+      let oldAncestor = oldDirectory;
+      let nextAncestor = nextDirectory;
+      while (oldAncestor !== rootPath && nextAncestor !== rootPath
+        && oldAncestor.startsWith(`${rootPath}${path.sep}`) && nextAncestor.startsWith(`${rootPath}${path.sep}`)) {
+        const oldId = stableDirectoryId(rootId, path.relative(rootPath, oldAncestor));
+        const nextId = stableDirectoryId(rootId, path.relative(rootPath, nextAncestor));
+        const prior = scopeCandidates.get(oldId);
+        scopeCandidates.set(oldId, prior === undefined ? nextId : prior === nextId ? nextId : null);
+        oldAncestor = path.dirname(oldAncestor);
+        nextAncestor = path.dirname(nextAncestor);
+      }
+    }
+    if (!relocations.length) return 0;
+    const scopeChanges = new Map<string, string>();
+    for (const [oldId, nextId] of scopeCandidates) {
+      if (!nextId) continue;
+      const oldDirectory = this.#resolveDirectory(oldId);
+      if (!oldDirectory) continue;
+      const oldPath = path.join(oldDirectory.rootPath, oldDirectory.relativePath);
+      if (!await stat(oldPath).then(() => true).catch(() => false)) scopeChanges.set(oldId, nextId);
+    }
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      const deleteAsset = this.#database.prepare('DELETE FROM assets WHERE id = ?');
+      const updateAsset = this.#database.prepare('UPDATE assets SET path = ?, file_name = ?, extension = ?, offline_at = NULL WHERE id = ?');
+      for (let index = 0; index < relocations.length; index += 1) {
+        const duplicateId = duplicates[index]!;
+        this.#database.prepare('DELETE FROM asset_search WHERE asset_id = ?').run(duplicateId);
+        this.#database.prepare('DELETE FROM asset_search_tokens WHERE asset_id = ?').run(duplicateId);
+        deleteAsset.run(duplicateId);
+        const item = relocations[index]!;
+        updateAsset.run(item.nextPath, item.nextFileName, path.extname(item.nextPath).toLowerCase(), item.assetId);
+      }
+      this.#applyScopeRelocations(scopeChanges);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    this.#externalRelocations.push(...relocations);
+    return relocations.length;
   }
 
   async #markRootOffline(rootId: string): Promise<void> {
@@ -1566,6 +1971,12 @@ function groupUnique<Value>(values: readonly Value[], keyOf: (value: Value) => s
 
 function escapeLike(value: string): string {
   return value.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_');
+}
+
+function validateSmartRegex(value: string): RegExp {
+  if (value.length > 200) throw new Error('SMART_COLLECTION_INVALID_REGEX');
+  try { return new RegExp(value, 'iu'); }
+  catch { throw new Error('SMART_COLLECTION_INVALID_REGEX'); }
 }
 
 async function hashFile(filePath: string): Promise<string> {

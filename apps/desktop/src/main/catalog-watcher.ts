@@ -18,7 +18,7 @@ export class CatalogWatcher {
   readonly #watchFactory: WatchFactory;
   readonly #debounceMs: number;
   readonly #retryMs: number;
-  readonly #onChanged: () => void;
+  readonly #onChanged: () => void | Promise<void>;
   readonly #watchers = new Map<string, WatchHandle>();
   readonly #folders = new Set<string>();
   #debounceTimer: NodeJS.Timeout | null = null;
@@ -36,7 +36,7 @@ export class CatalogWatcher {
 
   constructor(
     catalog: CatalogReconciler,
-    options: { watchFactory?: WatchFactory; debounceMs?: number; retryMs?: number; onChanged?: () => void } = {}
+    options: { watchFactory?: WatchFactory; debounceMs?: number; retryMs?: number; onChanged?: () => void | Promise<void> } = {}
   ) {
     this.#catalog = catalog;
     this.#watchFactory = options.watchFactory ?? defaultWatchFactory;
@@ -188,7 +188,7 @@ export class CatalogWatcher {
             await Promise.all([...(files ?? [])].map((file) => this.#catalog.synchronizeImportedFile(folder, file)));
           })()
           : Promise.all([...(files ?? [])].map((file) => this.#catalog.synchronizeImportedFile(folder, file)));
-        await work.then(() => this.#onChanged()).catch(() => {
+        await work.then(async () => this.#onChanged()).catch(() => {
           this.#reconciliationFailures += 1;
         }).finally(() => {
           if (fullScan) {

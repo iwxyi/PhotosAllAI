@@ -73,6 +73,10 @@ const api: DesktopApi = {
     ipcRenderer.invoke('catalog.albums.list.v1') as ReturnType<DesktopApi['listCatalogAlbums']>,
   listCatalogSmartCollections: () =>
     ipcRenderer.invoke('catalog.smart-collections.list.v1') as ReturnType<DesktopApi['listCatalogSmartCollections']>,
+  saveCatalogSmartCollection: (input) =>
+    ipcRenderer.invoke('catalog.smart-collection.save.v1', input) as ReturnType<DesktopApi['saveCatalogSmartCollection']>,
+  deleteCatalogSmartCollection: (id) =>
+    ipcRenderer.invoke('catalog.smart-collection.delete.v1', id) as ReturnType<DesktopApi['deleteCatalogSmartCollection']>,
   saveCatalogAlbum: (input) =>
     ipcRenderer.invoke('catalog.album.save.v1', input) as ReturnType<DesktopApi['saveCatalogAlbum']>,
   deleteCatalogAlbum: (albumId) =>
@@ -87,6 +91,15 @@ const api: DesktopApi = {
     ipcRenderer.invoke('catalog.assets.move.v1', input) as ReturnType<DesktopApi['moveCatalogAssets']>,
   copyCatalogAssets: (input) =>
     ipcRenderer.invoke('catalog.assets.copy.v1', input) as ReturnType<DesktopApi['copyCatalogAssets']>,
+  copyDisplayedFiles: (input) =>
+    ipcRenderer.invoke('catalog.files.clipboard.v1', input) as ReturnType<DesktopApi['copyDisplayedFiles']>,
+  copyDisplayedImage: (input) =>
+    ipcRenderer.invoke('catalog.image.clipboard.v1', input) as ReturnType<DesktopApi['copyDisplayedImage']>,
+  importExternalMedia: (input) =>
+    ipcRenderer.invoke('catalog.media.import.v1', input) as ReturnType<DesktopApi['importExternalMedia']>,
+  pasteExternalMedia: (input) =>
+    ipcRenderer.invoke('catalog.media.paste.v1', input) as ReturnType<DesktopApi['pasteExternalMedia']>,
+  startDisplayedFilesDrag: (input) => ipcRenderer.send('catalog.files.drag.v1', input),
   previewCatalogCompanions: (assetIds) =>
     ipcRenderer.invoke('catalog.assets.companions.v1', assetIds) as ReturnType<DesktopApi['previewCatalogCompanions']>,
   renameCatalogAsset: (input) =>
@@ -119,11 +132,11 @@ const api: DesktopApi = {
     ipcRenderer.invoke('catalog.folder.reveal.v1', folderId) as ReturnType<DesktopApi['revealCatalogFolder']>,
   unregisterCatalogFolder: (input) =>
     ipcRenderer.invoke('catalog.folder.unregister.v1', input) as ReturnType<DesktopApi['unregisterCatalogFolder']>,
+  trashCatalogFolder: (folderId) =>
+    ipcRenderer.invoke('catalog.folder.trash.v1', folderId) as ReturnType<DesktopApi['trashCatalogFolder']>,
   revealCatalogAsset: (assetId) =>
     ipcRenderer.invoke('catalog.asset.reveal.v1', assetId) as ReturnType<DesktopApi['revealCatalogAsset']>,
   listProviderProfiles: () =>
-  trashCatalogFolder: (folderId) =>
-    ipcRenderer.invoke('catalog.folder.trash.v1', folderId) as ReturnType<DesktopApi['trashCatalogFolder']>,
     ipcRenderer.invoke('providers.list.v1') as ReturnType<DesktopApi['listProviderProfiles']>,
   saveProviderProfile: (input) =>
     ipcRenderer.invoke('providers.save.v1', input) as ReturnType<DesktopApi['saveProviderProfile']>,

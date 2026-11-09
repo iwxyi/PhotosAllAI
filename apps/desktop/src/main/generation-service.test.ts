@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http';
-import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { ProviderProfile } from '@photoallisai/contracts';
 
 import { GenerationService, isPrivateAddress, validateGeneratedImageUrl } from './generation-service';
+import { CatalogService } from './catalog-service';
 import { publishTemporaryFileSafely } from './safe-file-write';
 import { TaskService } from './task-service';
 
@@ -413,6 +414,57 @@ describe('managed generation results', () => {
     expect(relocated).toBeTruthy();
     expect(await readFile(relocated!)).toEqual(png);
     service.close();
+  });
+
+  it('keeps a portable result linked after a catalog folder rename', async () => {
+    const { service, directory, sourcePath, setSourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const oldDirectory = path.join(directory, 'old');
+    await mkdir(oldDirectory);
+    const oldSourcePath = path.join(oldDirectory, path.basename(sourcePath));
+    await rename(sourcePath, oldSourcePath);
+    setSourcePath(oldSourcePath);
+    const catalog = new CatalogService(path.join(directory, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([oldDirectory]);
+      const asset = catalog.listAssets()[0]!;
+      const result = await service.generate(asset.id, { ...payload(), storageMode: 'portable' });
+      const report = await catalog.renameFolder({ folderId: asset.folderId, name: 'new' });
+      for (const item of report.relocations) await service.relocatePortableResults(
+        item.assetId, item.previousPath, item.nextPath, item.previousFileName, item.nextFileName
+      );
+      const relocatedFile = service.resolveResultFile(result.id);
+      expect(relocatedFile).toContain(path.join('new', '_PhotoAllIsAI'));
+      expect(await readFile(relocatedFile!)).toEqual(png);
+      expect(catalog.listAssets()[0]?.id).toBe(asset.id);
+      expect(catalog.resolveAssetFile(asset.id)?.path).toBe(path.join(await realpath(path.join(directory, 'new')), path.basename(sourcePath)));
+    } finally { catalog.close(); service.close(); }
+  });
+
+  it('keeps a portable result linked after an externally renamed child is scanned', async () => {
+    const { service, directory, sourcePath, setSourcePath } = await fixture(() => ({ data: [{ b64_json: png.toString('base64') }] }));
+    const photos = path.join(directory, 'photos');
+    const oldDirectory = path.join(photos, 'old');
+    await mkdir(oldDirectory, { recursive: true });
+    const oldSourcePath = path.join(oldDirectory, path.basename(sourcePath));
+    await rename(sourcePath, oldSourcePath);
+    setSourcePath(oldSourcePath);
+    const catalog = new CatalogService(path.join(directory, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([photos]);
+      const asset = catalog.listAssets()[0]!;
+      const result = await service.generate(asset.id, { ...payload(), storageMode: 'portable' });
+      await rename(oldDirectory, path.join(photos, 'new'));
+      expect(await catalog.synchronizeFolder(asset.folderId)).toEqual({ discovered: 0, offline: 0 });
+      const relocations = catalog.takeExternalRelocations();
+      expect(relocations).toHaveLength(1);
+      for (const item of relocations) await service.relocatePortableResults(
+        item.assetId, item.previousPath, item.nextPath, item.previousFileName, item.nextFileName
+      );
+      const relocatedFile = service.resolveResultFile(result.id);
+      expect(relocatedFile).toContain(path.join('new', '_PhotoAllIsAI'));
+      expect(await readFile(relocatedFile!)).toEqual(png);
+      expect(catalog.listAssets()[0]?.id).toBe(asset.id);
+    } finally { catalog.close(); service.close(); }
   });
 
   it('persists review state and keeps a single preferred result per asset', async () => {

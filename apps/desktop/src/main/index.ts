@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import type { EventEmitter } from 'node:events';
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
-import { stat } from 'node:fs/promises';
-import { dirname, isAbsolute, join } from 'node:path';
+import { appendFileSync, constants as fsConstants, existsSync, mkdirSync, statSync } from 'node:fs';
+import { copyFile, mkdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, extname, isAbsolute, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, safeStorage, shell, type MenuItemConstructorOptions } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, net, protocol, safeStorage, shell, type MenuItemConstructorOptions } from 'electron';
 import {
   appInfoSchema,
   createAgentSessionSchema,
@@ -25,8 +25,11 @@ import {
   catalogAssetRemovalReportSchema,
   catalogSnapshotSchema,
   catalogAlbumSchema,
+  catalogSmartCollectionSchema,
+  saveSmartCollectionInputSchema,
   deleteCatalogTagInputSchema,
   copyCatalogAssetsInputSchema,
+  copyDisplayedFilesInputSchema,
   copyCatalogAssetsReportSchema,
   catalogCompanionPreviewInputSchema,
   catalogCompanionPreviewSchema,
@@ -93,6 +96,7 @@ import { GenerationService } from './generation-service';
 import { ExportService } from './export-service';
 import { ExportPresetService } from './export-preset-service';
 import { FileOperationService } from './file-operation-service';
+import { readFilesFromClipboard, writeFilesToClipboard } from './file-clipboard';
 import { ProviderService } from './provider-service';
 import { replaceRegularFileSafely } from './safe-file-write';
 import { TaskService } from './task-service';
@@ -360,14 +364,99 @@ async function relocatePortableAfterFileOperation(
   await generation.relocatePortableResults(assetId, previous.path, next.path, previous.fileName, next.fileName);
 }
 
+let exifIndexRunning = false;
+function scheduleSmartCollectionExifIndex(): void {
+  if (exifIndexRunning || !catalog.hasExifSmartCollections()) return;
+  exifIndexRunning = true;
+  setImmediate(() => {
+    void (async () => {
+      let afterId = '';
+      try {
+        for (;;) {
+          const ids = catalog.listExifIndexCandidates(8, afterId);
+          if (!ids.length) break;
+          afterId = ids.at(-1)!;
+          await Promise.allSettled(ids.map(async (id) => {
+            const details = await imageFiles.details(id);
+            catalog.saveExifDetails(id, details);
+          }));
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      } finally { exifIndexRunning = false; }
+    })().catch(() => { exifIndexRunning = false; });
+  });
+}
+
 function registerIpc(): void {
-  ipcMain.handle('image.details.v1', async (_event, id: unknown) => fileDetailsSchema.parse(await imageFiles.details(validateImageId(id))));
+  const importExternalMedia = async (input: unknown, fromClipboard: boolean): Promise<number> => {
+    if (!input || typeof input !== 'object') throw new Error('INVALID_MEDIA_IMPORT');
+    const { paths, targetFolderId } = input as { paths?: unknown; targetFolderId?: unknown };
+    if (targetFolderId !== null && targetFolderId !== undefined && (typeof targetFolderId !== 'string' || !/^[a-f0-9]{32}$/u.test(targetFolderId))) throw new Error('INVALID_FOLDER_ID');
+    if (paths !== undefined && (!Array.isArray(paths) || paths.length > 1000 || !paths.every((item) => typeof item === 'string' && isAbsolute(item) && !item.includes('\0')))) throw new Error('INVALID_MEDIA_PATHS');
+    const sourcePaths = fromClipboard ? readFilesFromClipboard() : paths as string[];
+    const folder = targetFolderId ? catalog.listFolders().find((item) => item.id === targetFolderId) : null;
+    if (targetFolderId && !folder) throw new Error('CATALOG_FOLDER_NOT_FOUND');
+    const directory = folder ? catalog.resolveFolderPath(folder.id)! : join(app.getPath('userData'), 'Imported Media');
+    await mkdir(directory, { recursive: true });
+    const destination = await realpath(directory);
+    const copied: string[] = [];
+    const nameFor = (name: string, index: number) => {
+      const extension = extname(name);
+      return index === 1 ? name : `${name.slice(0, -extension.length || undefined)} (${index})${extension}`;
+    };
+    for (const requestedPath of [...new Set(sourcePaths)]) {
+      const source = await realpath(requestedPath).catch(() => null);
+      if (!source || !isSupportedBrowseMedia(source) || !(await stat(source)).isFile()) continue;
+      for (let index = 1; ; index += 1) {
+        const target = join(destination, nameFor(basename(source), index));
+        try {
+          await copyFile(source, target, fsConstants.COPYFILE_EXCL);
+          copied.push(target);
+          break;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        }
+      }
+    }
+    if (fromClipboard && sourcePaths.length === 0) {
+      const image = clipboard.readImage();
+      if (!image.isEmpty()) {
+        const name = `Clipboard image ${new Date().toISOString().replace(/[:.]/gu, '-')}.png`;
+        for (let index = 1; ; index += 1) {
+          const target = join(destination, nameFor(name, index));
+          try {
+            await writeFile(target, image.toPNG(), { flag: 'wx' });
+            copied.push(target);
+            break;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+          }
+        }
+      }
+    }
+    if (copied.length === 0) return 0;
+    if (!folder) await catalog.importFolders([destination]);
+    else {
+      const root = catalog.resolveFolderPath(folder.rootId)!;
+      for (const filePath of copied) await catalog.synchronizeImportedFile(root, relative(root, filePath));
+    }
+    catalogWatcher.watchFolders(catalog.listFolderPaths());
+    return copied.length;
+  };
+  ipcMain.handle('catalog.media.import.v1', (_event, input: unknown) => importExternalMedia(input, false));
+  ipcMain.handle('catalog.media.paste.v1', (_event, input: unknown) => importExternalMedia(input, true));
+  ipcMain.handle('image.details.v1', async (_event, id: unknown) => {
+    const assetId = validateImageId(id);
+    const details = fileDetailsSchema.parse(await imageFiles.details(assetId));
+    catalog.saveExifDetails(assetId, details);
+    return details;
+  });
   ipcMain.handle('image.details.page.v1', async (_event, rawIds: unknown) => {
     const ids = fileDetailsPageInputSchema.parse(rawIds);
     const details: Record<string, Awaited<ReturnType<typeof imageFiles.details>> | null> = {};
     for (let offset = 0; offset < ids.length; offset += 6) {
       const entries = await Promise.all(ids.slice(offset, offset + 6).map(async (id) =>
-        [id, await imageFiles.details(id).catch(() => null)] as const));
+        [id, await imageFiles.details(id).then((item) => { catalog.saveExifDetails(id, item); return item; }).catch(() => null)] as const));
       Object.assign(details, Object.fromEntries(entries));
     }
     return fileDetailsPageSchema.parse(details);
@@ -531,7 +620,13 @@ function registerIpc(): void {
     catalog.deleteTag(deleteCatalogTagInputSchema.parse(input));
   });
   ipcMain.handle('catalog.albums.list.v1', () => catalog.listAlbums());
-  ipcMain.handle('catalog.smart-collections.list.v1', () => catalog.listSmartCollections());
+  ipcMain.handle('catalog.smart-collections.list.v1', () => { scheduleSmartCollectionExifIndex(); return catalog.listSmartCollections(); });
+  ipcMain.handle('catalog.smart-collection.save.v1', (_event, input: unknown) => {
+    const saved = catalogSmartCollectionSchema.parse(catalog.saveSmartCollection(saveSmartCollectionInputSchema.parse(input)));
+    scheduleSmartCollectionExifIndex();
+    return saved;
+  });
+  ipcMain.handle('catalog.smart-collection.delete.v1', (_event, input: unknown) => catalog.deleteSmartCollection(String(input)));
   ipcMain.handle('catalog.album.save.v1', (_event, input: unknown) =>
     catalogAlbumSchema.parse(catalog.saveAlbum(saveCatalogAlbumInputSchema.parse(input)))
   );
@@ -569,6 +664,36 @@ function registerIpc(): void {
       await fileOperations.copy(copyCatalogAssetsInputSchema.parse(input))
     )
   );
+  const resolveDisplayedPaths = (input: unknown): string[] => {
+    const { items } = copyDisplayedFilesInputSchema.parse(input);
+    const paths = items.map((item) => item.kind === 'asset'
+      ? catalog.resolveAssetFile(item.assetId)?.path
+      : generation.resolveResultFile(item.resultId));
+    if (paths.some((filePath) => {
+      try { return !filePath || !statSync(filePath).isFile(); } catch { return true; }
+    })) {
+      throw new Error('COPY_FILE_NOT_FOUND');
+    }
+    return [...new Set(paths as string[])];
+  };
+  ipcMain.handle('catalog.files.clipboard.v1', (_event, input: unknown) => {
+    const paths = resolveDisplayedPaths(input);
+    writeFilesToClipboard(paths);
+    return paths.length;
+  });
+  ipcMain.handle('catalog.image.clipboard.v1', (_event, input: unknown) => {
+    const paths = resolveDisplayedPaths(input);
+    if (paths.length !== 1) throw new Error('COPY_IMAGE_REQUIRES_ONE_FILE');
+    const image = nativeImage.createFromPath(paths[0]!);
+    if (image.isEmpty()) throw new Error('COPY_IMAGE_UNSUPPORTED_FORMAT');
+    clipboard.writeImage(image);
+  });
+  ipcMain.on('catalog.files.drag.v1', (event, input: unknown) => {
+    try {
+      const paths = resolveDisplayedPaths(input);
+      event.sender.startDrag({ file: paths[0]!, files: paths, icon: nativeImage.createEmpty() });
+    } catch { /* A missing file cannot be dragged. */ }
+  });
   ipcMain.handle('catalog.asset.rename.v1', async (_event, input: unknown) => {
     const parsed = renameCatalogAssetInputSchema.parse(input);
     const previous = catalog.resolveAssetFile(parsed.assetId);
@@ -623,9 +748,11 @@ function registerIpc(): void {
   ipcMain.handle('catalog.folder.relink.v1', async (_event, input: unknown) => {
     const folderId = String(input);
     if (!/^[a-f0-9]{32}$/u.test(folderId)) throw new Error('INVALID_FOLDER_ID');
+    const previousPath = catalog.resolveFolderPath(folderId);
     const result = await dialog.showOpenDialog({
       title: '重新定位照片文件夹',
       buttonLabel: '选择新位置',
+      ...(previousPath ? { defaultPath: dirname(previousPath) } : {}),
       properties: ['openDirectory']
     });
     if (result.canceled || !result.filePaths[0]) return null;
@@ -643,7 +770,11 @@ function registerIpc(): void {
   ipcMain.handle('catalog.folder.synchronize.v1', async (_event, input: unknown) => {
     const folderId = String(input);
     if (!/^[a-f0-9]{32}$/u.test(folderId)) throw new Error('INVALID_FOLDER_ID');
-    return catalogFolderSyncReportSchema.parse(await catalog.synchronizeFolder(folderId));
+    const report = await catalog.synchronizeFolder(folderId);
+    await Promise.allSettled(catalog.takeExternalRelocations().map((item) => generation.relocatePortableResults(
+      item.assetId, item.previousPath, item.nextPath, item.previousFileName, item.nextFileName
+    )));
+    return catalogFolderSyncReportSchema.parse(report);
   });
   ipcMain.handle('catalog.folder.reveal.v1', (_event, input: unknown) => {
     const folderId = String(input);
@@ -653,9 +784,14 @@ function registerIpc(): void {
     shell.showItemInFolder(folderPath);
     return true;
   });
-  ipcMain.handle('catalog.folder.rename.v1', async (_event, input: unknown) =>
-    renameCatalogFolderResultSchema.parse(await catalog.renameFolder(renameCatalogFolderInputSchema.parse(input)))
-  );
+  ipcMain.handle('catalog.folder.rename.v1', async (_event, input: unknown) => {
+    const report = await catalog.renameFolder(renameCatalogFolderInputSchema.parse(input));
+    await Promise.allSettled(report.relocations.map((item) => generation.relocatePortableResults(
+      item.assetId, item.previousPath, item.nextPath, item.previousFileName, item.nextFileName
+    )));
+    catalogWatcher.watchFolders(catalog.listFolderPaths());
+    return renameCatalogFolderResultSchema.parse(report);
+  });
   ipcMain.handle('catalog.folder.create.v1', async (_event, input: unknown) =>
     renameCatalogFolderResultSchema.parse(await catalog.createFolder(createCatalogFolderInputSchema.parse(input)))
   );
@@ -675,6 +811,12 @@ function registerIpc(): void {
     const report = catalog.unregisterFolder(unregisterCatalogFolderInputSchema.parse(input).folderId);
     catalogWatcher.watchFolders(catalog.listFolderPaths());
     return unregisterCatalogFolderReportSchema.parse(report);
+  });
+  ipcMain.handle('catalog.folder.trash.v1', async (_event, input: unknown) => {
+    const folderId = String(input);
+    if (!/^[a-f0-9]{32}$/u.test(folderId)) throw new Error('INVALID_FOLDER_ID');
+    await catalog.trashFolder(folderId, (folderPath) => shell.trashItem(folderPath));
+    catalogWatcher.watchFolders(catalog.listFolderPaths());
   });
   ipcMain.handle('catalog.asset.reveal.v1', (_event, input: unknown) => {
     const assetId = String(input);
@@ -701,12 +843,6 @@ function registerIpc(): void {
   );
   ipcMain.handle('tasks.page.v1', (_event, input: unknown) => {
     const page = tasks.listPage(listTaskPageInputSchema.parse(input));
-  ipcMain.handle('catalog.folder.trash.v1', async (_event, input: unknown) => {
-    const folderId = String(input);
-    if (!/^[a-f0-9]{32}$/u.test(folderId)) throw new Error('INVALID_FOLDER_ID');
-    await catalog.trashFolder(folderId, (folderPath) => shell.trashItem(folderPath));
-    catalogWatcher.watchFolders(catalog.listFolderPaths());
-  });
     return { ...page, items: page.items.map((task) => ({
       ...toRendererTask(task),
       ...(task.assetId ? { assetFileName: catalog.resolveAssetFile(task.assetId)?.fileName } : {})
@@ -1081,10 +1217,12 @@ app.whenReady().then(async () => {
   imageFiles = new ImageFileService(catalog, temporaryMediaIndex);
   fileWorkflows = new FileWorkflowService(join(app.getPath('userData'), 'settings', 'file-workflows.json'), catalog);
   enterStartupStage('准备关联文件夹监听');
-  catalogWatcher = new CatalogWatcher(catalog, { onChanged: () => {
+  catalogWatcher = new CatalogWatcher(catalog, { onChanged: async () => {
+    await Promise.allSettled(catalog.takeExternalRelocations().map((item) => generation.relocatePortableResults(
+      item.assetId, item.previousPath, item.nextPath, item.previousFileName, item.nextFileName
+    )));
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1');
   } });
-  catalogWatcher.watchFolders(catalog.listFolderPaths());
   enterStartupStage('初始化文件操作与任务');
   fileOperations = new FileOperationService(databasePath, undefined, {
     trashItem: (filePath) => shell.trashItem(filePath)
@@ -1110,6 +1248,7 @@ app.whenReady().then(async () => {
     imageCache,
     catalog
   );
+  catalogWatcher.watchFolders(catalog.listFolderPaths());
   enterStartupStage('恢复中断的文件操作');
   const trashPurges = await generation.recoverInterruptedTrashPurges();
   const recoveredFileOperations = await fileOperations.recoverInterruptedOperations(async (change) => {

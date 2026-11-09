@@ -422,6 +422,235 @@ describe('catalog image discovery', () => {
     catalog.close();
   });
 
+  it('saves editable rules and follows folder renames and moves', async () => {
+    const root = await createTemporaryDirectory();
+    const source = path.join(root, 'photos');
+    await mkdir(path.join(source, 'A', 'child'), { recursive: true });
+    await mkdir(path.join(source, 'B'), { recursive: true });
+    await writeFile(path.join(source, 'A', 'child', 'one.jpg'), 'one');
+    await writeFile(path.join(source, 'B', 'two.jpg'), 'two');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([source]);
+      const original = catalog.listFolders().find((folder) => folder.name === 'child')!;
+      const destination = catalog.listFolders().find((folder) => folder.name === 'B')!;
+      const saved = catalog.saveSmartCollection({ name: '待留用', rule: { version: 1, scope: { all: false, favorites: false, folders: false, albums: false, folderIds: [original.id], albumIds: [] }, match: 'any', conditions: [{ field: 'rating', operator: 'gte', value: 4 }, { field: 'fileName', operator: 'contains', value: 'one' }] } });
+      expect(saved.assetCount).toBe(1);
+      expect(catalog.listAssetPage({ smartCollection: saved.id }).items.map((item) => item.fileName)).toEqual(['one.jpg']);
+      const renamed = (await catalog.renameFolder({ folderId: original.id, name: 'renamed' })).folder;
+      expect(catalog.listSmartCollections().find((item) => item.id === saved.id)?.rule.scope.folderIds).toEqual([renamed.id]);
+      const moved = (await catalog.moveFolder({ sourceFolderId: renamed.id, targetFolderId: destination.id })).folder;
+      expect(catalog.listSmartCollections().find((item) => item.id === saved.id)?.rule.scope.folderIds).toEqual([moved.id]);
+      expect(catalog.listAssetPage({ smartCollection: saved.id }).totalCount).toBe(1);
+      catalog.deleteSmartCollection(saved.id);
+      expect(catalog.listAssetPage({ smartCollection: saved.id }).totalCount).toBe(0);
+      catalog.deleteSmartCollection('unrated');
+      expect(catalog.listSmartCollections().some((item) => item.id === 'unrated')).toBe(false);
+    } finally { catalog.close(); }
+  });
+
+  it('indexes EXIF values for collection conditions and refreshes stale metadata', async () => {
+    const root = await createTemporaryDirectory();
+    const source = path.join(root, 'photos');
+    await mkdir(source);
+    await writeFile(path.join(source, 'one.jpg'), 'one');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([source]);
+      const asset = catalog.listAssets()[0]!;
+      const saved = catalog.saveSmartCollection({ name: 'Sony 高 ISO', rule: { version: 1, scope: { all: true, favorites: false, folders: false, albums: false, folderIds: [], albumIds: [] }, match: 'all', conditions: [{ field: 'cameraMake', operator: 'eq', value: 'Sony' }, { field: 'iso', operator: 'gte', value: 800 }] } });
+      expect(catalog.listSmartCollections().find((item) => item.id === saved.id)?.indexing).toBe(true);
+      expect(catalog.listAssetPage({ smartCollection: saved.id }).totalCount).toBe(0);
+      catalog.saveExifDetails(asset.id, { path: path.join(source, 'one.jpg'), sizeBytes: asset.sizeBytes, modifiedAt: asset.modifiedAt, cameraMake: 'Sony', iso: 1600 });
+      expect(catalog.listAssetPage({ smartCollection: saved.id }).totalCount).toBe(1);
+      expect(catalog.listSmartCollections().find((item) => item.id === saved.id)?.indexing).toBe(false);
+      const database = new DatabaseSync(path.join(root, 'catalog.sqlite'));
+      database.prepare('UPDATE assets SET modified_at = modified_at + 1 WHERE id = ?').run(asset.id);
+      database.close();
+      expect(catalog.listAssetPage({ smartCollection: saved.id }).totalCount).toBe(0);
+      expect(catalog.listExifIndexCandidates()).toEqual([asset.id]);
+    } finally { catalog.close(); }
+  });
+
+  it('keeps a missing external directory scope until the user reconnects it', async () => {
+    const root = await createTemporaryDirectory();
+    const source = path.join(root, 'photos');
+    await mkdir(path.join(source, 'old'), { recursive: true });
+    await writeFile(path.join(source, 'old', 'one.jpg'), 'fixture');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([source]);
+      const old = catalog.listFolders().find((folder) => folder.name === 'old')!;
+      const collection = catalog.saveSmartCollection({ name: '指定目录', rule: { version: 1, scope: { all: false, favorites: false, folders: false, albums: false, folderIds: [old.id], albumIds: [] }, match: 'all', conditions: [] } });
+      await rename(path.join(source, 'old'), path.join(source, 'new'));
+      await catalog.relinkFolder(catalog.listFolders().find((folder) => folder.isRoot)!.id, source);
+      expect(catalog.listSmartCollections().find((item) => item.id === collection.id)?.rule.scope.folderIds).toEqual([old.id]);
+      expect(catalog.listAssetPage({ smartCollection: collection.id }).totalCount).toBe(0);
+      const replacement = catalog.listFolders().find((folder) => folder.name === 'new')!;
+      catalog.saveSmartCollection({ id: collection.id, name: collection.name, rule: { ...collection.rule, scope: { ...collection.rule.scope, folderIds: [replacement.id] } } });
+      expect(catalog.listAssetPage({ smartCollection: collection.id }).totalCount).toBe(1);
+    } finally { catalog.close(); }
+  });
+
+  it('reconnects an externally renamed child after the watcher indexed its new path', async () => {
+    const root = await createTemporaryDirectory();
+    const source = path.join(root, 'photos');
+    const originalPath = path.join(source, 'old');
+    const replacementPath = path.join(source, 'new');
+    await mkdir(originalPath, { recursive: true });
+    await writeFile(path.join(originalPath, 'one.jpg'), 'fixture');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([source]);
+      const old = catalog.listFolders().find((folder) => folder.name === 'old')!;
+      const asset = catalog.listAssets()[0]!;
+      const originalAssetPath = catalog.resolveAssetFile(asset.id)!.path;
+      catalog.updateMetadata({ assetIds: [asset.id], rating: 5 });
+      const collection = catalog.saveSmartCollection({ name: '旧目录', rule: {
+        version: 1, scope: { all: false, favorites: false, folders: false, albums: false, folderIds: [old.id], albumIds: [] }, match: 'all', conditions: []
+      } });
+      await rename(originalPath, replacementPath);
+      await catalog.synchronizeImportedFile(await realpath(source), 'new/one.jpg');
+      await catalog.synchronizeImportedFile(await realpath(source), 'old/one.jpg');
+      expect(catalog.listAssets()).toHaveLength(2);
+      const report = await catalog.relinkFolder(old.id, replacementPath);
+      expect(report).toMatchObject({ matched: 1, discovered: 0 });
+      expect(report.relocations).toEqual([expect.objectContaining({ assetId: asset.id, previousPath: originalAssetPath, nextPath: path.join(await realpath(replacementPath), 'one.jpg') })]);
+      expect(catalog.listAssets()).toHaveLength(1);
+      expect(catalog.listAssets()[0]).toMatchObject({ id: asset.id, rating: 5, offline: false });
+      expect(catalog.listSmartCollections().find((item) => item.id === collection.id)?.rule.scope.folderIds).toEqual([report.folder.id]);
+      expect(catalog.listAssetPage({ smartCollection: collection.id }).items.map((item) => item.id)).toEqual([asset.id]);
+    } finally { catalog.close(); }
+  });
+
+  it('automatically follows an external child rename during a folder scan', async () => {
+    const root = await createTemporaryDirectory();
+    const source = path.join(root, 'photos');
+    const originalPath = path.join(source, 'old');
+    const replacementPath = path.join(source, 'new');
+    await mkdir(originalPath, { recursive: true });
+    await writeFile(path.join(originalPath, 'one.jpg'), 'fixture');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([source]);
+      const sourceRoot = catalog.listFolders().find((folder) => folder.isRoot)!;
+      const old = catalog.listFolders().find((folder) => folder.name === 'old')!;
+      const asset = catalog.listAssets()[0]!;
+      catalog.updateMetadata({ assetIds: [asset.id], rating: 4 });
+      const collection = catalog.saveSmartCollection({ name: '跟随目录', rule: {
+        version: 1, scope: { all: false, favorites: false, folders: false, albums: false, folderIds: [old.id], albumIds: [] }, match: 'all', conditions: []
+      } });
+      await rename(originalPath, replacementPath);
+      expect(await catalog.synchronizeFolder(sourceRoot.id)).toEqual({ discovered: 0, offline: 0 });
+      expect(catalog.listAssets()).toHaveLength(1);
+      expect(catalog.listAssets()[0]).toMatchObject({ id: asset.id, rating: 4, offline: false });
+      const replacement = catalog.listFolders().find((folder) => folder.name === 'new')!;
+      expect(catalog.listSmartCollections().find((item) => item.id === collection.id)?.rule.scope.folderIds).toEqual([replacement.id]);
+      expect(catalog.takeExternalRelocations()).toEqual([expect.objectContaining({ assetId: asset.id })]);
+      expect(catalog.takeExternalRelocations()).toEqual([]);
+    } finally { catalog.close(); }
+  });
+
+  it('does not discard edits on a newly indexed child while reconnecting an old folder', async () => {
+    const root = await createTemporaryDirectory();
+    const source = path.join(root, 'photos');
+    const originalPath = path.join(source, 'old');
+    const replacementPath = path.join(source, 'new');
+    await mkdir(originalPath, { recursive: true });
+    await writeFile(path.join(originalPath, 'one.jpg'), 'fixture');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([source]);
+      const old = catalog.listFolders().find((folder) => folder.name === 'old')!;
+      const originalId = catalog.listAssets()[0]!.id;
+      await rename(originalPath, replacementPath);
+      await catalog.synchronizeImportedFile(await realpath(source), 'new/one.jpg');
+      const newAsset = catalog.listAssets().find((asset) => asset.id !== originalId)!;
+      catalog.updateMetadata({ assetIds: [newAsset.id], rating: 3 });
+      await expect(catalog.relinkFolder(old.id, replacementPath)).rejects.toThrow('RELINK_TARGET_HAS_EDITED_ASSETS');
+      expect(catalog.listAssets()).toHaveLength(2);
+    } finally { catalog.close(); }
+  });
+
+  it('persists edits and deletion of default collections after reopening', async () => {
+    const root = await createTemporaryDirectory();
+    const databasePath = path.join(root, 'catalog.sqlite');
+    const catalog = new CatalogService(databasePath);
+    const original = catalog.listSmartCollections().find((item) => item.id === 'unrated')!;
+    catalog.saveSmartCollection({ id: original.id, name: '尚未打分', rule: original.rule });
+    catalog.deleteSmartCollection('recent');
+    catalog.close();
+    const reopened = new CatalogService(databasePath);
+    try {
+      expect(reopened.listSmartCollections().find((item) => item.id === 'unrated')?.name).toBe('尚未打分');
+      expect(reopened.listSmartCollections().some((item) => item.id === 'recent')).toBe(false);
+    } finally { reopened.close(); }
+  });
+
+  it('repairs missing collection and EXIF tables even when the schema version is current', async () => {
+    const root = await createTemporaryDirectory();
+    const databasePath = path.join(root, 'catalog.sqlite');
+    new CatalogService(databasePath).close();
+    const database = new DatabaseSync(databasePath);
+    database.exec('DROP TABLE smart_collections; DROP TABLE asset_exif');
+    database.close();
+    const repaired = new CatalogService(databasePath);
+    try {
+      expect(repaired.listSmartCollections()).toHaveLength(6);
+      const verification = new DatabaseSync(databasePath);
+      expect(verification.prepare('PRAGMA user_version').get()).toEqual({ user_version: 14 });
+      expect(verification.prepare("SELECT name FROM sqlite_master WHERE name = 'asset_exif'").get()).toEqual({ name: 'asset_exif' });
+      verification.close();
+    } finally { repaired.close(); }
+  });
+
+  it('unions selected scopes and applies all or any conditions to that union', async () => {
+    const root = await createTemporaryDirectory();
+    const source = path.join(root, 'photos');
+    await mkdir(path.join(source, 'A'), { recursive: true });
+    await mkdir(path.join(source, 'B'), { recursive: true });
+    await writeFile(path.join(source, 'A', 'keep.jpg'), 'one');
+    await writeFile(path.join(source, 'B', 'favorite.jpg'), 'two');
+    await writeFile(path.join(source, 'B', 'excluded.png'), 'three');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([source]);
+      const assets = catalog.listAssets();
+      const favorite = assets.find((item) => item.fileName === 'favorite.jpg')!;
+      catalog.updateMetadata({ assetIds: [favorite.id], favorite: true, rating: 5 });
+      const folderA = catalog.listFolders().find((item) => item.name === 'A')!;
+      const rule = { version: 1 as const, scope: { all: false, favorites: true, folders: false, albums: false, folderIds: [folderA.id], albumIds: [] }, match: 'all' as const, conditions: [{ field: 'format' as const, operator: 'eq' as const, value: 'jpg' }, { field: 'rating' as const, operator: 'gte' as const, value: 5 }] };
+      const saved = catalog.saveSmartCollection({ name: '并集中的高分 JPG', rule });
+      expect(catalog.listAssetPage({ smartCollection: saved.id }).items.map((item) => item.fileName)).toEqual(['favorite.jpg']);
+      catalog.saveSmartCollection({ id: saved.id, name: saved.name, rule: { ...rule, match: 'any' } });
+      expect(catalog.listAssetPage({ smartCollection: saved.id }).items.map((item) => item.fileName).sort()).toEqual(['favorite.jpg', 'keep.jpg']);
+      expect(catalog.listSmartCollections().find((item) => item.id === saved.id)?.assetCount).toBe(2);
+    } finally { catalog.close(); }
+  });
+
+  it('selects all linked folders or albums and matches string patterns', async () => {
+    const root = await createTemporaryDirectory();
+    const first = path.join(root, 'first');
+    const second = path.join(root, 'second');
+    await mkdir(first);
+    await mkdir(second);
+    await writeFile(path.join(first, 'Keep-01.jpg'), 'one');
+    await writeFile(path.join(second, 'skip-02.jpg'), 'two');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([first, second]);
+      const keep = catalog.listAssets().find((item) => item.fileName === 'Keep-01.jpg')!;
+      const album = catalog.saveAlbum({ name: 'Selected delivery' });
+      catalog.updateAlbumAssets({ albumId: album.id, assetIds: [keep.id], mode: 'add' });
+      const base = { version: 1 as const, scope: { all: false, favorites: false, folders: true, albums: false, folderIds: [], albumIds: [] }, match: 'all' as const };
+      const saved = catalog.saveSmartCollection({ name: 'Pattern', rule: { ...base, conditions: [{ field: 'fileName', operator: 'regex', value: '^keep-\\d+\\.jpg$' }] } });
+      expect(catalog.listAssetPage({ smartCollection: saved.id }).items.map((item) => item.id)).toEqual([keep.id]);
+      catalog.saveSmartCollection({ id: saved.id, name: saved.name, rule: { ...base, scope: { ...base.scope, folders: false, albums: true }, conditions: [{ field: 'albumName', operator: 'regex', value: 'delivery$' }] } });
+      expect(catalog.listAssetPage({ smartCollection: saved.id }).items.map((item) => item.id)).toEqual([keep.id]);
+      expect(() => catalog.saveSmartCollection({ name: 'Invalid', rule: { ...base, conditions: [{ field: 'fileName', operator: 'regex', value: '[' }] } })).toThrow('SMART_COLLECTION_INVALID_REGEX');
+    } finally { catalog.close(); }
+  });
+
   it('builds the recent collection from real import timestamps', async () => {
     const root = await createTemporaryDirectory();
     const photosDirectory = path.join(root, 'photos');

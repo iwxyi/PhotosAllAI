@@ -152,7 +152,7 @@ describe('large catalog pagination', () => {
       .toEqual(['existing']);
     migrated.close();
     const verified = new DatabaseSync(databasePath);
-    expect(verified.prepare('PRAGMA user_version').get()).toEqual({ user_version: 12 });
+    expect(verified.prepare('PRAGMA user_version').get()).toEqual({ user_version: 14 });
     expect((verified.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'index' AND name LIKE 'assets_browse_%'").get() as { count: number }).count).toBe(12);
     verified.close();
   });
