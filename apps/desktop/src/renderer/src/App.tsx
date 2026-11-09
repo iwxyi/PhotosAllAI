@@ -641,12 +641,14 @@ function Sidebar({
   smartCollections,
   selectedSmartCollection,
   tags,
+  selectedFolderIds,
   selectedTagId,
   onSelectFolder,
   onSelectAlbum,
   onSelectSmartCollection,
   onRefreshAlbums,
   onImportFolders,
+  onSelectFolders,
   onRelinkFolder,
   onSynchronizeFolder,
   onRevealFolder,
@@ -655,6 +657,7 @@ function Sidebar({
   onDropAssets,
   onSelectTag,
   isDemo
+  onTrashFolders,
 }: {
   folders: CatalogFolder[];
   albums: CatalogAlbum[];
@@ -664,12 +667,14 @@ function Sidebar({
   smartCollections: CatalogSmartCollection[];
   selectedSmartCollection: CatalogSmartCollection['id'] | null;
   tags: CatalogTag[];
+  selectedFolderIds: string[];
   selectedTagId: string | null;
   onSelectFolder: (folderId: string | null) => void;
   onSelectAlbum: (albumId: string | null) => void;
   onSelectSmartCollection: (id: CatalogSmartCollection['id'] | null) => void;
   onRefreshAlbums: () => Promise<void>;
   onImportFolders: () => Promise<void>;
+  onSelectFolders: (folderIds: string[]) => void;
   onRelinkFolder: (folderId: string) => Promise<void>;
   onSynchronizeFolder: (folderId: string) => Promise<{ discovered: number; offline: number }>;
   onRevealFolder: (folderId: string) => Promise<boolean>;
@@ -678,6 +683,7 @@ function Sidebar({
   onDropAssets?: (folderId: string, assetIds: string[], copy: boolean) => Promise<void>;
   onSelectTag: (tagId: string | null) => void;
   isDemo: boolean;
+  onTrashFolders: (folderIds: string[]) => Promise<void>;
 }): React.JSX.Element {
   const [albumManagerOpen, setAlbumManagerOpen] = useState(false);
   const [albumName, setAlbumName] = useState('');
@@ -693,6 +699,7 @@ function Sidebar({
   const [folderRemovalError, setFolderRemovalError] = useState('');
   const [folderRenameCandidate, setFolderRenameCandidate] = useState<CatalogFolder | null>(null);
   const [folderRenameDraft, setFolderRenameDraft] = useState('');
+  const [folderDeleteCandidates, setFolderDeleteCandidates] = useState<CatalogFolder[]>([]);
   const [folderRenameBusy, setFolderRenameBusy] = useState(false);
   const [inlineFolderRename, setInlineFolderRename] = useState(false);
   const folderRenameLock = useRef(false);
@@ -707,6 +714,7 @@ function Sidebar({
     ? demoFolders.map((folder, index) => ({ id: `demo-${index}`, name: folder.name, assetCount: folder.count, offlineCount: 0, parentId: null, rootId: `demo-${index}`, depth: 0, isRoot: true }))
     : folders;
   const selectedOfflineFolder = visibleFolders.find((folder) => folder.id === selectedFolderId && folder.isRoot && folder.offlineCount > 0);
+  const folderSelectionAnchor = useRef<string | null>(null);
   const libraryAssetCount = isDemo ? 12_408 : folders.length > 0 ? folders.filter((folder) => folder.isRoot).reduce((sum, folder) => sum + folder.assetCount, 0) : totalCount;
   const folderChildren = useMemo(() => {
     const children = new Map<string | null, CatalogFolder[]>();
@@ -736,6 +744,35 @@ function Sidebar({
   const contextExpanded = contextFolder ? folderAppearance.expandedIds.includes(contextFolder.id) : false;
   const contextAlbum = albumContextMenu ? albums.find((album) => album.id === albumContextMenu.id) : undefined;
   useEffect(() => {
+  const contextFolders = contextFolder && selectedFolderIds.includes(contextFolder.id) && selectedFolderIds.length > 1
+    ? visibleFolders.filter((folder) => selectedFolderIds.includes(folder.id)) : contextFolder ? [contextFolder] : [];
+  const topLevelFolders = (candidates: CatalogFolder[]) => {
+    const ids = new Set(candidates.map((folder) => folder.id));
+    const byId = new Map(visibleFolders.map((folder) => [folder.id, folder]));
+    return candidates.filter((folder) => {
+      let parentId = folder.parentId;
+      while (parentId) {
+        if (ids.has(parentId)) return false;
+        parentId = byId.get(parentId)?.parentId ?? null;
+      }
+      return true;
+    });
+  };
+  const selectFolderRow = (folder: CatalogFolder, event?: { metaKey: boolean; ctrlKey: boolean; shiftKey: boolean }) => {
+    const currentRoot = visibleFolders.find((item) => item.id === selectedFolderIds[0])?.rootId;
+    if (event?.shiftKey && currentRoot === folder.rootId && folderSelectionAnchor.current) {
+      const start = displayedFolders.findIndex((item) => item.id === folderSelectionAnchor.current);
+      const end = displayedFolders.findIndex((item) => item.id === folder.id);
+      if (start >= 0 && end >= 0) {
+        onSelectFolders(displayedFolders.slice(Math.min(start, end), Math.max(start, end) + 1).filter((item) => item.rootId === folder.rootId).map((item) => item.id));
+        return;
+      }
+    }
+    if (event && (event.metaKey || event.ctrlKey) && currentRoot === folder.rootId) {
+      onSelectFolders(selectedFolderIds.includes(folder.id) ? selectedFolderIds.filter((id) => id !== folder.id) : [...selectedFolderIds, folder.id]);
+    } else onSelectFolder(folder.id);
+    folderSelectionAnchor.current = folder.id;
+  };
     window.localStorage.setItem(FOLDER_APPEARANCE_KEY, JSON.stringify(folderAppearance));
   }, [folderAppearance]);
   useEffect(() => {
@@ -828,7 +865,7 @@ function Sidebar({
             const hasChildren = (folderChildren.get(folder.id)?.length ?? 0) > 0;
             return <div className={`folder-entry color-${color}`} key={folder.id} role="none">
               {hasChildren ? <button className="folder-disclosure" type="button" aria-label={`${expanded ? '收起' : '展开'} ${folder.name}`} aria-expanded={expanded} style={{ left: 3 + folder.depth * 13 }} onClick={() => setFolderAppearance((current) => ({ ...current, expandedIds: expanded ? current.expandedIds.filter((id) => id !== folder.id) : [...current.expandedIds, folder.id] }))}><ChevronRight size={11} className={expanded ? 'is-expanded' : ''} /></button> : <span className="folder-disclosure-spacer" style={{ width: 18, marginLeft: 3 + folder.depth * 13 }} />}
-              <button className={`nav-row folder-row${selectedFolderId === folder.id ? ' is-selected' : ''}${folderDropTargetId === folder.id ? ' is-drop-target' : ''}${draggedFolderId === folder.id ? ' is-dragging' : ''}`} style={{ paddingLeft: 25 + folder.depth * 13 }} type="button" role="treeitem" aria-level={folder.depth + 1} aria-selected={selectedFolderId === folder.id} aria-expanded={hasChildren ? expanded : undefined} tabIndex={selectedFolderId === folder.id || (!selectedFolderId && index === 0) ? 0 : -1} draggable={!isDemo} onDragStart={(event) => {
+              <button className={`nav-row folder-row${selectedFolderIds.includes(folder.id) ? ' is-selected' : ''}${folderDropTargetId === folder.id ? ' is-drop-target' : ''}${draggedFolderId === folder.id ? ' is-dragging' : ''}`} style={{ paddingLeft: 25 + folder.depth * 13 }} type="button" role="treeitem" aria-level={folder.depth + 1} aria-selected={selectedFolderIds.includes(folder.id)} aria-expanded={hasChildren ? expanded : undefined} tabIndex={selectedFolderId === folder.id || (!selectedFolderId && index === 0) ? 0 : -1} draggable={!isDemo} onDragStart={(event) => {
                 event.dataTransfer.effectAllowed = 'move';
                 event.dataTransfer.setData('application/x-photoallisai-folder', folder.id);
                 event.dataTransfer.setData('text/plain', folder.name);
@@ -851,10 +888,10 @@ function Sidebar({
                   if (expanded) setFolderAppearance((current) => ({ ...current, expandedIds: current.expandedIds.filter((id) => id !== folder.id) }));
                   else if (folder.parentId) { const parent = visibleFolders.find((item) => item.id === folder.parentId); if (parent) { onSelectFolder(parent.id); requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-folder-id="${CSS.escape(parent.id)}"]`)?.focus()); } }
                 } else if (event.key === 'F2' && !isDemo) { event.preventDefault(); startFolderRename(folder); }
-                else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSelectFolder(folder.id); }
-              }} data-folder-id={folder.id} onClick={() => onSelectFolder(folder.id)} onDragOver={(event) => {
+                else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectFolderRow(folder, event); }
+              }} data-folder-id={folder.id} onClick={(event) => selectFolderRow(folder, event)} onDragOver={(event) => {
                 const types = Array.from(event.dataTransfer.types);
-                if (isDemo || !types.some((type) => type === 'application/x-photoallisai-assets' || type === 'application/x-photoallisai-folder')) return;
+                if (isDemo || !types.some((type) => type === 'application/x-photoallisai-assets' || type === 'application/x-photoallisai-folder' || (type === 'Files' && activePhotoDragIds))) return;
                 event.preventDefault();
                 folderDropCopies.current = event.ctrlKey || event.metaKey || event.altKey;
                 event.dataTransfer.dropEffect = types.includes('application/x-photoallisai-folder') ? 'move' : folderDropCopies.current ? 'copy' : 'move';
@@ -880,17 +917,17 @@ function Sidebar({
                 }
                 if (!onDropAssets) return;
                 const raw = event.dataTransfer.getData('application/x-photoallisai-assets');
-                if (!raw) return;
+                if (!raw && !(activePhotoDragIds && event.dataTransfer.types.includes('Files'))) return;
                 event.preventDefault();
                 event.stopPropagation();
                 setFolderDropTargetId(null);
                 try {
-                  const assetIds = JSON.parse(raw) as unknown;
+                  const assetIds = raw ? JSON.parse(raw) as unknown : activePhotoDragIds;
                   const copy = folderDropCopies.current || event.ctrlKey || event.metaKey || event.altKey;
                   folderDropCopies.current = false;
                   if (Array.isArray(assetIds) && assetIds.length > 0 && assetIds.every((id) => typeof id === 'string')) void onDropAssets(folder.id, assetIds, copy);
                 } catch { setFolderActionNotice('无法识别拖入的照片，请重试或使用“移动到文件夹”菜单。'); }
-              }} onDragEnter={(event) => { if (Array.from(event.dataTransfer.types).some((type) => type === 'application/x-photoallisai-assets' || type === 'application/x-photoallisai-folder')) setFolderDropTargetId(folder.id); }} onContextMenu={(event) => { event.preventDefault(); setFolderContextMenu({ id: folder.id, x: event.clientX, y: event.clientY }); }}>
+              }} onDragEnter={(event) => { if (Array.from(event.dataTransfer.types).some((type) => type === 'application/x-photoallisai-assets' || type === 'application/x-photoallisai-folder' || (type === 'Files' && activePhotoDragIds))) setFolderDropTargetId(folder.id); }} onContextMenu={(event) => { event.preventDefault(); if (!selectedFolderIds.includes(folder.id)) selectFolderRow(folder); setFolderContextMenu({ id: folder.id, x: event.clientX, y: event.clientY }); }}>
                 <Folder size={15} />
                 {inlineFolderRename && folderRenameCandidate?.id === folder.id ? <input className="folder-inline-name" aria-label="文件夹名称" autoFocus value={folderRenameDraft} disabled={folderRenameBusy} onFocus={(event) => { event.currentTarget.select(); event.currentTarget.scrollIntoView({ block: 'nearest' }); }} onChange={(event) => setFolderRenameDraft(event.target.value)} onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onBlur={() => { if (folderRenameDraft.trim()) void renameFolder(); else { setFolderRenameCandidate(null); setInlineFolderRename(false); } }} onKeyDown={(event) => { event.stopPropagation(); if (event.key === 'Enter') { event.preventDefault(); void renameFolder(); } else if (event.key === 'Escape') { event.preventDefault(); setFolderRenameCandidate(null); setInlineFolderRename(false); } }} /> : <span>{folder.name}</span>}
                 <span className="row-count">{folder.offlineCount > 0 ? `离线 ${folder.offlineCount}` : folder.assetCount}</span>
@@ -899,18 +936,19 @@ function Sidebar({
           })}
           </div>}
           {folderContextMenu && contextFolder && <div className="folder-context-menu" role="menu" aria-label={`文件夹菜单 ${contextFolder.name}`} style={{ left: Math.min(folderContextMenu.x, Math.max(8, window.innerWidth - 224)), top: Math.min(folderContextMenu.y, Math.max(8, window.innerHeight - 286)) }} onPointerDown={(event) => event.stopPropagation()}>
-            <div className="folder-menu-title"><Folder size={14} /><span>{contextFolder.name}</span></div>
+            <div className="folder-menu-title"><Folder size={14} /><span>{contextFolders.length > 1 ? `${contextFolders.length} 个文件夹` : contextFolder.name}</span></div>
             <button type="button" role="menuitem" onClick={() => { onSelectFolder(contextFolder.id); setFolderContextMenu(null); }}><GalleryHorizontalEnd size={14} /><span>在图库中显示</span></button>
             <button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={() => void createFolder(contextFolder.id)}><FolderPlus size={14} /><span>创建子文件夹</span></button>
             <button type="button" role="menuitem" disabled={isDemo} onClick={() => startFolderRename(contextFolder)}><FilePenLine size={14} /><span>重命名</span></button>
             <button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={async () => { setFolderActionBusy(true); try { const revealed = await onRevealFolder(contextFolder.id); setFolderActionNotice(revealed ? '已在文件管理器中显示文件夹。' : '文件夹当前不可访问。'); } catch { setFolderActionNotice('无法打开文件管理器，请检查文件夹权限或磁盘连接。'); } finally { setFolderActionBusy(false); setFolderContextMenu(null); } }}><FolderOpen size={14} /><span>{FILE_MANAGER_LABEL}</span></button>
-            <button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={async () => { setFolderActionBusy(true); try { const report = await onSynchronizeFolder(contextFolder.id); setFolderActionNotice(`同步完成：新增 ${report.discovered} 张，离线 ${report.offline} 张。`); } catch { setFolderActionNotice('同步失败，请检查文件夹权限或磁盘连接。'); } finally { setFolderActionBusy(false); setFolderContextMenu(null); } }}><RefreshCw size={14} /><span>同步文件夹</span></button>
+            <button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={async () => { setFolderActionBusy(true); setFolderContextMenu(null); try { const roots = [...new Set(contextFolders.map((folder) => folder.rootId))]; const reports = await Promise.all(roots.map(onSynchronizeFolder)); setFolderActionNotice(`同步完成：新增 ${reports.reduce((sum, report) => sum + report.discovered, 0)} 张，离线 ${reports.reduce((sum, report) => sum + report.offline, 0)} 张。`); } catch { setFolderActionNotice('同步失败，请检查文件夹权限或磁盘连接。'); } finally { setFolderActionBusy(false); } }}><RefreshCw size={14} /><span>{contextFolders.length > 1 ? `同步所选 ${contextFolders.length} 个文件夹` : '同步文件夹'}</span></button>
             {contextHasChildren && <button type="button" role="menuitem" onClick={() => { setFolderAppearance((current) => ({ ...current, expandedIds: contextExpanded ? current.expandedIds.filter((id) => id !== contextFolder.id) : [...current.expandedIds, contextFolder.id] })); setFolderContextMenu(null); }}><ChevronRight className={contextExpanded ? 'is-expanded' : ''} size={14} /><span>{contextExpanded ? '收起子文件夹' : '展开子文件夹'}</span></button>}
             {contextFolder.isRoot && <><span className="folder-menu-separator" /><button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={() => { void onRelinkFolder(contextFolder.id); setFolderContextMenu(null); }}><RotateCcw size={14} /><span>更新关联路径…</span></button><button className="is-danger" type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={() => { setFolderRemovalError(''); setFolderRemovalCandidate(contextFolder); setFolderContextMenu(null); }}><FolderMinus size={14} /><span>取消关联…</span></button></>}
             <span className="folder-menu-separator" />
             <strong>文件夹颜色</strong><div className="folder-color-dots">{FOLDER_COLORS.map((option) => <button className={`color-${option}${(folderAppearance.colors[folderContextMenu.id] ?? 'none') === option ? ' is-active' : ''}`} type="button" role="menuitem" aria-label={option === 'none' ? '无颜色' : `${option} 色`} key={option} onClick={() => { setFolderAppearance((current) => ({ ...current, colors: { ...current.colors, [folderContextMenu.id]: option } })); setFolderContextMenu(null); }}><span />{(folderAppearance.colors[folderContextMenu.id] ?? 'none') === option && <Check size={10} />}</button>)}</div>
           </div>}
         </div>
+            <button className="is-danger" type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={() => { setFolderRemovalError(''); setFolderDeleteCandidates(topLevelFolders(contextFolders)); setFolderContextMenu(null); }}><Trash2 size={14} /><span>{contextFolders.length > 1 ? `删除所选 ${contextFolders.length} 个文件夹…` : '删除文件夹…'}</span></button>
 
         {!isDemo && <div className="sidebar-section"><div className="section-heading"><span>相册</span><button type="button" aria-label="新建相册" onClick={() => { setAlbumManagerOpen(true); setEditingAlbumId(null); setAlbumName(''); }}><Plus size={13} /></button></div>{albums.length === 0 ? <small className="sidebar-empty">暂无相册</small> : albums.map((album) => <button className={`nav-row folder-row${selectedAlbumId === album.id ? ' is-selected' : ''}`} type="button" key={album.id} onClick={() => onSelectAlbum(selectedAlbumId === album.id ? null : album.id)} onContextMenu={(event) => { event.preventDefault(); setFolderContextMenu(null); setAlbumContextMenu({ id: album.id, x: event.clientX, y: event.clientY }); }}><FolderHeart size={15} /><span>{album.name}</span><span className="row-count">{album.assetCount}</span></button>)}</div>}
         {albumContextMenu && contextAlbum && <div className="folder-context-menu album-context-menu" role="menu" aria-label={`相册菜单 ${contextAlbum.name}`} style={{ left: Math.min(albumContextMenu.x, Math.max(8, window.innerWidth - 224)), top: Math.min(albumContextMenu.y, Math.max(8, window.innerHeight - 150)) }} onPointerDown={(event) => event.stopPropagation()}>
@@ -944,6 +982,7 @@ function Sidebar({
       {folderActionNotice && <div className="operation-toast" role="status">{folderActionNotice}<button type="button" aria-label="关闭文件夹提示" onClick={() => setFolderActionNotice('')}><X size={13} /></button></div>}
     </aside>
   );
+      {folderDeleteCandidates.length > 0 && <div className="modal-backdrop sidebar-modal" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !folderRemovalBusy) setFolderDeleteCandidates([]); }}><section className="removal-dialog" role="alertdialog" aria-modal="true" aria-labelledby="folder-delete-title"><header><span className="dialog-icon"><Trash2 size={17} /></span><div><h2 id="folder-delete-title">删除{folderDeleteCandidates.length === 1 ? `「${folderDeleteCandidates[0]!.name}」` : `所选 ${folderDeleteCandidates.length} 个文件夹`}？</h2><p>文件夹及其中所有文件会移到系统回收站，图库中的照片也会移除。</p></div></header><div className="removal-impact"><Info size={15} /><span>包含 {folderDeleteCandidates.reduce((sum, folder) => sum + folder.assetCount, 0)} 张图库照片；同时会移走文件夹内的其他文件和子文件夹。</span></div>{folderRemovalError && <div className="folder-removal-error" role="alert"><CircleAlert size={14} /><span>{folderRemovalError}</span></div>}<footer><button autoFocus className="quiet-button" type="button" disabled={folderRemovalBusy} onClick={() => setFolderDeleteCandidates([])}>取消</button><button className="danger-action" type="button" disabled={folderRemovalBusy} onClick={async () => { setFolderRemovalBusy(true); setFolderRemovalError(''); try { await onTrashFolders(folderDeleteCandidates.map((folder) => folder.id)); setFolderDeleteCandidates([]); } catch (error) { const message = error instanceof Error ? error.message : String(error); setFolderRemovalError(message.includes('FOLDER_HAS_ACTIVE_TASKS') ? '有文件夹仍有正在运行或等待中的 AI 任务。' : message.includes('FOLDER_HAS_ACTIVE_FILE_OPERATIONS') ? '有文件夹仍有未完成的文件操作。' : `删除失败：${message.replace(/^Error invoking remote method [^:]+: /u, '').slice(0, 120)}`); } finally { setFolderRemovalBusy(false); } }}>{folderRemovalBusy ? '正在移到回收站…' : '移到回收站'}</button></footer></section></div>}
 }
 
 type FilmstripMenuOptions = {
@@ -2302,6 +2341,7 @@ type LibraryWorkspaceProps = {
   onSortDirectionChange: (direction: 'asc' | 'desc') => void;
   onSearchChange: (value: string) => void;
   favoriteOnly: boolean;
+  selectedFolderIds: string[];
   onFavoriteOnlyChange: (value: boolean) => void;
   sortBy: CatalogSort;
   onSortByChange: (value: CatalogSort) => void;
@@ -2319,6 +2359,7 @@ type LibraryWorkspaceProps = {
   onMoveFolder: (sourceFolderId: string, targetFolderId: string) => Promise<CatalogFolder>;
   onSelectTag: (tagId: string | null) => void;
   onLoadMore: () => void;
+  onSelectFolders: (folderIds: string[]) => void;
   searchQuery: string;
   selectedAssetId: string | null;
   onSelectedAssetChange: (assetId: string | null) => void;
@@ -2349,7 +2390,8 @@ function LibraryWorkspace(props: LibraryWorkspaceProps): React.JSX.Element {
   );
 }
 
-function collectionTitle(props: Pick<LibraryWorkspaceProps, 'catalogFolders' | 'catalogAlbums' | 'selectedFolderId' | 'selectedAlbumId' | 'selectedSmartCollection' | 'searchQuery'>): string {
+function collectionTitle(props: Pick<LibraryWorkspaceProps, 'catalogFolders' | 'catalogAlbums' | 'selectedFolderId' | 'selectedFolderIds' | 'selectedAlbumId' | 'selectedSmartCollection' | 'searchQuery'>): string {
+  if (props.selectedFolderIds.length > 1) return `${props.selectedFolderIds.length} 个文件夹`;
   if (props.selectedFolderId) return props.catalogFolders.find((folder) => folder.id === props.selectedFolderId)?.name ?? '文件夹';
   if (props.selectedAlbumId) return props.catalogAlbums.find((album) => album.id === props.selectedAlbumId)?.name ?? '相册';
   if (props.selectedSmartCollection) {
@@ -2490,7 +2532,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     const entry = groupDetails[photo.id];
     return entry && entry.modifiedAt === photo.modifiedAt ? [[photo.id, entry.data]] : [];
   })) as Record<string, FileDetails | null>, [groupDetails, props.availablePhotos]);
-  const photoGroups = useMemo(() => groupCatalogPhotos(props.availablePhotos, props.photoFilters.groupBy, props.catalogFolders, props.photoFilters.groupOrder, metadata), [props.availablePhotos, props.photoFilters.groupBy, props.photoFilters.groupOrder, props.catalogFolders, metadata]);
+  const photoGroups = useMemo(() => groupCatalogPhotos(props.availablePhotos, props.photoFilters.groupBy, props.catalogFolders, props.photoFilters.groupOrder, metadata, props.selectedFolderIds), [props.availablePhotos, props.photoFilters.groupBy, props.photoFilters.groupOrder, props.catalogFolders, props.selectedFolderIds, metadata]);
   const grouped = props.photoFilters.groupBy.length > 0;
   const defaultGroupTitle = collectionTitle(props);
   const setFilter = <K extends keyof PhotoFilters>(key: K, value: React.SetStateAction<PhotoFilters[K]>) => {
@@ -5464,6 +5506,7 @@ export function App(): React.JSX.Element {
         } else if (quickProgressTimer.current === null) {
           const refreshDelay = next.items.length >= 100_000 ? 1_000 : next.items.length >= 10_000 ? 500 : 100;
           quickProgressTimer.current = window.setTimeout(() => {
+  const [selectedFolderIds, setSelectedFolderIds] = useState<string[]>([]);
             quickProgressTimer.current = null;
             const latest = quickSessionRef.current;
             if (latest && latest.sessionId === progress.sessionId) setQuickSession({ ...latest });
@@ -5648,13 +5691,13 @@ export function App(): React.JSX.Element {
       version: 2,
       openTabs,
       activeTab,
-      library: { selectedFolderId, selectedAlbumId, selectedSmartCollection, selectedTagId, selectedAssetId, favoriteOnly, sortBy, ...(sortDirection ? { sortDirection } : {}), searchQuery: searchDraft.trim() }
+      library: { selectedFolderId, selectedFolderIds, selectedAlbumId, selectedSmartCollection, selectedTagId, selectedAssetId, favoriteOnly, sortBy, ...(sortDirection ? { sortDirection } : {}), searchQuery: searchDraft.trim() }
     };
     const timeout = window.setTimeout(() => {
       void window.desktopApi.saveWorkspaceSession(session).catch(() => undefined);
     }, 400);
     return () => window.clearTimeout(timeout);
-  }, [activeTab, favoriteOnly, openTabs, searchDraft, selectedAlbumId, selectedAssetId, selectedFolderId, selectedSmartCollection, selectedTagId, sessionReady, sortBy, sortDirection]);
+  }, [activeTab, favoriteOnly, openTabs, searchDraft, selectedAlbumId, selectedAssetId, selectedFolderId, selectedFolderIds, selectedSmartCollection, selectedTagId, sessionReady, sortBy, sortDirection]);
 
   const refreshCatalog = useCallback(async (folderId: string | null = selectedFolderId, preserveLoaded = false) => {
     const request = ++catalogRequest.current;
@@ -5665,7 +5708,7 @@ export function App(): React.JSX.Element {
     setLoadingMore(true);
     try {
       const [page, folders, tags, albums, smartCollections] = await Promise.all([
-        window.desktopApi.listCatalogAssetPage({ folderId, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: selectedSmartCollection, ...catalogFilterInput, favoriteOnly, sortBy, ...(sortDirection ? { sortDirection } : {}), query: searchQuery, cursor: null, limit: 200 }),
+        window.desktopApi.listCatalogAssetPage({ ...catalogFilterInput, folderId: folderIds.length ? null : folderId, folderIds, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: selectedSmartCollection, favoriteOnly, sortBy, ...(sortDirection ? { sortDirection } : {}), query: searchQuery, cursor: null, limit: 200 }),
         window.desktopApi.listCatalogFolders(),
         window.desktopApi.listCatalogTags(),
         window.desktopApi.listCatalogAlbums(),
@@ -5674,8 +5717,9 @@ export function App(): React.JSX.Element {
       if (request !== catalogRequest.current) return;
       const accumulated = [...page.items];
       let cursor = page.nextCursor;
+      setSelectedFolderIds(session.library.selectedFolderIds.length ? session.library.selectedFolderIds : session.library.selectedFolderId ? [session.library.selectedFolderId] : []);
       while (preserveLoaded && cursor && accumulated.length < loadedCount) {
-        const nextPage = await window.desktopApi.listCatalogAssetPage({ folderId, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: selectedSmartCollection, ...catalogFilterInput, favoriteOnly, sortBy, ...(sortDirection ? { sortDirection } : {}), query: searchQuery, cursor, limit: 500 });
+        const nextPage = await window.desktopApi.listCatalogAssetPage({ ...catalogFilterInput, folderId: folderIds.length ? null : folderId, folderIds, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: selectedSmartCollection, favoriteOnly, sortBy, ...(sortDirection ? { sortDirection } : {}), query: searchQuery, cursor, limit: 500 });
         if (request !== catalogRequest.current) return;
         accumulated.push(...nextPage.items);
         cursor = nextPage.nextCursor;
@@ -5684,7 +5728,7 @@ export function App(): React.JSX.Element {
       loadedCatalogCount.current = nextPhotos.length;
       loadedCatalogIds.current = new Set(nextPhotos.map((photo) => photo.id));
       setCatalogPhotos(nextPhotos);
-      const scope = JSON.stringify([folderId, selectedAlbumId, selectedSmartCollection, selectedTagId]);
+      const scope = JSON.stringify([folderId, folderIds, selectedAlbumId, selectedSmartCollection, selectedTagId]);
       if (viewerCatalogScope.current !== null && viewerCatalogScope.current !== scope) {
         viewerCatalogScope.current = scope;
         setViewerPhotos(nextPhotos);
@@ -5703,12 +5747,13 @@ export function App(): React.JSX.Element {
       setNextCursor(cursor);
       setCatalogReady(true);
     } catch (error) {
+    const folderIds = folderId && folderId === selectedFolderId && selectedFolderIds.length > 1 ? selectedFolderIds : [];
       if (request === catalogRequest.current) setNavigationNotice(error instanceof Error ? error.message : '无法加载图库');
     } finally {
       if (request === catalogRequest.current) catalogRefreshInFlight.current = false;
       if (request === catalogRequest.current) setLoadingMore(false);
     }
-  }, [favoriteOnly, catalogFilterInput, searchQuery, selectedAlbumId, selectedFolderId, selectedSmartCollection, selectedTagId, sortBy, sortDirection, setNavigationNotice]);
+  }, [favoriteOnly, catalogFilterInput, searchQuery, selectedAlbumId, selectedFolderId, selectedFolderIds, selectedSmartCollection, selectedTagId, sortBy, sortDirection, setNavigationNotice]);
 
   useEffect(() => {
     if (!sessionReady) return;
@@ -5743,6 +5788,10 @@ export function App(): React.JSX.Element {
     });
   }), [favoriteOnly, loadingMore, photoFilters.colors.length, photoFilters.flags.length, photoFilters.minimumRating, refreshCatalog, selectedFolderId, selectedSmartCollection, sortBy]);
 
+      setSelectedFolderIds((current) => {
+        const next = current.filter((id) => folders.some((folder) => folder.id === id));
+        return next.length === current.length ? current : next;
+      });
   useEffect(() => {
     const timeout = window.setTimeout(() => setSearchQuery(searchDraft.trim()), 250);
     return () => window.clearTimeout(timeout);
@@ -5815,6 +5864,7 @@ export function App(): React.JSX.Element {
           const range = document.createRange();
           range.selectNodeContents(focused);
           const selection = window.getSelection();
+    setSelectedFolderIds([]);
           selection?.removeAllRanges();
           selection?.addRange(range);
         } else if (focused instanceof Element && !focused.closest('input, textarea, select')) {
@@ -5865,7 +5915,8 @@ export function App(): React.JSX.Element {
     setLoadingMore(true);
     try {
       const page = await window.desktopApi.listCatalogAssetPage({
-        folderId: selectedFolderId,
+        folderId: selectedFolderIds.length > 1 ? null : selectedFolderId,
+        folderIds: selectedFolderIds.length > 1 ? selectedFolderIds : [],
         tagId: selectedTagId,
         albumId: selectedAlbumId,
         smartCollection: selectedSmartCollection,
@@ -5893,7 +5944,7 @@ export function App(): React.JSX.Element {
       catalogPagePending.current = false;
       if (request === catalogRequest.current) setLoadingMore(false);
     }
-  }, [nextCursor, loadingMore, selectedFolderId, selectedTagId, selectedAlbumId, selectedSmartCollection, favoriteOnly, catalogFilterInput, sortBy, sortDirection, searchQuery, setNavigationNotice]);
+  }, [nextCursor, loadingMore, selectedFolderId, selectedFolderIds, selectedTagId, selectedAlbumId, selectedSmartCollection, favoriteOnly, catalogFilterInput, sortBy, sortDirection, searchQuery, setNavigationNotice]);
 
   const isDemo = E2E_DEMO_MODE && catalogReady && catalogTotal === 0 && catalogFolders.length === 0;
   const availablePhotos = useMemo(() => {
@@ -6033,9 +6084,10 @@ export function App(): React.JSX.Element {
     onSelectionChange: setSharedSelection,
     onFavoriteOnlyChange: setFavoriteOnly,
     onSortByChange: setSortBy,
-    onSelectFolder: (id) => { setSelectedFolderId(id); setSelectedAlbumId(null); setSelectedSmartCollection(null); },
-    onSelectAlbum: (id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedSmartCollection(null); },
-    onSelectSmartCollection: (id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedAlbumId(null); },
+    onSelectFolder: (id) => { setSelectedFolderId(id); setSelectedFolderIds(id ? [id] : []); setSelectedAlbumId(null); setSelectedSmartCollection(null); },
+    onSelectFolders: (ids) => { setSelectedFolderIds(ids); setSelectedFolderId(ids[0] ?? null); setSelectedAlbumId(null); setSelectedSmartCollection(null); },
+    onSelectAlbum: (id) => { setSelectedAlbumId(id); setSelectedFolderId(null); setSelectedFolderIds([]); setSelectedSmartCollection(null); },
+    onSelectSmartCollection: (id) => { setSelectedSmartCollection(id); setSelectedFolderId(null); setSelectedFolderIds([]); setSelectedAlbumId(null); },
     onSelectTag: setSelectedTagId,
     onLoadMore: () => void loadMoreCatalog(),
     onRefreshCatalog: refreshCatalog,
@@ -6058,6 +6110,7 @@ export function App(): React.JSX.Element {
       focus: document.activeElement instanceof HTMLElement ? document.activeElement : null,
       drawerOpen: taskDrawerOpen,
       scroll: Array.from(document.querySelectorAll<HTMLElement>('.workspace-source-page *'))
+    selectedFolderIds,
         .filter((element) => element.scrollTop > 0 || element.scrollLeft > 0)
         .map((element) => ({ element, top: element.scrollTop, left: element.scrollLeft }))
     };
@@ -6105,7 +6158,7 @@ export function App(): React.JSX.Element {
       }
       if (request !== viewerRequest.current) return;
       viewerOrigin.current = origin;
-      viewerCatalogScope.current = JSON.stringify([selectedFolderId, selectedAlbumId, selectedSmartCollection, selectedTagId]);
+      viewerCatalogScope.current = JSON.stringify([selectedFolderId, selectedFolderIds.length > 1 ? selectedFolderIds : [], selectedAlbumId, selectedSmartCollection, selectedTagId]);
       setViewerPhotos(ids.flatMap((id) => byId.has(id) ? [byId.get(id)!] : []));
       setViewerPhoto(photo);
       setViewerResultId(options.resultId);
@@ -6167,7 +6220,7 @@ export function App(): React.JSX.Element {
       <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
       {!sessionReady || !catalogReady ? <main className="workspace-loading"><span className="working-pulse" /><span>{sessionReady ? '正在读取图库' : '正在恢复工作区'}</span></main>
         : <div className="global-workspace-shell" style={{ gridTemplateColumns: `${panelVisibility.left ? globalLayout.leftWidth : 0}px ${panelVisibility.left ? 5 : 0}px minmax(0, 1fr) ${panelVisibility.right ? 5 : 0}px ${panelVisibility.right ? globalLayout.rightWidth : 0}px` }}>
-              <div className="workspace-side-panel" hidden={!panelVisibility.left}><Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={catalogTotal} selectedFolderId={selectedFolderId} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={workspaceProps.onSelectFolder} onSelectAlbum={workspaceProps.onSelectAlbum} onSelectSmartCollection={workspaceProps.onSelectSmartCollection} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onRelinkFolder={relinkFolder} onSynchronizeFolder={synchronizeFolder} onRevealFolder={revealFolder} onUnregisterFolder={unregisterFromNavigation} onMoveFolder={moveFolder} onDropAssets={dropAssetsFromNavigation} onSelectTag={setSelectedTagId} isDemo={isDemo} /></div>
+              <div className="workspace-side-panel" hidden={!panelVisibility.left}><Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={catalogTotal} selectedFolderId={selectedFolderId} selectedFolderIds={selectedFolderIds} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} tags={catalogTags} selectedTagId={selectedTagId} onSelectFolder={workspaceProps.onSelectFolder} onSelectFolders={workspaceProps.onSelectFolders} onSelectAlbum={workspaceProps.onSelectAlbum} onSelectSmartCollection={workspaceProps.onSelectSmartCollection} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onRelinkFolder={relinkFolder} onSynchronizeFolder={synchronizeFolder} onRevealFolder={revealFolder} onUnregisterFolder={unregisterFromNavigation} onTrashFolders={trashFoldersFromNavigation} onMoveFolder={moveFolder} onDropAssets={dropAssetsFromNavigation} onSelectTag={setSelectedTagId} isDemo={isDemo} /></div>
               <div className="workspace-side-splitter" hidden={!panelVisibility.left}><PaneSplitter orientation="vertical" value={globalLayout.leftWidth} minimum={160} maximum={420} label="调整左侧目录栏宽度" onChange={(value) => setGlobalLayout('leftWidth', value)} /></div>
               <div className="workspace-page-stack">
               <div className="workspace-source-page" inert={Boolean(viewerPhoto)} aria-hidden={viewerPhoto ? true : undefined} style={viewerPhoto ? { visibility: 'hidden' } : undefined}>
@@ -6186,6 +6239,15 @@ export function App(): React.JSX.Element {
                 <div className="inspector unified-dock">
                   <div className="inspector-tabs"><button className={dockTab === 'ai' ? 'is-active' : ''} type="button" onClick={() => { setDockTab('ai'); setAgentDockOpen(false); }}><Bot size={14} />AI</button><button className={dockTab === 'agent' ? 'is-active' : ''} type="button" onClick={() => { setDockTab('agent'); setAgentDockOpen(true); }}><Sparkles size={14} />Agent</button><button className={dockTab === 'details' ? 'is-active' : ''} type="button" onClick={() => { setDockTab('details'); setAgentDockOpen(false); }}><Info size={14} />详情</button></div>
                   <div className="inspector-scroll">{dockTab === 'agent' ? <AgentDockPanel selectedIds={contextSelectedIds} photos={contextPhotos} onOpenResult={(result, results, assetIds) => { void openViewer(result.assetId, assetIds, { resultId: result.id, results }); }} onOpenAsset={(assetId, assetIds) => { void openViewer(assetId, assetIds); }} onClose={() => { setDockTab('ai'); setAgentDockOpen(false); }} onCollapse={() => saveDockLayout({ ...dockLayout, collapsed: true })} onMove={() => saveDockLayout({ ...dockLayout, order: ['details', 'agent'] })} /> : dockTab === 'details' && globalFocusPhoto ? <GlobalDetailsPanel photo={globalFocusPhoto} /> : <GlobalAiPanel onOpenBatch={() => openWorkspaceTab('batch')} photo={globalFocusPhoto} selectedIds={contextSelectedIds} isDemo={isDemo} workspaceTab={activeTab} onOpenTemplates={() => openWorkspaceTab('templates')} onAddAssetsToWorkflow={addAssetsToWorkflow} workflowAssetIds={workflowAssetIds} tasks={globalTasks} workflowRules={workflowRules} onWorkflowRulesChange={setWorkflowRules} workflowTemplateId={workflowTemplateId} onWorkflowTemplateChange={setWorkflowTemplateId} />}</div>
+  const trashFoldersFromNavigation = async (folderIds: string[]) => {
+    try {
+      for (const folderId of folderIds) await window.desktopApi.trashCatalogFolder(folderId);
+    } finally {
+      workspaceProps.onSelectFolder(null);
+      await refreshCatalog(null);
+    }
+    setNavigationNotice(`已将 ${folderIds.length} 个文件夹移到系统回收站。`);
+  };
                 </div>
                 {dockLayout.collapsed && <button className="dock-restore" type="button" onClick={() => saveDockLayout({ ...dockLayout, collapsed: false })}>展开 Dock 面板</button>}
               </div>

@@ -15,15 +15,17 @@ test.beforeAll(async () => {
   const source = path.join(testRoot, 'source');
   await mkdir(path.join(source, 'parent', 'child'), { recursive: true });
   await mkdir(path.join(source, 'target'), { recursive: true });
+  await mkdir(path.join(testRoot, 'secondary'), { recursive: true });
   const fixture = path.resolve('apps/desktop/src/renderer/public/demo/portrait.jpg');
   await copyFile(fixture, path.join(source, 'parent', 'parent.jpg'));
   await copyFile(fixture, path.join(source, 'parent', 'child', 'child.jpg'));
   await copyFile(fixture, path.join(source, 'target', 'target.jpg'));
+  await copyFile(fixture, path.join(testRoot, 'secondary', 'secondary.jpg'));
   const userData = path.join(testRoot, 'user-data');
   const library = path.join(userData, 'library');
   await mkdir(library, { recursive: true });
   const catalog = new CatalogService(path.join(library, 'catalog.sqlite'));
-  await catalog.importFolders([source]);
+  await catalog.importFolders([source, path.join(testRoot, 'secondary')]);
   catalog.close();
   app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js')], env: { ...process.env, PHOTOALLISAI_USER_DATA: userData } });
   page = await app.firstWindow();
@@ -97,4 +99,26 @@ test('drags a nested folder into another folder', async () => {
   await expect(movedChild).toBeVisible();
   await movedChild.locator('.folder-row').click();
   await expect(page.locator('.catalog-card')).toContainText('child.jpg');
+});
+
+test('selects folders within one root and collapses parent-child delete scope', async () => {
+  const target = page.locator('.folder-row[data-folder-id]').filter({ hasText: 'target' });
+  const child = page.locator('.folder-row[data-folder-id]').filter({ hasText: 'child' });
+  await target.click();
+  await child.click({ modifiers: ['ControlOrMeta'] });
+  await expect(target).toHaveAttribute('aria-selected', 'true');
+  await expect(child).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('.catalog-card')).toHaveCount(2);
+  await child.click({ button: 'right' });
+  await page.getByRole('menuitem', { name: /删除所选 2 个文件夹/ }).click();
+  const dialog = page.getByRole('alertdialog', { name: '删除「target」？' });
+  await expect(dialog).toContainText('包含 2 张图库照片');
+  await dialog.getByRole('button', { name: '取消' }).click();
+  const secondary = page.locator('.folder-row[data-folder-id]').filter({ hasText: 'secondary' });
+  await secondary.click();
+  await expect(secondary).toHaveAttribute('aria-selected', 'true');
+  await expect(target).toHaveAttribute('aria-selected', 'false');
+  await expect(child).toHaveAttribute('aria-selected', 'false');
+  await expect(page.locator('.catalog-card')).toHaveCount(1);
+  await expect(page.locator('.catalog-card')).toContainText('secondary.jpg');
 });

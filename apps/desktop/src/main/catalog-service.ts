@@ -664,6 +664,56 @@ export class CatalogService {
     return unregisterCatalogFolderReportSchema.parse({ folderId, assetCount });
   }
 
+  async trashFolder(folderId: string, trashItem: (folderPath: string) => Promise<void>): Promise<void> {
+    const directory = this.#resolveDirectory(folderId);
+    if (!directory) throw new Error('CATALOG_FOLDER_NOT_FOUND');
+    const folderPath = path.join(directory.rootPath, directory.relativePath);
+    const prefix = `${escapeLike(folderPath + path.sep)}%`;
+    if (this.#tableExists('tasks')) {
+      const activeTask = this.#database.prepare(`
+        SELECT 1 FROM tasks JOIN assets ON assets.id = tasks.asset_id
+        WHERE assets.folder_id = ? AND assets.removed_at IS NULL
+          AND assets.path LIKE ? ESCAPE '\\'
+          AND tasks.status IN ('draft', 'queued', 'preparing', 'uploading', 'processing', 'downloading', 'saving')
+        LIMIT 1
+      `).get(directory.rootId, prefix);
+      if (activeTask) throw new Error('FOLDER_HAS_ACTIVE_TASKS');
+    }
+    if (this.#tableExists('file_operations') && this.#tableExists('file_operation_items')) {
+      const activeOperation = this.#database.prepare(`
+        SELECT 1 FROM file_operation_items items
+        JOIN file_operations operations ON operations.id = items.operation_id
+        WHERE (items.source_folder_id = ? OR items.destination_folder_id = ?)
+          AND operations.status IN ('planned', 'executing', 'compensating', 'undoing')
+        LIMIT 1
+      `).get(directory.rootId, directory.rootId);
+      if (activeOperation) throw new Error('FOLDER_HAS_ACTIVE_FILE_OPERATIONS');
+    }
+    await trashItem(folderPath);
+    const now = Date.now();
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      if (directory.relativePath) {
+        this.#database.prepare(`
+          UPDATE assets SET removed_at = ?, trashed_at = ?
+          WHERE folder_id = ? AND removed_at IS NULL AND path LIKE ? ESCAPE '\\'
+        `).run(now, now, directory.rootId, prefix);
+        this.#database.prepare(`
+          DELETE FROM created_directories WHERE root_id = ? AND (path = ? OR path LIKE ? ESCAPE '\\')
+        `).run(directory.rootId, folderPath, prefix);
+      } else {
+        this.#database.prepare('UPDATE assets SET removed_at = ?, trashed_at = ? WHERE folder_id = ? AND removed_at IS NULL')
+          .run(now, now, directory.rootId);
+        this.#database.prepare('UPDATE folders SET removed_at = ? WHERE id = ? AND removed_at IS NULL')
+          .run(now, directory.rootId);
+      }
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   async relinkFolder(folderId: string, requestedPath: string): Promise<RelinkCatalogFolderOperationResult> {
     const folder = this.#database.prepare('SELECT id, path FROM folders WHERE id = ? AND removed_at IS NULL')
       .get(folderId) as { id: string; path: string } | undefined;

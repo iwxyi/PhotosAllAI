@@ -61,6 +61,7 @@ describe('workspace session service', () => {
       activeTab: 'tasks',
       library: {
         selectedFolderId: 'folder-1',
+        selectedFolderIds: ['folder-1'],
         selectedAlbumId: null,
         selectedSmartCollection: 'recent',
         selectedTagId: null,
@@ -116,6 +117,7 @@ describe('workspace session service', () => {
       activeTab: 'settings',
       library: {
         selectedFolderId: 'folder-legacy',
+        selectedFolderIds: ['folder-legacy'],
         selectedAlbumId: null,
         selectedSmartCollection: null,
         selectedTagId: null,

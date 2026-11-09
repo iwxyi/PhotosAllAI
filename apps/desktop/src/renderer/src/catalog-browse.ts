@@ -72,18 +72,7 @@ function ratioPart(details?: FileDetails | null): GroupPart {
   return { key: label, label, sort: width / height };
 }
 
-function groupPart(photo: Photo, dimension: BrowseDimension, folders: Map<string, CatalogFolder>, details?: FileDetails | null): GroupPart {
-  const folderPath = (id: string): string => {
-    const names: string[] = [];
-    const visited = new Set<string>();
-    let folder = folders.get(id);
-    while (folder && !visited.has(folder.id)) {
-      names.unshift(folder.name);
-      visited.add(folder.id);
-      folder = folder.parentId ? folders.get(folder.parentId) : undefined;
-    }
-    return names.join(' / ');
-  };
+function groupPart(photo: Photo, dimension: BrowseDimension, folders: Map<string, CatalogFolder>, details?: FileDetails | null, folderLabel?: (id: string) => string): GroupPart {
   const datePart = (value: number | undefined, precision: 'year' | 'month' | 'day', missing: string) => value === undefined || !Number.isFinite(value) ? unknown(missing) : part(localDateKey(value, precision));
   const shot = details?.takenAt ? new Date(details.takenAt).getTime() : NaN;
   switch (dimension) {
@@ -112,7 +101,7 @@ function groupPart(photo: Photo, dimension: BrowseDimension, folders: Map<string
       const bucket = ratio > 1.05 ? 3 : ratio < .95 ? 1 : 2;
       return part(bucket, ({ 3: '横图', 2: '方图', 1: '竖图' } as const)[bucket as 1 | 2 | 3]);
     }
-    case 'folder': return photo.folderId ? { key: photo.folderId, label: folderPath(photo.folderId) || '未知文件夹', sort: folderPath(photo.folderId) } : unknown('文件夹');
+    case 'folder': return photo.folderId ? { key: photo.folderId, label: folderLabel?.(photo.folderId) || '未知文件夹', sort: folderLabel?.(photo.folderId) ?? '' } : unknown('文件夹');
     case 'exifLensMake': return details?.lensMake ? part(details.lensMake) : unknown('镜头制造商');
     case 'exifLensModel': return details?.lensModel || details?.lens ? part(details.lensModel ?? details.lens) : unknown('镜头型号');
     case 'exifYear': return datePart(Number.isFinite(shot) ? shot : undefined, 'year', '拍摄年');
@@ -129,12 +118,39 @@ function groupPart(photo: Photo, dimension: BrowseDimension, folders: Map<string
   }
 }
 
-export function groupCatalogPhotos(photos: Photo[], dimensions: BrowseDimension[], folders: CatalogFolder[], order: BrowseFilters['groupOrder'] = {}, metadata: Record<string, FileDetails | null> = {}): { key: string; title: string; items: Photo[] }[] {
+export function groupCatalogPhotos(photos: Photo[], dimensions: BrowseDimension[], folders: CatalogFolder[], order: BrowseFilters['groupOrder'] = {}, metadata: Record<string, FileDetails | null> = {}, selectedFolderIds: string[] = []): { key: string; title: string; items: Photo[] }[] {
   if (!dimensions.length) return [{ key: 'all', title: '', items: photos }];
   const folderMap = new Map(folders.map((folder) => [folder.id, folder]));
+  const ancestorIds = (id: string): string[] => {
+    const ids: string[] = [];
+    let folder = folderMap.get(id);
+    while (folder) { ids.push(folder.id); folder = folder.parentId ? folderMap.get(folder.parentId) : undefined; }
+    return ids;
+  };
+  const selectedBase = selectedFolderIds.length ? ancestorIds(selectedFolderIds[0]!).find((id) => selectedFolderIds.every((selectedId) => ancestorIds(selectedId).includes(id))) : undefined;
+  const paths = new Map<string, string>();
+  for (const id of new Set(photos.map((photo) => photo.folderId).filter((id): id is string => Boolean(id)))) {
+    const names: string[] = [];
+    let folder = folderMap.get(id);
+    while (folder && folder.id !== selectedBase && !folder.isRoot) {
+      names.unshift(folder.name);
+      folder = folder.parentId ? folderMap.get(folder.parentId) : undefined;
+    }
+    paths.set(id, names.join(' / ') || (selectedBase ? '当前文件夹' : '根目录'));
+  }
+  const labels = [...new Set([...paths.values()].filter((value) => value !== '当前文件夹' && value !== '根目录'))];
+  let commonPrefix = labels.length > 1 ? labels[0]! : '';
+  for (const label of labels.slice(1)) {
+    while (commonPrefix && !label.startsWith(commonPrefix)) commonPrefix = commonPrefix.slice(0, -1);
+  }
+  if (labels.some((label) => label.length === commonPrefix.length)) commonPrefix = '';
+  const folderLabel = (id: string) => {
+    const label = paths.get(id) ?? '';
+    return commonPrefix && label !== '当前文件夹' && label !== '根目录' ? label.slice(commonPrefix.length) : label;
+  };
   const groups = new Map<string, { key: string; title: string; items: Photo[]; parts: GroupPart[] }>();
   for (const photo of photos) {
-    const parts = dimensions.map((dimension) => groupPart(photo, dimension, folderMap, metadata[photo.id]));
+    const parts = dimensions.map((dimension) => groupPart(photo, dimension, folderMap, metadata[photo.id], folderLabel));
     const key = JSON.stringify(parts.map((value) => value.key));
     const title = parts.map((value, index) => {
       if (value.missing) return value.label;

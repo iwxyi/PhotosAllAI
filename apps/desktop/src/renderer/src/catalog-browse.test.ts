@@ -16,9 +16,20 @@ describe('catalog browsing', () => {
     const groups = groupCatalogPhotos(items, ['date', 'month', 'folder'], folders);
     expect(groups).toHaveLength(2);
     expect(groups.find((group) => group.items[0]?.id === '1')?.items.map((item) => item.id)).toEqual(['1', '3']);
-    expect(groups[0]?.title).toBe('2026-01-15 · 2026-01 · same name');
+    expect(groups[0]?.title).toBe('2026-01-15 · 2026-01 · 根目录');
     expect(groups.flatMap((group) => group.items)).toHaveLength(items.length);
     expect(groupCatalogPhotos(items, [], folders)[0]?.items).toEqual(items);
+  });
+  it('uses the selected folder as a base and removes repeated child name prefixes', () => {
+    const tree: CatalogFolder[] = [
+      { id: 'root', name: '关联文件夹', assetCount: 3, offlineCount: 0, parentId: null, rootId: 'root', depth: 0, isRoot: true },
+      { id: 'parent', name: 'A', assetCount: 3, offlineCount: 0, parentId: 'root', rootId: 'root', depth: 1, isRoot: false },
+      { id: 'one', name: 'A1', assetCount: 1, offlineCount: 0, parentId: 'parent', rootId: 'root', depth: 2, isRoot: false },
+      { id: 'two', name: 'A2', assetCount: 1, offlineCount: 0, parentId: 'parent', rootId: 'root', depth: 2, isRoot: false }
+    ];
+    const scoped = ['parent', 'one', 'two'].map((folderId, index) => ({ ...items[0]!, id: String(index), folderId }));
+    expect(groupCatalogPhotos(scoped, ['folder'], tree, {}, {}, ['parent']).map((group) => group.title)).toEqual(['1', '2', '当前文件夹']);
+    expect(groupCatalogPhotos(scoped, ['folder'], tree, {}, {}, ['one', 'two']).map((group) => group.title)).toEqual(['1', '2', '当前文件夹']);
   });
   it('sorts every group by its active dimensions without removing photos', () => {
     const withLaterDate = [...items, { ...items[0]!, id: '4', modifiedAt: new Date(2026, 1, 15).getTime() }];

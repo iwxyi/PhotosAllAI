@@ -701,6 +701,12 @@ function registerIpc(): void {
   );
   ipcMain.handle('tasks.page.v1', (_event, input: unknown) => {
     const page = tasks.listPage(listTaskPageInputSchema.parse(input));
+  ipcMain.handle('catalog.folder.trash.v1', async (_event, input: unknown) => {
+    const folderId = String(input);
+    if (!/^[a-f0-9]{32}$/u.test(folderId)) throw new Error('INVALID_FOLDER_ID');
+    await catalog.trashFolder(folderId, (folderPath) => shell.trashItem(folderPath));
+    catalogWatcher.watchFolders(catalog.listFolderPaths());
+  });
     return { ...page, items: page.items.map((task) => ({
       ...toRendererTask(task),
       ...(task.assetId ? { assetFileName: catalog.resolveAssetFile(task.assetId)?.fileName } : {})

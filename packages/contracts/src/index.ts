@@ -1179,6 +1179,7 @@ export interface DesktopApi {
   listTemporaryMediaPage(input: TemporaryMediaPageInput): Promise<TemporaryMediaPage>;
   onOpenImages(listener: (session: QuickViewSession) => void): () => void;
   onOpenImagesProgress(listener: (session: QuickViewSession) => void): () => void;
+  trashCatalogFolder(folderId: string): Promise<void>;
   getDroppedFilePaths(files: File[]): string[];
   listProviderProfiles(): Promise<ProviderProfile[]>;
   saveProviderProfile(input: SaveProviderProfileInput): Promise<ProviderProfile>;

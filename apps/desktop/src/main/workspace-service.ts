@@ -12,6 +12,7 @@ export const defaultWorkspaceSession: WorkspaceSession = {
   activeTab: 'library',
   library: {
     selectedFolderId: null,
+    selectedFolderIds: [],
     selectedAlbumId: null,
     selectedSmartCollection: null,
     selectedTagId: null,
@@ -64,7 +65,7 @@ export class WorkspaceService {
           ...defaultWorkspaceSession,
           openTabs: legacy.openTabs,
           activeTab: legacy.activeTab,
-          library: { ...defaultWorkspaceSession.library, ...legacy.library }
+          library: { ...defaultWorkspaceSession.library, ...legacy.library, selectedFolderIds: legacy.library.selectedFolderId ? [legacy.library.selectedFolderId] : [] }
         }));
       }
       if (row.schema_version !== 2) return structuredClone(defaultWorkspaceSession);

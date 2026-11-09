@@ -20,6 +20,24 @@ afterEach(async () => {
 });
 
 describe('catalog image discovery', () => {
+  it('trashes a parent folder once and removes its descendants from the catalog', async () => {
+    const root = await createTemporaryDirectory();
+    const source = path.join(root, 'photos');
+    await mkdir(path.join(source, 'A', 'child'), { recursive: true });
+    await mkdir(path.join(source, 'B'), { recursive: true });
+    await writeFile(path.join(source, 'A', 'child', 'one.jpg'), 'fixture');
+    await writeFile(path.join(source, 'B', 'two.jpg'), 'fixture');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([source]);
+      const folder = catalog.listFolders().find((item) => item.name === 'A')!;
+      const trashed: string[] = [];
+      await catalog.trashFolder(folder.id, async (folderPath) => { trashed.push(folderPath); await rm(folderPath, { recursive: true }); });
+      expect(trashed).toEqual([path.join(await realpath(source), 'A')]);
+      expect(catalog.listFolders().map((item) => item.name)).toEqual(['photos', 'B']);
+      expect(catalog.listAssetPage({}).items.map((item) => item.fileName)).toEqual(['two.jpg']);
+    } finally { catalog.close(); }
+  });
   it('persists empty child folders, resolves name collisions and tracks renames and moves', async () => {
     const root = await createTemporaryDirectory();
     const source = path.join(root, 'photos');
@@ -69,6 +87,7 @@ describe('catalog image discovery', () => {
       const folderB = folders.find((folder) => folder.name === 'B')!;
       expect(catalog.listAssetPage({ folderIds: [folderA.id] }).totalCount).toBe(3);
       expect(catalog.listAssetPage({ folderIds: [folderA.id, folderB.id] }).totalCount).toBe(4);
+      expect(catalog.listAssetPage({ folderIds: [folderA.id, folders.find((folder) => folder.name === 'sub')!.id] }).totalCount).toBe(3);
       expect(catalog.listAssetPage({ folderIds: ['missing'] }).totalCount).toBe(0);
       expect(catalog.listAssetPage({ months: ['2026-01', '2026-02'], formats: ['jpg', 'PNG'] }).totalCount).toBe(4);
       const filters = { folderIds: [folderA.id, folderB.id], dateFrom: new Date(2026, 0, 1).getTime(), dateTo: february.getTime(), months: ['2026-01'], formats: ['JPG'], sortBy: 'fileName' as const, limit: 1 };

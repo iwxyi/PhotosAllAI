@@ -122,6 +122,8 @@ const api: DesktopApi = {
   revealCatalogAsset: (assetId) =>
     ipcRenderer.invoke('catalog.asset.reveal.v1', assetId) as ReturnType<DesktopApi['revealCatalogAsset']>,
   listProviderProfiles: () =>
+  trashCatalogFolder: (folderId) =>
+    ipcRenderer.invoke('catalog.folder.trash.v1', folderId) as ReturnType<DesktopApi['trashCatalogFolder']>,
     ipcRenderer.invoke('providers.list.v1') as ReturnType<DesktopApi['listProviderProfiles']>,
   saveProviderProfile: (input) =>
     ipcRenderer.invoke('providers.save.v1', input) as ReturnType<DesktopApi['saveProviderProfile']>,
