@@ -131,7 +131,7 @@ export class CatalogService {
   constructor(databasePath: string) {
     this.#database = new DatabaseSync(databasePath);
     this.#database.function('smart_regexp', (pattern: unknown, candidate: unknown) =>
-      typeof pattern === 'string' && typeof candidate === 'string' && new RegExp(pattern, 'iu').test(candidate) ? 1 : 0);
+      typeof pattern === 'string' && typeof candidate === 'string' && validateSmartRegex(pattern).test(candidate) ? 1 : 0);
     this.#database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.#migrate();
   }
@@ -416,6 +416,18 @@ export class CatalogService {
       FROM assets WHERE removed_at IS NULL
     `).get() as { assets: number; offline: number | null };
     return { assets: row.assets, offline: row.offline ?? 0 };
+  }
+
+  listAssetIdsInFolder(folderId: string): string[] {
+    const directory = this.#resolveDirectory(folderId);
+    if (!directory) throw new Error('FOLDER_NOT_FOUND');
+    const absolute = path.join(directory.rootPath, directory.relativePath);
+    const rows = directory.relativePath
+      ? this.#database.prepare("SELECT id FROM assets WHERE removed_at IS NULL AND folder_id = ? AND (path = ? OR path LIKE ? ESCAPE '\\')")
+        .all(directory.rootId, absolute, `${escapeLike(absolute + path.sep)}%`) as Array<{ id: string }>
+      : this.#database.prepare('SELECT id FROM assets WHERE removed_at IS NULL AND folder_id = ?')
+        .all(directory.rootId) as Array<{ id: string }>;
+    return rows.map((row) => row.id);
   }
 
   listAssetPage(rawInput: ListCatalogAssetsInput): CatalogAssetPage {
@@ -1975,6 +1987,8 @@ function escapeLike(value: string): string {
 
 function validateSmartRegex(value: string): RegExp {
   if (value.length > 200) throw new Error('SMART_COLLECTION_INVALID_REGEX');
+  if (/\((?:[^()]|\([^()]*\))*[+*{][^()]*\)[+*{]/u.test(value) || /\([^)]*\|[^)]*\)[+*{]/u.test(value))
+    throw new Error('SMART_COLLECTION_INVALID_REGEX');
   try { return new RegExp(value, 'iu'); }
   catch { throw new Error('SMART_COLLECTION_INVALID_REGEX'); }
 }

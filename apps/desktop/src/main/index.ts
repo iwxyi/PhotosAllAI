@@ -1049,6 +1049,10 @@ function registerIpc(): void {
     const result = await imageCache.prune(pruneImageCacheInputSchema.parse(input).maxBytes);
     return result;
   });
+  ipcMain.handle('cache.folder.clear.v1', async (_event, folderId: unknown) => {
+    if (typeof folderId !== 'string' || !folderId) throw new Error('FOLDER_NOT_FOUND');
+    return imageCache.clearAssets(catalog.listAssetIdsInFolder(folderId));
+  });
 }
 
 function createWindow(): BrowserWindow {
@@ -1373,7 +1377,7 @@ app.whenReady().then(async () => {
   protocol.handle('photoasset', async (request) => {
     if (shuttingDown) return new Response('Shutting down', { status: 503 });
     const url = new URL(request.url);
-    if (!['thumbnail', 'preview', 'original', 'temporary', 'temporary-thumbnail'].includes(url.host)) {
+    if (!['thumbnail', 'medium', 'preview', 'original', 'temporary', 'temporary-thumbnail'].includes(url.host)) {
       return new Response('Not found', { status: 404 });
     }
     const assetId = url.pathname.slice(1);

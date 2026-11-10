@@ -79,6 +79,52 @@ test('opens actual files temporarily, browses siblings, and measures physical pi
     await expect(page.locator('.inspector-scroll')).toContainText('photo10.jpg');
     await expect(page.locator('.inspector-scroll')).toContainText('位置');
     await expect.poll(() => page.locator('.metadata-list strong[title*="/"]').first().evaluate((element) => element.getBoundingClientRect().right <= element.closest('.inspector-scroll')!.getBoundingClientRect().right)).toBe(true);
+    await page.evaluate(() => {
+      const panel = document.querySelector('.inspector-scroll')!;
+      const inspect = () => {
+        const rows = panel.querySelectorAll('.inspector-info > .inspector-section:first-child .metadata-list > div');
+        const path = [...rows].find((row) => row.querySelector('span')?.textContent === '位置')?.querySelector('strong')?.textContent;
+        if (rows.length < 7 || !path || path === '—') document.body.dataset.inspectorCleared = 'true';
+      };
+      document.body.dataset.inspectorCleared = 'false';
+      new MutationObserver(inspect).observe(panel, { childList: true, subtree: true, characterData: true });
+    });
+    await viewer.locator('.canvas-wrap').focus();
+    await page.keyboard.press('ArrowLeft');
+    await expect(page.locator('.inspector-scroll')).toContainText('photo2.jpg');
+    await expect(page.locator('body')).toHaveAttribute('data-inspector-cleared', 'false');
+    await page.keyboard.press('ArrowRight');
+    await expect(page.locator('.inspector-scroll')).toContainText('photo10.jpg');
+    await expect(page.locator('body')).toHaveAttribute('data-inspector-cleared', 'false');
+    const inspectorScroll = page.locator('.inspector-scroll');
+    await inspectorScroll.evaluate((element) => {
+      const scroller = element as HTMLElement;
+      scroller.style.height = '150px';
+      scroller.scrollTop = 25;
+    });
+    await expect.poll(() => inspectorScroll.evaluate((element) => element.scrollTop)).toBe(25);
+    const headingTop = await inspectorScroll.locator('.inspector-heading').first().evaluate((element) => element.getBoundingClientRect().top);
+    await viewer.locator('.canvas-wrap').focus();
+    await page.keyboard.press('ArrowLeft');
+    await expect(inspectorScroll).toContainText('photo2.jpg');
+    await expect.poll(() => inspectorScroll.locator('.inspector-heading').first().evaluate((element) => element.getBoundingClientRect().top)).toBeCloseTo(headingTop, 0);
+    await expect.poll(() => inspectorScroll.evaluate((element) => element.scrollTop)).toBe(25);
+    await inspectorScroll.evaluate((element) => { (element as HTMLElement).style.height = ''; });
+    await page.evaluate(() => {
+      const heading = document.querySelector<HTMLElement>('.inspector-info .inspector-heading')!;
+      const label = heading.querySelector('span')!;
+      const initialTop = label.getBoundingClientRect().top;
+      document.body.dataset.inspectorHeadingMoved = 'false';
+      const inspect = () => {
+        if (Math.abs(label.getBoundingClientRect().top - initialTop) > 0.5 || heading.getBoundingClientRect().height < 29) document.body.dataset.inspectorHeadingMoved = 'true';
+      };
+      new MutationObserver(inspect).observe(heading, { childList: true, subtree: true, attributes: true });
+      requestAnimationFrame(function sample() { inspect(); requestAnimationFrame(sample); });
+    });
+    await viewer.locator('.canvas-wrap').focus();
+    await page.keyboard.press('ArrowRight');
+    await expect(inspectorScroll).toContainText('photo10.jpg');
+    await expect(page.locator('body')).toHaveAttribute('data-inspector-heading-moved', 'false');
     for (const [width, height] of [[1440, 900], [1000, 600]]) {
       await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0]!.setSize(size[0]!, size[1]!), [width!, height!]);
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

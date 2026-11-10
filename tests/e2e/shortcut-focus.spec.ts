@@ -83,3 +83,49 @@ test('select all follows text and photo-list focus', async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('default library and viewer shortcuts follow focus', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-default-shortcuts-'));
+  const app = await electron.launch({
+    args: [path.resolve('apps/desktop/out/main/index.js')],
+    env: { ...process.env, PHOTOALLISAI_USER_DATA: directory, PHOTOALLISAI_E2E_DEMO: '1' }
+  });
+  try {
+    const page = await app.firstWindow();
+    const catalog = page.getByRole('listbox', { name: '图库照片' });
+    await expect(catalog).toBeVisible();
+    await catalog.focus();
+    await page.keyboard.press('E');
+    const list = page.getByRole('listbox', { name: '图库列表视图' });
+    await expect(list).toBeVisible();
+    await list.focus();
+    await page.keyboard.press('G');
+    await expect(catalog).toBeVisible();
+    const search = page.getByRole('textbox', { name: '搜索图库' });
+    await search.focus();
+    await page.keyboard.press('E');
+    await expect(search).toHaveValue('E');
+    await expect(catalog).toBeVisible();
+    await search.fill('');
+    await catalog.focus();
+    await page.keyboard.press('Shift+L');
+    await expect(page.locator('.global-workspace-shell > .workspace-side-panel').first()).toBeHidden();
+    await page.keyboard.press('Shift+L');
+    await expect(page.locator('.global-workspace-shell > .workspace-side-panel').first()).toBeVisible();
+    await catalog.focus();
+    await page.keyboard.press('Space');
+    const viewer = page.getByRole('region', { name: '看图', exact: true });
+    await expect(viewer).toBeVisible();
+    const canvas = viewer.locator('.canvas-wrap');
+    await canvas.focus();
+    await page.keyboard.press('Z');
+    await expect(viewer.getByRole('button', { name: '适应窗口' })).toHaveAttribute('aria-pressed', 'false');
+    await page.keyboard.press('F');
+    await expect(viewer.getByRole('button', { name: '适应窗口' })).toHaveAttribute('aria-pressed', 'true');
+    await page.keyboard.press('Escape');
+    await expect(viewer).toHaveCount(0);
+  } finally {
+    await app.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

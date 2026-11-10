@@ -648,6 +648,7 @@ describe('catalog image discovery', () => {
       catalog.saveSmartCollection({ id: saved.id, name: saved.name, rule: { ...base, scope: { ...base.scope, folders: false, albums: true }, conditions: [{ field: 'albumName', operator: 'regex', value: 'delivery$' }] } });
       expect(catalog.listAssetPage({ smartCollection: saved.id }).items.map((item) => item.id)).toEqual([keep.id]);
       expect(() => catalog.saveSmartCollection({ name: 'Invalid', rule: { ...base, conditions: [{ field: 'fileName', operator: 'regex', value: '[' }] } })).toThrow('SMART_COLLECTION_INVALID_REGEX');
+      expect(() => catalog.saveSmartCollection({ name: 'Slow', rule: { ...base, conditions: [{ field: 'fileName', operator: 'regex', value: '(a+)+$' }] } })).toThrow('SMART_COLLECTION_INVALID_REGEX');
     } finally { catalog.close(); }
   });
 

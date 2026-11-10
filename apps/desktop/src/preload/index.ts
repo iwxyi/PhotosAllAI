@@ -203,6 +203,7 @@ const api: DesktopApi = {
   deleteExportPreset: (presetId) => ipcRenderer.invoke('export.presets.delete.v1', presetId) as ReturnType<DesktopApi['deleteExportPreset']>
   , getImageCacheStats: () => ipcRenderer.invoke('cache.stats.get.v1') as ReturnType<DesktopApi['getImageCacheStats']>
   , pruneImageCache: (input) => ipcRenderer.invoke('cache.prune.v1', input) as ReturnType<DesktopApi['pruneImageCache']>
+  , clearFolderImageCache: (folderId) => ipcRenderer.invoke('cache.folder.clear.v1', folderId) as ReturnType<DesktopApi['clearFolderImageCache']>
 };
 
 contextBridge.exposeInMainWorld('desktopApi', Object.freeze(api));

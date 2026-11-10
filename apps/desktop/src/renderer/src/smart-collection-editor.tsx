@@ -31,6 +31,8 @@ const choices: Partial<Record<Condition['field'], Array<[string, string]>>> = {
 function operatorsFor(field: typeof fields[number]): Condition['operator'][] {
   if (field.value === 'importedWithinDays') return ['lte'];
   if (field.value === 'reviewState' || field.kind === 'boolean') return ['eq', 'ne'];
+  if (field.value === 'flag') return ['eq', 'ne'];
+  if (field.value === 'labelColor') return ['eq', 'ne', 'isSet', 'isNotSet'];
   if (field.kind === 'number') return ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'isSet', 'isNotSet'];
   if (field.value === 'folderName') return ['eq', 'ne', 'contains', 'notContains', 'regex'];
   if (field.value === 'tag' || field.value === 'albumName') return ['eq', 'ne', 'contains', 'notContains', 'startsWith', 'endsWith', 'regex'];
@@ -49,7 +51,7 @@ export function SmartCollectionEditor({ collection, folders, albums, onClose, on
   onSave: (name: string, rule: SmartCollectionRule) => Promise<void>;
 }): React.JSX.Element {
   const [name, setName] = useState(collection?.name ?? '');
-  const [rule, setRule] = useState<SmartCollectionRule>(() => structuredClone(collection?.rule ?? emptyRule));
+  const [rule, setRule] = useState<SmartCollectionRule>(() => ({ ...structuredClone(collection?.rule ?? emptyRule), scope: { ...emptyRule.scope, ...structuredClone(collection?.rule.scope ?? {}) } }));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const setScope = (patch: Partial<SmartCollectionRule['scope']>) => setRule((current) => ({ ...current, scope: { ...current.scope, ...patch } }));
@@ -97,9 +99,9 @@ export function SmartCollectionEditor({ collection, folders, albums, onClose, on
         <div className="smart-collection-body">
         <label className="smart-collection-name">名称<input autoFocus value={name} maxLength={120} onChange={(event) => setName(event.target.value)} /></label>
         <fieldset className="smart-collection-scope"><legend>范围 <small>多选后取并集</small></legend>
-          <label><input type="checkbox" checked={rule.scope.all} onChange={(event) => setScope({ all: event.target.checked })} />所有照片</label>
-          <label><input type="checkbox" checked={rule.scope.favorites} onChange={() => setScope({ all: false, favorites: !rule.scope.favorites })} />收藏</label>
-          <label className="smart-collection-scope-parent"><input type="checkbox" checked={rule.scope.folders} onChange={(event) => setScope({ all: false, folders: event.target.checked, folderIds: event.target.checked ? [] : rule.scope.folderIds })} />关联文件夹 <small>全部关联目录</small></label>
+          <label><input type="checkbox" checked={rule.scope.all} onChange={(event) => setScope(event.target.checked ? { all: true, favorites: false, folders: false, albums: false, folderIds: [], albumIds: [] } : { all: false })} />所有照片</label>
+          <label><input type="checkbox" disabled={rule.scope.all} checked={rule.scope.favorites} onChange={() => setScope({ all: false, favorites: !rule.scope.favorites })} />收藏</label>
+          <label className="smart-collection-scope-parent"><input type="checkbox" disabled={rule.scope.all} checked={rule.scope.folders} onChange={(event) => setScope({ all: false, folders: event.target.checked, folderIds: event.target.checked ? [] : rule.scope.folderIds })} />关联文件夹 <small>全部关联目录</small></label>
           <div className="smart-collection-folder-list">{folders.map((folder) => <label key={folder.id} style={{ paddingLeft: folder.depth * 18 }}><input type="checkbox" disabled={rule.scope.all || rule.scope.folders || hasSelectedAncestor(folder)} checked={rule.scope.folderIds.includes(folder.id)} onChange={() => toggleFolder(folder)} />{folder.name}{folder.isRoot ? '（全部子目录）' : ''}</label>)}</div>
           {rule.scope.folderIds.filter((id) => !folders.some((folder) => folder.id === id)).map((missingId) => <label key={missingId} style={{ display: 'block' }}>原文件夹已变化，请重新关联：
             <select defaultValue="" onChange={(event) => setRule((current) => ({ ...current, scope: { ...current.scope, folderIds: current.scope.folderIds.map((id) => id === missingId ? event.target.value : id) } }))}>
@@ -107,7 +109,7 @@ export function SmartCollectionEditor({ collection, folders, albums, onClose, on
             </select>
             <button type="button" onClick={() => setRule((current) => ({ ...current, scope: { ...current.scope, folderIds: current.scope.folderIds.filter((id) => id !== missingId) } }))}>移除旧范围</button>
           </label>)}
-          <label className="smart-collection-scope-parent"><input type="checkbox" checked={rule.scope.albums} onChange={(event) => setScope({ all: false, albums: event.target.checked, albumIds: event.target.checked ? [] : rule.scope.albumIds })} />相册 <small>全部相册</small></label>
+          <label className="smart-collection-scope-parent"><input type="checkbox" disabled={rule.scope.all} checked={rule.scope.albums} onChange={(event) => setScope({ all: false, albums: event.target.checked, albumIds: event.target.checked ? [] : rule.scope.albumIds })} />相册 <small>全部相册</small></label>
           {albums.map((album) => <label key={album.id} className="smart-collection-album"><input type="checkbox" disabled={rule.scope.all || rule.scope.albums} checked={rule.scope.albumIds.includes(album.id)} onChange={() => toggleId('albumIds', album.id)} />{album.name}</label>)}
         </fieldset>
         <fieldset className="smart-collection-conditions"><legend>条件</legend>
@@ -122,7 +124,7 @@ export function SmartCollectionEditor({ collection, folders, albums, onClose, on
               <select aria-label={`条件 ${index + 1} 运算`} value={condition.operator} onChange={(event) => updateCondition(index, { operator: event.target.value as Condition['operator'] })}>
                 {operatorsFor(field).map((operator) => <option key={operator} value={operator}>{operatorLabels[operator]}</option>)}
               </select>
-              {condition.operator === 'isSet' || condition.operator === 'isNotSet' ? null : field.kind === 'boolean' ? <select aria-label={`条件 ${index + 1} 值`} value={String(condition.value)} onChange={(event) => updateCondition(index, { value: event.target.value === 'true' })}><option value="true">是</option><option value="false">否</option></select> : choices[field.value] ? <select aria-label={`条件 ${index + 1} 值`} value={String(condition.value)} onChange={(event) => updateCondition(index, { value: event.target.value })}>{choices[field.value]!.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select> : <input aria-label={`条件 ${index + 1} 值`} type={field.kind === 'number' ? 'number' : 'text'} value={condition.value === null ? '' : String(condition.value)} onChange={(event) => updateCondition(index, { value: field.kind === 'number' ? Number(event.target.value) : event.target.value })} />}
+              {condition.operator === 'isSet' || condition.operator === 'isNotSet' ? null : field.kind === 'boolean' ? <select aria-label={`条件 ${index + 1} 值`} value={String(condition.value)} onChange={(event) => updateCondition(index, { value: event.target.value === 'true' })}><option value="true">是</option><option value="false">否</option></select> : choices[field.value] && condition.operator !== 'regex' ? <select aria-label={`条件 ${index + 1} 值`} value={String(condition.value)} onChange={(event) => updateCondition(index, { value: event.target.value })}>{choices[field.value]!.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select> : <input aria-label={`条件 ${index + 1} 值`} type={field.kind === 'number' ? 'number' : 'text'} value={condition.value === null ? '' : String(condition.value)} onChange={(event) => updateCondition(index, { value: field.kind === 'number' ? Number(event.target.value) : event.target.value })} />}
               <button className="smart-collection-remove-condition" type="button" aria-label={`删除条件 ${index + 1}`} title="删除条件" onClick={() => setRule((current) => ({ ...current, conditions: current.conditions.filter((_, at) => at !== index) }))}><X size={14} /></button>
             </div>;
           })}

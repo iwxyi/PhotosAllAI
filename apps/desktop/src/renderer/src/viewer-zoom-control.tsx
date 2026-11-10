@@ -62,6 +62,6 @@ export function ViewerZoomControl({ percent, title, onZoom, onCommand }: {
         const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
         buttons[(index + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
       }
-    }}>{options.map(([value, label]) => <button type="button" role="menuitem" key={value} onClick={() => command(value!)}>{label}</button>)}</div>, document.body)}
+    }}>{options.map(([value, label]) => <button type="button" role="menuitem" key={value} onClick={() => command(value!)}><span>{label}</span>{(value === 'fit' || value === 'zoom:100') && <kbd aria-hidden="true">{value === 'fit' ? 'F' : 'Z'}</kbd>}</button>)}</div>, document.body)}
   </div>;
 }

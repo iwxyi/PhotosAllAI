@@ -114,6 +114,7 @@ const VIEWER_VERSION_TARGET_KEY = 'photoallisai.viewer-version-target';
 const GENERATED_IMAGE_COMPARE_KEY = 'photoallisai.generated-image-compare-parent';
 const GENERATED_IMAGE_COMPARE_EVENT = 'photoallisai:generated-image-compare-changed';
 const ANALYSIS_DETAILS_OPEN_KEY = 'photoallisai.analysis-details-open';
+const SHOOTING_DETAILS_OPEN_KEY = 'photoallisai.shooting-details-open';
 const OPEN_TASK_DRAWER_EVENT = 'photoallisai-open-task-drawer';
 const OPERATION_NOTICE_EVENT = 'photoallisai-operation-notice';
 const COPY_DISPLAYED_EVENT = 'photoallisai:copy-displayed-files';
@@ -325,22 +326,19 @@ function BufferedPreviewImage({ src, alt, className, onReady }: { src: string; a
     image.src = src;
     return () => { active = false; window.clearTimeout(indicatorTimer); };
   }, [alt, displayed.src, failedSrc, src]);
-  return <>{displayed.src ? <img className={`${className} buffered-image${ready ? ' is-ready' : ''}`} src={displayed.src} alt={displayed.alt} onLoad={(event) => { rememberDecodedImage(displayed.src); if (event.currentTarget.naturalHeight > 0) rememberImageAspectRatio(displayed.src, event.currentTarget.naturalWidth / event.currentTarget.naturalHeight); setReady(true); onReadyRef.current?.(event.currentTarget); }} /> : null}{showLoading && <span className="preview-loading" aria-label="正在载入下一张照片"><span className="working-pulse" /></span>}</>;
+  return <>{displayed.src ? <img className={`${className} buffered-image${ready ? ' is-ready' : ''}`} src={displayed.src} alt={displayed.alt} onLoad={(event) => { rememberDecodedImage(displayed.src); if (event.currentTarget.naturalHeight > 0) rememberImageAspectRatio(displayed.src, event.currentTarget.naturalWidth / event.currentTarget.naturalHeight); setFailedSrc(null); setReady(true); onReadyRef.current?.(event.currentTarget); }} onError={() => { setFailedSrc(displayed.src); setReady(false); }} /> : null}{failedSrc === displayed.src && src === displayed.src && <div className="preview-unavailable"><Image size={36} /><strong>预览暂不可用</strong><span>图像服务将在后台生成屏幕预览</span></div>}{showLoading && <span className="preview-loading" aria-label="正在载入下一张照片"><span className="working-pulse" /></span>}</>;
 }
 
 const catalogImageVisibility = new Map<Element, (visible: boolean) => void>();
 let catalogImageObserver: IntersectionObserver | undefined;
-const catalogImageActiveVisibility = new Map<Element, (visible: boolean) => void>();
-let catalogImageActiveObserver: IntersectionObserver | undefined;
 
 function CatalogImage({ src, previewSrc, alt = '', onAspectRatio, defer = false, eager = false }: { src: string; previewSrc?: string; alt?: string; onAspectRatio?: ((ratio: number) => void) | undefined; defer?: boolean; eager?: boolean }): React.JSX.Element {
   const ref = useRef<HTMLImageElement>(null);
   const [nearViewport, setNearViewport] = useState(false);
-  const [inViewport, setInViewport] = useState(false);
   const [request, setRequest] = useState<{ src: string; id: string; attempt: number; visible: boolean }>();
   const [displayed, setDisplayed] = useState<{ base: string; src: string; ready: boolean }>();
   const [outgoingSrc, setOutgoingSrc] = useState<string | null>(null);
-  const [needsPreview, setNeedsPreview] = useState(false);
+  const [upgradeSrc, setUpgradeSrc] = useState<string | null>(null);
   const [retry, setRetry] = useState<{ src: string; attempt: number }>({ src, attempt: 0 });
   const [retryReady, setRetryReady] = useState(false);
   const onAspectRatioRef = useRef(onAspectRatio);
@@ -357,26 +355,20 @@ function CatalogImage({ src, previewSrc, alt = '', onAspectRatio, defer = false,
     catalogImageObserver ??= new IntersectionObserver((entries) => {
       for (const entry of entries) catalogImageVisibility.get(entry.target)?.(entry.isIntersecting);
     }, { rootMargin: '300px' });
-    catalogImageActiveObserver ??= new IntersectionObserver((entries) => {
-      for (const entry of entries) catalogImageActiveVisibility.get(entry.target)?.(entry.isIntersecting);
-    });
     catalogImageVisibility.set(element, setNearViewport);
-    catalogImageActiveVisibility.set(element, setInViewport);
     catalogImageObserver.observe(element);
-    catalogImageActiveObserver.observe(element);
     return () => {
       catalogImageObserver?.unobserve(element);
-      catalogImageActiveObserver?.unobserve(element);
       catalogImageVisibility.delete(element);
-      catalogImageActiveVisibility.delete(element);
     };
   }, []);
+  const shouldRequest = nearViewport || eager;
   useEffect(() => {
-    if ((!nearViewport && !eager) || defer) { setRequest(undefined); return; }
+    if (!shouldRequest || defer || (displayed?.base === src && displayed.ready)) { setRequest(undefined); return; }
     const id = crypto.randomUUID();
-    setRequest({ src, id, attempt: retry.attempt, visible: inViewport });
+    setRequest({ src, id, attempt: retry.attempt, visible: true });
     return () => window.desktopApi.cancelPreviewRequest(id);
-  }, [nearViewport, eager, defer, src, retry.attempt, inViewport]);
+  }, [shouldRequest, defer, src, retry.attempt, displayed?.base, displayed?.ready]);
   useEffect(() => {
     if (retry.src !== src || retry.attempt === 0 || !nearViewport) return;
     const timer = window.setTimeout(() => setRetryReady(true), Math.min(200 * 2 ** (retry.attempt - 1), 1_600));
@@ -389,7 +381,10 @@ function CatalogImage({ src, previewSrc, alt = '', onAspectRatio, defer = false,
       const { width, height } = element.getBoundingClientRect();
       const ratio = IMAGE_ASPECT_RATIOS.get(src);
       const longEdge = ratio ? Math.max(Math.min(width, height * ratio), Math.min(height, width / ratio)) : Math.max(width, height);
-      setNeedsPreview(longEdge * window.devicePixelRatio > 384);
+      const neededPixels = longEdge * window.devicePixelRatio;
+      const next = neededPixels <= 384 ? null : neededPixels <= 1024 && previewSrc.startsWith('photoasset://preview/')
+        ? previewSrc.replace('photoasset://preview/', 'photoasset://medium/') : previewSrc;
+      setUpgradeSrc((current) => current === next ? current : next);
     };
     measure();
     const observer = new ResizeObserver(measure);
@@ -398,19 +393,19 @@ function CatalogImage({ src, previewSrc, alt = '', onAspectRatio, defer = false,
     return () => { observer.disconnect(); window.removeEventListener('resize', measure); };
   }, [nearViewport, previewSrc, src, displayed?.ready]);
   useEffect(() => {
-    if (!previewSrc || !nearViewport || !needsPreview || displayed?.base !== src || !displayed.ready || displayed.src === previewSrc) return;
+    if (!upgradeSrc || !nearViewport || displayed?.base !== src || !displayed.ready || displayed.src === upgradeSrc) return;
     let active = true;
     const image = new window.Image();
     // Wait for zoom gestures to settle before requesting a larger disk preview.
     const timer = window.setTimeout(() => {
       image.onload = async () => {
         try { await image.decode(); } catch { /* A loaded image remains usable if decode rejects. */ }
-        if (active) setDisplayed({ base: src, src: previewSrc, ready: true });
+        if (active) setDisplayed({ base: src, src: upgradeSrc, ready: true });
       };
-      image.src = previewSrc;
+      image.src = upgradeSrc;
     }, 180);
     return () => { active = false; window.clearTimeout(timer); image.onload = null; image.onerror = null; };
-  }, [displayed, nearViewport, needsPreview, previewSrc, src]);
+  }, [displayed, nearViewport, upgradeSrc, src]);
   const current = displayed?.base === src ? displayed : undefined;
   const prioritizedSrc = request?.visible && src.startsWith('photoasset://') ? `${src}${src.includes('?') ? '&' : '?'}priority=visible` : src;
   const retryUrl = retry.src === src && retry.attempt > 0 && retryReady ? `${prioritizedSrc}${prioritizedSrc.includes('?') ? '&' : '?'}retry=${retry.attempt}` : undefined;
@@ -442,6 +437,15 @@ type CatalogSort = 'modifiedAt' | 'fileName' | 'rating';
 type CatalogViewMode = 'list' | 'grid' | 'masonry' | 'justified';
 const photoColorNames: Record<NonNullable<Photo['labelColor']>, string> = { red: '红色', yellow: '黄色', green: '绿色', blue: '蓝色', purple: '紫色' };
 const photoColorName = (color: Photo['labelColor']): string => color ? photoColorNames[color] : '无';
+function MenuShortcut({ keys }: { keys: string }): React.JSX.Element {
+  return <kbd className="context-menu-shortcut" aria-hidden="true">{keys}</kbd>;
+}
+const copyShortcut = navigator.platform.includes('Mac') ? '⌘C' : 'Ctrl+C';
+const aiShortcut = (key: string): string => navigator.platform.includes('Mac') ? `⌘⌥${key}` : `Ctrl+Alt+${key}`;
+function shortcutBlocked(event: KeyboardEvent): boolean {
+  return event.defaultPrevented || event.repeat || document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"], .tag-editor-popover') !== null ||
+    event.target instanceof Element && Boolean(event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]'));
+}
 function ContextMenuSurface({ children, style, ...props }: React.HTMLAttributes<HTMLDivElement>): React.JSX.Element {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -955,9 +959,10 @@ function Sidebar({
             <div className="folder-menu-title"><Folder size={14} /><span>{contextFolders.length > 1 ? `${contextFolders.length} 个文件夹` : contextFolder.name}</span></div>
             <button type="button" role="menuitem" onClick={() => { onSelectFolder(contextFolder.id); setFolderContextMenu(null); }}><GalleryHorizontalEnd size={14} /><span>在图库中显示</span></button>
             <button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={() => void createFolder(contextFolder.id)}><FolderPlus size={14} /><span>创建子文件夹</span></button>
-            <button type="button" role="menuitem" disabled={isDemo} onClick={() => startFolderRename(contextFolder)}><FilePenLine size={14} /><span>重命名</span></button>
+            <button type="button" role="menuitem" disabled={isDemo} onClick={() => startFolderRename(contextFolder)}><FilePenLine size={14} /><span>重命名</span><MenuShortcut keys="F2" /></button>
             <button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={async () => { setFolderActionBusy(true); try { const revealed = await onRevealFolder(contextFolder.id); setFolderActionNotice(revealed ? '已在文件管理器中显示文件夹。' : '文件夹当前不可访问。'); } catch { setFolderActionNotice('无法打开文件管理器，请检查文件夹权限或磁盘连接。'); } finally { setFolderActionBusy(false); setFolderContextMenu(null); } }}><FolderOpen size={14} /><span>{FILE_MANAGER_LABEL}</span></button>
             <button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={async () => { setFolderActionBusy(true); setFolderContextMenu(null); try { const roots = [...new Set(contextFolders.map((folder) => folder.rootId))]; const reports = await Promise.all(roots.map(onSynchronizeFolder)); setFolderActionNotice(`同步完成：新增 ${reports.reduce((sum, report) => sum + report.discovered, 0)} 张，离线 ${reports.reduce((sum, report) => sum + report.offline, 0)} 张。`); } catch { setFolderActionNotice('同步失败，请检查文件夹权限或磁盘连接。'); } finally { setFolderActionBusy(false); } }}><RefreshCw size={14} /><span>{contextFolders.length > 1 ? `同步所选 ${contextFolders.length} 个文件夹` : '同步文件夹'}</span></button>
+            <button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={async () => { setFolderActionBusy(true); setFolderContextMenu(null); try { const reports = await Promise.all(topLevelFolders(contextFolders).map((folder) => window.desktopApi.clearFolderImageCache(folder.id))); setFolderActionNotice(`已清理 ${reports.reduce((sum, report) => sum + report.removedFiles, 0)} 个预览缓存文件。重新打开图片可测试首次加载。`); } catch { setFolderActionNotice('预览缓存清理失败，请稍后重试。'); } finally { setFolderActionBusy(false); } }}><RotateCcw size={14} /><span>{contextFolders.length > 1 ? `清空所选 ${contextFolders.length} 个文件夹的预览缓存` : '清空预览缓存'}</span></button>
             {contextHasChildren && <button type="button" role="menuitem" onClick={() => { setFolderAppearance((current) => ({ ...current, expandedIds: contextExpanded ? current.expandedIds.filter((id) => id !== contextFolder.id) : [...current.expandedIds, contextFolder.id] })); setFolderContextMenu(null); }}><ChevronRight className={contextExpanded ? 'is-expanded' : ''} size={14} /><span>{contextExpanded ? '收起子文件夹' : '展开子文件夹'}</span></button>}
             <span className="folder-menu-separator" /><button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={() => { void onRelinkFolder(contextFolder.id).catch((error: unknown) => setFolderActionNotice(relinkErrorMessage(error))); setFolderContextMenu(null); }}><RotateCcw size={14} /><span>{contextFolder.isRoot ? '更新关联路径…' : '重新关联子文件夹…'}</span></button>
             {contextFolder.isRoot && <button className="is-danger" type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={() => { setFolderRemovalError(''); setFolderRemovalCandidate(contextFolder); setFolderContextMenu(null); }}><FolderMinus size={14} /><span>取消关联…</span></button>}
@@ -1016,13 +1021,17 @@ type FilmstripMenuOptions = {
 };
 
 function FilmstripMenu({ options, onClose }: { options: FilmstripMenuOptions; onClose: () => void }): React.JSX.Element {
+  const [expanded, setExpanded] = useState(false);
   return <>
     <span className="folder-menu-separator" />
-    {(['flags', 'ratings', 'names'] as const).map((key) => <button type="button" role="menuitemcheckbox" aria-checked={options.display[key]} key={key} onClick={() => { options.onDisplayChange(key); onClose(); }}><span className="menu-check-slot">{options.display[key] && <Check size={13} />}</span><span>{key === 'flags' ? '显示旗标' : key === 'ratings' ? '显示星级' : '显示文件名'}</span></button>)}
-    <span className="folder-menu-separator" />
-    <div className="folder-menu-title">胶片布局</div>
-    {(['filmstrip', 'grid'] as const).map((mode) => <button type="button" role="menuitemradio" aria-checked={options.viewMode === mode} key={mode} onClick={() => { options.onViewModeChange(mode); onClose(); }}>{mode === 'filmstrip' ? <GalleryHorizontalEnd size={14} /> : <Grid2X2 size={14} />}<span>{mode === 'filmstrip' ? '横向胶片' : '网格'}</span>{options.viewMode === mode && <Check size={13} />}</button>)}
-    {!options.temporary && <label className="filmstrip-menu-sort">排序<select aria-label="胶片排序" value={options.sortBy} onChange={(event) => { options.onSortByChange(event.target.value as CatalogSort); onClose(); }}><option value="modifiedAt">修改时间</option><option value="fileName">文件名</option><option value="rating">评分</option></select></label>}
+    <button type="button" role="menuitem" aria-haspopup="menu" aria-expanded={expanded} onClick={() => setExpanded((value) => !value)} onKeyDown={(event) => { if (event.key === 'ArrowRight') { event.preventDefault(); setExpanded(true); } }}><GalleryHorizontalEnd size={14} /><span>胶片带选项</span><ChevronRight className={expanded ? 'is-expanded' : ''} size={14} /></button>
+    {expanded && <div className="filmstrip-submenu" role="menu" aria-label="胶片带选项" onKeyDown={(event) => { if (event.key === 'Escape' || event.key === 'ArrowLeft') { event.preventDefault(); event.stopPropagation(); setExpanded(false); } }}>
+      <div className="filmstrip-submenu-label">显示</div>
+      {(['flags', 'ratings', 'names'] as const).map((key) => <button type="button" role="menuitemcheckbox" aria-checked={options.display[key]} key={key} onClick={() => { options.onDisplayChange(key); onClose(); }}><span className="menu-check-slot">{options.display[key] && <Check size={13} />}</span><span>{key === 'flags' ? '显示旗标' : key === 'ratings' ? '显示星级' : '显示文件名'}</span></button>)}
+      <div className="filmstrip-submenu-label">布局</div>
+      {(['filmstrip', 'grid'] as const).map((mode) => <button type="button" role="menuitemradio" aria-checked={options.viewMode === mode} key={mode} onClick={() => { options.onViewModeChange(mode); onClose(); }}>{mode === 'filmstrip' ? <GalleryHorizontalEnd size={14} /> : <Grid2X2 size={14} />}<span>{mode === 'filmstrip' ? '横向胶片' : '网格'}</span><MenuShortcut keys={mode === 'filmstrip' ? 'E' : 'G'} />{options.viewMode === mode && <Check size={13} />}</button>)}
+      {!options.temporary && <label className="filmstrip-menu-sort">排序<select aria-label="胶片排序" value={options.sortBy} onChange={(event) => { options.onSortByChange(event.target.value as CatalogSort); onClose(); }}><option value="modifiedAt">修改时间</option><option value="fileName">文件名</option><option value="rating">评分</option></select></label>}
+    </div>}
   </>;
 }
 
@@ -1286,6 +1295,16 @@ function Filmstrip({
     onVisibleIdsChange((current) => current?.length === ids.length && current.every((id, index) => id === ids[index]) ? current : ids);
   }, [items, onVisibleIdsChange]);
   const menuOptions: FilmstripMenuOptions = { display, onDisplayChange: changeDisplay, viewMode, onViewModeChange: setViewMode, sortBy, onSortByChange, temporary: Boolean(selected.temporary) };
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if (shortcutBlocked(event) || event.metaKey || event.ctrlKey || event.altKey || !(event.target instanceof Element) || !event.target.closest('.filmstrip:not(.result-filmstrip)')) return;
+      if (event.shiftKey) return;
+      if (event.key.toLowerCase() === 'g') { event.preventDefault(); setViewMode('grid'); }
+      else if (event.key.toLowerCase() === 'e') { event.preventDefault(); setViewMode('filmstrip'); }
+    };
+    window.addEventListener('keydown', shortcut);
+    return () => window.removeEventListener('keydown', shortcut);
+  }, []);
   const metadataHeight = (display.names ? 20 : 0) + (display.ratings ? 16 : 0);
   const itemSize = 137;
   const layout = useMemo(() => {
@@ -1683,12 +1702,16 @@ function Viewer({
         return;
       }
       const target = event.target;
-      if (!(target instanceof Element) || target.closest('input, textarea, select, [contenteditable="true"]') || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (!(target instanceof Element) || shortcutBlocked(event) || event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.code === 'Space') {
         event.preventDefault();
         setHoldPreviousVersion(true);
       }
       if (event.key.toLowerCase() === 'o') setShowOriginal(event.type === 'keydown');
+      if (event.type === 'keydown' && target.closest('.canvas-wrap')) {
+        if (event.key.toLowerCase() === 'f') { event.preventDefault(); setViewMode('fit'); }
+        else if (event.key.toLowerCase() === 'z') { event.preventDefault(); setViewMode(fitMode === 'actual' ? 'fit' : 'actual'); }
+      }
     };
     const restore = () => setHoldPreviousVersion(false);
     window.addEventListener('keydown', onKey);
@@ -1699,7 +1722,7 @@ function Viewer({
       window.removeEventListener('keyup', onKey);
       window.removeEventListener('blur', restore);
     };
-  }, []);
+  }, [fitMode, setViewMode]);
 
   useEffect(() => {
     const onMenuCommand = (event: Event) => {
@@ -1726,6 +1749,15 @@ function Viewer({
       return next;
     });
   };
+  useEffect(() => {
+    const zoomShortcut = (event: KeyboardEvent) => {
+      if (shortcutBlocked(event) || event.metaKey || event.ctrlKey || event.altKey || !(event.target instanceof Element) || !event.target.closest('.canvas-wrap')) return;
+      if (event.key === '+' || event.key === '=') { event.preventDefault(); adjustZoom(1.25); }
+      else if (event.key === '-') { event.preventDefault(); adjustZoom(.8); }
+    };
+    window.addEventListener('keydown', zoomShortcut);
+    return () => window.removeEventListener('keydown', zoomShortcut);
+  });
   const constrainPan = useCallback((nextPan: { x: number; y: number }, nextZoom: number) => {
     const container = canvasWrapRef.current;
     if (!container || nextZoom <= 1) return { x: 0, y: 0 };
@@ -1820,7 +1852,7 @@ function Viewer({
           style={{ width: fittedSize.width, height: fittedSize.height, visibility: fittedSize.height > 0 ? 'visible' : 'hidden', transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom})` }}
 
         >
-          <div className="preview-unavailable"><Image size={36} /><strong>预览暂不可用</strong><span>图像服务将在后台生成屏幕预览</span></div>
+          {!baseSource && !displayedGeneratedSource && <div className="preview-unavailable"><Image size={36} /><strong>预览暂不可用</strong><span>图像服务将在后台生成屏幕预览</span></div>}
           {baseSource ? <BufferedPreviewImage className="base-image" src={baseSource} alt={photo.fileName} onReady={(image) => captureAspectRatio(baseSource, image)} /> : null}
           {displayedGeneratedSource && !showOriginal && !holdPreviousVersion && (
             <div
@@ -2145,6 +2177,9 @@ function GlobalAiPanel({
 function InspectorInfo({ photo, revision }: { photo: Photo; revision: AnalysisRevision | undefined }): React.JSX.Element {
   const [details, setDetails] = useState<{ id: string; data?: FileDetails; error?: string }>({ id: photo.id });
   const [dimensions, setDimensions] = useState<{ id: string; width: number; height: number } | null>(null);
+  const [shootingDetailsOpen, setShootingDetailsOpen] = useState(() => {
+    try { return localStorage.getItem(SHOOTING_DETAILS_OPEN_KEY) === 'true'; } catch { return false; }
+  });
   useEffect(() => {
     let active = true;
     void window.desktopApi.getFileDetails(photo.id).then((data) => { if (active) setDetails({ id: photo.id, data }); }, (error: unknown) => { if (active) setDetails({ id: photo.id, error: error instanceof Error ? error.message : '文件信息不可用' }); });
@@ -2154,17 +2189,25 @@ function InspectorInfo({ photo, revision }: { photo: Photo; revision: AnalysisRe
     return () => { active = false; image.onload = null; };
   }, [photo.id, photo.originalSrc, photo.src]);
   const data = details.id === photo.id ? details.data : undefined;
-  const size = dimensions?.id === photo.id ? `${dimensions.width} × ${dimensions.height}` : data?.width && data.height ? `${data.width} × ${data.height}` : '—';
+  const displayedData = data ?? (details.id !== photo.id ? details.data : undefined);
+  const size = dimensions?.id === photo.id ? `${dimensions.width} × ${dimensions.height}` : data?.width && data.height ? `${data.width} × ${data.height}` : photo.dimensions || '—';
   const fields = [
     ['文件名', photo.fileName],
     ['格式', photo.format],
     [photo.originalSrc ? '尺寸' : '预览尺寸', size],
-    ...(data ? [['文件大小', formatStorageBytes(data.sizeBytes)], ['修改时间', new Date(data.modifiedAt).toLocaleString()], ['位置', data.path]] : []),
+    ['文件大小', displayedData ? formatStorageBytes(displayedData.sizeBytes) : '—'],
+    ['修改时间', displayedData ? new Date(displayedData.modifiedAt).toLocaleString() : '—'],
+    ['位置', displayedData?.path ?? '—'],
     ['评分', `${photo.rating} / 5`],
     ...(revision ? [['AI 状态', '已分析']] : [])
   ];
-  const shooting = data ? [['相机', data.camera], ['镜头', data.lens], ['拍摄时间', data.takenAt ? new Date(data.takenAt).toLocaleString() : undefined], ['快门', data.exposure], ['光圈', data.aperture ? `f/${data.aperture}` : undefined], ['ISO', data.iso?.toString()], ['焦距', data.focalLength ? `${data.focalLength} mm` : undefined]].filter(([, value]) => value) : [];
-  return <div className="inspector-info"><section className="inspector-section"><div className="inspector-heading"><span>文件信息</span>{data && <IconButton label="复制文件路径" onClick={() => { void navigator.clipboard.writeText(data.path).catch(() => window.dispatchEvent(new CustomEvent(OPERATION_NOTICE_EVENT, { detail: '无法复制文件路径，请检查剪贴板权限' }))); }}><Copy size={13} /></IconButton>}</div><div className="metadata-list">{fields.map(([label, value]) => <div key={label}><span>{label}</span><strong title={value}>{value}</strong></div>)}</div>{details.id === photo.id && details.error && !E2E_DEMO_MODE && <p className="inline-error">{details.error}</p>}</section>{shooting.length > 0 && <details className="inspector-section metadata-shooting"><summary>拍摄信息</summary><div className="metadata-list">{shooting.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div></details>}<section className="inspector-section"><div className="inspector-heading"><span>用户标签</span><span className="section-count">{photo.tags?.length ?? 0} 个</span></div>{photo.tags?.length ? <div className="metadata-tags">{photo.tags.map((tag) => <span key={tag.id}>{tag.name}</span>)}</div> : <div className="inline-empty">尚未添加标签</div>}</section>{revision && <section className="inspector-section"><div className="inspector-heading"><span>AI 编目</span></div><p className="analysis-copy">{revision.result.catalog.shortDescription}</p></section>}</div>;
+  const shootingData = displayedData;
+  const shooting = shootingData ? [['相机', shootingData.camera], ['镜头', shootingData.lens], ['拍摄时间', shootingData.takenAt ? new Date(shootingData.takenAt).toLocaleString() : undefined], ['快门', shootingData.exposure], ['光圈', shootingData.aperture ? `f/${shootingData.aperture}` : undefined], ['ISO', shootingData.iso?.toString()], ['焦距', shootingData.focalLength ? `${shootingData.focalLength} mm` : undefined]].filter(([, value]) => value) : [];
+  return <div className="inspector-info"><section className="inspector-section"><div className="inspector-heading"><span>文件信息</span><IconButton label="复制文件路径" disabled={!data} onClick={() => { if (!data) return; void navigator.clipboard.writeText(data.path).catch(() => window.dispatchEvent(new CustomEvent(OPERATION_NOTICE_EVENT, { detail: '无法复制文件路径，请检查剪贴板权限' }))); }}><Copy size={13} /></IconButton></div><div className="metadata-list">{fields.map(([label, value]) => <div key={label}><span>{label}</span><strong title={value}>{value}</strong></div>)}</div>{details.id === photo.id && details.error && !E2E_DEMO_MODE && <p className="inline-error">{details.error}</p>}</section>{shooting.length > 0 && <details className="inspector-section metadata-shooting" aria-busy={!data} open={shootingDetailsOpen} onToggle={(event) => {
+    const open = event.currentTarget.open;
+    setShootingDetailsOpen(open);
+    try { localStorage.setItem(SHOOTING_DETAILS_OPEN_KEY, String(open)); } catch { /* storage may be unavailable */ }
+  }}><summary>拍摄信息</summary><div className="metadata-list">{shooting.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div></details>}<section className="inspector-section"><div className="inspector-heading"><span>用户标签</span><span className="section-count">{photo.tags?.length ?? 0} 个</span></div>{photo.tags?.length ? <div className="metadata-tags">{photo.tags.map((tag) => <span key={tag.id}>{tag.name}</span>)}</div> : <div className="inline-empty">尚未添加标签</div>}</section>{revision && <section className="inspector-section"><div className="inspector-heading"><span>AI 编目</span></div><p className="analysis-copy">{revision.result.catalog.shortDescription}</p></section>}</div>;
 }
 
 function GlobalDetailsPanel({ photo }: { photo: Photo }): React.JSX.Element {
@@ -2183,7 +2226,8 @@ function GlobalDetailsPanel({ photo }: { photo: Photo }): React.JSX.Element {
     return () => { active = false; window.clearInterval(timer); };
   }, [photo.id, photo.temporary, refresh]);
   const current = state.id === photo.id && !photo.temporary ? state : undefined;
-  return <div className="inspector-details"><InspectorInfo photo={photo} revision={current?.revision} />{current?.error && <p className="inline-error">{current.error}</p>}{current && (current.results.length > 0 || current.trashed.length > 0) && <InspectorVersions results={current.results} trashedResults={current.trashed} onTrashResult={async (id) => { await window.desktopApi.trashGenerationResult({ resultId: id }); setRefresh((value) => value + 1); }} onRestoreResult={async (id) => { await window.desktopApi.restoreGenerationResult({ resultId: id }); setRefresh((value) => value + 1); }} />}</div>;
+  const displayed = current ?? (!photo.temporary ? state : undefined);
+  return <div className="inspector-details"><InspectorInfo photo={photo} revision={displayed?.revision} />{current?.error && <p className="inline-error">{current.error}</p>}{displayed && (displayed.results.length > 0 || displayed.trashed.length > 0) && <div inert={!current} aria-busy={!current}><InspectorVersions results={displayed.results} trashedResults={displayed.trashed} onTrashResult={async (id) => { await window.desktopApi.trashGenerationResult({ resultId: id }); setRefresh((value) => value + 1); }} onRestoreResult={async (id) => { await window.desktopApi.restoreGenerationResult({ resultId: id }); setRefresh((value) => value + 1); }} /></div>}</div>;
 }
 
 function InspectorVersions({ results, trashedResults, onTrashResult, onRestoreResult }: { results: GenerationResult[]; trashedResults: TrashedGenerationResult[]; onTrashResult: (resultId: string) => Promise<void>; onRestoreResult: (resultId: string) => Promise<void> }): React.JSX.Element {
@@ -2343,11 +2387,11 @@ function TaskBar({ panelVisibility, onTogglePanel, suspended, open, onToggle, on
         </div>
       )}
       <div className="task-statusbar">
-        <button className="panel-visibility-toggle" type="button" aria-label={panelVisibility.left ? '隐藏左侧栏' : '显示左侧栏'} aria-expanded={panelVisibility.left} title={panelVisibility.left ? '隐藏左侧栏（Tab 切换两侧）' : '显示左侧栏（Tab 切换两侧）'} onClick={() => onTogglePanel('left')}>{panelVisibility.left ? <ChevronLeft size={15} /> : <ChevronRight size={15} />}</button>
+        <button className="panel-visibility-toggle" type="button" aria-label={panelVisibility.left ? '隐藏左侧栏' : '显示左侧栏'} aria-expanded={panelVisibility.left} title={panelVisibility.left ? '隐藏左侧栏（Shift+L）' : '显示左侧栏（Shift+L）'} onClick={() => onTogglePanel('left')}>{panelVisibility.left ? <ChevronLeft size={15} /> : <ChevronRight size={15} />}</button>
         <button className="task-status-toggle" type="button" onClick={onToggle} aria-expanded={open} aria-label="后台任务" title="后台任务"><span className={`working-pulse${runningCount === 0 ? ' is-idle' : ''}`} /><span>{pendingBatches.length ? `${pendingBatches.length} 批任务` : '任务'}</span><ChevronDown size={12} className={open ? 'is-open' : ''} /></button>
         <div className="task-status-batches">{pendingBatches.slice(0, 2).map((batch) => <button type="button" className="task-status-batch" key={batch.id} onClick={() => expandBatch(batch.id)} title={`${taskLabels[batch.tasks[0]!.kind]} · ${batch.settled}/${batch.total}`}><TaskKindIcon kind={batch.tasks[0]!.kind} /><span>{taskLabels[batch.tasks[0]!.kind]} {batch.settled}/{batch.total}</span><progress aria-label="批次进度" max={Math.max(batch.total, 1)} value={batch.settled} /></button>)}</div>
         {pendingBatches.length > 2 && <button className="task-status-toggle" type="button" onClick={onToggle} aria-label="查看其余后台任务">+{pendingBatches.length - 2}</button>}{failedCount > 0 && <button className="task-status-toggle failed-count" type="button" onClick={onToggle}>失败 {failedCount}</button>}<div className="status-spacer" />
-        <button className="panel-visibility-toggle" type="button" aria-label={panelVisibility.right ? '隐藏右侧栏' : '显示右侧栏'} aria-expanded={panelVisibility.right} title={panelVisibility.right ? '隐藏右侧栏（Tab 切换两侧）' : '显示右侧栏（Tab 切换两侧）'} onClick={() => onTogglePanel('right')}>{panelVisibility.right ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}</button>
+        <button className="panel-visibility-toggle" type="button" aria-label={panelVisibility.right ? '隐藏右侧栏' : '显示右侧栏'} aria-expanded={panelVisibility.right} title={panelVisibility.right ? '隐藏右侧栏（Shift+R）' : '显示右侧栏（Shift+R）'} onClick={() => onTogglePanel('right')}>{panelVisibility.right ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}</button>
       </div>
     </TaskActions>
   );
@@ -2754,14 +2798,14 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
   }, [viewMode, props.availablePhotos.length]);
   useEffect(() => { try { localStorage.setItem('photoallisai.thumbnail-size', String(thumbnailSize)); } catch { /* restricted storage */ } }, [thumbnailSize]);
   const [aspectRatios, setAspectRatios] = useState(() => new Map(IMAGE_ASPECT_RATIOS));
-  const aspectRatioFrame = useRef<number | null>(null);
-  useEffect(() => () => { if (aspectRatioFrame.current !== null) cancelAnimationFrame(aspectRatioFrame.current); }, []);
+  const aspectRatioTimer = useRef<number | null>(null);
+  useEffect(() => () => { if (aspectRatioTimer.current !== null) window.clearTimeout(aspectRatioTimer.current); }, []);
   const refreshAspectRatio = useCallback((src: string, ratio: number) => {
-    if (aspectRatios.get(src) === ratio || aspectRatioFrame.current !== null) return;
-    aspectRatioFrame.current = requestAnimationFrame(() => {
-      aspectRatioFrame.current = null;
+    if (aspectRatios.get(src) === ratio || aspectRatioTimer.current !== null) return;
+    aspectRatioTimer.current = window.setTimeout(() => {
+      aspectRatioTimer.current = null;
       setAspectRatios(new Map(IMAGE_ASPECT_RATIOS));
-    });
+    }, 100);
   }, [aspectRatios]);
   useLayoutEffect(() => {
     const grid = gridRef.current;
@@ -2920,7 +2964,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
       : Math.max(1, cards.filter((card) => card.getBoundingClientRect().top === cards[0]?.getBoundingClientRect().top).length);
     const delta = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : event.key === 'ArrowUp' ? -columns : columns;
     let targetIndex = clamp(currentIndex + delta, 0, orderedIds.length - 1);
-    if ((viewMode === 'masonry' && !masonryLayout) || viewMode === 'justified' || (grouped && viewMode !== 'masonry')) {
+    if (((viewMode === 'masonry' && !masonryLayout) || viewMode === 'justified' || (grouped && viewMode !== 'masonry')) && (viewMode === 'masonry' || event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
       const currentCard = cards.find((card) => card.dataset.assetId === orderedIds[currentIndex]);
       if (currentCard) {
       const current = currentCard.getBoundingClientRect();
@@ -2930,6 +2974,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
       targetIndex = currentIndex;
       cards.forEach((card) => {
         const rect = card.getBoundingClientRect();
+        if (horizontal && (rect.bottom <= current.top + 1 || rect.top >= current.bottom - 1)) return;
         const dx = rect.left + rect.width / 2 - (current.left + current.width / 2);
         const dy = rect.top + rect.height / 2 - (current.top + current.height / 2);
         const primary = horizontal ? dx : dy;
@@ -2998,6 +3043,21 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     setViewMode(mode);
     try { window.localStorage.setItem('photoallisai.catalog-view-mode', mode); } catch { /* restricted storage */ }
   };
+  useEffect(() => {
+    if (props.active === false) return;
+    const shortcut = (event: KeyboardEvent) => {
+      if (shortcutBlocked(event) || event.metaKey || event.ctrlKey || event.altKey || !(event.target instanceof Element) || !event.target.closest('.catalog-grid, .catalog-list-view')) return;
+      if (event.shiftKey) return;
+      if (event.key.toLowerCase() === 'g') { event.preventDefault(); changeViewMode('grid'); }
+      else if (event.key.toLowerCase() === 'e') { event.preventDefault(); changeViewMode('list'); }
+      else if (event.key === ' ') {
+        const photo = props.availablePhotos.find((item) => item.id === (selection.focusId ?? props.selectedAssetId)) ?? props.availablePhotos[0];
+        if (photo) { event.preventDefault(); props.onOpenViewer(photo.id, orderedIds); }
+      }
+    };
+    window.addEventListener('keydown', shortcut);
+    return () => window.removeEventListener('keydown', shortcut);
+  });
   const [allVisibleSelected, someVisibleSelected] = useMemo(() => {
     if (orderedIds.length === 0 || selection.selectedIds.size === 0) return [false, false];
     let selectedCount = 0;
@@ -3403,7 +3463,7 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (viewerActive === false) return;
-      if (event.defaultPrevented) return;
+      if (shortcutBlocked(event)) return;
       const target = event.target;
       if (!(target instanceof Element) || target.closest('input, textarea, select, [contenteditable="true"]') || !target.closest('.filmstrip, .catalog-grid, .catalog-list-view, .canvas-wrap')) return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
@@ -3867,6 +3927,27 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     setRenameDraft(selected.fileName);
     setRenameDialogOpen(true);
   };
+  useEffect(() => {
+    if (props.active === false) return;
+    const shortcut = (event: KeyboardEvent) => {
+      if (shortcutBlocked(event) || !(event.target instanceof Element)) return;
+      const inPhotos = Boolean(event.target.closest('.catalog-grid, .catalog-list-view, .filmstrip, .canvas-wrap'));
+      if (!inPhotos) return;
+      const key = event.key.toLowerCase();
+      if (event.metaKey || event.ctrlKey) {
+        if (event.shiftKey || !event.altKey || isDemo) return;
+        if (event.code === 'KeyA') { event.preventDefault(); void analyzeSelection(); }
+        else if (event.code === 'KeyG' && generationProfiles[0]) { event.preventDefault(); void generateSelection({ providerProfileId: generationProfiles[0].id, template: null, count: 1, instruction: '', disabledActionIds: new Set() }); }
+        else if (event.code === 'KeyB') { event.preventDefault(); onAddAssetsToBatch?.(selection.selectedIds.size ? [...selection.selectedIds] : [selected.id]); }
+        return;
+      }
+      if (event.altKey || event.shiftKey || isDemo) return;
+      if (key === 'b') { event.preventDefault(); void favoriteSelection(!(selection.selectedIds.size ? [...selection.selectedIds] : [selected.id]).every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite)); }
+      else if (event.key === 'F2') { event.preventDefault(); if (selection.selectedIds.size > 1) setBatchRenameDialogOpen(true); else openRenameDialog(); }
+    };
+    window.addEventListener('keydown', shortcut);
+    return () => window.removeEventListener('keydown', shortcut);
+  });
 
   const renameSelected = async () => {
     if (!renameDraft || renameBusy) return;
@@ -3967,23 +4048,23 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
         {props.resultSequence && props.onSelectViewerResult ? <ResultFilmstrip results={props.resultSequence} selectedId={props.initialResultId} onSelect={props.onSelectViewerResult} /> : <Filmstrip versionTarget={isDemo ? undefined : filmstripVersionTarget} rawCompanions={filmstripRawCompanions} activeGenerationResults={generationAssetId === selected.id ? currentGenerationResults : undefined} toolbarHost={viewerToolbarHost} items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} onSelectionChange={setSelection} onFocusPhoto={(photo) => { setSelectedId(photo.id); onSelectedAssetChange(photo.id); }} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} onVisibleIdsChange={setFilmstripVisibleIds} onOpenContextMenu={(event, photo, options) => openPhotoContextMenu(event, photo, false, options)} />}
       </main>}
       {photoContextMenu && <ContextMenuSurface className="folder-context-menu photo-context-menu" role="menu" aria-label={`照片菜单 ${selection.selectedIds.size} 张`} style={{ left: Math.min(photoContextMenu.x, Math.max(8, window.innerWidth - 244)), top: Math.min(photoContextMenu.y, Math.max(8, window.innerHeight - 530)) }} onPointerDown={(event) => event.stopPropagation()}>
-        {!isDemo && view === 'library' && <button type="button" role="menuitem" onClick={() => { window.dispatchEvent(new Event(COPY_DISPLAYED_EVENT)); setPhotoContextMenu(null); }}><Copy size={14} /><span>复制当前显示文件</span></button>}
+        {selection.selectedIds.size > 1 && <div className="folder-menu-title"><Image size={14} /><span>{selection.selectedIds.size} 张照片</span></div>}
+        {!isDemo && view === 'library' && <button type="button" role="menuitem" onClick={() => { window.dispatchEvent(new Event(COPY_DISPLAYED_EVENT)); setPhotoContextMenu(null); }}><Copy size={14} /><span>复制当前显示文件</span>{!photoContextMenu.filmstrip && <MenuShortcut keys={copyShortcut} />}</button>}
         {!isDemo && view === 'library' && selection.selectedIds.size === 1 && <button type="button" role="menuitem" onClick={() => { window.dispatchEvent(new Event(COPY_IMAGE_EVENT)); setPhotoContextMenu(null); }}><Image size={14} /><span>复制图片内容</span></button>}
         {!isDemo && selection.selectedIds.size === 1 && <><button type="button" role="menuitem" onClick={() => { void window.desktopApi.openAssetExternally(selected.id).catch((error: unknown) => setOperationNotice(error instanceof Error ? error.message : '无法打开文件')); setPhotoContextMenu(null); }}><Image size={14} /><span>用默认应用打开</span></button><button type="button" role="menuitem" onClick={() => { void window.desktopApi.getFileDetails(selected.id).then((details) => navigator.clipboard.writeText(details.path)).catch(() => setOperationNotice('无法复制文件路径')); setPhotoContextMenu(null); }}><Copy size={14} /><span>复制文件路径</span></button></>}
-        <div className="folder-menu-title"><Image size={14} /><span>{selection.selectedIds.size > 1 ? `${selection.selectedIds.size} 张照片` : selected.fileName}</span></div>
-        <div className="photo-menu-rating"><span>评分</span><button type="button" aria-label="清除评分" onClick={() => { void rateSelection(0); setPhotoContextMenu(null); }}>0</button>{[1, 2, 3, 4, 5].map((rating) => <button type="button" aria-label={`${rating} 星`} key={rating} onClick={() => { void rateSelection(rating); setPhotoContextMenu(null); }}><Star size={12} fill={rating <= selected.rating && selection.selectedIds.size === 1 ? 'currentColor' : 'none'} /></button>)}</div>
-        {!isDemo && <div className="photo-menu-flags" role="group" aria-label="设置旗标"><span>旗标</span>{(['picked', 'rejected', 'unflagged'] as const).map((flag, index) => <button type="button" key={flag} title={`${['留用', '排除', '无旗标'][index]} (${['P', 'X', 'U'][index]})`} aria-label={['留用', '排除', '无旗标'][index]} aria-pressed={selection.selectedIds.size <= 1 && (selected.flag ?? 'unflagged') === flag} onClick={() => { void window.desktopApi.updateCatalogMetadata({ assetIds: selection.selectedIds.size ? [...selection.selectedIds] : [selected.id], flag }); setPhotoContextMenu(null); }}><span className="photo-flag-cross"><Flag size={15} fill={flag === 'unflagged' ? 'none' : 'currentColor'} />{flag === 'rejected' && <X size={10} />}</span></button>)}</div>}
-        <div className="photo-menu-labels" role="group" aria-label="颜色标签">{(['red', 'yellow', 'green', 'blue', 'purple'] as const).map((id, index) => {
+        <div className="photo-menu-rating" role="group" aria-label="设置评分"><span className="photo-menu-option-label">评分</span><div className="photo-menu-option-buttons"><button type="button" aria-label="清除评分" title="清除评分 (0)" onClick={() => { void rateSelection(0); setPhotoContextMenu(null); }}>0</button>{[1, 2, 3, 4, 5].map((rating) => <button type="button" aria-label={`${rating} 星`} title={`${rating} 星 (${rating})`} key={rating} onClick={() => { void rateSelection(rating); setPhotoContextMenu(null); }}><Star size={12} fill={rating <= selected.rating && selection.selectedIds.size === 1 ? 'currentColor' : 'none'} /></button>)}</div></div>
+        {!isDemo && <div className="photo-menu-flags" role="group" aria-label="设置旗标"><span className="photo-menu-option-label">旗标</span><div className="photo-menu-option-buttons">{(['picked', 'rejected', 'unflagged'] as const).map((flag, index) => <button type="button" key={flag} title={`${['留用', '排除', '无旗标'][index]} (${['P', 'X', 'U'][index]})`} aria-label={['留用', '排除', '无旗标'][index]} aria-pressed={selection.selectedIds.size <= 1 && (selected.flag ?? 'unflagged') === flag} onClick={() => { void window.desktopApi.updateCatalogMetadata({ assetIds: selection.selectedIds.size ? [...selection.selectedIds] : [selected.id], flag }); setPhotoContextMenu(null); }}><span className={`photo-flag-cross${flag === 'rejected' ? ' is-rejected' : ''}`}><Flag size={15} fill={flag === 'unflagged' ? 'none' : 'currentColor'} />{flag === 'rejected' && <X size={10} />}</span></button>)}</div></div>}
+        <div className="photo-menu-labels" role="group" aria-label="颜色标签"><span className="photo-menu-option-label">颜色</span><div className="photo-menu-option-buttons">{(['red', 'yellow', 'green', 'blue', 'purple'] as const).map((id, index) => {
           const active = (selection.selectedIds.size ? [...selection.selectedIds] : [selected.id]).every((assetId) => availablePhotos.find((photo) => photo.id === assetId)?.labelColor === id);
           return <button className={active ? 'is-active' : ''} key={id} type="button" title={`${photoColorName(id)}标签${index < 4 ? ` (${index + 6})` : ''}`} aria-label={`${photoColorName(id)}标签`} aria-pressed={active} onClick={() => { void setLabelColor(id); setPhotoContextMenu(null); }}><i className={`photo-color-swatch is-${id}`} /></button>;
-        })}<button type="button" aria-label="清除颜色标签" title="清除颜色标签" onClick={() => { void setLabelColor(null); setPhotoContextMenu(null); }}><X size={13} /></button></div>
-        <button type="button" role="menuitem" onClick={() => { void favoriteSelection(![...selection.selectedIds].every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite)); setPhotoContextMenu(null); }}><Heart size={14} /><span>{[...selection.selectedIds].every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite) ? '取消收藏' : '添加到收藏'}</span></button>
+        })}<button type="button" aria-label="清除颜色标签" title="清除颜色标签" onClick={() => { void setLabelColor(null); setPhotoContextMenu(null); }}><X size={13} /></button></div></div>
+        <button type="button" role="menuitem" onClick={() => { void favoriteSelection(![...selection.selectedIds].every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite)); setPhotoContextMenu(null); }}><Heart size={14} /><span>{[...selection.selectedIds].every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite) ? '取消收藏' : '添加到收藏'}</span><MenuShortcut keys="B" /></button>
         <button type="button" role="menuitem" onClick={() => { setTagEditorOpen(true); setPhotoContextMenu(null); }}><Tags size={14} /><span>添加标签…</span></button>
         <span className="folder-menu-separator" />
-        <button type="button" role="menuitem" onClick={() => { void analyzeSelection(); setPhotoContextMenu(null); }}><Sparkles size={14} /><span>AI 分析{selection.selectedIds.size > 1 ? ` ${selection.selectedIds.size} 张` : ''}</span></button>
+        <button type="button" role="menuitem" onClick={() => { void analyzeSelection(); setPhotoContextMenu(null); }}><Sparkles size={14} /><span>AI 分析{selection.selectedIds.size > 1 ? ` ${selection.selectedIds.size} 张` : ''}</span><MenuShortcut keys={aiShortcut('A')} /></button>
         <button type="button" role="menuitem" onClick={() => { onAddAssetsToAgent?.(selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id]); setPhotoContextMenu(null); }}><Bot size={14} /><span>加入 Agent 批处理{selection.selectedIds.size > 1 ? `（${selection.selectedIds.size} 张）` : ''}</span></button>
-        <button type="button" role="menuitem" onClick={() => { onAddAssetsToBatch?.(selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id]); setPhotoContextMenu(null); }}><Sparkles size={14} /><span>加入 AI 批量修图{selection.selectedIds.size > 1 ? `（${selection.selectedIds.size} 张）` : ''}</span></button>
-        {!photoContextMenu.resultId && <button type="button" role="menuitem" disabled={generationProfiles.length === 0} onClick={() => { void generateSelection({ providerProfileId: generationProfiles[0]!.id, template: null, count: 1, instruction: '', disabledActionIds: new Set() }); setPhotoContextMenu(null); }}><WandSparkles size={14} /><span>按默认方案生成</span></button>}
+        <button type="button" role="menuitem" onClick={() => { onAddAssetsToBatch?.(selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id]); setPhotoContextMenu(null); }}><Sparkles size={14} /><span>加入 AI 批量修图{selection.selectedIds.size > 1 ? `（${selection.selectedIds.size} 张）` : ''}</span><MenuShortcut keys={aiShortcut('B')} /></button>
+        {!photoContextMenu.resultId && <button type="button" role="menuitem" disabled={generationProfiles.length === 0} onClick={() => { void generateSelection({ providerProfileId: generationProfiles[0]!.id, template: null, count: 1, instruction: '', disabledActionIds: new Set() }); setPhotoContextMenu(null); }}><WandSparkles size={14} /><span>按默认方案生成</span><MenuShortcut keys={aiShortcut('G')} /></button>}
         <div className="photo-menu-export-options">{!photoContextMenu.resultId && <select aria-label="导出版本范围" value={exportSelectionMode} onChange={(event) => setExportSelectionMode(event.target.value as ExportSelectionMode)}><option value="preferred-or-latest">每张首选 / 最新版本</option><option value="accepted">所有已接受版本</option><option value="all">所有生成版本</option></select>}<select aria-label="右键菜单导出预设" value={selectedExportPresetId ?? ''} onChange={(event) => setSelectedExportPresetId(event.target.value || null)}><option value="">保留文件名 · 原格式</option>{exportPresets.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select></div>
         {photoContextMenu.resultId && <>
           <div className="folder-menu-title">生成版本 V{currentGenerationResults.find((result) => result.id === photoContextMenu.resultId)?.version}</div>
@@ -3993,7 +4074,7 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
         </>}
         {!photoContextMenu.resultId && <button type="button" role="menuitem" onClick={() => { void exportLatestSelection(); setPhotoContextMenu(null); }}><Download size={14} /><span>导出 AI 版本…</span></button>}
         {photoContextMenu.filmstrip && <FilmstripMenu options={photoContextMenu.filmstrip} onClose={() => setPhotoContextMenu(null)} />}
-        {!isDemo && <><span className="folder-menu-separator" />{selection.selectedIds.size === 1 && <button type="button" role="menuitem" onClick={() => { void window.desktopApi.revealCatalogAsset(selected.id); setPhotoContextMenu(null); }}><FolderOpen size={14} /><span>{FILE_MANAGER_LABEL}</span></button>}<button type="button" role="menuitem" onClick={() => { if (selection.selectedIds.size > 1) setBatchRenameDialogOpen(true); else openRenameDialog(); setPhotoContextMenu(null); }}><FilePenLine size={14} /><span>{selection.selectedIds.size > 1 ? '批量重命名…' : '重命名…'}</span></button><button type="button" role="menuitem" onClick={() => { void openFolderDialog('copy'); setPhotoContextMenu(null); }}><Copy size={14} /><span>复制到文件夹…</span></button><button type="button" role="menuitem" onClick={() => { void openFolderDialog('move'); setPhotoContextMenu(null); }}><FolderInput size={14} /><span>移动到文件夹…</span></button></>}
+        {!isDemo && <><span className="folder-menu-separator" />{selection.selectedIds.size === 1 && <button type="button" role="menuitem" onClick={() => { void window.desktopApi.revealCatalogAsset(selected.id); setPhotoContextMenu(null); }}><FolderOpen size={14} /><span>{FILE_MANAGER_LABEL}</span></button>}<button type="button" role="menuitem" onClick={() => { if (selection.selectedIds.size > 1) setBatchRenameDialogOpen(true); else openRenameDialog(); setPhotoContextMenu(null); }}><FilePenLine size={14} /><span>{selection.selectedIds.size > 1 ? '批量重命名…' : '重命名…'}</span><MenuShortcut keys="F2" /></button><button type="button" role="menuitem" onClick={() => { void openFolderDialog('copy'); setPhotoContextMenu(null); }}><Copy size={14} /><span>复制到文件夹…</span></button><button type="button" role="menuitem" onClick={() => { void openFolderDialog('move'); setPhotoContextMenu(null); }}><FolderInput size={14} /><span>移动到文件夹…</span></button></>}
         {!isDemo && catalogAlbums.length > 0 && <div className="photo-menu-album"><FolderHeart size={14} /><select aria-label="加入相册" value={albumTargetId} onChange={(event) => setAlbumTargetId(event.target.value)}><option value="">加入相册…</option>{catalogAlbums.map((album) => <option key={album.id} value={album.id}>{album.name}</option>)}</select><button type="button" disabled={!albumTargetId} onClick={() => { void updateAlbumMembership('add', albumTargetId); setPhotoContextMenu(null); }}>加入</button></div>}
         {!isDemo && selectedAlbumId && <button type="button" role="menuitem" onClick={() => { void updateAlbumMembership('remove'); setPhotoContextMenu(null); }}><FolderHeart size={14} /><span>从当前相册移出</span></button>}
         {!isDemo && <><span className="folder-menu-separator" /><button type="button" role="menuitem" onClick={() => { setRemovalMode('remove'); setPhotoContextMenu(null); }}><LibraryBig size={14} /><span>从图库移除…</span></button><button className="is-danger" type="button" role="menuitem" onClick={() => { setRemovalMode('trash'); setPhotoContextMenu(null); }}><Trash2 size={14} /><span>移到系统回收站…</span></button></>}
@@ -4793,7 +4874,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
         </section>}
         {settingsSection === 'shortcuts' && <section className="settings-section settings-info-section">
           <div className="settings-heading"><h2>快捷键</h2></div>
-          <div className="shortcut-list"><span><kbd>⌘ / Ctrl</kbd><strong>+</strong><kbd>A</kbd><em>选择当前列表全部照片</em></span><span><kbd>0–5</kbd><em>设置选中照片星级</em></span><span><kbd>6–9</kbd><em>设置红、黄、绿、蓝颜色标签</em></span><span><kbd>Shift</kbd><strong>+</strong><em>范围选择</em></span><span><kbd>⌘ / Ctrl</kbd><strong>+</strong><em>点击追加选择</em></span></div>
+          <div className="shortcut-list"><span><kbd>G / E</kbd><em>图库网格 / 列表；胶片带网格 / 横向布局</em></span><span><kbd>空格</kbd><em>从图库打开看图</em></span><span><kbd>← / →</kbd><em>切换照片；胶片带使用方向键移动选择</em></span><span><kbd>F / Z</kbd><em>看图适应窗口 / 切换实际像素</em></span><span><kbd>O</kbd><em>按住临时查看原图</em></span><span><kbd>Tab</kbd><em>同时隐藏或恢复两侧栏</em></span><span><kbd>Shift+L / Shift+R</kbd><em>单独切换左侧栏 / 右侧栏</em></span><span><kbd>⌘ / Ctrl</kbd><strong>+</strong><kbd>A</kbd><em>选择当前列表全部照片</em></span><span><kbd>P / X / U</kbd><em>留用 / 排除 / 清除旗标</em></span><span><kbd>0–5</kbd><em>设置选中照片星级</em></span><span><kbd>6–9</kbd><em>设置红、黄、绿、蓝颜色标签</em></span><span><kbd>B</kbd><em>切换收藏</em></span><span><kbd>F2</kbd><em>重命名选中照片或侧边栏文件夹</em></span><span><kbd>⌘ / Ctrl + Alt + A</kbd><em>AI 分析选中照片</em></span><span><kbd>⌘ / Ctrl + Alt + G</kbd><em>按默认方案生成 AI 版本</em></span><span><kbd>⌘ / Ctrl + Alt + B</kbd><em>加入 AI 批量修图</em></span><span><kbd>Shift</kbd><strong>+</strong><em>范围选择</em></span><span><kbd>⌘ / Ctrl</kbd><strong>+</strong><em>点击追加选择</em></span></div>
         </section>}
         {settingsSection === 'privacy' && <section className="settings-section settings-info-section">
           <div className="settings-heading"><div><h2>数据边界</h2><p>图库保存在本机。执行 AI 任务时，图片会发送至所选模型服务。</p></div></div>
@@ -5528,6 +5609,16 @@ export function App(): React.JSX.Element {
     };
     window.addEventListener('keydown', togglePanels);
     return () => window.removeEventListener('keydown', togglePanels);
+  }, []);
+  useEffect(() => {
+    const shortcut = (event: KeyboardEvent) => {
+      if (shortcutBlocked(event) || !event.shiftKey || event.metaKey || event.ctrlKey || event.altKey || !['l', 'r'].includes(event.key.toLowerCase())) return;
+      event.preventDefault();
+      const side = event.key.toLowerCase() === 'l' ? 'left' : 'right';
+      setPanelVisibility((current) => ({ ...current, [side]: !current[side] }));
+    };
+    window.addEventListener('keydown', shortcut);
+    return () => window.removeEventListener('keydown', shortcut);
   }, []);
   const [navigationNotice, setNavigationNotice] = useTransientNotice();
   const [globalTasks, setGlobalTasks] = useState<PersistedTask[]>([]);

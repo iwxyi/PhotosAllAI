@@ -31,6 +31,12 @@ test('views gallery and batch images in place and restores source state with Esc
     const id = await card.getAttribute('data-asset-id');
     const scroll = await source.evaluate((element) => element.scrollTop);
     const tabCount = await page.getByRole('tab').count();
+    await page.evaluate(() => {
+      document.body.dataset.viewerUnavailableSeen = 'false';
+      new MutationObserver(() => {
+        if (document.querySelector('.inline-photo-viewer .preview-unavailable')) document.body.dataset.viewerUnavailableSeen = 'true';
+      }).observe(document.body, { childList: true, subtree: true });
+    });
     await source.focus();
     await page.keyboard.press('Enter');
     const viewer = page.getByRole('region', { name: '看图', exact: true });
@@ -39,6 +45,8 @@ test('views gallery and batch images in place and restores source state with Esc
     await expect(page.getByRole('tab', { name: '图库', exact: true })).toHaveAttribute('aria-selected', 'true');
     await expect(viewer.locator('.thumb.is-selected')).toHaveAttribute('data-asset-id', id!);
     await expect(viewer.locator('.base-image')).toHaveClass(/is-ready/);
+    await expect(viewer.locator('.preview-unavailable')).toHaveCount(0);
+    await expect(page.locator('body')).toHaveAttribute('data-viewer-unavailable-seen', 'false');
     const analysisDetails = page.locator('.analysis-details');
     await expect(analysisDetails.locator('.analysis-copy')).toBeHidden();
     await analysisDetails.locator('summary').click();
@@ -121,17 +129,26 @@ test('views gallery and batch images in place and restores source state with Esc
       return rating.top >= image.bottom - 1;
     })).toBe(true);
     await expect(viewer.locator('.thumb-rating').first()).toBeVisible();
+    await viewer.locator('.thumb:not(.is-chosen)').first().click();
+    await expect(viewer.locator('.thumb.is-chosen')).toHaveCount(1);
     await viewer.locator('.thumb').first().click({ button: 'right' });
+    const photoMenu = page.getByRole('menu', { name: /照片菜单/ });
+    await expect(photoMenu.locator('.folder-menu-title')).toHaveCount(0);
+    await expect(photoMenu.locator('.photo-menu-option-label')).toHaveText(['评分', '颜色']);
+    await page.getByRole('menuitem', { name: '胶片带选项' }).click();
     await expect(page.getByRole('menuitemcheckbox', { name: '显示星级', exact: true })).toHaveAttribute('aria-checked', 'true');
     await page.getByRole('menuitemcheckbox', { name: '显示星级', exact: true }).click();
     await expect(viewer.locator('.thumb-rating')).toHaveCount(0);
     await viewer.locator('.thumb').first().click({ button: 'right' });
+    await page.getByRole('menuitem', { name: '胶片带选项' }).click();
     await page.getByRole('menuitemcheckbox', { name: '显示星级', exact: true }).click();
     await expect(viewer.locator('.thumb-rating').first()).toBeVisible();
     await viewer.locator('.thumb').first().click({ button: 'right' });
+    await page.getByRole('menuitem', { name: '胶片带选项' }).click();
     await page.getByRole('menuitemradio', { name: '网格', exact: true }).click();
     await expect(viewer.locator('.filmstrip')).toHaveClass(/is-grid/);
     await viewer.locator('.thumb').first().click({ button: 'right' });
+    await page.getByRole('menuitem', { name: '胶片带选项' }).click();
     await page.getByRole('menuitemradio', { name: '横向胶片', exact: true }).click();
     await expect(viewer.locator('.filmstrip')).not.toHaveClass(/is-grid/);
     await viewer.locator('.viewer-footer').click({ button: 'right' });

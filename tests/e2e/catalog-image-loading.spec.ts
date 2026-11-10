@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { _electron as electron, expect, test } from '@playwright/test';
 import { CatalogService } from '../../apps/desktop/src/main/catalog-service';
 
-test('gallery defers distant thumbnails and keeps the thumbnail during high resolution upgrades', async () => {
+test('gallery defers distant thumbnails and reuses a medium preview when cards grow', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'photo-image-loading-'));
   const userData = path.join(directory, 'user-data');
   const photos = path.join(directory, 'photos');
@@ -38,15 +38,16 @@ test('gallery defers distant thumbnails and keeps the thumbnail during high reso
     for (let index = 0; index < 4; index += 1) {
       await page.locator('.catalog-grid').dispatchEvent('wheel', { deltaY: -200, ctrlKey: true, bubbles: true });
     }
-    await expect(first).toHaveAttribute('src', /photoasset:\/\/preview\//);
+    await expect(first).toHaveAttribute('src', /photoasset:\/\/medium\//);
     await expect(first).toHaveClass('is-ready');
     expect(await first.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeGreaterThan(384);
+    expect(await first.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBeLessThanOrEqual(1024);
     expect(await page.evaluate(() => (window as unknown as { imageMutations: string[] }).imageMutations.every((value) => value.endsWith('|is-ready') && !value.startsWith('null|')))).toBe(true);
     expect(await last.getAttribute('src')).toBeNull();
     await page.screenshot({ path: 'test-results/catalog-image-loading.png' });
     await cards.last().scrollIntoViewIfNeeded();
     await expect(last).toHaveClass('is-ready');
-    await expect(last).toHaveAttribute('src', /photoasset:\/\/(thumbnail|preview)\//);
+    await expect(last).toHaveAttribute('src', /photoasset:\/\/(thumbnail|medium)\//);
   } finally {
     await app.close();
     await rm(directory, { recursive: true, force: true });

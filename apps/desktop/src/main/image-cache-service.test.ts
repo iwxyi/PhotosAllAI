@@ -36,6 +36,24 @@ describe('image cache governance', () => {
     }
   });
 
+  it('reuses one medium preview across card zoom sizes', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-medium-'));
+    directories.push(directory);
+    const source = path.join(directory, 'large.png');
+    await sharp({ create: { width: 2400, height: 1600, channels: 3, background: '#385f88' } }).png({ compressionLevel: 0 }).toFile(source);
+    const metadata = await stat(source);
+    expect(metadata.size).toBeGreaterThan(8 * 1024 * 1024);
+    const service = new ImageCacheService(path.join(directory, 'cache'), {} as never);
+    try {
+      const input = { path: source, modifiedAt: metadata.mtimeMs, sizeBytes: metadata.size };
+      const first = await service.getOrCreate('medium-image', 'medium', input);
+      const second = await service.getOrCreate('medium-image', 'medium', input);
+      expect(second).toBe(first);
+      expect(await sharp(first!).metadata()).toMatchObject({ width: 1024, height: 683 });
+      expect(service.getPerformanceStats()).toMatchObject({ decodes: 1, hits: 1 });
+    } finally { await service.stop(); }
+  });
+
   it('decodes TIFF without external tools or platform thumbnail codecs', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-tiff-'));
     directories.push(directory);
@@ -84,6 +102,31 @@ describe('image cache governance', () => {
     await writeFile(path.join(nested, 'later.jpg'), Buffer.alloc(15));
     expect(await service.setMaxBytes(20)).toEqual({ removedFiles: 1, removedBytes: 20 });
     expect(await service.getStats()).toEqual({ files: 1, bytes: 15 });
+  });
+
+  it('evicts an equally recent large preview before a thumbnail but keeps a recently used preview', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-priority-'));
+    directories.push(directory);
+    const cache = path.join(directory, 'cache');
+    await mkdir(cache);
+    const thumbnail = path.join(cache, 'asset-thumbnail.jpg');
+    const preview = path.join(cache, 'asset-preview.jpg');
+    await writeFile(thumbnail, Buffer.alloc(10));
+    await writeFile(preview, Buffer.alloc(10));
+    const now = Date.now();
+    await utimes(thumbnail, new Date(now), new Date(now));
+    await utimes(preview, new Date(now), new Date(now));
+    const service = new ImageCacheService(cache, {} as never);
+    await service.prune(10);
+    expect(await stat(thumbnail)).toBeDefined();
+    await expect(stat(preview)).rejects.toMatchObject({ code: 'ENOENT' });
+    await writeFile(preview, Buffer.alloc(10));
+    await utimes(thumbnail, new Date(now - 3 * 24 * 60 * 60_000), new Date(now - 3 * 24 * 60 * 60_000));
+    await utimes(preview, new Date(now), new Date(now));
+    await service.prune(10);
+    expect(await stat(preview)).toBeDefined();
+    await expect(stat(thumbnail)).rejects.toMatchObject({ code: 'ENOENT' });
+    await service.stop();
   });
 
   it('includes source size in the cache fingerprint', async () => {

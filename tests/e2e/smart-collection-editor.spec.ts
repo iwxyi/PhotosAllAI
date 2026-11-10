@@ -39,5 +39,41 @@ test('creates and edits a smart collection with a selected directory and conditi
     await editor.getByRole('textbox', { name: '名称' }).fill('精选交付');
     await editor.getByRole('button', { name: '保存集合' }).click();
     await expect(page.getByRole('button', { name: /精选交付 1/ })).toBeVisible();
+    await page.getByRole('button', { name: /精选交付 1/ }).click({ button: 'right' });
+    await expect(page.getByRole('menuitem', { name: '删除智能集合…' })).toBeVisible();
+    await page.keyboard.press('Escape');
+  } finally { await app.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('selects a whole scope and disables its children', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'photo-smart-scope-'));
+  const userData = path.join(root, 'user-data');
+  const source = path.join(root, 'photos');
+  await mkdir(path.join(userData, 'library'), { recursive: true });
+  await mkdir(path.join(source, 'child'), { recursive: true });
+  await writeFile(path.join(source, 'child', 'one.jpg'), 'one');
+  const catalog = new CatalogService(path.join(userData, 'library', 'catalog.sqlite'));
+  await catalog.importFolders([source]);
+  catalog.close();
+  const app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js')], env: { ...process.env, PHOTOALLISAI_USER_DATA: userData } });
+  try {
+    const page = await app.firstWindow();
+    await page.getByRole('button', { name: '创建智能集合' }).click();
+    const dialog = page.getByRole('dialog', { name: '创建智能集合' });
+    await dialog.getByRole('checkbox', { name: '所有照片' }).uncheck();
+    await dialog.getByRole('checkbox', { name: /关联文件夹/ }).check();
+    await expect(dialog.getByRole('checkbox', { name: /photos/ })).toBeDisabled();
+    await expect(dialog.getByRole('checkbox', { name: 'child' })).toBeDisabled();
+    await dialog.getByRole('checkbox', { name: /关联文件夹/ }).uncheck();
+    await dialog.getByRole('checkbox', { name: /photos/ }).check();
+    await expect(dialog.getByRole('checkbox', { name: 'child' })).toBeDisabled();
+    await dialog.getByRole('checkbox', { name: /photos/ }).uncheck();
+    await dialog.getByRole('button', { name: '添加条件' }).click();
+    await dialog.getByRole('combobox', { name: '条件 1 字段' }).selectOption('fileName');
+    await dialog.getByRole('combobox', { name: '条件 1 运算' }).selectOption('regex');
+    await expect(dialog.getByRole('textbox', { name: '条件 1 值' })).toBeVisible();
+    await dialog.getByRole('combobox', { name: '条件 1 运算' }).selectOption('isSet');
+    await expect(dialog.getByRole('button', { name: '删除条件 1' })).toBeVisible();
+    await expect(dialog.getByRole('textbox', { name: '条件 1 值' })).toHaveCount(0);
   } finally { await app.close(); await rm(root, { recursive: true, force: true }); }
 });

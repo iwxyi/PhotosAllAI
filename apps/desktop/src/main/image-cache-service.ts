@@ -14,12 +14,13 @@ import { publishTemporaryFileSafely } from './safe-file-write';
 import { PreviewWorkQueue, type PreviewPriority } from './preview-work-queue';
 import { identifyMediaFormat } from './media-format-registry';
 
-export type ImageVariant = 'thumbnail' | 'preview';
+export type ImageVariant = 'thumbnail' | 'medium' | 'preview';
 type DecoderCapabilities = { imageMagick: boolean; sips: boolean };
 type DecoderProbe = () => Promise<DecoderCapabilities>;
 
 const variants: Record<ImageVariant, { width: number; height: number; quality: number; resizeQuality: 'good' | 'best' }> = {
   thumbnail: { width: 384, height: 384, quality: 82, resizeQuality: 'good' },
+  medium: { width: 1024, height: 1024, quality: 85, resizeQuality: 'good' },
   preview: { width: 2560, height: 2560, quality: 90, resizeQuality: 'best' }
 };
 const execFile = promisify(nodeExecFile);
@@ -142,6 +143,29 @@ export class ImageCacheService {
     return operation;
   }
 
+  async clearAssets(assetIds: readonly string[]): Promise<{ removedFiles: number; removedBytes: number }> {
+    const ids = new Set(assetIds);
+    const operation = this.#pruneQueue.then(async () => {
+      let removedFiles = 0;
+      let removedBytes = 0;
+      for (const file of await this.#listFiles()) {
+        const assetId = path.basename(file.path).slice(0, 36);
+        if (!ids.has(assetId)) continue;
+        try {
+          await unlink(file.path);
+          removedFiles += 1;
+          removedBytes += file.size;
+          this.#lastTouches.delete(file.path);
+        } catch (error) {
+          if (!isNodeError(error, 'ENOENT')) throw error;
+        }
+      }
+      return { removedFiles, removedBytes };
+    });
+    this.#pruneQueue = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
   async setMaxBytes(maxBytes: number): Promise<{ removedFiles: number; removedBytes: number }> {
     this.#maxBytes = normalizeMaxBytes(maxBytes);
     return this.prune(this.#maxBytes);
@@ -152,7 +176,14 @@ export class ImageCacheService {
     let total = files.reduce((sum, file) => sum + file.size, 0);
     let removedFiles = 0;
     let removedBytes = 0;
-    files.sort((left, right) => left.modifiedAt - right.modifiedAt);
+    // Larger variants cost more disk space. A small recency bias favors keeping
+    // thumbnails without evicting a frequently viewed preview before stale files.
+    const evictionAge = (file: { path: string; modifiedAt: number }) => {
+      const name = path.basename(file.path);
+      const bias = name.endsWith('-preview.jpg') ? 24 * 60 * 60_000 : name.endsWith('-medium.jpg') ? 6 * 60 * 60_000 : 0;
+      return file.modifiedAt - bias;
+    };
+    files.sort((left, right) => evictionAge(left) - evictionAge(right));
     for (const file of files) {
       if (total <= target) break;
       try {
@@ -326,7 +357,7 @@ export class ImageCacheService {
       encoded = await this.#decodeWithSharp(sourcePath, specification);
       this.#externalDecodeMsTotal += performance.now() - externalStartedAt;
     }
-    if (!encoded && specification.width === variants.thumbnail.width && sourceMetadata.size >= 8 * 1024 * 1024 && (format?.id === 'jpeg' || format?.id === 'png')) {
+    if (!encoded && specification.width <= variants.medium.width && sourceMetadata.size >= 8 * 1024 * 1024 && (format?.id === 'jpeg' || format?.id === 'png')) {
       const externalStartedAt = performance.now();
       encoded = await this.#decodeWithSharp(sourcePath, specification);
       this.#externalDecodeMsTotal += performance.now() - externalStartedAt;

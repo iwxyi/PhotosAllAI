@@ -1261,4 +1261,5 @@ export interface DesktopApi {
   deleteExportPreset(presetId: string): Promise<void>;
   getImageCacheStats(): Promise<ImageCacheStats>;
   pruneImageCache(input: z.input<typeof pruneImageCacheInputSchema>): Promise<{ removedFiles: number; removedBytes: number }>;
+  clearFolderImageCache(folderId: string): Promise<{ removedFiles: number; removedBytes: number }>;
 }
