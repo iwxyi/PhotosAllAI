@@ -149,8 +149,9 @@ export class ImageCacheService {
       let removedFiles = 0;
       let removedBytes = 0;
       for (const file of await this.#listFiles()) {
-        const assetId = path.basename(file.path).slice(0, 36);
-        if (!ids.has(assetId)) continue;
+        const name = path.basename(file.path);
+        const assetId = name.match(/^([0-9a-f]{32}|[0-9a-f-]{36})-/iu)?.[1];
+        if (!assetId || !ids.has(assetId)) continue;
         try {
           await unlink(file.path);
           removedFiles += 1;

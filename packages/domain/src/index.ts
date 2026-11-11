@@ -110,3 +110,4 @@ export function computeHorizontalWindow(
 
 export { composeGenerationPrompt, type ComposePromptInput } from './prompt-composer';
 export { pickExportResult, pickExportResults, type ExportSelectionMode } from './export-selection';
+export { naturalSortKey, compareNaturalNames } from './natural-sort';

@@ -365,6 +365,25 @@ async function relocatePortableAfterFileOperation(
 }
 
 let exifIndexRunning = false;
+const dimensionIndexPending = new Set<string>();
+let dimensionIndexRunning = false;
+function scheduleVisibleDimensions(ids: readonly string[]): void {
+  for (const id of ids) dimensionIndexPending.add(id);
+  if (dimensionIndexRunning || dimensionIndexPending.size === 0) return;
+  dimensionIndexRunning = true;
+  setImmediate(() => {
+    void (async () => {
+      while (dimensionIndexPending.size > 0 && !shuttingDown) {
+        const ids = [...dimensionIndexPending].slice(0, 8);
+        for (const id of ids) dimensionIndexPending.delete(id);
+        await Promise.allSettled(ids.map(async (id) => {
+          if (!catalog.hasCurrentDimensions(id)) catalog.saveExifDetails(id, await imageFiles.details(id));
+        }));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    })().finally(() => { dimensionIndexRunning = false; });
+  });
+}
 function scheduleSmartCollectionExifIndex(): void {
   if (exifIndexRunning || !catalog.hasExifSmartCollections()) return;
   exifIndexRunning = true;
@@ -611,9 +630,11 @@ function registerIpc(): void {
   );
 
   ipcMain.handle('catalog.assets.list.v1', () => catalog.listAssets());
-  ipcMain.handle('catalog.assets.page.v1', (_event, input: unknown) =>
-    fileWorkflows.page(listCatalogAssetsInputSchema.parse(input))
-  );
+  ipcMain.handle('catalog.assets.page.v1', async (_event, input: unknown) => {
+    const page = await fileWorkflows.page(listCatalogAssetsInputSchema.parse(input));
+    scheduleVisibleDimensions(page.items.filter((item) => !item.width || !item.height).map((item) => item.id));
+    return page;
+  });
   ipcMain.handle('catalog.folders.list.v1', () => catalog.listFolders());
   ipcMain.handle('catalog.tags.list.v1', () => catalog.listTags());
   ipcMain.handle('catalog.tags.delete.v1', (_event, input: unknown) => {

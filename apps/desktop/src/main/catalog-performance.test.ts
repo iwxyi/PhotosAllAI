@@ -152,8 +152,8 @@ describe('large catalog pagination', () => {
       .toEqual(['existing']);
     migrated.close();
     const verified = new DatabaseSync(databasePath);
-    expect(verified.prepare('PRAGMA user_version').get()).toEqual({ user_version: 14 });
-    expect((verified.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'index' AND name LIKE 'assets_browse_%'").get() as { count: number }).count).toBe(12);
+    expect(verified.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 });
+    expect((verified.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'index' AND name LIKE 'assets_browse_%'").get() as { count: number }).count).toBe(16);
     verified.close();
   });
 
@@ -243,11 +243,11 @@ describe('large catalog pagination', () => {
     console.info('100k catalog baseline', { folderSummaryMs: Math.round(durationMs), cachedFolderSummaryMs: Math.round(cachedDurationMs), pageTimings, deepPageTimings, positionTimings });
     expect(positionTimings.every((measurement) => measurement.count === 200)).toBe(true);
     const planDb = new DatabaseSync(databasePath);
-    for (const field of ['file_name COLLATE NOCASE', 'rating', 'modified_at'] as const) {
+    for (const field of ['name_sort_key', 'rating', 'modified_at'] as const) {
       for (const direction of ['ASC', 'DESC'] as const) {
         for (const folderId of [null, 'folder-summary']) {
           const scope = folderId ? 'AND folder_id = ?' : '';
-          const indexField = field.startsWith('file_name') ? 'name' : field === 'rating' ? 'rating' : 'modified';
+          const indexField = field === 'name_sort_key' ? 'natural_name' : field === 'rating' ? 'rating' : 'modified';
           const indexName = `assets_browse_${folderId ? '' : 'all_'}${indexField}_${direction.toLowerCase()}_idx`;
           const plan = planDb.prepare(`EXPLAIN QUERY PLAN SELECT id FROM assets INDEXED BY ${indexName} WHERE removed_at IS NULL ${scope} ORDER BY ${field} ${direction}, id ASC LIMIT 201`)
             .all(...(folderId ? [folderId] : [])) as { detail: string }[];

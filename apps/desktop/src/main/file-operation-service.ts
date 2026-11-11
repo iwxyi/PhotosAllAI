@@ -408,7 +408,7 @@ export class FileOperationService {
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       const updateAsset = this.#database.prepare(`
-        UPDATE assets SET folder_id = ?, path = ?, file_name = ?
+        UPDATE assets SET folder_id = ?, path = ?, file_name = ?, name_sort_key = NULL
         WHERE id = ? AND path = ? AND removed_at IS NULL
       `);
       const markItem = this.#database.prepare(`
@@ -1218,7 +1218,7 @@ export class FileOperationService {
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       const update = this.#database.prepare(`
-        UPDATE assets SET folder_id = ?, path = ?, file_name = ?
+        UPDATE assets SET folder_id = ?, path = ?, file_name = ?, name_sort_key = NULL
         WHERE id = ? AND path = ? AND removed_at IS NULL
       `);
       for (const item of items) {

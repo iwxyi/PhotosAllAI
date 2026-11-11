@@ -3,6 +3,7 @@ import { createReadStream } from 'node:fs';
 import { mkdir, opendir, realpath, rename, rmdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { naturalSortKey } from '@photoallisai/domain';
 
 import {
   catalogAlbumSchema,
@@ -69,6 +70,8 @@ type AssetRow = {
   flag: 'picked' | 'rejected' | 'unflagged';
   offline_at: number | null;
   content_hash: string | null;
+  width?: number | null;
+  height?: number | null;
 };
 
 export type RelinkCatalogFolderOperationResult = RelinkCatalogFolderResult & {
@@ -93,7 +96,7 @@ function stableDirectoryId(rootId: string, relativePath: string): string {
   return createHash('sha256').update(`${rootId}\0${normalizeRelativePath(relativePath)}`).digest('hex').slice(0, 32);
 }
 
-async function* walkImages(root: string): AsyncGenerator<string> {
+async function* walkImages(root: string, strict = false): AsyncGenerator<string> {
   const directories = [root];
 
   while (directories.length > 0) {
@@ -103,7 +106,8 @@ async function* walkImages(root: string): AsyncGenerator<string> {
     let directory;
     try {
       directory = await opendir(current);
-    } catch {
+    } catch (error) {
+      if (strict) throw error;
       continue;
     }
 
@@ -344,6 +348,20 @@ export class CatalogService {
         COMMIT;
       `);
     }
+    const naturalSortVersion = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (naturalSortVersion.user_version < 15) {
+      const hasSortKey = (this.#database.prepare('PRAGMA table_info(assets)').all() as Array<{ name: string }>).some((column) => column.name === 'name_sort_key');
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        ${hasSortKey ? '' : 'ALTER TABLE assets ADD COLUMN name_sort_key TEXT;'}
+        CREATE INDEX IF NOT EXISTS assets_browse_natural_name_asc_idx ON assets(folder_id, name_sort_key ASC, id ASC) WHERE removed_at IS NULL;
+        CREATE INDEX IF NOT EXISTS assets_browse_natural_name_desc_idx ON assets(folder_id, name_sort_key DESC, id ASC) WHERE removed_at IS NULL;
+        CREATE INDEX IF NOT EXISTS assets_browse_all_natural_name_asc_idx ON assets(name_sort_key ASC, id ASC) WHERE removed_at IS NULL;
+        CREATE INDEX IF NOT EXISTS assets_browse_all_natural_name_desc_idx ON assets(name_sort_key DESC, id ASC) WHERE removed_at IS NULL;
+        PRAGMA user_version = 15;
+        COMMIT;
+      `);
+    }
     this.#ensureCreatedDirectories();
   }
 
@@ -418,6 +436,17 @@ export class CatalogService {
     return { assets: row.assets, offline: row.offline ?? 0 };
   }
 
+  #populateMissingNameSortKeys(): void {
+    const missing = this.#database.prepare('SELECT id, file_name FROM assets WHERE removed_at IS NULL AND name_sort_key IS NULL').all() as Array<{ id: string; file_name: string }>;
+    if (!missing.length) return;
+    const update = this.#database.prepare('UPDATE assets SET name_sort_key = ? WHERE id = ?');
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      for (const row of missing) update.run(naturalSortKey(row.file_name), row.id);
+      this.#database.exec('COMMIT');
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error; }
+  }
+
   listAssetIdsInFolder(folderId: string): string[] {
     const directory = this.#resolveDirectory(folderId);
     if (!directory) throw new Error('FOLDER_NOT_FOUND');
@@ -432,6 +461,7 @@ export class CatalogService {
 
   listAssetPage(rawInput: ListCatalogAssetsInput): CatalogAssetPage {
     const input = listCatalogAssetsInputSchema.parse(rawInput);
+    if (input.sortBy === 'fileName') this.#populateMissingNameSortKeys();
     if (input.cursor && input.offset !== undefined) throw new RangeError('Use either cursor or offset for catalog paging');
     const baseConditions: string[] = ['removed_at IS NULL'];
     const baseValues: (string | number)[] = [];
@@ -536,8 +566,9 @@ export class CatalogService {
     const comparison = direction === 'asc' ? '>' : '<';
     if (input.cursor) {
       if (input.sortBy === 'fileName') {
-        conditions.push(`(file_name COLLATE NOCASE ${comparison} ? OR (file_name COLLATE NOCASE = ? AND id > ?))`);
-        values.push(typeof input.cursor.sortValue === 'string' ? input.cursor.sortValue : '', typeof input.cursor.sortValue === 'string' ? input.cursor.sortValue : '', input.cursor.id);
+        conditions.push(`(name_sort_key ${comparison} ? OR (name_sort_key = ? AND id > ?))`);
+        const key = naturalSortKey(typeof input.cursor.sortValue === 'string' ? input.cursor.sortValue : '');
+        values.push(key, key, input.cursor.id);
       } else if (input.sortBy === 'rating') {
         conditions.push(`(rating ${comparison} ? OR (rating = ? AND id > ?))`);
         const rating = typeof input.cursor.sortValue === 'number' ? input.cursor.sortValue : 0;
@@ -549,7 +580,7 @@ export class CatalogService {
     }
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
     const orderBy = input.sortBy === 'fileName'
-      ? `file_name COLLATE NOCASE ${direction}, id ASC`
+      ? `name_sort_key ${direction}, id ASC`
       : input.sortBy === 'rating'
         ? `rating ${direction}, id ASC`
         : `modified_at ${direction}, id ASC`;
@@ -558,13 +589,15 @@ export class CatalogService {
     const browseField = input.sortBy === 'fileName' ? 'name' : input.sortBy === 'rating' ? 'rating' : 'modified';
     const browseDirection = direction === 'asc' ? 'asc' : 'desc';
     const browseIndex = plainFolder
-      ? `assets_browse_${browseField}_${browseDirection}_idx`
+      ? input.sortBy === 'fileName' ? `assets_browse_natural_name_${browseDirection}_idx` : `assets_browse_${browseField}_${browseDirection}_idx`
       : plainCatalog
-        ? `assets_browse_all_${browseField}_${browseDirection}_idx`
+        ? input.sortBy === 'fileName' ? `assets_browse_all_natural_name_${browseDirection}_idx` : `assets_browse_all_${browseField}_${browseDirection}_idx`
         : null;
     const indexedBy = browseIndex ? `INDEXED BY ${browseIndex}` : '';
     const rows = this.#database.prepare(`
-      SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, label_color, flag, favorite, offline_at
+      SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, label_color, flag, favorite, offline_at,
+        (SELECT width FROM asset_exif WHERE asset_id = assets.id AND source_size = assets.size_bytes AND source_modified_at = assets.modified_at) AS width,
+        (SELECT height FROM asset_exif WHERE asset_id = assets.id AND source_size = assets.size_bytes AND source_modified_at = assets.modified_at) AS height
       FROM assets ${indexedBy} ${where}
       ORDER BY ${orderBy}
       LIMIT ? ${input.offset === undefined ? '' : 'OFFSET ?'}
@@ -850,7 +883,7 @@ export class CatalogService {
       this.#database.prepare('UPDATE assets SET offline_at = ? WHERE folder_id = ? AND removed_at IS NULL')
         .run(Date.now(), folderId);
       const update = this.#database.prepare(`
-        UPDATE assets SET path = ?, file_name = ?, extension = ?,
+        UPDATE assets SET path = ?, file_name = ?, name_sort_key = NULL, extension = ?,
           content_hash = CASE WHEN size_bytes = ? AND modified_at = ? THEN COALESCE(?, content_hash) ELSE ? END,
           size_bytes = ?, modified_at = ?, offline_at = NULL
         WHERE id = ?
@@ -950,7 +983,7 @@ export class CatalogService {
     try {
       const removeDuplicate = this.#database.prepare('DELETE FROM assets WHERE path = ? AND id <> ?');
       const update = this.#database.prepare(`
-        UPDATE assets SET path = ?, file_name = ?, extension = ?, size_bytes = ?, modified_at = ?, offline_at = NULL,
+        UPDATE assets SET path = ?, file_name = ?, name_sort_key = NULL, extension = ?, size_bytes = ?, modified_at = ?, offline_at = NULL,
           content_hash = CASE WHEN size_bytes = ? AND modified_at = ? THEN content_hash ELSE NULL END WHERE id = ?
       `);
       const insert = this.#database.prepare(`
@@ -1185,6 +1218,14 @@ export class CatalogService {
       details.city ?? null, details.country ?? null, details.takenAt ? Date.parse(details.takenAt) : null,
       details.exposureSeconds ?? null, details.aperture ?? null, details.focalLength ?? null, details.iso ?? null);
     this.#countCache.clear();
+  }
+
+  hasCurrentDimensions(assetId: string): boolean {
+    return Boolean(this.#database.prepare(`
+      SELECT 1 FROM assets JOIN asset_exif ON asset_exif.asset_id = assets.id
+      WHERE assets.id = ? AND assets.removed_at IS NULL AND assets.size_bytes = asset_exif.source_size
+        AND assets.modified_at = asset_exif.source_modified_at AND asset_exif.width > 0 AND asset_exif.height > 0
+    `).get(assetId));
   }
 
   saveSmartCollection(rawInput: SaveSmartCollectionInput): CatalogSmartCollection {
@@ -1519,7 +1560,7 @@ export class CatalogService {
     return this.listTags();
   }
 
-  async importFolders(folderPaths: readonly string[]): Promise<number> {
+  async importFolders(folderPaths: readonly string[], seenPaths?: Set<string>): Promise<number> {
     let importedCount = 0;
 
     for (const requestedPath of folderPaths) {
@@ -1545,6 +1586,7 @@ export class CatalogService {
         ON CONFLICT(path) DO UPDATE SET
           folder_id = excluded.folder_id,
           file_name = excluded.file_name,
+          name_sort_key = CASE WHEN assets.file_name = excluded.file_name THEN assets.name_sort_key ELSE NULL END,
           extension = excluded.extension,
           content_hash = CASE
             WHEN assets.size_bytes = excluded.size_bytes AND assets.modified_at = excluded.modified_at THEN assets.content_hash
@@ -1566,8 +1608,9 @@ export class CatalogService {
             try {
               const fileStats = await stat(filePath);
               return fileStats.isFile() ? { path: filePath, size: fileStats.size, modifiedAt: Math.trunc(fileStats.mtimeMs) } : null;
-            } catch {
-              // A disappeared or unreadable file must not abort the batch.
+            } catch (error) {
+              if (seenPaths) throw error;
+              // A disappeared or unreadable file must not abort a regular import.
               return null;
             }
           }));
@@ -1593,13 +1636,14 @@ export class CatalogService {
           }
           this.#database.exec('COMMIT');
           importedCount += newlyImported;
+          for (const file of batch) seenPaths?.add(file.path);
         } catch (error) {
           this.#database.exec('ROLLBACK');
           throw error;
         }
       };
 
-      for await (const filePath of walkImages(folderPath)) {
+      for await (const filePath of walkImages(folderPath, Boolean(seenPaths))) {
         pendingPaths.push(filePath);
         if (pendingPaths.length >= IMPORT_BATCH_SIZE) {
           await flush();
@@ -1648,16 +1692,9 @@ export class CatalogService {
 
   async reconcileImportedFolders(): Promise<{ discovered: number; offline: number }> {
     const folders = this.#database.prepare('SELECT id, path FROM folders WHERE removed_at IS NULL').all() as { id: string; path: string }[];
-    for (const folder of folders) {
-      await this.#markRootOffline(folder.id);
-    }
     let discovered = 0;
     for (const folder of folders) {
-      try {
-        discovered += await this.importFolders([folder.path]);
-      } catch {
-        // Missing or inaccessible roots remain offline; other roots still reconcile.
-      }
+      discovered += (await this.synchronizeFolder(folder.id)).discovered;
     }
     const row = this.#database.prepare('SELECT COUNT(*) AS value FROM assets WHERE offline_at IS NOT NULL AND removed_at IS NULL').get() as { value: number };
     return { discovered, offline: row.value };
@@ -1688,7 +1725,9 @@ export class CatalogService {
       INSERT INTO assets (id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at, offline_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
       ON CONFLICT(path) DO UPDATE SET
-        folder_id = excluded.folder_id, file_name = excluded.file_name, extension = excluded.extension,
+        folder_id = excluded.folder_id, file_name = excluded.file_name,
+        name_sort_key = CASE WHEN assets.file_name = excluded.file_name THEN assets.name_sort_key ELSE NULL END,
+        extension = excluded.extension,
         content_hash = CASE WHEN assets.size_bytes = excluded.size_bytes AND assets.modified_at = excluded.modified_at THEN assets.content_hash ELSE NULL END,
         size_bytes = excluded.size_bytes, modified_at = excluded.modified_at,
         removed_at = NULL, trashed_at = NULL, offline_at = NULL
@@ -1745,12 +1784,17 @@ export class CatalogService {
     const directory = this.#resolveDirectory(folderId);
     if (!directory) throw new Error('CATALOG_FOLDER_NOT_FOUND');
     const scanStartedAt = Date.now();
-    await this.#markRootOffline(directory.rootId);
     let discovered = 0;
+    const seenPaths = new Set<string>();
     try {
-      discovered = await this.importFolders([directory.rootPath]);
+      discovered = await this.importFolders([directory.rootPath], seenPaths);
+      this.#markMissingRootAssetsOffline(directory.rootId, seenPaths);
     } catch {
-      // An inaccessible root remains offline and is reported to the caller.
+      // A missing root is offline. A partially scanned root keeps its last
+      // known state, since it is unsafe to infer which files disappeared.
+      if (!await stat(directory.rootPath).then((item) => item.isDirectory()).catch(() => false)) {
+        await this.#markRootOffline(directory.rootId);
+      }
     }
     if (discovered > 0) discovered -= await this.#reconcileExternalFolderRenames(directory.rootId, directory.rootPath, scanStartedAt);
     const row = this.#database.prepare(`
@@ -1825,7 +1869,7 @@ export class CatalogService {
     this.#database.exec('BEGIN IMMEDIATE');
     try {
       const deleteAsset = this.#database.prepare('DELETE FROM assets WHERE id = ?');
-      const updateAsset = this.#database.prepare('UPDATE assets SET path = ?, file_name = ?, extension = ?, offline_at = NULL WHERE id = ?');
+      const updateAsset = this.#database.prepare('UPDATE assets SET path = ?, file_name = ?, name_sort_key = NULL, extension = ?, offline_at = NULL WHERE id = ?');
       for (let index = 0; index < relocations.length; index += 1) {
         const duplicateId = duplicates[index]!;
         this.#database.prepare('DELETE FROM asset_search WHERE asset_id = ?').run(duplicateId);
@@ -1863,6 +1907,20 @@ export class CatalogService {
       update.run(Date.now(), rootId, cursor, lastId);
       cursor = lastId;
       await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  }
+
+  #markMissingRootAssetsOffline(rootId: string, seenPaths: ReadonlySet<string>): void {
+    const rows = this.#database.prepare('SELECT id, path FROM assets WHERE folder_id = ? AND removed_at IS NULL').iterate(rootId) as Iterable<{ id: string; path: string }>;
+    const mark = this.#database.prepare('UPDATE assets SET offline_at = ? WHERE id = ? AND offline_at IS NULL');
+    const now = Date.now();
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      for (const row of rows) if (!seenPaths.has(row.path)) mark.run(now, row.id);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
     }
   }
 
@@ -1941,6 +1999,7 @@ export class CatalogService {
       format: row.extension.slice(1).toUpperCase(),
       sizeBytes: row.size_bytes,
       modifiedAt: row.modified_at,
+      ...(row.width && row.height ? { width: row.width, height: row.height } : {}),
       rating: row.rating,
       labelColor: row.label_color,
       flag: row.flag,

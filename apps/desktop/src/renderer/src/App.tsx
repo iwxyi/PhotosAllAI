@@ -46,7 +46,7 @@ import type {
 import { analysisResultSchema, collectionAnalysisReportSchema, generationResultSchema, agentTaskResultSchema } from '@photoallisai/contracts';
 import { groupTaskBatches, batchProgress } from './task-batches';
 import { TaskActions, TaskClearButton, TaskBatchButtons, TASKS_CHANGED_EVENT } from './task-actions';
-import { composeGenerationPrompt, pickExportResults, selectAll, updateSelection, type ExportSelectionMode, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
+import { compareNaturalNames, composeGenerationPrompt, pickExportResults, selectAll, updateSelection, type ExportSelectionMode, type SelectionIntent, type SelectionState } from '@photoallisai/domain';
 import { getLocale, setLocale, t, useLocale, type Locale } from './i18n';
 import {
   Aperture,
@@ -371,7 +371,7 @@ function CatalogImage({ src, previewSrc, alt = '', onAspectRatio, defer = false,
   }, [shouldRequest, defer, src, retry.attempt, displayed?.base, displayed?.ready]);
   useEffect(() => {
     if (retry.src !== src || retry.attempt === 0 || !nearViewport) return;
-    const timer = window.setTimeout(() => setRetryReady(true), Math.min(200 * 2 ** (retry.attempt - 1), 1_600));
+    const timer = window.setTimeout(() => setRetryReady(true), Math.min(200 * 2 ** Math.min(retry.attempt - 1, 8), 30_000));
     return () => window.clearTimeout(timer);
   }, [nearViewport, retry, src]);
   useEffect(() => {
@@ -416,7 +416,7 @@ function CatalogImage({ src, previewSrc, alt = '', onAspectRatio, defer = false,
   const previousSrc = current?.ready ? outgoingSrc : displayed?.ready ? displayed.src : null;
   return <>{previousSrc && <img className={`catalog-image-previous${current?.ready ? ' is-fading' : ''}`} src={previousSrc} alt="" aria-hidden="true" />}
   <img ref={ref} className={current?.ready ? 'is-ready' : ''} src={current?.ready ? current.src : (nearViewport || eager) && !defer ? trackedUrl : undefined} alt={alt} decoding="async" onError={(event) => {
-    if (!event.currentTarget.getAttribute('src') || !src.startsWith('photoasset://') || retry.src !== src || retry.attempt >= 3) return;
+    if (!event.currentTarget.getAttribute('src') || !src.startsWith('photoasset://') || retry.src !== src) return;
     setRetryReady(false);
     setRetry({ src, attempt: retry.attempt + 1 });
   }} onLoad={(event) => {
@@ -442,8 +442,8 @@ function MenuShortcut({ keys }: { keys: string }): React.JSX.Element {
 }
 const copyShortcut = navigator.platform.includes('Mac') ? '⌘C' : 'Ctrl+C';
 const aiShortcut = (key: string): string => navigator.platform.includes('Mac') ? `⌘⌥${key}` : `Ctrl+Alt+${key}`;
-function shortcutBlocked(event: KeyboardEvent): boolean {
-  return event.defaultPrevented || event.repeat || document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"], .tag-editor-popover') !== null ||
+function shortcutBlocked(event: KeyboardEvent, allowRepeat = false): boolean {
+  return event.defaultPrevented || (!allowRepeat && event.repeat) || document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"], .tag-editor-popover') !== null ||
     event.target instanceof Element && Boolean(event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]'));
 }
 function ContextMenuSurface({ children, style, ...props }: React.HTMLAttributes<HTMLDivElement>): React.JSX.Element {
@@ -502,6 +502,7 @@ function mapCatalogAssets(assets: CatalogAsset[]): Photo[] {
     ...(asset.relativePath ? { relativePath: asset.relativePath } : {}),
     modifiedAt: asset.modifiedAt,
     sizeBytes: asset.sizeBytes,
+    ...(asset.width && asset.height ? { width: asset.width, height: asset.height } : {}),
     fileName: asset.fileName,
     src: asset.previewUrl,
     ...(['JPG', 'JPEG', 'PNG', 'WEBP', 'GIF', 'AVIF', 'BMP', 'ICO'].includes(asset.format.toUpperCase()) ? { originalSrc: asset.previewUrl.replace('://preview/', '://original/') } : {}),
@@ -738,7 +739,7 @@ function Sidebar({
       siblings.push(folder);
       children.set(folder.parentId, siblings);
     }
-    for (const siblings of children.values()) siblings.sort((left, right) => left.name.localeCompare(right.name));
+    for (const siblings of children.values()) siblings.sort((left, right) => compareNaturalNames(left.name, right.name));
     return children;
   }, [visibleFolders]);
   const displayedFolders = useMemo(() => {
@@ -962,7 +963,7 @@ function Sidebar({
             <button type="button" role="menuitem" disabled={isDemo} onClick={() => startFolderRename(contextFolder)}><FilePenLine size={14} /><span>重命名</span><MenuShortcut keys="F2" /></button>
             <button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={async () => { setFolderActionBusy(true); try { const revealed = await onRevealFolder(contextFolder.id); setFolderActionNotice(revealed ? '已在文件管理器中显示文件夹。' : '文件夹当前不可访问。'); } catch { setFolderActionNotice('无法打开文件管理器，请检查文件夹权限或磁盘连接。'); } finally { setFolderActionBusy(false); setFolderContextMenu(null); } }}><FolderOpen size={14} /><span>{FILE_MANAGER_LABEL}</span></button>
             <button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={async () => { setFolderActionBusy(true); setFolderContextMenu(null); try { const roots = [...new Set(contextFolders.map((folder) => folder.rootId))]; const reports = await Promise.all(roots.map(onSynchronizeFolder)); setFolderActionNotice(`同步完成：新增 ${reports.reduce((sum, report) => sum + report.discovered, 0)} 张，离线 ${reports.reduce((sum, report) => sum + report.offline, 0)} 张。`); } catch { setFolderActionNotice('同步失败，请检查文件夹权限或磁盘连接。'); } finally { setFolderActionBusy(false); } }}><RefreshCw size={14} /><span>{contextFolders.length > 1 ? `同步所选 ${contextFolders.length} 个文件夹` : '同步文件夹'}</span></button>
-            <button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={async () => { setFolderActionBusy(true); setFolderContextMenu(null); try { const reports = await Promise.all(topLevelFolders(contextFolders).map((folder) => window.desktopApi.clearFolderImageCache(folder.id))); setFolderActionNotice(`已清理 ${reports.reduce((sum, report) => sum + report.removedFiles, 0)} 个预览缓存文件。重新打开图片可测试首次加载。`); } catch { setFolderActionNotice('预览缓存清理失败，请稍后重试。'); } finally { setFolderActionBusy(false); } }}><RotateCcw size={14} /><span>{contextFolders.length > 1 ? `清空所选 ${contextFolders.length} 个文件夹的预览缓存` : '清空预览缓存'}</span></button>
+            <button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={async () => { setFolderActionBusy(true); setFolderContextMenu(null); try { const reports = await Promise.all(topLevelFolders(contextFolders).map((folder) => window.desktopApi.clearFolderImageCache(folder.id))); setFolderActionNotice(`已清理 ${reports.reduce((sum, report) => sum + report.removedFiles, 0)} 个缩略图和预览缓存文件。重新打开图片可测试首次加载。`); } catch { setFolderActionNotice('图片缓存清理失败，请稍后重试。'); } finally { setFolderActionBusy(false); } }}><RotateCcw size={14} /><span>{contextFolders.length > 1 ? `清空所选 ${contextFolders.length} 个文件夹的图片缓存` : '清空图片缓存'}</span></button>
             {contextHasChildren && <button type="button" role="menuitem" onClick={() => { setFolderAppearance((current) => ({ ...current, expandedIds: contextExpanded ? current.expandedIds.filter((id) => id !== contextFolder.id) : [...current.expandedIds, contextFolder.id] })); setFolderContextMenu(null); }}><ChevronRight className={contextExpanded ? 'is-expanded' : ''} size={14} /><span>{contextExpanded ? '收起子文件夹' : '展开子文件夹'}</span></button>}
             <span className="folder-menu-separator" /><button type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={() => { void onRelinkFolder(contextFolder.id).catch((error: unknown) => setFolderActionNotice(relinkErrorMessage(error))); setFolderContextMenu(null); }}><RotateCcw size={14} /><span>{contextFolder.isRoot ? '更新关联路径…' : '重新关联子文件夹…'}</span></button>
             {contextFolder.isRoot && <button className="is-danger" type="button" role="menuitem" disabled={isDemo || folderActionBusy} onClick={() => { setFolderRemovalError(''); setFolderRemovalCandidate(contextFolder); setFolderContextMenu(null); }}><FolderMinus size={14} /><span>取消关联…</span></button>}
@@ -1313,7 +1314,7 @@ function Filmstrip({
     const positions = items.map((photo) => {
       const preview = previewPhoto(photo);
       const src = preview.thumbnailSrc ?? preview.src;
-      const ratio = ratios[src] ?? IMAGE_ASPECT_RATIOS.get(src) ?? 1.5;
+    const ratio = ratios[src] ?? IMAGE_ASPECT_RATIOS.get(src) ?? (photo.width && photo.height ? photo.width / photo.height : 1.5);
       const width = Math.max(14, Math.max(1, viewport.height - 14 - metadataHeight) * ratio + 14);
       const position = { left, width };
       left += width + 7;
@@ -2834,7 +2835,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
   const justifiedLayout = useMemo(() => viewMode === 'justified' && gridWidth > 0 ? justifiedCardLayout(photoGroups, (photo) => {
     const preview = previewPhoto(photo);
     const src = preview.thumbnailSrc ?? preview.src;
-    return clamp(aspectRatios.get(src) ?? IMAGE_ASPECT_RATIOS.get(src) ?? 1.5, .25, 5);
+    return clamp(aspectRatios.get(src) ?? IMAGE_ASPECT_RATIOS.get(src) ?? (photo.width && photo.height ? photo.width / photo.height : 1.5), .25, 5);
   }, gridWidth, thumbnailSize, listViewport.height) : null, [viewMode, gridWidth, photoGroups, previewPhoto, aspectRatios, thumbnailSize, listViewport.height]);
   const justifiedSizes = justifiedLayout?.sizes ?? {};
   const masonryLayout = useMemo(() => {
@@ -2853,7 +2854,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
       for (const photo of group.items) {
       const preview = previewPhoto(photo);
       const src = preview.thumbnailSrc ?? preview.src;
-      const ratio = clamp(aspectRatios.get(src) ?? IMAGE_ASPECT_RATIOS.get(src) ?? 1.5, .25, 5);
+      const ratio = clamp(aspectRatios.get(src) ?? IMAGE_ASPECT_RATIOS.get(src) ?? (photo.width && photo.height ? photo.width / photo.height : 1.5), .25, 5);
       const height = Math.ceil(width / ratio + 24 + 16 * (Number(photo.rating > 0) + Number(Boolean(photo.workflow)) + Number(Boolean(photo.workflowConflict))));
       let column = 0;
       for (let candidate = 1; candidate < columnCount; candidate += 1) {
@@ -2955,7 +2956,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
   };
 
   const moveGridFocus = (event: React.KeyboardEvent<HTMLElement>) => {
-    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) || orderedIds.length === 0) return;
+    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) || orderedIds.length === 0 || event.target instanceof Element && Boolean(event.target.closest('input, textarea, select, [role="slider"]'))) return;
     event.preventDefault();
     const cards = [...event.currentTarget.querySelectorAll<HTMLElement>('.catalog-card')];
     const currentIndex = Math.max(0, orderedIds.indexOf(selection.focusId ?? orderedIds[0]!));
@@ -3226,7 +3227,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
             {props.catalogFolders.length === 0 && <button className="primary-action compact" type="button" onClick={() => void props.onImportFolders()}><Plus size={14} />选择文件夹</button>}
           </section>
         ) : viewMode === 'list' ? (
-          <section className={`catalog-list-view${listWindow ? ' is-windowed' : ''}`} role="listbox" aria-multiselectable="true" ref={gridRef} tabIndex={0} onScroll={handleCatalogScroll} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a' && !(event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]'))) { event.preventDefault(); setSelection(selectAll(orderedIds)); } }} aria-label="图库列表视图"><div className="catalog-list-header" style={listStyle} onContextMenu={(event) => { event.preventDefault(); setColumnMenu({ x: event.clientX, y: event.clientY }); }}><input className="catalog-list-select" type="checkbox" aria-label="全选当前列表" title="全选当前列表" checked={allVisibleSelected} ref={(element) => { if (element) element.indeterminate = someVisibleSelected && !allVisibleSelected; }} onChange={() => setSelection(allVisibleSelected ? { selectedIds: new Set(), anchorId: null, focusId: null } : selectAll(orderedIds))} />{columns.map((column) => <span key={column.id}>{column.label}</span>)}</div>{listWindow && <div aria-hidden="true" style={{ height: listWindow.before }} />}{listRows}{listWindow && <div aria-hidden="true" style={{ height: listWindow.after }} />}{props.hasMore && <button className="catalog-load-more" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? '加载中…' : '加载更多'}</button>}</section>
+          <section className={`catalog-list-view${listWindow ? ' is-windowed' : ''}`} role="listbox" aria-multiselectable="true" ref={gridRef} tabIndex={0} onScroll={handleCatalogScroll} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a' && !(event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]'))) { event.preventDefault(); setSelection(selectAll(orderedIds)); } else if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) && orderedIds.length && !(event.target instanceof Element && event.target.closest('input, textarea, select, [role="slider"]'))) { event.preventDefault(); const current = Math.max(0, orderedIds.indexOf(selection.focusId ?? props.selectedAssetId ?? orderedIds[0]!)); const nextId = orderedIds[clamp(current + (event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 1), 0, orderedIds.length - 1)]!; setSelection((value) => updateSelection(value, orderedIds, nextId, event.shiftKey ? 'range' : 'replace')); props.onSelectedAssetChange(nextId); event.currentTarget.querySelector<HTMLElement>(`[data-asset-id="${nextId}"]`)?.scrollIntoView({ block: 'nearest' }); } }} aria-label="图库列表视图"><div className="catalog-list-header" style={listStyle} onContextMenu={(event) => { event.preventDefault(); setColumnMenu({ x: event.clientX, y: event.clientY }); }}><input className="catalog-list-select" type="checkbox" aria-label="全选当前列表" title="全选当前列表" checked={allVisibleSelected} ref={(element) => { if (element) element.indeterminate = someVisibleSelected && !allVisibleSelected; }} onChange={() => setSelection(allVisibleSelected ? { selectedIds: new Set(), anchorId: null, focusId: null } : selectAll(orderedIds))} />{columns.map((column) => <span key={column.id}>{column.label}</span>)}</div>{listWindow && <div aria-hidden="true" style={{ height: listWindow.before }} />}{listRows}{listWindow && <div aria-hidden="true" style={{ height: listWindow.after }} />}{props.hasMore && <button className="catalog-load-more" type="button" disabled={props.loadingMore} onClick={props.onLoadMore}>{props.loadingMore ? '加载中…' : '加载更多'}</button>}</section>
         ) : (
           <section className={`catalog-grid${viewMode === 'masonry' ? ' catalog-masonry' : ''}${viewMode === 'justified' ? ' catalog-justified' : ''}${grouped ? ' is-grouped' : ''}${gridWindow || groupedGridWindow || justifiedWindow || masonryWindow ? ' is-windowed' : ''}`} style={{ '--thumbnail-size': `${thumbnailSize}px`, '--thumbnail-height': `${Math.round(thumbnailSize * 112 / 155)}px`, '--virtual-row-height': `${gridRowHeight}px` } as React.CSSProperties} role="listbox" aria-label="图库照片" aria-multiselectable="true" data-loaded-count={props.availablePhotos.length} ref={gridRef} tabIndex={0} onScroll={handleCatalogScroll} onPointerDown={(event) => {
             if (event.button !== 0 || (event.target !== event.currentTarget && !(event.target instanceof Element && event.target.classList.contains('catalog-group-grid')))) return;
@@ -3273,7 +3274,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
                 const preview = previewPhoto(photo);
                 const justifiedSize = justifiedSizes[photo.id];
                 const metadataHeight = 24 + 16 * (Number(photo.rating > 0) + Number(Boolean(photo.workflow)) + Number(Boolean(photo.workflowConflict)));
-                return <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} style={masonryWindow ? masonryLayout!.positions.get(photo.id) : viewMode === 'masonry' ? { gridRowEnd: `span ${Math.ceil(cardWidth / (aspectRatios.get(preview.thumbnailSrc ?? preview.src) ?? IMAGE_ASPECT_RATIOS.get(preview.thumbnailSrc ?? preview.src) ?? 1.5) + metadataHeight + 10)}` } : viewMode === 'justified' && justifiedSize ? { width: justifiedSize.width, '--thumbnail-height': `${justifiedSize.height}px` } as React.CSSProperties : undefined} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable key={photo.id} onDragStart={(event) => dragDisplayed(event, photo)} onDragEnd={() => { activePhotoDragIds = null; }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
+                return <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} style={masonryWindow ? masonryLayout!.positions.get(photo.id) : viewMode === 'masonry' ? { gridRowEnd: `span ${Math.ceil(cardWidth / (aspectRatios.get(preview.thumbnailSrc ?? preview.src) ?? IMAGE_ASPECT_RATIOS.get(preview.thumbnailSrc ?? preview.src) ?? (photo.width && photo.height ? photo.width / photo.height : 1.5)) + metadataHeight + 10)}` } : viewMode === 'justified' && justifiedSize ? { width: justifiedSize.width, '--thumbnail-height': `${justifiedSize.height}px` } as React.CSSProperties : undefined} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable key={photo.id} onDragStart={(event) => dragDisplayed(event, photo)} onDragEnd={() => { activePhotoDragIds = null; }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
               <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{preview.thumbnailSrc || preview.src ? <CatalogImage src={preview.thumbnailSrc ?? preview.src} previewSrc={preview.src} defer={fastScrolling} eager={eagerCatalogIds.has(photo.id)} onAspectRatio={viewMode === 'masonry' || viewMode === 'justified' ? (ratio) => refreshAspectRatio(preview.thumbnailSrc ?? preview.src, ratio) : undefined} /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
               <span className="catalog-photo-badges"><PhotoFlag photo={photo} /></span>
               <span className="catalog-card-meta"><strong title={photo.fileName}>{photo.fileName}</strong>{photo.rating > 0 && <span className="catalog-card-rating" aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}{photo.workflow && <small title={`${photo.workflow.name} · 按规则关联`}>{photo.workflow.members.length} 版本</small>}{photo.workflowConflict && <small title="多条流程规则同时匹配，已保留独立显示">规则冲突</small>}</span>
@@ -3399,6 +3400,8 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
   const trackedExportTaskId = trackedExport?.taskId ?? null;
   const trackedExportSurface = trackedExport?.surface ?? null;
   const selected = availablePhotos.find((photo) => photo.id === selectedAssetId) ?? availablePhotos.find((photo) => photo.id === selectedId) ?? availablePhotos[0]!;
+  const navigationId = useRef(selected.id);
+  useEffect(() => { navigationId.current = selected.id; }, [selected.id]);
   const currentAnalysisRevision = analysisAssetId === selected.id ? analysisRevision : undefined;
   const currentGenerationResults = generationAssetId === selected.id ? generationResults
     : props.resultSequence?.filter((result) => result.assetId === selected.id) ?? [];
@@ -3463,9 +3466,9 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (viewerActive === false) return;
-      if (shortcutBlocked(event)) return;
+      if (shortcutBlocked(event, event.key === 'ArrowLeft' || event.key === 'ArrowRight')) return;
       const target = event.target;
-      if (!(target instanceof Element) || target.closest('input, textarea, select, [contenteditable="true"]') || !target.closest('.filmstrip, .catalog-grid, .catalog-list-view, .canvas-wrap')) return;
+      if (!(target instanceof Element) || target.closest('input, textarea, select, [contenteditable="true"]') || !target.closest(view === 'viewer' ? '.inline-photo-viewer' : '.filmstrip, .catalog-grid, .catalog-list-view')) return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
         if (!target.closest('.filmstrip, .catalog-grid, .catalog-list-view')) return;
         event.preventDefault();
@@ -3497,10 +3500,11 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
           if (next) onSelectViewerResult?.(next);
           return;
         }
-        const currentIndex = orderedIds.indexOf(selected.id);
+        const currentIndex = orderedIds.indexOf(navigationId.current);
         const nextId = orderedIds[clamp(currentIndex < 0 ? (event.key === 'ArrowLeft' ? orderedIds.length - 1 : 0) : currentIndex + (event.key === 'ArrowLeft' ? -1 : 1), 0, orderedIds.length - 1)];
         const nextPhoto = availablePhotos.find((photo) => photo.id === nextId);
-        if (!nextPhoto || nextPhoto.id === selected.id) return;
+        if (!nextPhoto || nextPhoto.id === navigationId.current) return;
+        navigationId.current = nextPhoto.id;
         setSelectedId(nextPhoto.id);
         onSelectedAssetChange(nextPhoto.id);
         setSelection((current) => updateSelection(current, orderedIds, nextPhoto.id, event.shiftKey ? 'range' : 'replace'));
@@ -5481,9 +5485,12 @@ function QuickPhotoViewer({ session, photo, onPhotoChange, onClose }: { session:
 
 function IndexedQuickPhotoViewer({ session, photo, onPhotoChange, onClose }: { session: QuickViewSession; photo: Photo; onPhotoChange: (photo: Photo) => void; onClose: () => void }): React.JSX.Element {
   const viewport = useRef<HTMLDivElement>(null);
+  const pendingPosition = useRef<number | null>(null);
+  const navigationRequest = useRef(0);
   const [view, setView] = useState({ top: 0, width: 800, height: 160 });
   const [page, setPage] = useState<{ offset: number; items: Photo[]; total: number; selectedPosition: number | null }>({ offset: 0, items: [photo], total: session.totalCount ?? 1, selectedPosition: null });
   const [selectedPosition, setSelectedPosition] = useState<number | null>(null);
+  const resolvingPosition = useRef(false);
   const [toolbarHost, setToolbarHost] = useState<HTMLDivElement | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; photo: Photo } | null>(null);
   useEffect(() => {
@@ -5519,28 +5526,39 @@ function IndexedQuickPhotoViewer({ session, photo, onPhotoChange, onClose }: { s
       if (!active) return;
       const items = mapCatalogAssets(result.items).map((item) => ({ ...item, temporary: true }));
       setPage({ offset: start, items, total: result.totalCount, selectedPosition: result.selectedPosition ?? null });
-      setSelectedPosition(result.selectedPosition ?? null);
+      if (pendingPosition.current === null) setSelectedPosition(result.selectedPosition ?? null);
     }).catch(() => undefined);
     return () => { active = false; };
   }, [session.sessionId, session.totalCount, start, count, photo.id]);
   const navigate = (delta: number) => {
     if (!session.sessionId) return;
-    const position = selectedPosition ?? page.selectedPosition;
+    const position = pendingPosition.current ?? selectedPosition ?? page.selectedPosition;
     if (position === null) {
+      if (resolvingPosition.current) return;
+      resolvingPosition.current = true;
+      const request = ++navigationRequest.current;
       void window.desktopApi.listTemporaryMediaPage({ sessionId: session.sessionId, offset: 0, limit: 1, selectedId: photo.id }).then((result) => {
+        resolvingPosition.current = false;
+        if (request !== navigationRequest.current) return;
         if (result.selectedPosition !== null && result.selectedPosition !== undefined) {
-          setSelectedPosition(result.selectedPosition);
           const target = clamp(result.selectedPosition + delta, 0, Math.max(0, result.totalCount - 1));
+          pendingPosition.current = target;
+          setSelectedPosition(target);
           void window.desktopApi.listTemporaryMediaPage({ sessionId: session.sessionId!, offset: target, limit: 1 }).then((nextPage) => {
+            if (request !== navigationRequest.current) return;
             const next = nextPage.items[0];
             if (next) onPhotoChange({ ...mapCatalogAssets([next])[0]!, temporary: true });
           });
         }
-      });
+      }).catch(() => { resolvingPosition.current = false; });
       return;
     }
     const target = clamp(position + delta, 0, Math.max(0, page.total - 1));
+    pendingPosition.current = target;
+    setSelectedPosition(target);
+    const request = ++navigationRequest.current;
     void window.desktopApi.listTemporaryMediaPage({ sessionId: session.sessionId, offset: target, limit: 1 }).then((result) => {
+      if (request !== navigationRequest.current) return;
       const next = result.items[0];
       if (next) onPhotoChange({ ...mapCatalogAssets([next])[0]!, temporary: true });
     });
@@ -5950,6 +5968,12 @@ export function App(): React.JSX.Element {
       if (request === catalogRequest.current) setLoadingMore(false);
     }
   }, [favoriteOnly, catalogFilterInput, searchQuery, selectedAlbumId, selectedFolderId, selectedFolderIds, selectedSmartCollection, selectedTagId, sortBy, sortDirection]);
+
+  useEffect(() => {
+    if (!catalogReady || !catalogPhotos.some((photo) => !photo.width || !photo.height)) return;
+    const timer = window.setTimeout(() => { void refreshCatalog(selectedFolderId, true); }, 5_000);
+    return () => window.clearTimeout(timer);
+  }, [catalogReady, catalogPhotos, refreshCatalog, selectedFolderId]);
 
   useEffect(() => {
     if (!sessionReady) return;

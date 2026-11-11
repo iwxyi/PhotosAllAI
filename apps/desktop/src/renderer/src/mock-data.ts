@@ -8,6 +8,8 @@ export type Photo = {
   relativePath?: string;
   modifiedAt?: number;
   sizeBytes?: number;
+  width?: number;
+  height?: number;
   fileName: string;
   src: string;
   originalSrc?: string;

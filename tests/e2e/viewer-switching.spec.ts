@@ -96,3 +96,26 @@ test('switches portrait and landscape previews without painting the previous ima
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('holding an arrow advances the focused viewer and gallery', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'photo-viewer-arrows-'));
+  const app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js')], env: { ...process.env, PHOTOALLISAI_USER_DATA: directory, PHOTOALLISAI_E2E_DEMO: '1' } });
+  try {
+    const page = await app.firstWindow();
+    const grid = page.getByRole('listbox', { name: '图库照片' });
+    await grid.focus();
+    await page.keyboard.press('ArrowRight');
+    await grid.evaluate((element) => element.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', repeat: true, bubbles: true })));
+    await expect(page.locator('.catalog-card.is-focused')).toHaveAttribute('data-asset-id', 'photo-3');
+    await page.locator('.catalog-card.is-focused').dblclick();
+    const viewer = page.getByRole('region', { name: '看图', exact: true });
+    const canvas = viewer.locator('.canvas-wrap');
+    await canvas.focus();
+    await page.keyboard.press('ArrowRight');
+    await canvas.evaluate((element) => element.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', repeat: true, bubbles: true })));
+    await expect(viewer.locator('.viewer-title')).toContainText('IMG_7240.HEIC');
+  } finally {
+    await app.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

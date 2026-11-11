@@ -1,5 +1,6 @@
 import path from 'node:path';
 import type { CatalogAsset } from '@photoallisai/contracts';
+import { naturalSortKey } from '@photoallisai/domain';
 
 type Entry = { id: string; file?: string; fileName: string; sortKey: string | undefined; sizeBytes: number; modifiedAt: number };
 
@@ -125,11 +126,4 @@ export class TemporaryMediaIndex {
   }
 
   close(): void { this.#revision += 1; this.#sessionId = null; this.#commonDirectory = null; this.#entries = []; this.#positions.clear(); }
-}
-
-function naturalSortKey(value: string): string {
-  return value.toLocaleLowerCase().replace(/\d+/gu, (digits) => {
-    const significant = digits.replace(/^0+(?=\d)/u, '');
-    return `${String(significant.length).padStart(5, '0')}:${significant}:${String(digits.length).padStart(5, '0')}`;
-  });
 }

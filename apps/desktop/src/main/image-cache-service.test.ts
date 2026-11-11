@@ -129,6 +129,25 @@ describe('image cache governance', () => {
     await service.stop();
   });
 
+  it('clears every cached size for a selected asset only', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-folder-clear-'));
+    directories.push(directory);
+    const assetId = 'a'.repeat(32);
+    const otherId = 'b'.repeat(32);
+    const nested = path.join(directory, assetId.slice(0, 2));
+    await mkdir(nested, { recursive: true });
+    const variants = ['thumbnail', 'medium', 'preview'];
+    for (const variant of variants) await writeFile(path.join(nested, `${assetId}-123-456-${variant}.jpg`), variant);
+    const other = path.join(nested, `${otherId}-123-456-thumbnail.jpg`);
+    await writeFile(other, 'other');
+    const service = new ImageCacheService(directory, {} as never);
+    try {
+      expect(await service.clearAssets([assetId])).toEqual({ removedFiles: 3, removedBytes: variants.join('').length });
+      expect(await readFile(other, 'utf8')).toBe('other');
+      expect((await readdir(nested)).filter((name) => name.startsWith(`${assetId}-`))).toEqual([]);
+    } finally { await service.stop(); }
+  });
+
   it('includes source size in the cache fingerprint', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-cache-'));
     directories.push(directory);

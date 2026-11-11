@@ -235,6 +235,8 @@ const catalogAssetBaseSchema = z.object({
   format: z.string(),
   sizeBytes: z.number().nonnegative(),
   modifiedAt: z.number().nonnegative(),
+  width: z.number().positive().optional(),
+  height: z.number().positive().optional(),
   rating: z.number().int().min(0).max(5),
   labelColor: z.enum(['red', 'yellow', 'green', 'blue', 'purple']).nullable().default(null),
   flag: z.enum(['picked', 'rejected', 'unflagged']).default('unflagged'),

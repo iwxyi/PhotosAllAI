@@ -320,6 +320,31 @@ describe('catalog image discovery', () => {
     catalog.close();
   });
 
+  it('sorts numbered file names naturally through cursor and offset pages', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    await mkdir(photos);
+    for (const name of ['导出10.jpg', '导出2.jpg', '导出1.jpg', '导出02.jpg']) await writeFile(path.join(photos, name), name);
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([photos]);
+      const ascending = catalog.listAssetPage({ sortBy: 'fileName', limit: 10 }).items.map((asset) => asset.fileName);
+      expect(ascending).toEqual(['导出1.jpg', '导出2.jpg', '导出02.jpg', '导出10.jpg']);
+      expect(catalog.listAssetPage({ sortBy: 'fileName', offset: 2, limit: 1 }).items[0]?.fileName).toBe('导出02.jpg');
+      for (const direction of ['asc', 'desc'] as const) {
+        const expected = catalog.listAssetPage({ sortBy: 'fileName', sortDirection: direction, limit: 10 }).items.map((asset) => asset.fileName);
+        const actual: string[] = [];
+        let cursor = null;
+        do {
+          const page = catalog.listAssetPage({ sortBy: 'fileName', sortDirection: direction, cursor, limit: 1 });
+          actual.push(...page.items.map((asset) => asset.fileName));
+          cursor = page.nextCursor;
+        } while (cursor);
+        expect(actual).toEqual(expected);
+      }
+    } finally { catalog.close(); }
+  });
+
   it('keeps indexed sorting deterministic in both directions with tied values', async () => {
     const root = await createTemporaryDirectory();
     const photosDirectory = path.join(root, 'photos');
@@ -598,7 +623,7 @@ describe('catalog image discovery', () => {
     try {
       expect(repaired.listSmartCollections()).toHaveLength(6);
       const verification = new DatabaseSync(databasePath);
-      expect(verification.prepare('PRAGMA user_version').get()).toEqual({ user_version: 14 });
+      expect(verification.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 });
       expect(verification.prepare("SELECT name FROM sqlite_master WHERE name = 'asset_exif'").get()).toEqual({ name: 'asset_exif' });
       verification.close();
     } finally { repaired.close(); }
@@ -690,6 +715,39 @@ describe('catalog image discovery', () => {
     await catalog.reconcileImportedFolders();
     expect(catalog.listAssets()[0]?.offline).toBe(false);
     catalog.close();
+  });
+
+  it('keeps accessible photos online throughout a root rescan', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    await mkdir(photos);
+    await writeFile(path.join(photos, 'one.jpg'), 'one');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([photos]);
+      const rescan = catalog.synchronizeImportedRoot(photos);
+      expect(catalog.listAssetPage({}).items[0]?.offline).toBe(false);
+      await expect(rescan).resolves.toEqual({ discovered: 0, offline: 0 });
+      expect(catalog.listAssetPage({}).items[0]?.offline).toBe(false);
+    } finally { catalog.close(); }
+  });
+
+  it('returns saved source dimensions for stable thumbnail layout', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    await mkdir(photos);
+    await writeFile(path.join(photos, 'portrait.jpg'), 'portrait');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([photos]);
+      const asset = catalog.listAssetPage({}).items[0]!;
+      catalog.saveExifDetails(asset.id, { path: path.join(photos, 'portrait.jpg'), sizeBytes: asset.sizeBytes, modifiedAt: asset.modifiedAt, width: 2000, height: 3000 });
+      expect(catalog.listAssetPage({}).items[0]).toMatchObject({ width: 2000, height: 3000 });
+      const database = new DatabaseSync(path.join(root, 'catalog.sqlite'));
+      database.prepare('UPDATE assets SET modified_at = modified_at + 1 WHERE id = ?').run(asset.id);
+      database.close();
+      expect(catalog.listAssetPage({}).items[0]?.width).toBeUndefined();
+    } finally { catalog.close(); }
   });
 
   it('reports newly discovered files when another file disappears in the same reconciliation', async () => {
