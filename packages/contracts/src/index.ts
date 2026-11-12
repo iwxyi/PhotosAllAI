@@ -1050,7 +1050,9 @@ export const generationTaskPayloadSchema = z.object({
   inputSources: z.array(z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('asset'), assetId: z.string().min(1) }),
     z.object({ kind: z.literal('result'), resultId: z.string().uuid() })
-  ])).min(1).max(8).optional(),
+  ])).max(8).optional(),
+  outputFolderId: z.string().min(1).max(300).optional(),
+  textItemId: z.string().uuid().optional(),
   submissionId: z.string().uuid().optional(),
   providerProfileId: z.string().uuid(),
   batchId: z.string().uuid(),
@@ -1062,6 +1064,14 @@ export const generationTaskPayloadSchema = z.object({
   analysisRevisionId: z.string().uuid().optional(),
   disabledActionIds: z.array(z.string().min(1).max(200)).max(1_000).optional().default([]),
   userInstruction: z.string().max(20_000).optional().default('')
+}).superRefine((payload, context) => {
+  if (payload.outputFolderId) {
+    if (payload.sourceResultId || !payload.textItemId) {
+      context.addIssue({ code: 'custom', message: 'Folder generation requires a text item and no legacy source result', path: ['outputFolderId'] });
+    }
+  } else if (payload.textItemId || payload.inputSources?.length === 0) {
+    context.addIssue({ code: 'custom', message: 'Image inputs are required', path: ['inputSources'] });
+  }
 });
 
 export const generationResultSchema = z.object({
@@ -1071,7 +1081,8 @@ export const generationResultSchema = z.object({
   inputSources: z.array(z.discriminatedUnion('kind', [
     z.object({ kind: z.literal('asset'), assetId: z.string().min(1) }),
     z.object({ kind: z.literal('result'), resultId: z.string().uuid() })
-  ])).min(1).max(8).optional(),
+  ])).max(8).optional(),
+  outputFolderId: z.string().min(1).max(300).optional(),
   version: z.number().int().positive(),
   fileName: z.string().min(1),
   resultUrl: z.string(),
@@ -1243,6 +1254,7 @@ export interface DesktopApi {
   trashCatalogFolder(folderId: string): Promise<void>;
   revealCatalogAsset(assetId: string): Promise<boolean>;
   getFileDetails(assetId: string): Promise<FileDetails>;
+  getGenerationResultDetails(resultId: string): Promise<FileDetails>;
   getFileDetailsPage(assetIds: string[]): Promise<Record<string, FileDetails | null>>;
   openAssetExternally(assetId: string): Promise<void>;
   linkImageDirectory(assetId: string): Promise<void>;

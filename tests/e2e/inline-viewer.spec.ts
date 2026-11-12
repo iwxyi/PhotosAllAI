@@ -3,6 +3,122 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { _electron as electron, expect, test } from '@playwright/test';
 
+test('gallery keeps multiple selections for a batch drag', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-catalog-multidrag-'));
+  const app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js')], env: { ...process.env, PHOTOALLISAI_USER_DATA: directory, PHOTOALLISAI_E2E_DEMO: '1' } });
+  try {
+    const page = await app.firstWindow();
+    const cards = page.locator('.catalog-card');
+    await cards.first().click();
+    await cards.nth(1).click({ modifiers: ['ControlOrMeta'] });
+    await expect(page.locator('.catalog-card[aria-selected="true"]')).toHaveCount(2);
+  } finally {
+    await app.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('filmstrip selection follows back to the gallery', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-viewer-selection-'));
+  const app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js')], env: { ...process.env, PHOTOALLISAI_USER_DATA: directory, PHOTOALLISAI_E2E_DEMO: '1' } });
+  try {
+    const page = await app.firstWindow();
+    const first = page.locator('.catalog-card').first();
+    const second = page.locator('.catalog-card').nth(1);
+    const third = page.locator('.catalog-card').nth(2);
+    const secondId = await second.getAttribute('data-asset-id');
+    const thirdId = await third.getAttribute('data-asset-id');
+    await first.dblclick();
+    const viewer = page.getByRole('region', { name: '看图', exact: true });
+    await viewer.locator(`.thumb[data-asset-id="${secondId}"]`).click();
+    await expect(viewer.locator('.thumb.is-selected')).toHaveAttribute('data-asset-id', secondId!);
+    await expect(second).toHaveAttribute('aria-selected', 'true');
+    await viewer.locator(`.thumb[data-asset-id="${thirdId}"]`).click({ modifiers: ['ControlOrMeta'] });
+    await expect(viewer.locator('.thumb.is-chosen')).toHaveCount(2);
+    await expect(second).toHaveAttribute('aria-selected', 'true');
+    await expect(third).toHaveAttribute('aria-selected', 'true');
+    await page.locator('.inspector-tabs').getByRole('button', { name: 'AI', exact: true }).click();
+    await expect(page.locator('.ai-batch-selection-count')).toHaveText('已选择 2 张');
+    await viewer.locator('.canvas-wrap').focus();
+    await page.keyboard.press('ArrowLeft');
+    const keyboardViewedId = await viewer.locator('.thumb.is-selected').getAttribute('data-asset-id');
+    await expect(page.locator(`.catalog-card[data-asset-id="${keyboardViewedId}"]`)).toHaveAttribute('aria-selected', 'true');
+    await expect(third).toHaveAttribute('aria-selected', 'false');
+    await expect(viewer.locator('.thumb.is-selected')).toHaveAttribute('data-asset-id', keyboardViewedId!);
+    await viewer.locator(`.thumb[data-asset-id="${secondId}"]`).click();
+    await page.keyboard.press('Escape');
+    await expect(second).toHaveAttribute('aria-selected', 'true');
+    await expect(first).toHaveAttribute('aria-selected', 'false');
+    await expect(second).toBeFocused();
+  } finally {
+    await app.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('drags a zoomed viewer image to pan without starting a native image drag', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-viewer-pan-'));
+  const app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js')], env: { ...process.env, PHOTOALLISAI_USER_DATA: directory, PHOTOALLISAI_E2E_DEMO: '1' } });
+  try {
+    const page = await app.firstWindow();
+    await page.locator('.catalog-card').first().dblclick();
+    const viewer = page.getByRole('region', { name: '看图', exact: true });
+    const image = viewer.locator('.base-image');
+    await expect(image).toHaveClass(/is-ready/);
+    await expect(image).toHaveAttribute('draggable', 'false');
+    await image.evaluate((element) => {
+      document.body.dataset.viewerDragStarted = 'false';
+      element.addEventListener('dragstart', () => { document.body.dataset.viewerDragStarted = 'true'; });
+    });
+    await viewer.getByRole('button', { name: '放大', exact: true }).click();
+    const canvas = viewer.locator('.canvas-wrap');
+    await expect(canvas).toHaveClass(/is-zoomed/);
+    const before = await viewer.locator('.photo-canvas').evaluate((element) => getComputedStyle(element).transform);
+    const bounds = (await image.boundingBox())!;
+    const x = bounds.x + bounds.width / 2;
+    const y = bounds.y + bounds.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + 70, y + 45, { steps: 5 });
+    await page.mouse.up();
+    await expect.poll(() => viewer.locator('.photo-canvas').evaluate((element) => getComputedStyle(element).transform)).not.toBe(before);
+    await expect(page.locator('body')).toHaveAttribute('data-viewer-drag-started', 'false');
+  } finally {
+    await app.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('pinch gestures zoom the viewer around their center', async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-viewer-pinch-'));
+  const app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js')], env: { ...process.env, PHOTOALLISAI_USER_DATA: directory, PHOTOALLISAI_E2E_DEMO: '1' } });
+  try {
+    const page = await app.firstWindow();
+    await page.locator('.catalog-card').first().dblclick();
+    const canvas = page.getByRole('region', { name: '看图', exact: true }).locator('.canvas-wrap');
+    const scale = () => canvas.locator('.photo-canvas').evaluate((element) => Number(getComputedStyle(element).transform.match(/^matrix\(([^,]+)/)?.[1] ?? 1));
+    const initial = await scale();
+    await canvas.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      element.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: -100, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }));
+    });
+    await expect.poll(scale).toBeGreaterThan(initial * 1.45);
+    await canvas.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      const touches = (offset: number) => [-offset, offset].map((dx, identifier) => new Touch({ identifier, target: element, clientX: x + dx, clientY: y }));
+      element.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, touches: touches(50), targetTouches: touches(50), changedTouches: touches(50) }));
+      element.dispatchEvent(new TouchEvent('touchmove', { bubbles: true, cancelable: true, touches: touches(75), targetTouches: touches(75), changedTouches: touches(75) }));
+      element.dispatchEvent(new TouchEvent('touchend', { bubbles: true, cancelable: true, touches: [], targetTouches: [], changedTouches: touches(75) }));
+    });
+    await expect.poll(scale).toBeGreaterThan(initial * 2);
+  } finally {
+    await app.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('views gallery and batch images in place and restores source state with Escape', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-inline-viewer-'));
   const app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js')], env: { ...process.env, PHOTOALLISAI_USER_DATA: directory, PHOTOALLISAI_E2E_DEMO: '1' } });
@@ -105,6 +221,9 @@ test('views gallery and batch images in place and restores source state with Esc
     await viewer.locator('.filmstrip').focus();
     await page.keyboard.press('ControlOrMeta+a');
     await expect(viewer.locator('.thumb.is-chosen')).toHaveCount(2);
+    await viewer.locator('.thumb:not(.is-selected)').first().click();
+    const viewedId = await viewer.locator('.thumb.is-selected').getAttribute('data-asset-id');
+    await expect(page.locator(`.catalog-card[data-asset-id="${viewedId}"]`)).toHaveAttribute('aria-selected', 'true');
     await page.screenshot({ path: 'test-results/viewer-filmstrip-filters.png' });
     const filmstripHeight = await viewer.locator('.filmstrip-region').evaluate((element) => element.clientHeight);
     await viewer.getByRole('button', { name: '筛选胶片文件名', exact: true }).click();
@@ -219,6 +338,7 @@ test('views gallery and batch images in place and restores source state with Esc
     await expect(viewer).toBeVisible();
     await page.keyboard.press('ArrowLeft');
     await expect(viewer.locator('.thumb.is-selected')).not.toHaveAttribute('data-asset-id', id!);
+    const finalViewedId = await viewer.locator('.thumb.is-selected').getAttribute('data-asset-id');
     expect(await viewer.locator('.thumb.is-selected').evaluate((element) => {
       const style = getComputedStyle(element);
       return style.outlineStyle === 'solid' && style.outlineWidth === '2px';
@@ -228,11 +348,11 @@ test('views gallery and batch images in place and restores source state with Esc
     await expect(viewer).toHaveCount(0);
     await expect(source).toHaveAttribute('data-retained', 'yes');
     expect(await source.evaluate((element) => element.scrollTop)).toBe(scroll);
-    await expect(card).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator(`.catalog-card[data-asset-id="${finalViewedId}"]`)).toHaveAttribute('aria-selected', 'true');
     await expect(source).toBeFocused();
     await card.click({ button: 'right' });
     await page.getByRole('menuitem', { name: /加入 AI 批量修图/ }).click();
-    await expect(page.getByRole('tab', { name: 'AI 批量修图', exact: true })).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByRole('tab', { name: '图片生成', exact: true })).toHaveAttribute('aria-selected', 'true');
     const queue = page.locator('.batch-queue-item').first();
     const prompt = queue.locator('textarea');
     await prompt.fill('保留原有构图，改为动漫风');

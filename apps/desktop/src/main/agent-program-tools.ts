@@ -6,7 +6,7 @@ import {
   appSettingsSchema, copyCatalogAssetsInputSchema, createCatalogFolderInputSchema,
   listTaskPageInputSchema, moveCatalogFolderInputSchema, moveQueuedTaskInputSchema, renameCatalogAssetsInputSchema,
   renameCatalogFolderInputSchema,
-  saveCatalogAlbumInputSchema, saveExportPresetInputSchema, savePromptTemplateInputSchema,
+  saveCatalogAlbumInputSchema, saveSmartCollectionInputSchema, saveExportPresetInputSchema, savePromptTemplateInputSchema,
   updateQueuedGenerationTaskInputSchema
 } from '@photoallisai/contracts';
 import type { AgentTool, AgentToolContext } from './agent-tools';
@@ -30,6 +30,37 @@ export function createAgentProgramTools(d: {
     run: (a: z.output<T>, c: AgentToolContext) => unknown | Promise<unknown>): AgentTool => ({ name, description, schema, approval, replayable,
       execute: async (raw, c) => ({ result: await run(schema.parse(raw), c) }) });
   const ids = z.array(z.string().min(1)).min(1).max(500);
+  const selectFolderBatch = (folderId: string, c: AgentToolContext, next = false) => {
+    const folder = d.catalog.listFolders().find((item) => item.id === folderId);
+    if (!folder) throw new Error('FOLDER_NOT_FOUND');
+    if (next && c.session.folderScope?.folderId !== folderId) throw new Error('没有可继续的文件夹范围，请先选择该文件夹');
+    if (next) {
+      const current = new Set(c.session.assetIds);
+      const generated = c.session.calls.filter((call) => call.status === 'done' && call.resultIds.length &&
+        (call.arguments.assetIds as string[] | undefined)?.some((id) => current.has(id)));
+      const inspected = new Set(c.session.calls.filter((call) => call.name === 'vision.inspect' && call.status === 'done')
+        .flatMap((call) => call.arguments.resultIds as string[] | undefined ?? []));
+      if (generated.some((call) => call.resultIds.some((id) => !inspected.has(id)))) throw new Error('请先检查当前批次所有生成结果，再进入下一批');
+    }
+    const snapshot = next ? c.session.folderScope!.assetIds : d.catalog.listAssetIdsInFolder(folderId).sort();
+    const start = next ? c.session.folderScope!.nextIndex : 0;
+    const batchSize = 100;
+    const assetIds = snapshot.slice(start, start + batchSize);
+    if (next && !assetIds.length) return { folderId, folderName: folder.name, assetIds: [], added: 0, batch: Math.ceil(start / batchSize), total: snapshot.length, selectedBefore: start, remaining: 0, hasNext: false };
+    if (snapshot.length <= batchSize && !next) {
+      const merged = [...new Set([...c.session.assetIds, ...assetIds])];
+      if (merged.length > 500) throw new Error('合并后的会话范围超过 500 张，请先在新会话中选择该文件夹');
+      c.session.assetIds = merged;
+      c.session.folderScope = undefined;
+    } else {
+      c.session.assetIds = assetIds;
+      c.session.folderScope = { folderId, assetIds: snapshot, nextIndex: start + assetIds.length };
+      if (next) { c.session.turns = 0; c.session.outputs = 0; }
+    }
+    c.save();
+    return { folderId, folderName: folder.name, assetIds, added: assetIds.length, batch: Math.floor(start / batchSize) + 1, total: snapshot.length,
+      selectedBefore: start, remaining: snapshot.length - start - assetIds.length, hasNext: start + assetIds.length < snapshot.length };
+  };
   const scope = (assetIds: string[], c: AgentToolContext) => {
     if (assetIds.some((id) => !c.session.assetIds.includes(id))) throw new Error('超出会话图片范围，请先 scope.request。');
   };
@@ -37,13 +68,23 @@ export function createAgentProgramTools(d: {
     if (!c.session.assetIds.some((assetId) => (trash ? d.generation.listTrashed(assetId) : d.generation.list(assetId)).some((r) => r.id === id))) throw new Error('版本超出会话范围');
   };
   const taskSchema = z.object({ taskId: z.string().uuid(), action: z.enum(['pause', 'resume', 'cancel', 'retry']) }).strict();
+  const taskManySchema = z.object({
+    action: z.enum(['pause', 'resume', 'cancel', 'retry']),
+    scope: z.enum(['session', 'batch', 'ids', 'all']),
+    taskId: z.string().uuid().optional(),
+    taskIds: z.array(z.string().uuid()).max(10_000).optional()
+  }).strict().superRefine((value, ctx) => {
+    if (value.scope === 'batch' && !value.taskId) ctx.addIssue({ code: 'custom', path: ['taskId'], message: '批次需要一个任务 ID' });
+    if (value.scope === 'ids' && !value.taskIds?.length) ctx.addIssue({ code: 'custom', path: ['taskIds'], message: '请指定任务 ID' });
+  });
   const controlTask = (a: z.infer<typeof taskSchema>) => {
+    if (a.action === 'retry' && d.tasks.find(a.taskId)?.errorCode === 'GENERATION_RESULT_UNCERTAIN') throw new Error('生成结果状态不确定，请先人工核对文件后再重试');
     const result = d.tasks[a.action](a.taskId);
     if (a.action === 'pause' || a.action === 'cancel') d.cancelTask(a.taskId); else d.wake();
     return toRendererTask(result);
   };
   const taskScope = (id: string, c: AgentToolContext) => {
-    if (!c.session.calls.some((call) => call.taskIds.includes(id))) throw new Error('不是本会话作业，使用 tasks.control-global 并确认。');
+    if (!c.session.calls.some((call) => call.taskIds.includes(id))) throw new Error('不是本会话作业，请先用 tasks.search 查找，再使用 tasks.control-global。');
   };
   const idSchema = z.object({ id: z.string().uuid() }).strict();
   const templateBatchSchema = z.object({ templates: z.array(savePromptTemplateInputSchema).min(1).max(50) }).strict();
@@ -130,20 +171,29 @@ export function createAgentProgramTools(d: {
       d.changed();
       return { read: Object.keys(files), written: entries.map(([path, content]) => ({ path, bytes: Buffer.byteLength(content, 'utf8') })) };
     }),
-    define('scope.request', '申请新增图片到会话操作范围。先查询得到明确 ID，用户确认一次后可自动处理；不能静默扩大全库权限。', z.object({ assetIds: ids, reason: z.string().min(1).max(2000) }).strict(), true, true, (a, c) => {
+    define('scope.request', '将已查询到的明确图片加入当前会话范围，最多 500 张；这是应用内范围选择，不改动图片。根据用户目标直接执行，含糊时先询问。', z.object({ assetIds: ids, reason: z.string().min(1).max(2000) }).strict(), false, true, (a, c) => {
       const all = [...new Set([...c.session.assetIds, ...a.assetIds])];
       if (all.length > 500) throw new Error('单会话最多 500 张');
       if (d.catalog.listAssetPage({ assetIds: all, workflow: false, limit: 500 }).items.length !== all.length) throw new Error('图片不存在');
       c.session.assetIds = all; c.save(); return { assetIds: all };
     }),
+    define('scope.folder', '选择已关联文件夹及子文件夹。超过 100 张时每批 100 张；处理并验收当前批次后以相同 folderId 和 next=true 获取下一批，直到 hasNext=false。', z.object({ folderId: z.string().min(1), next: z.boolean().optional() }).strict(), false, true, (a, c) => selectFolderBatch(a.folderId, c, a.next)),
     define('catalog.stats', '图库图片总数和离线数量。', z.object({}).strict(), false, true, () => d.catalog.getStats()),
     define('tags.list', '读取图库标签。', z.object({}).strict(), false, true, () => d.catalog.listTags()),
     define('collections.list', '读取智能集合及其筛选规则。', z.object({}).strict(), false, true, () => d.catalog.listSmartCollections()),
+    define('collections.save', '创建或更新智能集合规则。先读取 collections.list，更新时传原 id；只改变应用内动态筛选定义，不移动照片。', saveSmartCollectionInputSchema, false, false, (a) => { const result = d.catalog.saveSmartCollection(a); d.changed(); return result; }),
+    define('collections.delete', '删除指定智能集合定义，不删除原图；默认集合不可删除。', idSchema, true, false, (a) => { const collection = d.catalog.listSmartCollections().find((item) => item.id === a.id); if (!collection || collection.isDefault) throw new Error('SMART_COLLECTION_NOT_DELETABLE'); d.catalog.deleteSmartCollection(a.id); d.changed(); return { deleted: a.id }; }),
     define('albums.save', '创建或重命名相册，不移动原文件。', saveCatalogAlbumInputSchema, false, false, (a) => { const r = d.catalog.saveAlbum(a); d.changed(); return r; }),
     define('albums.delete', '删除相册定义，照片保留。', idSchema, true, false, (a) => { d.catalog.deleteAlbum(a.id); d.changed(); return { deleted: a.id }; }),
-    define('folders.import', '关联明确的绝对目录并导入其照片，不移动原文件。', z.object({ paths: z.array(z.string().min(1)).min(1).max(20) }).strict(), true, false, async (a) => {
+    define('folders.import', '关联用户明确指定的绝对目录并导入照片，不移动原文件。自动选择首个新关联文件夹，每批最多 100 张；完成当前批后用 scope.folder(next=true) 继续，多个文件夹依次选择。', z.object({ paths: z.array(z.string().min(1)).min(1).max(20) }).strict(), false, false, async (a, c) => {
       if (a.paths.some((p) => !isAbsolute(p))) throw new Error('需要绝对目录');
-      const imported = await d.catalog.importFolders(a.paths); d.watchFolders(); d.changed(); return { imported, folders: d.catalog.listFolders() };
+      const before = new Set(d.catalog.listFolders().filter((item) => item.isRoot).map((item) => item.id));
+      const imported = await d.catalog.importFolders(a.paths);
+      const folders = d.catalog.listFolders();
+      const addedFolders = folders.filter((item) => item.isRoot && !before.has(item.id));
+      const selected = addedFolders[0] ? selectFolderBatch(addedFolders[0].id, c) : null;
+      d.watchFolders(); d.changed();
+      return { imported, folders, addedFolders: addedFolders.map((item) => ({ id: item.id, name: item.name, assetCount: item.assetCount })), scoped: selected?.added ?? 0, scope: selected };
     }),
     define('folders.synchronize', '重新扫描已关联文件夹的新增和离线图片。', z.object({ folderId: z.string().min(1) }).strict(), false, true, async (a) => { const r = await d.catalog.synchronizeFolder(a.folderId); d.changed(); return r; }),
     define('folders.create', '在已关联父目录创建新文件夹，返回名称与 ID。', createCatalogFolderInputSchema, false, false, async (a) => { const r = await d.catalog.createFolder(a); d.watchFolders(); d.changed(); return r; }),
@@ -174,7 +224,26 @@ export function createAgentProgramTools(d: {
     define('generation.restore', '恢复会话照片在回收站中的指定 AI 版本。', idSchema, false, false, async (a, c) => { resultScope(a.id, c, true); const r = await d.generation.restore(a.id); d.changed(); return r; }),
     define('tasks.search', '分页查询应用作业，保留真实状态；不自动授权控制其他会话作业。', listTaskPageInputSchema, false, true, (a) => { const r = d.tasks.listPage(a); return { ...r, items: r.items.map(toRendererTask) }; }),
     define('tasks.control', '暂停、恢复、取消或重试本会话的作业。', taskSchema, false, false, (a, c) => { taskScope(a.taskId, c); return controlTask(a); }),
-    define('tasks.control-global', '控制其他来源作业，需用户确认避免打断其他工作。', taskSchema, true, false, controlTask),
+    define('tasks.control-global', '暂停、恢复、取消或重试 tasks.search 找到的明确任务。操作任务状态，不删除原图或结果；目标不明确时先询问。', taskSchema, false, false, controlTask),
+    define('tasks.control-many', '批量控制任务：scope=session 当前会话，batch 指定任务所属批次，ids 明确任务 ID，all 全部任务。先用 tasks.search 查看状态；仅当用户明确说全部/所有时使用 all。pause/resume/cancel/retry 只作用于符合状态的任务，返回处理与跳过数量，不删除结果。', taskManySchema, false, false, (a, c) => {
+      const tasks = a.scope === 'session' ? c.session.calls.flatMap((call) => call.taskIds).flatMap((id) => d.tasks.find(id) ?? [])
+        : a.scope === 'batch' ? d.tasks.batchForTask(a.taskId!)
+          : a.scope === 'ids' ? a.taskIds!.flatMap((id) => d.tasks.find(id) ?? []) : d.tasks.list();
+      const eligible = {
+        pause: ['queued', 'preparing', 'uploading', 'processing', 'downloading'],
+        resume: ['paused'], cancel: ['draft', 'queued', 'paused', 'preparing', 'uploading', 'processing', 'downloading'],
+        retry: ['failed', 'canceled']
+      }[a.action];
+      const unique = [...new Map(tasks.map((task) => [task.id, task])).values()];
+      const selected = unique.filter((task) => eligible.includes(task.status) && !(a.action === 'retry' && task.errorCode === 'GENERATION_RESULT_UNCERTAIN'));
+      const failed: Array<{ id: string; error: string }> = [];
+      let changed = 0;
+      for (const task of selected) {
+        try { controlTask({ taskId: task.id, action: a.action }); changed += 1; }
+        catch (error) { failed.push({ id: task.id, error: error instanceof Error ? error.message : String(error) }); }
+      }
+      return { scope: a.scope, action: a.action, matched: unique.length, changed, skipped: unique.length - selected.length, failed };
+    }),
     define('tasks.reorder', '调整本会话排队任务顺序。', moveQueuedTaskInputSchema, false, false, (a, c) => { taskScope(a.taskId, c); return toRendererTask(d.tasks.moveQueued(a)); }),
     define('tasks.update-generation', '修改本会话尚未执行的生成任务提示词。', updateQueuedGenerationTaskInputSchema, false, true, (a, c) => { taskScope(a.taskId, c); return toRendererTask(d.tasks.updateQueuedGeneration(a)); }),
     define('templates.list', '读取全部活动提示词模板及当前版本。创建、修改前先读取，依据已有模板判断新建还是创建下一版本。', z.object({}).strict(), false, true, () => d.templates.list()),
@@ -186,7 +255,8 @@ export function createAgentProgramTools(d: {
     define('export.preset-save', '保存导出预设，包含尺寸、格式和文件命名。', saveExportPresetInputSchema, false, false, (a) => d.exportPresets.save(a)),
     define('export.preset-delete', '删除指定导出预设，已导出文件不变。', idSchema, true, false, (a) => { d.exportPresets.delete(a.id); return { deleted: a.id }; }),
     define('settings.read', '读取程序通用设置，不含模型密钥。', z.object({}).strict(), false, true, () => d.settings.get()),
-    define('settings.update', '更新指定通用设置，其余设置保留。影响全局，需确认。', appSettingsSchema.partial().strict(), true, true, async (a) => { const r = await d.settings.save(appSettingsSchema.parse({ ...await d.settings.get(), ...a })); await d.settingsChanged(); d.changed(); return r; }),
+    define('settings.update', '修改主题、语言或缓存上限等通用设置，其余设置保留。生成文件存储方式请使用 settings.storage-mode 并确认。', appSettingsSchema.omit({ generationStorageMode: true }).partial().strict(), false, true, async (a) => { const r = await d.settings.save(appSettingsSchema.parse({ ...await d.settings.get(), ...a })); await d.settingsChanged(); d.changed(); return r; }),
+    define('settings.storage-mode', '修改后续 AI 生成文件的存储方式，可能影响生成版本的位置，需要确认。', z.object({ generationStorageMode: appSettingsSchema.shape.generationStorageMode }).strict(), true, true, async (a) => { const r = await d.settings.save(appSettingsSchema.parse({ ...await d.settings.get(), ...a })); await d.settingsChanged(); d.changed(); return r; }),
     define('app.diagnostics', '读取应用运行诊断和完整性状态，不包含密钥。', z.object({}).strict(), false, true, () => d.diagnostics())
   ];
 }

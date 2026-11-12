@@ -42,7 +42,7 @@ test('toggles global side panels independently and together without disrupting t
     await expect(left).toBeVisible();
     await expect(right).toBeVisible();
     await page.getByRole('button', { name: '打开工作区', exact: true }).click();
-    await page.getByRole('menuitem', { name: 'AI 批量修图', exact: true }).click();
+    await page.getByRole('menuitem', { name: '图片生成', exact: true }).click();
     const prompt = page.getByLabel('批次整体提示词');
     await prompt.fill('保留提示词');
     await page.keyboard.press('Tab');

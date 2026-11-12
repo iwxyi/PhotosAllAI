@@ -63,14 +63,15 @@ test('direct generation shows batch and image progress, retains candidates and r
   }, `http://127.0.0.1:${address.port}`);
   await expect(page.locator('.catalog-card')).toHaveCount(2);
   await page.locator('.catalog-card').first().dblclick();
-  await page.getByRole('button', { name: '添加到批量修图', exact: true }).click();
+  await page.getByRole('button', { name: '添加到 AI 修图', exact: true }).click();
   await page.keyboard.press('Escape');
   await page.locator('.catalog-card').nth(1).dblclick();
-  await page.getByRole('button', { name: '添加到批量修图', exact: true }).click();
+  await page.getByRole('button', { name: '添加到 AI 修图', exact: true }).click();
   await page.getByRole('button', { name: '打开批量修图' }).click();
   const items = page.locator('.batch-queue-item');
   await expect(items).toHaveCount(2);
   await expect(items.first().getByPlaceholder('补充这张图片的独立要求')).toBeVisible();
+  await expect(items.first().getByRole('button', { name: '运行 A.jpg' })).toBeVisible();
   await expect(items.first().getByText('本图补充要求')).toHaveCount(0);
   await expect(items.first().getByRole('spinbutton')).toHaveCount(0);
   await page.getByLabel('批次整体提示词').fill('水彩风格，保持人物身份');
@@ -79,13 +80,13 @@ test('direct generation shows batch and image progress, retains candidates and r
   await page.getByRole('button', { name: '生成全部', exact: true }).click();
   const progress = page.getByRole('region', { name: '本批生成进度' });
   await expect(progress).toBeVisible();
-  await expect(page.getByRole('button', { name: '生成中…', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '全部运行中…', exact: true })).toBeDisabled();
   await page.getByRole('tab', { name: '图库', exact: true }).click();
   await expect(page.locator('.catalog-card')).toHaveCount(2);
   await page.locator('.catalog-card').first().dblclick();
   await expect(page.getByRole('region', { name: '看图', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
-  await page.getByRole('tab', { name: 'AI 批量修图', exact: true }).click();
+  await page.getByRole('tab', { name: '图片生成', exact: true }).click();
   await expect(progress).toBeVisible();
   await expect(items.first()).not.toContainText('待识别');
   await expect(progress).toContainText('完成 2/4 · 失败 2', { timeout: 25_000 });
@@ -104,6 +105,7 @@ test('direct generation shows batch and image progress, retains candidates and r
   await expect(page.getByRole('region', { name: '本批生成进度' })).toContainText('完成 4/4', { timeout: 25_000 });
   await expect(page.getByRole('region', { name: '本批生成进度' }).getByRole('progressbar')).toHaveCount(0);
   await expect(page.locator('.batch-candidate')).toHaveCount(4);
+  await expect(items.first().getByRole('button', { name: '运行 A.jpg' })).toBeEnabled();
   expect(requests).toHaveLength(6);
   await expect(page.getByRole('button', { name: '生成全部', exact: true })).toBeEnabled();
   await page.setViewportSize({ width: 1000, height: 760 });
@@ -115,7 +117,6 @@ test('viewer remembers one target, temporarily overrides task originals and navi
   test.setTimeout(90_000);
   await page.getByLabel('默认生成数量').fill('2');
   await page.getByRole('button', { name: '生成全部', exact: true }).click();
-  await page.getByRole('alertdialog', { name: '重新生成全部图片？' }).getByRole('button', { name: '重新生成' }).click();
   await expect.poll(async () => page.evaluate(async () => {
     const assets = await window.desktopApi.listCatalogAssets();
     return (await Promise.all(assets.map((asset) => window.desktopApi.listGenerationResults(asset.id)))).flat().length;
@@ -130,16 +131,16 @@ test('viewer remembers one target, temporarily overrides task originals and navi
   const firstInLatestBatch = results.filter((result) => result.batchId === latest.batchId).sort((a, b) => a.version - b.version)[0]!;
   const catalogTarget = page.getByLabel('图库流程版本', { exact: true });
   await catalogTarget.selectOption('no-ai');
-  await expect(card.locator('img')).not.toHaveAttribute('src', firstInLatestBatch.resultUrl);
+  await expect(card.locator('img:not(.catalog-image-previous)')).not.toHaveAttribute('src', firstInLatestBatch.resultUrl);
   await catalogTarget.selectOption('latest-ai');
-  await expect(card.locator('img')).toHaveAttribute('src', firstInLatestBatch.resultUrl);
+  await expect(card.locator('img:not(.catalog-image-previous)')).toHaveAttribute('src', firstInLatestBatch.resultUrl);
   await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
   await page.getByRole('checkbox', { name: '视图', exact: true }).check();
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: '列表视图', exact: true }).click();
-  await expect(page.locator(`.catalog-list-row[data-asset-id="${assetId}"] img`)).toHaveAttribute('src', firstInLatestBatch.resultUrl);
+  await expect(page.locator(`.catalog-list-row[data-asset-id="${assetId}"] img:not(.catalog-image-previous)`)).toHaveAttribute('src', firstInLatestBatch.resultUrl);
   await page.getByRole('button', { name: '网格视图', exact: true }).click();
-  await expect(card.locator('img')).toHaveAttribute('src', firstInLatestBatch.resultUrl);
+  await expect(card.locator('img:not(.catalog-image-previous)')).toHaveAttribute('src', firstInLatestBatch.resultUrl);
   await page.screenshot({ path: 'test-results/catalog-version-target.png' });
   await card.dblclick();
   const target = page.getByLabel('切换目标版本');
@@ -154,19 +155,31 @@ test('viewer remembers one target, temporarily overrides task originals and navi
   await expect(catalogTarget).toHaveValue('no-ai');
   await target.selectOption('latest-ai');
   await expect(page.locator('.generated-layer img')).toHaveAttribute('src', firstInLatestBatch.resultUrl);
+  await page.getByRole('button', { name: '详情', exact: true }).click();
+  const fileInfo = page.locator('.inspector-info > .inspector-section').first();
+  const fileValue = (label: string) => fileInfo.locator('.metadata-list > div').filter({ hasText: new RegExp(`^${label}`) }).locator('strong');
+  const resultDetails = await page.evaluate((id) => window.desktopApi.getGenerationResultDetails(id), firstInLatestBatch.id);
+  const originalDetails = await page.evaluate((id) => window.desktopApi.getFileDetails(id!), assetId);
+  await expect(fileValue('文件名')).toHaveText(firstInLatestBatch.fileName);
+  await expect(fileValue('尺寸')).toHaveText(`${resultDetails.width} × ${resultDetails.height}`);
+  await expect(fileValue('文件大小')).toHaveText(/\S/);
+  await expect(fileInfo.getByRole('button', { name: '复制文件路径' })).toHaveCount(0);
   await page.locator('.canvas-wrap').focus();
   await page.keyboard.down('Space');
   await expect(page.locator('.generated-layer img')).toHaveCount(0);
+  await expect(fileValue('文件名')).toHaveText(path.basename(originalDetails.path));
+  await expect(fileValue('尺寸')).toHaveText(`${originalDetails.width} × ${originalDetails.height}`);
   await expect(target).toHaveValue('latest-ai');
   await page.keyboard.up('Space');
   await expect(page.locator('.generated-layer img')).toHaveAttribute('src', firstInLatestBatch.resultUrl);
-  await expect(page.locator(`.filmstrip .thumb[data-asset-id="${assetId}"] img`)).toHaveAttribute('src', firstInLatestBatch.resultUrl);
+  await expect(fileValue('文件名')).toHaveText(firstInLatestBatch.fileName);
+  await expect(page.locator(`.filmstrip .thumb[data-asset-id="${assetId}"] img:not(.catalog-image-previous)`)).toHaveAttribute('src', firstInLatestBatch.resultUrl);
   const stripIds = await page.locator('.filmstrip .thumb').evaluateAll((elements) => elements.map((element) => element.getAttribute('data-asset-id')!));
   for (const id of stripIds) {
     const candidates = await page.evaluate((assetId) => window.desktopApi.listGenerationResults(assetId), id);
     const newest = [...candidates].sort((a, b) => b.createdAt - a.createdAt || b.version - a.version)[0]!;
     const expected = candidates.filter((result) => result.batchId === newest.batchId).sort((a, b) => a.version - b.version)[0]!;
-    await expect(page.locator(`.filmstrip .thumb[data-asset-id="${id}"] img`)).toHaveAttribute('src', expected.resultUrl);
+    await expect(page.locator(`.filmstrip .thumb[data-asset-id="${id}"] img:not(.catalog-image-previous)`)).toHaveAttribute('src', expected.resultUrl);
   }
   const otherId = stripIds.find((id) => id !== assetId)!;
   const otherResults = await page.evaluate((id) => window.desktopApi.listGenerationResults(id), otherId);
@@ -197,11 +210,11 @@ test('viewer remembers one target, temporarily overrides task originals and navi
   await expect(page.locator('.generated-layer img')).toHaveAttribute('src', firstInLatestBatch.resultUrl);
   await target.selectOption('no-ai');
   await expect(page.locator('.generated-layer img')).toHaveCount(0);
-  await expect(page.locator(`.filmstrip .thumb[data-asset-id="${assetId}"] img`)).not.toHaveAttribute('src', firstInLatestBatch.resultUrl);
+  await expect(page.locator(`.filmstrip .thumb[data-asset-id="${assetId}"] img:not(.catalog-image-previous)`)).not.toHaveAttribute('src', firstInLatestBatch.resultUrl);
   await page.keyboard.press('Escape');
 
-  await page.getByRole('tab', { name: 'AI 批量修图', exact: true }).click();
-  await page.locator(`.batch-queue-item[data-workflow-asset-id="${assetId}"] .batch-queue-source`).dblclick();
+  await page.getByRole('tab', { name: '图片生成', exact: true }).click();
+  await page.locator(`.batch-queue-item[data-workflow-asset-id="${assetId}"] .batch-reference-preview`).first().click();
   await expect(target).toHaveValue('latest-ai');
   await expect(page.locator('.generated-layer img')).toHaveAttribute('src', firstInLatestBatch.resultUrl);
   expect(await page.evaluate(() => localStorage.getItem('photoallisai.viewer-version-target'))).toBe('no-ai');
@@ -215,7 +228,7 @@ test('viewer remembers one target, temporarily overrides task originals and navi
   await expect(page.locator('.generated-layer img')).toHaveCount(0);
   await page.keyboard.press('Escape');
 
-  await page.getByRole('tab', { name: 'AI 批量修图', exact: true }).click();
+  await page.getByRole('tab', { name: '图片生成', exact: true }).click();
   const candidates = page.locator('.batch-candidate');
   const reviewsBefore = await page.evaluate(async () => {
     const assets = await window.desktopApi.listCatalogAssets();
@@ -320,12 +333,12 @@ test('branches from a selected AI result and keeps the source relationship', asy
     await window.desktopApi.saveProviderProfile({ name: 'ACE Fixture', kind: 'acedata-nano-banana', purpose: 'generation', baseUrl, modelId: 'nano-banana-pro', apiKey: 'fixture-key', enabled: true, isDefault: true, requestTimeoutMs: 300000, retryCount: 0, customHeaders: {} });
   }, `http://127.0.0.1:${address.port}`);
   await page.reload();
-  if (await page.getByRole('tab', { name: 'AI 批量修图', exact: true }).count() === 0) {
+  if (await page.getByRole('tab', { name: '图片生成', exact: true }).count() === 0) {
     await page.locator('.catalog-card').first().dblclick();
-    await page.getByRole('button', { name: '添加到批量修图', exact: true }).click();
+    await page.getByRole('button', { name: '添加到 AI 修图', exact: true }).click();
     await page.getByRole('button', { name: '打开批量修图' }).click();
   }
-  await page.getByRole('tab', { name: 'AI 批量修图', exact: true }).click();
+  await page.getByRole('tab', { name: '图片生成', exact: true }).click();
   await page.getByLabel('批次整体提示词').fill('自然修图');
   await page.getByLabel('默认生成数量').fill('1');
   if (await page.locator('.batch-candidate').count() === 0) {
@@ -339,7 +352,7 @@ test('branches from a selected AI result and keeps the source relationship', asy
       const taskPage = await window.desktopApi.listTaskPage({ includeBatchMembers: true, limit: 200, cursor: null });
       return taskPage.items.filter((task) => task.kind === 'generation' && task.assetId === id && !['completed', 'failed', 'canceled'].includes(task.status)).length;
     }, assetId), { timeout: 25_000 }).toBe(0);
-    await expect(item.locator('.batch-queue-meta button').first()).toBeEnabled();
+    await expect(item.getByRole('button', { name: /再次生成|重试失败版本/ })).toBeEnabled();
   };
   await waitForGenerationIdle();
   const source = item.locator('.batch-candidate').first();
@@ -376,7 +389,7 @@ test('branches from a selected AI result and keeps the source relationship', asy
   const compareSetting = page.getByRole('checkbox', { name: '生成图对比' });
   await expect(compareSetting).not.toBeChecked();
   await compareSetting.check();
-  await page.getByRole('tab', { name: 'AI 批量修图', exact: true }).click();
+  await page.getByRole('tab', { name: '图片生成', exact: true }).click();
   await item.locator(`.batch-tree-node[data-result-id="${result!.id}"] .batch-candidate`).click();
   await page.locator('.canvas-wrap').focus();
   await page.keyboard.down('Space');
@@ -389,4 +402,85 @@ test('branches from a selected AI result and keeps the source relationship', asy
   await page.getByRole('menuitem', { name: '设置', exact: true }).click();
   await page.getByRole('button', { name: '外观', exact: true }).click();
   await expect(page.getByRole('checkbox', { name: '生成图对比' })).toBeChecked();
+});
+
+test('adds a text-to-image item to the batch queue and lists its results in the selected folder', async () => {
+  test.setTimeout(60_000);
+  fail = false;
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('No fixture server');
+  await page.evaluate(async (baseUrl) => {
+    await window.desktopApi.saveProviderProfile({ name: 'ACE Fixture', kind: 'acedata-nano-banana', purpose: 'generation', baseUrl, modelId: 'nano-banana-pro', apiKey: 'fixture-key', enabled: true, isDefault: true, requestTimeoutMs: 300000, retryCount: 0, customHeaders: {} });
+  }, `http://127.0.0.1:${address.port}`);
+  await page.reload();
+  await page.getByRole('tab', { name: '图库', exact: true }).click();
+  const folderId = await page.evaluate(async () => (await window.desktopApi.listCatalogFolders())[0]!.id);
+  await page.locator(`[data-folder-id="${folderId}"]`).click();
+  await page.getByRole('button', { name: 'AI', exact: true }).click();
+  await page.getByRole('button', { name: '打开批量修图' }).click();
+  await page.getByRole('button', { name: '添加生图队列项', exact: true }).click();
+  const item = page.locator('[data-prompt-generation-item]').last();
+  await expect(item.locator('.batch-queue-source')).toHaveCount(0);
+  await expect(item.getByRole('button', { name: '添加参考图' })).toBeVisible();
+  await expect(item.getByRole('textbox', { name: '生图提示词' })).toBeVisible();
+  const compactLayout = await item.evaluate((element) => {
+    const strip = element.querySelector('.batch-reference-strip')!.getBoundingClientRect();
+    const prompt = element.querySelector('.batch-item-settings')!.getBoundingClientRect();
+    return { stripWidth: strip.width, gap: prompt.left - strip.right };
+  });
+  expect(compactLayout.stripWidth).toBeLessThan(100);
+  expect(compactLayout.gap).toBeGreaterThanOrEqual(0);
+  expect(compactLayout.gap).toBeLessThan(20);
+  await item.getByRole('textbox').fill('雨夜街头，霓虹倒映在湿润路面，电影感构图');
+  await page.getByLabel('批次整体提示词').fill('高品质电影概念图');
+  await page.getByLabel('默认生成数量').fill('2');
+  const previousRequests = requests.length;
+  await page.getByRole('button', { name: '生成全部', exact: true }).click();
+  const itemId = (await item.getAttribute('data-prompt-generation-item'))!;
+  await expect.poll(() => page.evaluate((id) => window.desktopApi.listTaskBatch({ kind: 'generation', batchId: id }).then((tasks) => tasks.length), itemId), { timeout: 25_000 }).toBe(2);
+  await expect(item.locator('.batch-candidate')).toHaveCount(2, { timeout: 25_000 });
+  await expect(item).toContainText('已生成 2 张');
+  const textRequests = requests.slice(previousRequests).filter((request) => String(request.prompt).includes('雨夜街头'));
+  expect(textRequests).toHaveLength(2);
+  expect(textRequests.every((request) => request.action === 'generate' && Array.isArray(request.image_urls) && request.image_urls.length === 0)).toBe(true);
+  expect(textRequests.every((request) => String(request.prompt).includes('高品质电影概念图'))).toBe(true);
+  await item.locator('.batch-candidate').first().click();
+  await expect(page.locator('.canvas-wrap')).toBeVisible();
+  await page.keyboard.press('Escape');
+});
+
+test('adds ordered reference images to a folder generation item', async () => {
+  test.setTimeout(60_000);
+  fail = false;
+  await page.getByRole('tab', { name: '图片生成', exact: true }).click();
+  await page.getByRole('button', { name: '添加生图队列项', exact: true }).click();
+  const item = page.locator('[data-prompt-generation-item]').last();
+  await item.getByRole('button', { name: '添加参考图' }).click();
+  const picker = page.getByRole('dialog', { name: '添加参考图' });
+  await picker.getByLabel('搜索参考图').fill('A.jpg');
+  await picker.getByRole('button', { name: 'A.jpg', exact: true }).click();
+  await item.getByRole('button', { name: '添加参考图' }).click();
+  await picker.getByLabel('搜索参考图').fill('B.jpg');
+  await picker.getByRole('button', { name: 'B.jpg', exact: true }).click();
+  await expect(item.locator('.batch-reference')).toHaveCount(2);
+  const referenceLayout = await item.evaluate((element) => {
+    const strip = element.querySelector('.batch-reference-strip')!.getBoundingClientRect();
+    const prompt = element.querySelector('.batch-item-settings')!.getBoundingClientRect();
+    return { stripWidth: strip.width, itemWidth: element.getBoundingClientRect().width, gap: prompt.left - strip.right };
+  });
+  expect(referenceLayout.stripWidth).toBeGreaterThan(200);
+  expect(referenceLayout.stripWidth).toBeLessThan(referenceLayout.itemWidth / 2);
+  expect(referenceLayout.gap).toBeLessThan(20);
+  await item.locator('.batch-reference').nth(1).dragTo(item.locator('.batch-reference').first());
+  await expect(item.locator('.batch-reference').first().getByRole('button', { name: '查看B.jpg' })).toBeVisible();
+  await item.getByRole('textbox', { name: '生图提示词' }).fill('把两张参考照片融合为一张');
+  const itemId = (await item.getAttribute('data-prompt-generation-item'))!;
+  await item.getByRole('button', { name: '再次生成生图' }).click();
+  await expect.poll(() => page.evaluate((id) => window.desktopApi.listTaskBatch({ kind: 'generation', batchId: id }).then((tasks) => tasks[0]?.status), itemId), { timeout: 25_000 }).toBe('completed');
+  const task = await page.evaluate((id) => window.desktopApi.listTaskBatch({ kind: 'generation', batchId: id }).then((tasks) => tasks[0]), itemId);
+  expect(task?.payload.inputSources).toHaveLength(2);
+  const names = await page.evaluate(async (ids) => (await window.desktopApi.listCatalogAssetPage({ assetIds: ids, limit: 2 })).items.map((asset) => [asset.id, asset.fileName] as const), (task?.payload.inputSources as Array<{ assetId: string }>).map((source) => source.assetId));
+  expect((task?.payload.inputSources as Array<{ assetId: string }>).map((source) => names.find(([id]) => id === source.assetId)?.[1])).toEqual(['B.jpg', 'A.jpg']);
+  expect(requests.at(-1)?.action).toBe('edit');
+  expect((requests.at(-1)?.image_urls as unknown[]).length).toBe(2);
 });

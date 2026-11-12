@@ -146,7 +146,8 @@ test('moves, copies, and renames originals through safe file dialogs', async () 
 
   await page.getByRole('button', { name: '打开工作区' }).click();
   await page.getByRole('menuitem', { name: '任务中心' }).click();
-  await expect(page.getByText('文件操作', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '文件分类' }).click();
+  await expect(page.locator('.task-center-page .operation-history-row')).toHaveCount(4);
   await expect(page.getByText('从图库移除', { exact: true })).toBeVisible();
   await page.getByLabel('撤销重命名').click();
   await expect(page.locator('.task-center-page').getByRole('status')).toContainText('已撤销重命名');

@@ -6,17 +6,17 @@ const labels: Record<AgentSession['status'], string> = { idle: '就绪', running
 const toolLabels: Record<string, string> = { 'catalog.read': '读取图片', 'catalog.folders': '读取文件夹', 'providers.list': '选择模型', 'runtime.plan': '安排执行方案', 'vision.inspect': '视觉检查', 'analysis.read': '读取分析', 'generation.read': '读取生成版本', 'metadata.update': '修改图片信息', 'tags.update': '修改标签', 'jobs.submit': '处理图片', 'tasks.read': '检查作业', 'files.move': '移动文件', 'files.remove': '移出图库', 'runtime.wait': '等待' };
 const active = (s: AgentSession | null) => !!s && ['running', 'waiting'].includes(s.status);
 Object.assign(toolLabels, {
-  'scope.request': '扩大图片范围', 'catalog.search': '查找图片', 'catalog.stats': '图库概况', 'tags.list': '读取标签',
-  'collections.list': '读取智能集合', 'albums.list': '读取相册', 'albums.create': '创建相册', 'albums.save': '保存相册', 'albums.update': '整理相册', 'albums.delete': '删除相册',
+  'scope.request': '选择图片范围', 'scope.folder': '选择文件夹图片', 'catalog.search': '查找图片', 'catalog.stats': '图库概况', 'tags.list': '读取标签',
+  'collections.list': '读取智能集合', 'collections.save': '保存智能集合', 'collections.delete': '删除智能集合', 'albums.list': '读取相册', 'albums.create': '创建相册', 'albums.save': '保存相册', 'albums.update': '整理相册', 'albums.delete': '删除相册',
   'folders.import': '关联文件夹', 'folders.synchronize': '同步文件夹', 'folders.create': '创建文件夹', 'folders.rename': '重命名文件夹', 'folders.move': '移动文件夹', 'folders.unregister': '取消关联文件夹',
   'files.copy': '复制图片', 'files.rename': '重命名图片', 'files.rename-many': '批量重命名', 'files.history': '读取操作记录', 'files.undo': '撤销文件操作',
   'files.rename-pattern.preview': '预览扩展名重命名', 'files.rename-pattern': '批量修改扩展名',
   'program.run': '运行文件处理程序',
   'generation.review': '审阅生成版本', 'generation.trash-list': '读取版本回收站', 'generation.trash': '回收生成版本', 'generation.restore': '恢复生成版本',
-  'tasks.search': '查询作业', 'tasks.control': '管理关联作业', 'tasks.control-global': '管理其他作业', 'tasks.reorder': '调整作业顺序', 'tasks.update-generation': '调整排队提示词',
+  'tasks.search': '查询作业', 'tasks.control': '管理关联作业', 'tasks.control-global': '管理其他作业', 'tasks.control-many': '批量管理作业', 'tasks.reorder': '调整作业顺序', 'tasks.update-generation': '调整排队提示词',
   'templates.list': '读取提示词模板', 'templates.save': '保存提示词模板', 'templates.save-batch': '批量保存提示词模板', 'templates.archive': '归档提示词模板', 'templates.archive-batch': '批量归档提示词模板',
   'export.results': '导出生成版本', 'export.presets': '读取导出预设', 'export.preset-save': '保存导出预设', 'export.preset-delete': '删除导出预设',
-  'workflow.read': '读取流程', 'workflow.configure': '修改流程', 'settings.read': '读取设置', 'settings.update': '修改设置', 'app.diagnostics': '检查程序状态'
+  'workflow.read': '读取流程', 'workflow.configure': '修改流程', 'settings.read': '读取设置', 'settings.update': '修改设置', 'settings.storage-mode': '修改生成文件位置', 'app.diagnostics': '检查程序状态'
 });
 
 type AgentPhoto = { id: string; fileName?: string; src?: string; thumbnailSrc?: string };
@@ -87,15 +87,17 @@ export function AgentPanel({ selectedIds, photos, onClose, onCollapse, onMove, o
   }, [session?.id, polling]);
   const resultIdsKey = JSON.stringify(session?.calls.slice(session.requestCallStart ?? 0).flatMap((c) => c.resultIds) ?? []);
   const assetIdsKey = JSON.stringify(session?.assetIds ?? []);
+  const resultAssetIdsKey = JSON.stringify([...new Set(session?.calls.slice(session.requestCallStart ?? 0).filter((c) => c.resultIds.length)
+    .flatMap((c) => c.arguments.assetIds as string[] | undefined ?? []) ?? [])]);
   const approvalIdsKey = JSON.stringify(session?.calls.find((call) => call.status === 'approval')?.arguments.assetIds ?? []);
   useEffect(() => {
     let live = true; setResults([]);
     const wanted = new Set(JSON.parse(resultIdsKey) as string[]);
-    if (wanted.size) void Promise.all((JSON.parse(assetIdsKey) as string[]).map((id) => window.desktopApi.listGenerationResults(id))).then((groups) => {
+    if (wanted.size) void Promise.all((JSON.parse(resultAssetIdsKey) as string[]).map((id) => window.desktopApi.listGenerationResults(id))).then((groups) => {
       if (live) setResults(groups.flat().filter((r) => wanted.has(r.id)));
     }).catch((e: unknown) => { if (live) setError(String(e)); });
     return () => { live = false; };
-  }, [resultIdsKey, assetIdsKey]);
+  }, [resultIdsKey, resultAssetIdsKey]);
   useEffect(() => {
     let live = true;
     const ids = [...new Set([...(JSON.parse(assetIdsKey) as string[]), ...(JSON.parse(approvalIdsKey) as string[])])];

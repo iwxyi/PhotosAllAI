@@ -78,7 +78,6 @@ import {
   GalleryHorizontalEnd,
   Grid2X2,
   Heart,
-  History,
   Image,
   LoaderCircle,
   Info,
@@ -92,6 +91,7 @@ import {
   Server,
   Settings,
   RotateCcw,
+  Play,
   Rows3,
   RefreshCw,
   Sparkles,
@@ -136,6 +136,23 @@ function rememberImageAspectRatio(src: string, ratio: number): void {
 }
 const VIEWER_IMAGE_PRELOADS = new Map<string, HTMLImageElement>();
 let activePhotoDragIds: string[] | null = null;
+
+// Electron's native file drag can omit custom MIME types on macOS and Windows.
+// Keep the in-window selection as a fallback so drops still carry every photo.
+function photoDragIds(event: React.DragEvent): string[] | null {
+  const raw = event.dataTransfer.getData('application/x-photoallisai-assets');
+  if (raw) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0 && parsed.every((id): id is string => typeof id === 'string')) return parsed;
+    } catch { /* Fall through to the native drag session. */ }
+  }
+  return activePhotoDragIds?.length ? [...activePhotoDragIds] : null;
+}
+
+function hasPhotoDrag(event: React.DragEvent): boolean {
+  return event.dataTransfer.types.includes('application/x-photoallisai-assets') || Boolean(activePhotoDragIds?.length);
+}
 const FILE_MANAGER_LABEL = navigator.userAgent.includes('Mac') ? '在访达中显示' : '在文件资源管理器中显示';
 const DEFAULT_GENERATION_TEMPLATE_BODY = [
   '请基于原图进行专业且写实的修图。',
@@ -327,7 +344,7 @@ function BufferedPreviewImage({ src, alt, className, onReady }: { src: string; a
     image.src = src;
     return () => { active = false; window.clearTimeout(indicatorTimer); };
   }, [alt, displayed.src, failedSrc, src]);
-  return <>{displayed.src ? <img className={`${className} buffered-image${ready ? ' is-ready' : ''}`} src={displayed.src} alt={displayed.alt} onLoad={(event) => { rememberDecodedImage(displayed.src); if (event.currentTarget.naturalHeight > 0) rememberImageAspectRatio(displayed.src, event.currentTarget.naturalWidth / event.currentTarget.naturalHeight); setFailedSrc(null); setReady(true); onReadyRef.current?.(event.currentTarget); }} onError={() => { setFailedSrc(displayed.src); setReady(false); }} /> : null}{failedSrc === displayed.src && src === displayed.src && <div className="preview-unavailable"><Image size={36} /><strong>预览暂不可用</strong><span>图像服务将在后台生成屏幕预览</span></div>}{showLoading && <span className="preview-loading" aria-label="正在载入下一张照片"><span className="working-pulse" /></span>}</>;
+  return <>{displayed.src ? <img className={`${className} buffered-image${ready ? ' is-ready' : ''}`} src={displayed.src} alt={displayed.alt} draggable={false} onLoad={(event) => { rememberDecodedImage(displayed.src); if (event.currentTarget.naturalHeight > 0) rememberImageAspectRatio(displayed.src, event.currentTarget.naturalWidth / event.currentTarget.naturalHeight); setFailedSrc(null); setReady(true); onReadyRef.current?.(event.currentTarget); }} onError={() => { setFailedSrc(displayed.src); setReady(false); }} /> : null}{failedSrc === displayed.src && src === displayed.src && <div className="preview-unavailable"><Image size={36} /><strong>预览暂不可用</strong><span>图像服务将在后台生成屏幕预览</span></div>}{showLoading && <span className="preview-loading" aria-label="正在载入下一张照片"><span className="working-pulse" /></span>}</>;
 }
 
 const catalogImageVisibility = new Map<Element, (visible: boolean) => void>();
@@ -483,7 +500,7 @@ type CatalogColumn = typeof catalogColumns[number]['id'];
 
 const tabs: { id: Exclude<WorkspaceTab, `task:${string}`>; label: string; icon: typeof Image }[] = [
   { id: 'library', label: '图库', icon: LibraryBig },
-  { id: 'batch', label: 'AI 批量修图', icon: Sparkles },
+  { id: 'batch', label: '图片生成', icon: Sparkles },
   { id: 'templates', label: '提示词模板', icon: WandSparkles },
   { id: 'tasks', label: '任务中心', icon: Clock3 },
   { id: 'settings', label: '设置', icon: Settings }
@@ -904,7 +921,7 @@ function Sidebar({
                 else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectFolderRow(folder, event); }
               }} data-folder-id={folder.id} onClick={(event) => selectFolderRow(folder, event)} onDragOver={(event) => {
                 const types = Array.from(event.dataTransfer.types);
-                if (isDemo || !types.some((type) => type === 'application/x-photoallisai-assets' || type === 'application/x-photoallisai-folder' || type === 'Files')) return;
+                if (isDemo || !(activePhotoDragIds?.length || types.some((type) => type === 'application/x-photoallisai-assets' || type === 'application/x-photoallisai-folder' || type === 'Files'))) return;
                 event.preventDefault();
                 event.stopPropagation();
                 folderDropCopies.current = event.ctrlKey || event.metaKey || event.altKey;
@@ -939,7 +956,7 @@ function Sidebar({
                   if (paths.length) void onImportExternalMedia(paths, folder.id);
                   return;
                 }
-                if (!raw && !(activePhotoDragIds && event.dataTransfer.types.includes('Files'))) return;
+                if (!raw && !activePhotoDragIds) return;
                 event.preventDefault();
                 event.stopPropagation();
                 setFolderDropTargetId(null);
@@ -949,7 +966,7 @@ function Sidebar({
                   folderDropCopies.current = false;
                   if (Array.isArray(assetIds) && assetIds.length > 0 && assetIds.every((id) => typeof id === 'string')) void onDropAssets(folder.id, assetIds, copy);
                 } catch { setFolderActionNotice('无法识别拖入的照片，请重试或使用“移动到文件夹”菜单。'); }
-              }} onDragEnter={(event) => { if (Array.from(event.dataTransfer.types).some((type) => type === 'application/x-photoallisai-assets' || type === 'application/x-photoallisai-folder' || type === 'Files')) setFolderDropTargetId(folder.id); }} onContextMenu={(event) => { event.preventDefault(); if (!selectedFolderIds.includes(folder.id)) selectFolderRow(folder); setFolderContextMenu({ id: folder.id, x: event.clientX, y: event.clientY }); }}>
+              }} onDragEnter={(event) => { if (activePhotoDragIds?.length || Array.from(event.dataTransfer.types).some((type) => type === 'application/x-photoallisai-assets' || type === 'application/x-photoallisai-folder' || type === 'Files')) setFolderDropTargetId(folder.id); }} onContextMenu={(event) => { event.preventDefault(); if (!selectedFolderIds.includes(folder.id)) selectFolderRow(folder); setFolderContextMenu({ id: folder.id, x: event.clientX, y: event.clientY }); }}>
                 <Folder size={15} />
                 {inlineFolderRename && folderRenameCandidate?.id === folder.id ? <input className="folder-inline-name" aria-label="文件夹名称" autoFocus value={folderRenameDraft} disabled={folderRenameBusy} onFocus={(event) => { event.currentTarget.select(); event.currentTarget.scrollIntoView({ block: 'nearest' }); }} onChange={(event) => setFolderRenameDraft(event.target.value)} onClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onBlur={() => { if (folderRenameDraft.trim()) void renameFolder(); else { setFolderRenameCandidate(null); setInlineFolderRename(false); } }} onKeyDown={(event) => { event.stopPropagation(); if (event.key === 'Enter') { event.preventDefault(); void renameFolder(); } else if (event.key === 'Escape') { event.preventDefault(); setFolderRenameCandidate(null); setInlineFolderRename(false); } }} /> : <span>{folder.name}</span>}
                 <span className="row-count">{folder.offlineCount > 0 ? `离线 ${folder.offlineCount}` : folder.assetCount}</span>
@@ -1524,6 +1541,7 @@ function ResultFilmstrip({ results, selectedId, onSelect }: { results: Generatio
 }
 
 type ViewerOpenOptions = { target?: 'latest-ai'; resultId?: string | undefined; results?: GenerationResult[] };
+type ViewerDisplayedFile = { kind: 'asset'; photo: Photo } | { kind: 'result'; result: GenerationResult };
 type OpenTaskViewer = (assetId: string, assetIds?: string[], options?: ViewerOpenOptions) => void;
 
 function taskGenerationResults(tasks: PersistedTask[]): GenerationResult[] {
@@ -1548,7 +1566,8 @@ function Viewer({
   resultSequence,
   rawCompanion,
   onToolbarHostChange,
-  onWorkflowStageChange
+  onWorkflowStageChange,
+  onDisplayedFileChange
 }: {
   photo: Photo;
   results: GenerationResult[];
@@ -1565,6 +1584,7 @@ function Viewer({
   rawCompanion?: Photo | null | undefined;
   onToolbarHostChange: (element: HTMLDivElement | null) => void;
   onWorkflowStageChange?: ((photo: Photo) => void) | undefined;
+  onDisplayedFileChange?: ((file: ViewerDisplayedFile) => void) | undefined;
 }): React.JSX.Element {
   const [versionTarget, setVersionTarget] = useState<string>(() => {
     if (initialVersionTarget) return initialVersionTarget;
@@ -1594,6 +1614,8 @@ function Viewer({
   const rememberedZoomRef = useRef(Number(localStorage.getItem('photoallisai.viewer-double-click-percent')) || 100);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const panOriginRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
+  const touchGestureRef = useRef<{ distance: number; center: { x: number; y: number }; zoom: number; pan: { x: number; y: number } } | null>(null);
+  const touchPanRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const wheelEndTimerRef = useRef<number | undefined>(undefined);
   const [imageAspectRatio, setImageAspectRatio] = useState(() => photo.src ? IMAGE_ASPECT_RATIOS.get(photo.src) ?? 3 / 2 : 3 / 2);
   const [fittedSize, setFittedSize] = useState({ width: 0, height: 0 });
@@ -1652,6 +1674,17 @@ function Viewer({
     : holdPreviousVersion && comparisonPhoto ? comparisonPhoto.originalSrc ?? comparisonPhoto.src
       : rawBase.originalSrc ?? rawBase.src;
   const activeSource = displayedGeneratedSource && !showOriginal && !holdPreviousVersion ? displayedGeneratedSource : baseSource;
+  const lastDisplayedFileKey = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    if (!onDisplayedFileChange) return;
+    const displayedFile: ViewerDisplayedFile = selectedResult?.resultUrl === activeSource ? { kind: 'result', result: selectedResult }
+      : parentResult?.resultUrl === activeSource ? { kind: 'result', result: parentResult }
+        : { kind: 'asset', photo: holdPreviousVersion && comparisonPhoto ? comparisonPhoto : rawBase };
+    const key = `${displayedFile.kind}:${displayedFile.kind === 'result' ? displayedFile.result.id : displayedFile.photo.id}`;
+    if (lastDisplayedFileKey.current === key) return;
+    lastDisplayedFileKey.current = key;
+    onDisplayedFileChange(displayedFile);
+  });
   const sourceSizes = useRef(new Map<string, { width: number; height: number }>());
   const canCompare = Boolean(generatedSource);
   const pixelZoom = actualPixelZoom(naturalWidth, fittedSize.width, window.devicePixelRatio);
@@ -1680,6 +1713,8 @@ function Viewer({
     setZoom(1);
     setFitMode('fit');
     setPan({ x: 0, y: 0 });
+    touchGestureRef.current = null;
+    touchPanRef.current = null;
   }, [photo.id, photo.src, effectiveSelectionId]);
 
   useLayoutEffect(() => {
@@ -1805,7 +1840,7 @@ function Viewer({
           const normalizedDelta = event.deltaY * (event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 80 : 1);
           setFitMode('custom');
           setZoom((current) => {
-            const next = clamp(current * Math.exp(-normalizedDelta * 0.0025), minZoom, maxZoom);
+            const next = clamp(current * Math.exp(-normalizedDelta * 0.004), minZoom, maxZoom);
             setPan((currentPan) => constrainPan(zoomAround(currentPan, pointer, current, next), next));
             return next;
           });
@@ -1822,7 +1857,49 @@ function Viewer({
             setFitMode('custom');
             setPan(zoomAround(pan, pointer, zoom, next));
             setZoom(next);
+          }} onTouchStart={(event) => {
+            const touches = event.touches;
+            if (touches.length >= 2) {
+              const first = touches[0]!;
+              const second = touches[1]!;
+              touchGestureRef.current = {
+                distance: Math.max(1, Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY)),
+                center: { x: (first.clientX + second.clientX) / 2, y: (first.clientY + second.clientY) / 2 },
+                zoom,
+                pan,
+              };
+              touchPanRef.current = null;
+            } else if (touches.length === 1 && zoom > 1) {
+              touchPanRef.current = { x: touches[0]!.clientX, y: touches[0]!.clientY, panX: pan.x, panY: pan.y };
+            }
+          }} onTouchMove={(event) => {
+            const touches = event.touches;
+            const gesture = touchGestureRef.current;
+            if (touches.length >= 2 && gesture) {
+              const first = touches[0]!;
+              const second = touches[1]!;
+              const center = { x: (first.clientX + second.clientX) / 2, y: (first.clientY + second.clientY) / 2 };
+              const distance = Math.max(1, Math.hypot(first.clientX - second.clientX, first.clientY - second.clientY));
+              const next = clamp(gesture.zoom * Math.pow(distance / gesture.distance, 1.15), minZoom, maxZoom);
+              const rect = event.currentTarget.getBoundingClientRect();
+              const anchor = { x: gesture.center.x - rect.left - rect.width / 2, y: gesture.center.y - rect.top - rect.height / 2 };
+              const nextPan = zoomAround(gesture.pan, anchor, gesture.zoom, next);
+              setFitMode('custom');
+              setPan(constrainPan({ x: nextPan.x + center.x - gesture.center.x, y: nextPan.y + center.y - gesture.center.y }, next));
+              setZoom(next);
+            } else if (touches.length === 1 && touchPanRef.current && zoom > 1) {
+              const origin = touchPanRef.current;
+              setPan(constrainPan({ x: origin.panX + touches[0]!.clientX - origin.x, y: origin.panY + touches[0]!.clientY - origin.y }, zoom));
+            }
+          }} onTouchEnd={(event) => {
+            touchGestureRef.current = null;
+            const touch = event.touches[0];
+            touchPanRef.current = touch && zoom > 1 ? { x: touch.clientX, y: touch.clientY, panX: pan.x, panY: pan.y } : null;
+          }} onTouchCancel={() => {
+            touchGestureRef.current = null;
+            touchPanRef.current = null;
           }} onPointerDown={(event) => {
+        if (event.pointerType === 'touch') return;
         if (event.target instanceof Element && event.target.closest('button, input, select, [role="slider"]')) return;
         if (event.button === 0) event.currentTarget.focus({ preventScroll: true });
         if (zoom <= 1 || event.button !== 0) return;
@@ -1830,14 +1907,17 @@ function Viewer({
         panOriginRef.current = { x: event.clientX, y: event.clientY, panX: pan.x, panY: pan.y };
         event.currentTarget.classList.add('is-panning');
       }} onPointerMove={(event) => {
+        if (event.pointerType === 'touch') return;
         const origin = panOriginRef.current;
         if (!origin) return;
         setPan(constrainPan({ x: origin.panX + event.clientX - origin.x, y: origin.panY + event.clientY - origin.y }, zoom));
       }} onPointerUp={(event) => {
+        if (event.pointerType === 'touch') return;
         panOriginRef.current = null;
         event.currentTarget.classList.remove('is-panning');
         if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
       }} onPointerCancel={(event) => {
+        if (event.pointerType === 'touch') return;
         panOriginRef.current = null;
         event.currentTarget.classList.remove('is-panning');
       }}>
@@ -1957,10 +2037,13 @@ function AiPanel({
   analysisTaskStatus,
   analysisErrorCode,
   onAddToWorkflow,
+  onAddAsReferences,
   onOpenBatch,
   workflowQueueCount,
   workflowPosition,
-  selectionCount
+  selectionCount,
+  hasCurrentWorkflowItem,
+  referenceNotice
 }: {
   photo: Photo;
   results: GenerationResult[];
@@ -1979,10 +2062,13 @@ function AiPanel({
   onTrashResult: (resultId: string) => Promise<void>;
   onRestoreResult: (resultId: string) => Promise<void>;
   onAddToWorkflow: () => void;
+  onAddAsReferences: () => void;
   onOpenBatch: () => void;
   workflowQueueCount: number;
   workflowPosition: number | null;
   selectionCount: number;
+  hasCurrentWorkflowItem: boolean;
+  referenceNotice: string;
   workflowRules: WorkflowRule[];
   onWorkflowRulesChange: React.Dispatch<React.SetStateAction<WorkflowRule[]>>;
   workflowTemplateId: string;
@@ -2031,9 +2117,9 @@ function AiPanel({
         </section>
         <section className="ai-purpose-card ai-batch-destination" aria-label="批量修图">
           <header className="ai-purpose-heading"><Image size={15} /><strong>批量修图</strong><span>{workflowQueueCount} 张图片</span><IconButton label="打开批量修图" onClick={onOpenBatch}><ChevronRight size={14} /></IconButton></header>
-          {workflowPosition !== null && selectionCount <= 1
-            ? <button className="secondary-action compact is-queued" type="button" onClick={onOpenBatch}><Check size={14} />已加入修图列表<ChevronRight size={13} /></button>
-            : <button className="secondary-action compact" type="button" onClick={onAddToWorkflow}><Plus size={14} />{selectionCount > 1 ? `添加选中的 ${selectionCount} 张到批量修图` : '添加到批量修图'}</button>}
+          <span className="ai-batch-selection-count">已选择 {selectionCount} 张</span>
+          <div className="ai-batch-actions"><button className="secondary-action compact" type="button" onClick={workflowPosition !== null && selectionCount <= 1 ? onOpenBatch : onAddToWorkflow}>{workflowPosition !== null && selectionCount <= 1 ? <Check size={14} /> : <Plus size={14} />}添加到 AI 修图</button><button className="secondary-action compact" type="button" disabled={!hasCurrentWorkflowItem} onClick={onAddAsReferences}><Plus size={14} />添加为参考图</button></div>
+          {referenceNotice && <p className="ai-reference-warning" role="status">{referenceNotice}</p>}
         </section>
     </div>
   );
@@ -2046,6 +2132,9 @@ function GlobalAiPanel({
   workspaceTab,
   onOpenTemplates,
   onAddAssetsToWorkflow,
+  onAddAssetsAsReferences,
+  currentWorkflowItemId,
+  referenceNotice,
   onOpenBatch,
   workflowAssetIds,
   tasks,
@@ -2060,6 +2149,9 @@ function GlobalAiPanel({
   workspaceTab: WorkspaceTab;
   onOpenTemplates: () => void;
   onAddAssetsToWorkflow: (ids: string[]) => void;
+  onAddAssetsAsReferences: (ids: string[]) => void;
+  currentWorkflowItemId: string | null;
+  referenceNotice: string;
   onOpenBatch: () => void;
   workflowAssetIds: string[];
   tasks: PersistedTask[];
@@ -2173,12 +2265,14 @@ function GlobalAiPanel({
   const latestAnalysisTask = tasks
     .filter((task) => task.kind === 'analysis' && task.assetId === photo.id && task.status !== 'canceled')
     .sort((left, right) => right.createdAt - left.createdAt)[0];
-  return <AiPanel photo={photo} results={results} trashedResults={trashedResults} revision={revision} isDemo={isDemo} notice={notice} onAnalyze={() => void analyze()} analyzing={analyzing} analysisTaskStatus={latestAnalysisTask?.status} analysisErrorCode={latestAnalysisTask?.errorCode ?? null} generationProfiles={profiles.filter((item) => item.purpose === 'generation' && item.enabled)} templates={templates} onOpenTemplates={onOpenTemplates} onGenerate={generate} onTrashResult={trash} onRestoreResult={restore} onOpenBatch={onOpenBatch} onAddToWorkflow={() => onAddAssetsToWorkflow(targetIds)} workflowQueueCount={workflowAssetIds.length} workflowPosition={workflowIndex >= 0 ? workflowIndex + 1 : null} selectionCount={targetIds.length} workflowRules={workflowRules} onWorkflowRulesChange={onWorkflowRulesChange} workflowTemplateId={workflowTemplateId} onWorkflowTemplateChange={onWorkflowTemplateChange} />;
+  return <AiPanel photo={photo} results={results} trashedResults={trashedResults} revision={revision} isDemo={isDemo} notice={notice} onAnalyze={() => void analyze()} analyzing={analyzing} analysisTaskStatus={latestAnalysisTask?.status} analysisErrorCode={latestAnalysisTask?.errorCode ?? null} generationProfiles={profiles.filter((item) => item.purpose === 'generation' && item.enabled)} templates={templates} onOpenTemplates={onOpenTemplates} onGenerate={generate} onTrashResult={trash} onRestoreResult={restore} onOpenBatch={onOpenBatch} onAddToWorkflow={() => onAddAssetsToWorkflow(targetIds)} onAddAsReferences={() => onAddAssetsAsReferences(targetIds)} workflowQueueCount={workflowAssetIds.length} workflowPosition={workflowIndex >= 0 ? workflowIndex + 1 : null} selectionCount={targetIds.length} hasCurrentWorkflowItem={currentWorkflowItemId !== null} referenceNotice={referenceNotice} workflowRules={workflowRules} onWorkflowRulesChange={onWorkflowRulesChange} workflowTemplateId={workflowTemplateId} onWorkflowTemplateChange={onWorkflowTemplateChange} />;
 }
 
-function InspectorInfo({ photo, revision }: { photo: Photo; revision: AnalysisRevision | undefined }): React.JSX.Element {
+function InspectorInfo({ photo, revision, displayedFile }: { photo: Photo; revision: AnalysisRevision | undefined; displayedFile?: ViewerDisplayedFile | undefined }): React.JSX.Element {
   const [details, setDetails] = useState<{ id: string; data?: FileDetails; error?: string }>({ id: photo.id });
   const [dimensions, setDimensions] = useState<{ id: string; width: number; height: number } | null>(null);
+  const [resultDetails, setResultDetails] = useState<Record<string, { data?: FileDetails; error?: string }>>({});
+  const [comparedAssetDetails, setComparedAssetDetails] = useState<Record<string, { data?: FileDetails; error?: string }>>({});
   const [shootingDetailsOpen, setShootingDetailsOpen] = useState(() => {
     try { return localStorage.getItem(SHOOTING_DETAILS_OPEN_KEY) === 'true'; } catch { return false; }
   });
@@ -2190,29 +2284,48 @@ function InspectorInfo({ photo, revision }: { photo: Photo; revision: AnalysisRe
     image.src = photo.originalSrc ?? photo.src;
     return () => { active = false; image.onload = null; };
   }, [photo.id, photo.originalSrc, photo.src]);
+  const displayedResultId = displayedFile?.kind === 'result' ? displayedFile.result.id : null;
+  const resultDetailsLoaded = displayedResultId ? Boolean(resultDetails[displayedResultId]) : false;
+  useEffect(() => {
+    if (!displayedResultId || resultDetailsLoaded) return;
+    let active = true;
+    void window.desktopApi.getGenerationResultDetails(displayedResultId).then((data) => { if (active) setResultDetails((current) => ({ ...current, [displayedResultId]: { data } })); }, (error: unknown) => { if (active) setResultDetails((current) => ({ ...current, [displayedResultId]: { error: error instanceof Error ? error.message : '生成文件信息不可用' } })); });
+    return () => { active = false; };
+  }, [displayedResultId, resultDetailsLoaded]);
+  const comparedPhoto = displayedFile?.kind === 'asset' ? displayedFile.photo : photo;
+  const comparedResult = displayedFile?.kind === 'result' ? displayedFile.result : null;
+  const comparedAsset = comparedPhoto.id !== photo.id;
+  const comparedAssetDetailsLoaded = Boolean(comparedAssetDetails[comparedPhoto.id]);
+  useEffect(() => {
+    if (!comparedAsset || comparedAssetDetailsLoaded) return;
+    let active = true;
+    void window.desktopApi.getFileDetails(comparedPhoto.id).then((data) => { if (active) setComparedAssetDetails((current) => ({ ...current, [comparedPhoto.id]: { data } })); }, (error: unknown) => { if (active) setComparedAssetDetails((current) => ({ ...current, [comparedPhoto.id]: { error: error instanceof Error ? error.message : '文件信息不可用' } })); });
+    return () => { active = false; };
+  }, [comparedAsset, comparedPhoto.id, comparedAssetDetailsLoaded]);
   const data = details.id === photo.id ? details.data : undefined;
-  const displayedData = data ?? (details.id !== photo.id ? details.data : undefined);
-  const size = dimensions?.id === photo.id ? `${dimensions.width} × ${dimensions.height}` : data?.width && data.height ? `${data.width} × ${data.height}` : photo.dimensions || '—';
+  const displayedData = comparedResult ? resultDetails[comparedResult.id]?.data : comparedAsset ? comparedAssetDetails[comparedPhoto.id]?.data : data ?? (details.id !== photo.id ? details.data : undefined);
+  const size = comparedResult ? (displayedData?.width && displayedData.height ? `${displayedData.width} × ${displayedData.height}` : '—')
+    : comparedAsset ? (displayedData?.width && displayedData.height ? `${displayedData.width} × ${displayedData.height}` : comparedPhoto.dimensions || '—')
+      : dimensions?.id === photo.id ? `${dimensions.width} × ${dimensions.height}` : data?.width && data.height ? `${data.width} × ${data.height}` : photo.dimensions || '—';
   const fields = [
-    ['文件名', photo.fileName],
-    ['格式', photo.format],
-    [photo.originalSrc ? '尺寸' : '预览尺寸', size],
+    ['文件名', comparedResult?.fileName ?? comparedPhoto.fileName],
+    ['格式', comparedResult ? comparedResult.fileName.split('.').at(-1)?.toUpperCase() ?? '—' : comparedPhoto.format],
+    [comparedResult || comparedPhoto.originalSrc ? '尺寸' : '预览尺寸', size],
     ['文件大小', displayedData ? formatStorageBytes(displayedData.sizeBytes) : '—'],
     ['修改时间', displayedData ? new Date(displayedData.modifiedAt).toLocaleString() : '—'],
     ['位置', displayedData?.path ?? '—'],
-    ['评分', `${photo.rating} / 5`],
-    ...(revision ? [['AI 状态', '已分析']] : [])
+    ...(comparedResult ? [] : [['评分', `${comparedPhoto.rating} / 5`], ...(revision && !comparedAsset ? [['AI 状态', '已分析']] : [])])
   ];
-  const shootingData = displayedData;
+  const shootingData = comparedResult || comparedAsset ? undefined : data;
   const shooting = shootingData ? [['相机', shootingData.camera], ['镜头', shootingData.lens], ['拍摄时间', shootingData.takenAt ? new Date(shootingData.takenAt).toLocaleString() : undefined], ['快门', shootingData.exposure], ['光圈', shootingData.aperture ? `f/${shootingData.aperture}` : undefined], ['ISO', shootingData.iso?.toString()], ['焦距', shootingData.focalLength ? `${shootingData.focalLength} mm` : undefined]].filter(([, value]) => value) : [];
-  return <div className="inspector-info"><section className="inspector-section"><div className="inspector-heading"><span>文件信息</span><IconButton label="复制文件路径" disabled={!data} onClick={() => { if (!data) return; void navigator.clipboard.writeText(data.path).catch(() => window.dispatchEvent(new CustomEvent(OPERATION_NOTICE_EVENT, { detail: '无法复制文件路径，请检查剪贴板权限' }))); }}><Copy size={13} /></IconButton></div><div className="metadata-list">{fields.map(([label, value]) => <div key={label}><span>{label}</span><strong title={value}>{value}</strong></div>)}</div>{details.id === photo.id && details.error && !E2E_DEMO_MODE && <p className="inline-error">{details.error}</p>}</section>{shooting.length > 0 && <details className="inspector-section metadata-shooting" aria-busy={!data} open={shootingDetailsOpen} onToggle={(event) => {
+  return <div className="inspector-info"><section className="inspector-section"><div className="inspector-heading"><span>文件信息</span></div><div className="metadata-list">{fields.map(([label, value]) => <div key={label}><span>{label}</span><strong title={value}>{value}</strong></div>)}</div>{!comparedResult && !comparedAsset && details.id === photo.id && details.error && !E2E_DEMO_MODE && <p className="inline-error">{details.error}</p>}{comparedResult && resultDetails[comparedResult.id]?.error && !E2E_DEMO_MODE && <p className="inline-error">{resultDetails[comparedResult.id]?.error}</p>}</section>{shooting.length > 0 && <details className="inspector-section metadata-shooting" aria-busy={!data} open={shootingDetailsOpen} onToggle={(event) => {
     const open = event.currentTarget.open;
     setShootingDetailsOpen(open);
     try { localStorage.setItem(SHOOTING_DETAILS_OPEN_KEY, String(open)); } catch { /* storage may be unavailable */ }
   }}><summary>拍摄信息</summary><div className="metadata-list">{shooting.map(([label, value]) => <div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div></details>}<section className="inspector-section"><div className="inspector-heading"><span>用户标签</span><span className="section-count">{photo.tags?.length ?? 0} 个</span></div>{photo.tags?.length ? <div className="metadata-tags">{photo.tags.map((tag) => <span key={tag.id}>{tag.name}</span>)}</div> : <div className="inline-empty">尚未添加标签</div>}</section>{revision && <section className="inspector-section"><div className="inspector-heading"><span>AI 编目</span></div><p className="analysis-copy">{revision.result.catalog.shortDescription}</p></section>}</div>;
 }
 
-function GlobalDetailsPanel({ photo }: { photo: Photo }): React.JSX.Element {
+function GlobalDetailsPanel({ photo, displayedFile }: { photo: Photo; displayedFile?: ViewerDisplayedFile | undefined }): React.JSX.Element {
   const [state, setState] = useState<{ id: string; revision?: AnalysisRevision | undefined; results: GenerationResult[]; trashed: TrashedGenerationResult[]; error?: string }>({ id: photo.id, results: [], trashed: [] });
   const [refresh, setRefresh] = useState(0);
   useEffect(() => {
@@ -2229,7 +2342,7 @@ function GlobalDetailsPanel({ photo }: { photo: Photo }): React.JSX.Element {
   }, [photo.id, photo.temporary, refresh]);
   const current = state.id === photo.id && !photo.temporary ? state : undefined;
   const displayed = current ?? (!photo.temporary ? state : undefined);
-  return <div className="inspector-details"><InspectorInfo photo={photo} revision={displayed?.revision} />{current?.error && <p className="inline-error">{current.error}</p>}{displayed && (displayed.results.length > 0 || displayed.trashed.length > 0) && <div inert={!current} aria-busy={!current}><InspectorVersions results={displayed.results} trashedResults={displayed.trashed} onTrashResult={async (id) => { await window.desktopApi.trashGenerationResult({ resultId: id }); setRefresh((value) => value + 1); }} onRestoreResult={async (id) => { await window.desktopApi.restoreGenerationResult({ resultId: id }); setRefresh((value) => value + 1); }} /></div>}</div>;
+  return <div className="inspector-details"><InspectorInfo photo={photo} revision={displayed?.revision} displayedFile={displayedFile} />{current?.error && <p className="inline-error">{current.error}</p>}{displayed && (displayed.results.length > 0 || displayed.trashed.length > 0) && <div inert={!current} aria-busy={!current}><InspectorVersions results={displayed.results} trashedResults={displayed.trashed} onTrashResult={async (id) => { await window.desktopApi.trashGenerationResult({ resultId: id }); setRefresh((value) => value + 1); }} onRestoreResult={async (id) => { await window.desktopApi.restoreGenerationResult({ resultId: id }); setRefresh((value) => value + 1); }} /></div>}</div>;
 }
 
 function InspectorVersions({ results, trashedResults, onTrashResult, onRestoreResult }: { results: GenerationResult[]; trashedResults: TrashedGenerationResult[]; onTrashResult: (resultId: string) => Promise<void>; onRestoreResult: (resultId: string) => Promise<void> }): React.JSX.Element {
@@ -2285,7 +2398,12 @@ function TaskAnalysisResult({ task }: { task: PersistedTask }): React.JSX.Elemen
 function TaskOutput({ task, photos, batchTasks, onOpenViewer }: { task: PersistedTask; photos: Photo[]; batchTasks: PersistedTask[]; onOpenViewer?: OpenTaskViewer | undefined }): React.JSX.Element | null {
   if (task.kind === 'generation') {
     const generated = generationResultSchema.safeParse(task.result?.generation);
-    return <details className="task-analysis-result"><summary>生成详情</summary><div className="task-analysis-report">{generated.success && <figure className="task-generated-result" data-label-color={photos.find((photo) => photo.id === task.assetId)?.labelColor ?? undefined}><button type="button" aria-label={`查看生成图片 ${generated.data.fileName}`} onClick={() => onOpenViewer?.(generated.data.assetId, [...new Set(batchTasks.flatMap((item) => item.assetId ? [item.assetId] : []))], { resultId: generated.data.id, results: taskGenerationResults(batchTasks) })}><img src={generated.data.resultUrl} alt={generated.data.fileName} loading="lazy" /></button><figcaption>{generated.data.fileName}</figcaption></figure>}<p className="task-prompt-text">{typeof task.payload.prompt === 'string' ? task.payload.prompt : '未保存提示词'}</p></div></details>;
+    const imageIds = [...new Set(batchTasks.flatMap((item) => {
+      if (item.assetId) return [item.assetId];
+      const result = generationResultSchema.safeParse(item.result?.generation);
+      return result.success ? [result.data.assetId] : [];
+    }))];
+    return <details className="task-analysis-result"><summary>生成详情</summary><div className="task-analysis-report">{generated.success && <figure className="task-generated-result" data-label-color={photos.find((photo) => photo.id === task.assetId)?.labelColor ?? undefined}><button type="button" aria-label={`查看生成图片 ${generated.data.fileName}`} onClick={() => onOpenViewer?.(generated.data.assetId, imageIds, { resultId: generated.data.id, results: taskGenerationResults(batchTasks) })}><img src={generated.data.resultUrl} alt={generated.data.fileName} loading="lazy" /></button><figcaption>{generated.data.fileName}</figcaption></figure>}<p className="task-prompt-text">{typeof task.payload.prompt === 'string' ? task.payload.prompt : '未保存提示词'}</p></div></details>;
   }
   if (task.kind === 'collection-analysis') {
     const report = collectionAnalysisReportSchema.safeParse(task.result);
@@ -2455,6 +2573,7 @@ type LibraryWorkspaceProps = {
   onSelectionChange: React.Dispatch<React.SetStateAction<SelectionState>>;
   onRefreshCatalog: () => Promise<void>;
   onOpenTaskCenter: () => void;
+  onDisplayedFileChange?: ((file: ViewerDisplayedFile) => void) | undefined;
   onOpenTemplates: () => void;
   onAddAssetsToWorkflow: (ids: string[]) => void;
   onAddAssetsToAgent?: (ids: string[]) => void;
@@ -4048,7 +4167,7 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     <div className="workspace viewer-workspace">
       {view === 'library' ? <CatalogWorkspace {...props} onOpenPhotoContextMenu={(event, photo) => openPhotoContextMenu(event, photo)} /> :
       <main className="library-main" style={{ gridTemplateRows: `minmax(0, 1fr) 5px ${viewerLayout.filmstripHeight}px` }}>
-        <Viewer resultSequence={props.resultSequence} photo={selected} results={currentGenerationResults} resultsLoading={generationAssetId !== selected.id && currentGenerationResults.length === 0} initialVersionTarget={props.initialVersionTarget} onVersionTargetChange={setFilmstripVersionTarget} rawCompanion={rawCompanion} isDemo={isDemo} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onReview={reviewResult} onOpenContextMenu={(event, resultId) => openPhotoContextMenu(event, selected, true, undefined, resultId)} onClose={props.onCloseViewer} initialResultId={props.initialResultId} onToolbarHostChange={setViewerToolbarHost} onWorkflowStageChange={props.onWorkflowStageChange} />
+        <Viewer resultSequence={props.resultSequence} photo={selected} results={currentGenerationResults} resultsLoading={generationAssetId !== selected.id && currentGenerationResults.length === 0} initialVersionTarget={props.initialVersionTarget} onVersionTargetChange={setFilmstripVersionTarget} rawCompanion={rawCompanion} isDemo={isDemo} trackedExportNotice={trackedExport?.surface === 'viewer' ? trackedExport.notice : ''} onReview={reviewResult} onOpenContextMenu={(event, resultId) => openPhotoContextMenu(event, selected, true, undefined, resultId)} onClose={props.onCloseViewer} initialResultId={props.initialResultId} onToolbarHostChange={setViewerToolbarHost} onWorkflowStageChange={props.onWorkflowStageChange} onDisplayedFileChange={props.onDisplayedFileChange} />
         <PaneSplitter orientation="horizontal" value={viewerLayout.filmstripHeight} minimum={72} maximum={320} label="调整大图和胶片带高度" invert onChange={(value) => setViewerLayout('filmstripHeight', value)} />
         {props.resultSequence && props.onSelectViewerResult ? <ResultFilmstrip results={props.resultSequence} selectedId={props.initialResultId} onSelect={props.onSelectViewerResult} /> : <Filmstrip versionTarget={isDemo ? undefined : filmstripVersionTarget} rawCompanions={filmstripRawCompanions} activeGenerationResults={generationAssetId === selected.id ? currentGenerationResults : undefined} toolbarHost={viewerToolbarHost} items={availablePhotos} selected={selected} selection={selection} onSelect={selectPhoto} onSelectionChange={setSelection} onFocusPhoto={(photo) => { setSelectedId(photo.id); onSelectedAssetChange(photo.id); }} collectionName={collectionName} totalCount={totalCount} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} sortBy={sortBy} onSortByChange={onSortByChange} hasMore={hasMore} loading={loadingMore} onLoadMore={onLoadMore} onVisibleIdsChange={setFilmstripVisibleIds} onOpenContextMenu={(event, photo, options) => openPhotoContextMenu(event, photo, false, options)} />}
       </main>}
@@ -4142,6 +4261,7 @@ const emptyProviderForm: SaveProviderProfileInput = {
 type WorkflowStage = 'analysis' | 'collection' | 'optimization' | 'prompt' | 'generation' | 'review';
 type WorkflowRule = { id: string; text: string; enabled: boolean };
 type WorkflowAssetMeta = { id: string; fileName: string; src: string; thumbnailSrc?: string; format: string };
+type PromptGenerationItem = { id: string; outputFolderId: string; outputFolderName: string; prompt: string; referenceAssetIds: string[] };
 type CollectionReport = { summary: string; groups: string[][]; keep: string[]; review: string[]; recommendations: string[] };
 type WorkflowDraft = {
   workflowAssetIds: string[];
@@ -4151,7 +4271,9 @@ type WorkflowDraft = {
   generationCount: number;
   globalRules: WorkflowRule[];
   itemRules: Record<string, WorkflowRule[]>;
+  referenceAssetIds: Record<string, string[]>;
   itemTemplateIds: Record<string, string>;
+  promptItems: PromptGenerationItem[];
   collectionReport: CollectionReport | null;
 };
 const WORKFLOW_DRAFT_KEY = 'photoallisai.ai-workflow.v1';
@@ -4163,7 +4285,7 @@ const DEFAULT_WORKFLOW_RULES: WorkflowRule[] = [
 ];
 
 function loadWorkflowDraft(): WorkflowDraft {
-  const fallback: WorkflowDraft = { workflowAssetIds: [], workflowAssetMeta: {}, stage: 'analysis', templateId: '', generationCount: 1, globalRules: DEFAULT_WORKFLOW_RULES, itemRules: {}, itemTemplateIds: {}, collectionReport: null };
+  const fallback: WorkflowDraft = { workflowAssetIds: [], workflowAssetMeta: {}, stage: 'analysis', templateId: '', generationCount: 1, globalRules: DEFAULT_WORKFLOW_RULES, itemRules: {}, referenceAssetIds: {}, itemTemplateIds: {}, promptItems: [], collectionReport: null };
   try {
     const value = JSON.parse(window.localStorage.getItem(WORKFLOW_DRAFT_KEY) ?? '') as Partial<WorkflowDraft>;
     const stages: WorkflowStage[] = ['analysis', 'collection', 'optimization', 'prompt', 'generation', 'review'];
@@ -4176,7 +4298,9 @@ function loadWorkflowDraft(): WorkflowDraft {
       generationCount: clamp(Number(value.generationCount) || 1, 1, 8),
       globalRules: validRules(value.globalRules) ? value.globalRules : fallback.globalRules,
       itemRules: value.itemRules && typeof value.itemRules === 'object' ? Object.fromEntries(Object.entries(value.itemRules).filter(([, rules]) => validRules(rules))) : {},
+      referenceAssetIds: value.referenceAssetIds && typeof value.referenceAssetIds === 'object' ? Object.fromEntries(Object.entries(value.referenceAssetIds).filter(([, ids]) => Array.isArray(ids)).map(([id, ids]) => [id, (ids as unknown[]).filter((assetId): assetId is string => typeof assetId === 'string').slice(0, 7)])) : {},
       itemTemplateIds: value.itemTemplateIds && typeof value.itemTemplateIds === 'object' ? Object.fromEntries(Object.entries(value.itemTemplateIds).filter(([, id]) => typeof id === 'string')) as Record<string, string> : {},
+      promptItems: Array.isArray(value.promptItems) ? value.promptItems.filter((item): item is PromptGenerationItem => typeof item === 'object' && item !== null && typeof item.id === 'string' && typeof item.outputFolderId === 'string' && typeof item.outputFolderName === 'string' && typeof item.prompt === 'string').slice(0, 500).map((item) => ({ ...item, referenceAssetIds: Array.isArray(item.referenceAssetIds) ? item.referenceAssetIds.filter((id): id is string => typeof id === 'string').slice(0, 8) : [] })) : [],
       collectionReport: value.collectionReport && typeof value.collectionReport.summary === 'string' && Array.isArray(value.collectionReport.groups) && Array.isArray(value.collectionReport.keep) && Array.isArray(value.collectionReport.review) && Array.isArray(value.collectionReport.recommendations) ? value.collectionReport : null
     };
   } catch {
@@ -4188,7 +4312,7 @@ function AgentDockPanel(props: React.ComponentProps<typeof AgentPanel>): React.J
   return <AgentPanel {...props} />;
 }
 
-function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, workflowAssetMeta, tasks, globalRules, onGlobalRulesChange, templateId, onRemoveAsset, onMoveAsset: _onMoveAsset, onClearAssets, onOpenTasks: _onOpenTasks, onFocusAsset, onOpenViewer }: { photos: Photo[]; focusId: string | null; workflowAssetIds: string[]; workflowAssetMeta: Record<string, WorkflowAssetMeta>; tasks: PersistedTask[]; globalRules: WorkflowRule[]; onGlobalRulesChange: React.Dispatch<React.SetStateAction<WorkflowRule[]>>; templateId: string; onRemoveAsset: (id: string) => void; onMoveAsset: (id: string, direction: -1 | 1) => void; onClearAssets: () => void; onOpenTasks: () => void; onFocusAsset: (id: string) => void; onOpenViewer: OpenTaskViewer }): React.JSX.Element {
+function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, workflowAssetMeta, tasks, globalRules, onGlobalRulesChange, templateId, outputFolderId, outputFolderName, enablePromptItems, referenceAssetIds, onReferenceAssetIdsChange, promptItems, onPromptItemsChange, currentWorkflowItemId, onCurrentWorkflowItemChange, onRemoveAsset, onMoveAsset: _onMoveAsset, onClearAssets, onOpenTasks: _onOpenTasks, onFocusAsset, onOpenViewer }: { photos: Photo[]; focusId: string | null; workflowAssetIds: string[]; workflowAssetMeta: Record<string, WorkflowAssetMeta>; tasks: PersistedTask[]; globalRules: WorkflowRule[]; onGlobalRulesChange: React.Dispatch<React.SetStateAction<WorkflowRule[]>>; templateId: string; outputFolderId: string | null; outputFolderName: string; enablePromptItems: boolean; referenceAssetIds: Record<string, string[]>; onReferenceAssetIdsChange: React.Dispatch<React.SetStateAction<Record<string, string[]>>>; promptItems: PromptGenerationItem[]; onPromptItemsChange: React.Dispatch<React.SetStateAction<PromptGenerationItem[]>>; currentWorkflowItemId: string | null; onCurrentWorkflowItemChange: (id: string | null) => void; onRemoveAsset: (id: string) => void; onMoveAsset: (id: string, direction: -1 | 1) => void; onClearAssets: () => void; onOpenTasks: () => void; onFocusAsset: (id: string) => void; onOpenViewer: OpenTaskViewer }): React.JSX.Element {
   const initialDraft = useMemo(loadWorkflowDraft, []);
   const [stage, setStage] = useState<WorkflowStage>(initialDraft.stage);
   const [revisions, setRevisions] = useState<Record<string, AnalysisRevision | undefined>>({});
@@ -4204,6 +4328,12 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
   const [itemTemplateIds] = useState<Record<string, string>>(initialDraft.itemTemplateIds);
   const [localFocusId, setLocalFocusId] = useState<string | null>(focusId);
   const [itemRules, setItemRules] = useState<Record<string, WorkflowRule[]>>(initialDraft.itemRules);
+  const setReferenceAssetIds = onReferenceAssetIdsChange;
+  const [referencePicker, setReferencePicker] = useState<{ itemId: string; query: string } | null>(null);
+  const [pickerPhotos, setPickerPhotos] = useState<Photo[]>([]);
+  const [draggedReference, setDraggedReference] = useState<{ itemId: string; assetId: string } | null>(null);
+  const setPromptItems = onPromptItemsChange;
+  const [promptItemTasks, setPromptItemTasks] = useState<Record<string, PersistedTask[]>>({});
   const ids = workflowAssetIds;
   const idsKey = ids.join('|');
   const analysisTasks = useMemo(() => {
@@ -4219,8 +4349,44 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
     const saved = workflowAssetMeta[id];
     return saved ? { ...saved, dimensions: '', rating: 0 } : null;
   }).filter((photo): photo is Photo => Boolean(photo));
+  const referenceIds = [...new Set([...Object.values(referenceAssetIds).flat(), ...promptItems.flatMap((item) => item.referenceAssetIds)])];
+  const referencePhotos = useAssetPhotos(referenceIds, availablePhotos);
+  const pickerQuery = referencePicker?.query ?? '';
+  const pickerOpen = referencePicker !== null;
+  useEffect(() => {
+    if (!pickerOpen) return;
+    let active = true;
+    const timer = window.setTimeout(() => { void window.desktopApi.listCatalogAssetPage({ query: pickerQuery, limit: 200 }).then((page) => { if (active) setPickerPhotos(mapCatalogAssets(page.items)); }).catch(() => { if (active) setPickerPhotos([]); }); }, 150);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [pickerQuery, pickerOpen]);
+  const referencePhoto = (id: string) => referencePhotos.find((photo) => photo.id === id) ?? workflowPhotos.find((photo) => photo.id === id);
+  const addReferences = (itemId: string, assetIds: string[], promptItem: boolean) => {
+    const valid = [...new Set(assetIds)].filter((id) => referencePhoto(id) || pickerPhotos.some((photo) => photo.id === id));
+    if (!valid.length) { setNotice('请从图库拖入照片，或通过加号选择已关联的照片。'); return; }
+    if (promptItem) setPromptItems((items) => items.map((item) => item.id === itemId ? { ...item, referenceAssetIds: [...new Set([...item.referenceAssetIds, ...valid])].slice(0, 8) } : item));
+    else setReferenceAssetIds((current) => ({ ...current, [itemId]: [...new Set([...(current[itemId] ?? []), ...valid.filter((id) => id !== itemId)])].slice(0, 7) }));
+  };
+  const moveReference = (itemId: string, assetId: string, targetId: string, promptItem: boolean) => {
+    if (assetId === targetId) return;
+    const reorder = (ids: string[]) => { const next = ids.filter((id) => id !== assetId); const index = next.indexOf(targetId); if (index < 0) return ids; next.splice(index, 0, assetId); return next; };
+    if (promptItem) setPromptItems((items) => items.map((item) => item.id === itemId ? { ...item, referenceAssetIds: reorder(item.referenceAssetIds) } : item));
+    else setReferenceAssetIds((current) => ({ ...current, [itemId]: reorder(current[itemId] ?? []) }));
+  };
+  const referenceStrip = (itemId: string, ids: string[], promptItem: boolean) => <div className="batch-reference-strip" aria-label="输入图片列表" onDragOver={(event) => { if (hasPhotoDrag(event) || event.dataTransfer.types.includes('application/x-photoallisai-reference')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }} onDrop={(event) => {
+    event.preventDefault(); event.stopPropagation();
+    const moving = draggedReference;
+    if (moving?.itemId === itemId && ids.includes(moving.assetId)) return;
+    const incoming = photoDragIds(event);
+    if (incoming) addReferences(itemId, incoming, promptItem);
+    activePhotoDragIds = null;
+  }}>
+    {ids.map((id, index) => { const photo = referencePhoto(id); const primary = !promptItem && index === 0; return <div className="batch-reference" key={id} draggable={!primary} onDragStart={(event) => { if (primary) return; setDraggedReference({ itemId, assetId: id }); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('application/x-photoallisai-reference', id); }} onDragEnd={() => setDraggedReference(null)} onDragOver={(event) => { if (event.dataTransfer.types.includes('application/x-photoallisai-reference')) { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = 'move'; } }} onDrop={(event) => { if (draggedReference?.itemId !== itemId || primary) return; event.preventDefault(); event.stopPropagation(); moveReference(itemId, draggedReference.assetId, id, promptItem); setDraggedReference(null); }}>
+      <button type="button" className="batch-reference-preview" aria-label={`查看${photo?.fileName ?? id}`} onClick={() => onOpenViewer(id, ids, primary ? { target: 'latest-ai' } : undefined)}>{photo?.thumbnailSrc || photo?.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" /> : <Image size={18} />}</button><small title={photo?.fileName ?? id}>{photo?.fileName ?? id}</small>{!primary && <button type="button" className="batch-reference-remove" aria-label={`移除参考图 ${photo?.fileName ?? id}`} onClick={() => promptItem ? setPromptItems((items) => items.map((item) => item.id === itemId ? { ...item, referenceAssetIds: item.referenceAssetIds.filter((entry) => entry !== id) } : item)) : setReferenceAssetIds((current) => ({ ...current, [itemId]: (current[itemId] ?? []).filter((entry) => entry !== id) }))}><X size={12} /></button>}
+    </div>; })}
+    {ids.length < 8 && <button type="button" className="batch-reference-add" aria-label="添加参考图" title="添加参考图" onClick={() => setReferencePicker({ itemId, query: '' })}><Plus size={18} /><span>添加图片</span></button>}
+  </div>;
   const currentId = focusId && ids.includes(focusId) ? focusId : workflowPhotos[0]?.id ?? null;
-  const effectiveCurrentId = localFocusId && ids.includes(localFocusId) ? localFocusId : currentId;
+  const effectiveCurrentId = currentWorkflowItemId && ids.includes(currentWorkflowItemId) ? currentWorkflowItemId : localFocusId && ids.includes(localFocusId) ? localFocusId : currentId;
   useEffect(() => {
     if (!effectiveCurrentId) return;
     const frame = requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-workflow-asset-id="${effectiveCurrentId}"]`)?.scrollIntoView({ block: 'nearest' }));
@@ -4249,7 +4415,6 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
   const submitting = useRef(false);
   const [submissionId, setSubmissionId] = useState(() => window.localStorage.getItem(`${WORKFLOW_DRAFT_KEY}.submission`) ?? '');
   const [submissionTasks, setSubmissionTasks] = useState<PersistedTask[]>([]);
-  const [regenerateConfirmation, setRegenerateConfirmation] = useState<'all' | null>(null);
   const generationTasks = useMemo(() => {
     const merged = new Map(tasks.filter((task) => task.kind === 'generation').map((task) => [task.id, task]));
     for (const task of submissionTasks) {
@@ -4263,7 +4428,7 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
     return latest ? assetTasks.filter((task) => (task.payload.submissionId ?? task.payload.batchId) === (latest.payload.submissionId ?? latest.payload.batchId)) : [];
   };
   const isUnfinished = (task: PersistedTask) => !['completed', 'failed', 'canceled'].includes(task.status);
-  const generationActive = generationTasks.some((task) => ids.includes(task.assetId ?? '') && isUnfinished(task));
+  const generationActive = [...ids.map((id) => generationTasks.some((task) => task.assetId === id && isUnfinished(task))), ...promptItems.map((item) => (promptItemTasks[item.id] ?? []).some(isUnfinished))].every(Boolean);
   const batchCompleted = submissionTasks.filter((task) => task.status === 'completed').length;
   const batchFailed = submissionTasks.filter((task) => task.status === 'failed').length;
   const batchCanceled = submissionTasks.filter((task) => task.status === 'canceled').length;
@@ -4293,15 +4458,29 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
       if (pending) return;
       pending = true;
       try {
-        const items = await window.desktopApi.listTaskBatch({ kind: 'generation', batchId: submissionId });
-        if (active) setSubmissionTasks(items);
+        const groups = await Promise.all([
+          window.desktopApi.listTaskBatch({ kind: 'generation', batchId: submissionId }),
+          ...promptItems.map((item) => window.desktopApi.listTaskBatch({ kind: 'generation', batchId: item.id }))
+        ]);
+        if (active) setSubmissionTasks([...new Map(groups.flat().map((task) => [task.id, task])).values()]);
       } catch { if (active) setNotice('生成进度暂时无法更新，正在重试。可在任务中心查看。'); }
       finally { pending = false; }
     };
     void refresh();
     const timer = window.setInterval(() => void refresh(), 1_000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [submissionId]);
+  }, [promptItems, submissionId]);
+  useEffect(() => {
+    if (!promptItems.length) { setPromptItemTasks({}); return; }
+    let active = true;
+    const refresh = async () => {
+      const entries = await Promise.all(promptItems.map(async (item) => [item.id, await window.desktopApi.listTaskBatch({ kind: 'generation', batchId: item.id })] as const));
+      if (active) setPromptItemTasks(Object.fromEntries(entries));
+    };
+    void refresh().catch(() => undefined);
+    const timer = window.setInterval(() => { void refresh().catch(() => undefined); }, 1_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [promptItems]);
 
   useEffect(() => {
     void Promise.all([window.desktopApi.listProviderProfiles(), window.desktopApi.listPromptTemplates(), window.desktopApi.getAppSettings()]).then(([items, savedTemplates, settings]) => {
@@ -4354,9 +4533,9 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
   }, [ids, idsKey, revisions]);
   useEffect(() => { if (focusId && ids.includes(focusId)) setLocalFocusId(focusId); }, [focusId, ids, idsKey]);
   useEffect(() => {
-    const timeout = window.setTimeout(() => window.localStorage.setItem(WORKFLOW_DRAFT_KEY, JSON.stringify({ workflowAssetIds, workflowAssetMeta, stage, templateId, generationCount, globalRules, itemRules, itemTemplateIds, collectionReport })), 300);
+    const timeout = window.setTimeout(() => window.localStorage.setItem(WORKFLOW_DRAFT_KEY, JSON.stringify({ workflowAssetIds, workflowAssetMeta, stage, templateId, generationCount, globalRules, itemRules, referenceAssetIds, itemTemplateIds, promptItems, collectionReport })), 300);
     return () => window.clearTimeout(timeout);
-  }, [collectionReport, generationCount, globalRules, itemRules, itemTemplateIds, stage, templateId, workflowAssetIds, workflowAssetMeta]);
+  }, [collectionReport, generationCount, globalRules, itemRules, referenceAssetIds, itemTemplateIds, promptItems, stage, templateId, workflowAssetIds, workflowAssetMeta]);
   const openGeneratedViewer = async (candidate: GenerationResult) => {
     try {
       // Browse the same candidates shown in the queue, including earlier submissions.
@@ -4395,7 +4574,46 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
     } catch (error) { setNotice(`重试失败：${error instanceof Error ? error.message : String(error)}`); }
     finally { submitting.current = false; setBusy(false); }
   };
-  const generate = async (onlyAssetId?: string, force = false, sourceResultId?: string) => {
+  const promptForItem = (item: PromptGenerationItem): string => {
+    const isDefaultEditPrompt = globalRules.length === DEFAULT_WORKFLOW_RULES.length
+      && globalRules.every((rule, index) => rule.id === DEFAULT_WORKFLOW_RULES[index]?.id && rule.text === DEFAULT_WORKFLOW_RULES[index]?.text && rule.enabled === DEFAULT_WORKFLOW_RULES[index]?.enabled);
+    return [...(isDefaultEditPrompt ? [] : globalRules.filter((rule) => rule.enabled).map((rule) => rule.text)), item.prompt.trim()].filter(Boolean).join('\n');
+  };
+  const enqueuePromptItems = async (items: PromptGenerationItem[], submissionId: string, profile: ProviderProfile): Promise<number> => {
+    let count = 0;
+    for (const item of items) {
+      const prompt = promptForItem(item);
+      if (!prompt) throw new Error('请填写批次提示词或这张生图的单独提示词。');
+      for (let resultIndex = 1; resultIndex <= generationCount; resultIndex += 1) {
+        const task = await window.desktopApi.enqueueTask({ kind: 'generation', assetId: null, payload: {
+          providerProfileId: profile.id, batchId: item.id, submissionId: item.id, prompt, templateId: null,
+          templateVersion: null, resultIndex, storageMode: 'managed', outputFolderId: item.outputFolderId,
+          textItemId: item.id, userInstruction: item.prompt.trim(),
+          inputSources: item.referenceAssetIds.map((assetId) => ({ kind: 'asset' as const, assetId }))
+        } });
+        count += 1;
+        setSubmissionTasks((current) => [...current.filter((entry) => entry.id !== task.id), task]);
+      }
+    }
+    return count;
+  };
+  const generatePromptItem = async (item: PromptGenerationItem) => {
+    if (submitting.current) return;
+    if ((promptItemTasks[item.id] ?? []).some((task) => isUnfinished(task))) { setNotice('这项生图任务仍在队列中。'); return; }
+    const profile = profiles.find((candidate) => candidate.purpose === 'generation' && candidate.enabled && candidate.id === generationProfileId)
+      ?? profiles.find((candidate) => candidate.purpose === 'generation' && candidate.enabled && candidate.isDefault)
+      ?? profiles.find((candidate) => candidate.purpose === 'generation' && candidate.enabled);
+    if (!profile) { setNotice('请先在设置中配置并启用图片生成模型。'); return; }
+    if (!promptForItem(item)) { setNotice('请填写批次提示词或这张生图的单独提示词。'); return; }
+    submitting.current = true; setBusy(true);
+    const nextSubmissionId = crypto.randomUUID(); setSubmissionTasks([]); setSubmissionId(nextSubmissionId);
+    try {
+      const count = await enqueuePromptItems([item], nextSubmissionId, profile);
+      setNotice(`已将「${item.outputFolderName}」的生图任务加入队列，共 ${count} 个版本。`);
+    } catch (error) { setNotice(`加入生图队列失败：${error instanceof Error ? error.message : String(error)}`); }
+    finally { submitting.current = false; setBusy(false); }
+  };
+  const generate = async (onlyAssetId?: string, _force = false, sourceResultId?: string) => {
     if (submitting.current) return;
     if (generationResultsReadyKey !== idsKey) { setNotice('正在读取已有生成版本，请稍后再试。'); return; }
     const profile = profiles.find((item) => item.purpose === 'generation' && item.enabled && item.id === generationProfileId) ?? profiles.find((item) => item.purpose === 'generation' && item.enabled && item.isDefault) ?? profiles.find((item) => item.purpose === 'generation' && item.enabled);
@@ -4403,13 +4621,11 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
     const scopedIds = ids.filter((id) => !onlyAssetId || id === onlyAssetId);
     const usable = scopedIds
       .filter((id) => !generationTasks.some((task) => task.assetId === id && isUnfinished(task)))
-      .filter((id) => force || (generationResults[id]?.length ?? 0) === 0)
       .map((assetId) => ({ assetId, revision: revisions[assetId] }));
-    if (usable.length === 0) {
+    const promptQueue = onlyAssetId ? [] : promptItems.filter((item) => !(promptItemTasks[item.id] ?? []).some((task) => isUnfinished(task)));
+    if (usable.length === 0 && promptQueue.length === 0) {
       const activeCount = scopedIds.filter((id) => generationTasks.some((task) => task.assetId === id && isUnfinished(task))).length;
-      const resultCount = scopedIds.filter((id) => (generationResults[id]?.length ?? 0) > 0).length;
       if (activeCount > 0) setNotice('这些图片已有生成任务，请等待完成后再生成。');
-      else if (resultCount > 0 && !force) setRegenerateConfirmation('all');
       else setNotice('没有可生成的图片。');
       return;
     }
@@ -4430,17 +4646,19 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
         const batchId = crypto.randomUUID();
         const count = generationCount;
         for (let resultIndex = 1; resultIndex <= count; resultIndex += 1) {
-          const task = await window.desktopApi.enqueueTask({ kind: 'generation', assetId, payload: { providerProfileId: profile.id, batchId, submissionId, prompt, templateId: template?.id ?? null, templateVersion: template?.version ?? null, resultIndex, storageMode, ...(sourceResultId ? { sourceResultId } : {}), ...(revision ? { analysisRevisionId: revision.id } : {}), disabledActionIds: revision?.result.generativeActions.filter((action) => !enabled.some((item) => item.startsWith(`${action.target}：`))).map((action) => action.id) ?? [], userInstruction: [...rules, ...enabled].join('\n') } });
+          const inputSources = sourceResultId ? undefined : [{ kind: 'asset' as const, assetId }, ...(referenceAssetIds[assetId] ?? []).map((id) => ({ kind: 'asset' as const, assetId: id }))];
+          const task = await window.desktopApi.enqueueTask({ kind: 'generation', assetId, payload: { providerProfileId: profile.id, batchId, submissionId, prompt, templateId: template?.id ?? null, templateVersion: template?.version ?? null, resultIndex, storageMode, ...(sourceResultId ? { sourceResultId } : { inputSources }), ...(revision ? { analysisRevisionId: revision.id } : {}), disabledActionIds: revision?.result.generativeActions.filter((action) => !enabled.some((item) => item.startsWith(`${action.target}：`))).map((action) => action.id) ?? [], userInstruction: [...rules, ...enabled].join('\n') } });
           submittedCount += 1;
           setSubmissionTasks((current) => [...current.filter((item) => item.id !== task.id), task]);
         }
       }
-      const taskCount = usable.length * generationCount;
-      setNotice(`已将 ${usable.length} 张照片、共 ${taskCount} 个版本加入生图队列。`); setStage('review');
+      const promptTaskCount = await enqueuePromptItems(promptQueue, submissionId, profile);
+      const taskCount = usable.length * generationCount + promptTaskCount;
+      setNotice(`已将 ${usable.length} 张照片和 ${promptQueue.length} 项文字生图加入队列，共 ${taskCount} 个版本。`); setStage('review');
     } catch (error) { setNotice(`已提交 ${submittedCount} 个生成任务；${error instanceof Error ? error.message : String(error)}`); }
     finally { submitting.current = false; setBusy(false); }
   };
-  return <main className="ai-workflow-page batch-workspace" onFocusCapture={(event) => { const target = (event.target as HTMLElement).closest<HTMLElement>('[data-workflow-asset-id]'); const id = target?.dataset.workflowAssetId; if (id) { setLocalFocusId(id); onFocusAsset(id); } }}>
+  return <main className="ai-workflow-page batch-workspace" onDragOver={(event) => { if ((event.target as Element).closest('[data-workflow-asset-id], [data-prompt-generation-item]') && hasPhotoDrag(event)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }} onDrop={(event) => { const target = (event.target as Element).closest<HTMLElement>('[data-workflow-asset-id], [data-prompt-generation-item]'); const ids = photoDragIds(event); if (!target || !ids) return; event.preventDefault(); event.stopPropagation(); addReferences(target.dataset.promptGenerationItem ?? target.dataset.workflowAssetId!, ids, Boolean(target.dataset.promptGenerationItem)); activePhotoDragIds = null; }} onFocusCapture={(event) => { const target = (event.target as HTMLElement).closest<HTMLElement>('[data-workflow-asset-id]'); const id = target?.dataset.workflowAssetId; if (id) { setLocalFocusId(id); onCurrentWorkflowItemChange(id); onFocusAsset(id); } }}>
     <div className="workflow-body">
       <section className="workflow-main">
         <section className="batch-prompt-card"><div><span>批次整体提示词</span><label className="batch-model-choice"><select aria-label="本批生成模型" value={generationProfileId || (profiles.find((item) => item.purpose === 'generation' && item.enabled && item.isDefault) ?? profiles.find((item) => item.purpose === 'generation' && item.enabled))?.id || ''} onChange={(event) => setGenerationProfileId(event.target.value)}>{!profiles.some((item) => item.purpose === 'generation' && item.enabled) && <option value="">尚未配置生成模型</option>}{profiles.filter((item) => item.purpose === 'generation' && item.enabled).map((item) => <option key={item.id} value={item.id}>{item.name}{item.isDefault ? ' · 默认' : ''}</option>)}</select></label></div><textarea aria-label="批次整体提示词" value={globalRules.filter((item) => item.enabled).map((item) => item.text).join('\n')} onChange={(event) => onGlobalRulesChange([{ id: 'batch-prompt', text: event.target.value, enabled: true }])} placeholder="描述所有照片共有的修图要求" /></section>
@@ -4450,11 +4668,12 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
             <span>{submissionTasks.length > 0 ? `${workflowPhotos.length} 张 · 完成 ${batchCompleted}/${submissionTasks.length}${batchFailed > 0 ? ` · 失败 ${batchFailed}` : ''}${batchCanceled > 0 ? ` · 取消 ${batchCanceled}` : ''}${batchRunning > 0 ? ` · 生成中 ${batchRunning}` : ''}${batchQueued > 0 ? ` · 排队 ${batchQueued}` : ''}${batchPaused > 0 ? ` · 暂停 ${batchPaused}` : ''}` : `${workflowPhotos.length} 张 · 待生成 ${workflowPhotos.length * generationCount} 个版本`}</span>
             {batchPending && <progress aria-label="本批已结束版本" value={batchCompleted + batchFailed + batchCanceled} max={submissionTasks.length} />}
             {batchFailed > 0 && <button className="quiet-button compact" type="button" disabled={busy || batchRunning > 0 || batchQueued > 0 || batchPaused > 0} onClick={() => void retryGeneration(submissionTasks.filter((task) => task.status === 'failed'))}>重试失败</button>}
+            {enablePromptItems && <button className="quiet-button compact batch-add-prompt" type="button" aria-label="添加生图队列项" title={outputFolderId ? `在「${outputFolderName}」添加生图项` : '先在图库选择一个关联文件夹'} disabled={busy || !outputFolderId} onClick={() => { const id = crypto.randomUUID(); setPromptItems((items) => [...items, { id, outputFolderId: outputFolderId!, outputFolderName, prompt: '', referenceAssetIds: [] }]); onCurrentWorkflowItemChange(id); setNotice('已添加生图项，填写单独提示词或使用批次整体提示词。'); }}><Plus size={13} />生图</button>}
           </div>
-          <div className="batch-queue-toolbar-actions"><label><span>每图生成</span><input aria-label="默认生成数量" type="number" min="1" max="8" value={generationCount} onChange={(event) => setGenerationCount(clamp(Number(event.target.value) || 1, 1, 8))} /></label><button className="quiet-button compact" type="button" disabled={busy || workflowPhotos.length === 0} onClick={() => void analyze()}><Sparkles size={12} />视觉分析</button><button className="primary-action compact" type="button" disabled={busy || generationActive || generationResultsReadyKey !== idsKey || workflowPhotos.length === 0} onClick={() => void generate()}><WandSparkles size={12} />{busy ? '正在提交…' : generationActive ? '生成中…' : generationResultsReadyKey !== idsKey ? '读取版本…' : '生成全部'}</button><button className="quiet-button compact" type="button" aria-label="清空处理列表" title="清空处理列表（后台任务继续运行）" disabled={workflowAssetIds.length === 0} onClick={() => { onClearAssets(); setNotice('已清空处理列表。'); }}><X size={12} /></button></div>
+          <div className="batch-queue-toolbar-actions"><label><span>每项生成</span><input aria-label="默认生成数量" type="number" min="1" max="8" value={generationCount} onChange={(event) => setGenerationCount(clamp(Number(event.target.value) || 1, 1, 8))} /></label><button className="quiet-button compact" type="button" disabled={busy || workflowPhotos.length === 0} onClick={() => void analyze()}><Sparkles size={12} />视觉分析</button><button className="primary-action compact" type="button" disabled={busy || generationActive || generationResultsReadyKey !== idsKey || (workflowPhotos.length === 0 && promptItems.length === 0)} onClick={() => void generate()}><WandSparkles size={12} />{busy ? '正在提交…' : generationActive ? '全部运行中…' : generationResultsReadyKey !== idsKey ? '读取版本…' : '生成全部'}</button><button className="quiet-button compact" type="button" aria-label="清空处理列表" title="清空处理列表（后台任务继续运行）" disabled={workflowAssetIds.length === 0 && promptItems.length === 0} onClick={() => { onClearAssets(); setPromptItems([]); onCurrentWorkflowItemChange(null); setNotice('已清空处理列表。'); }}><X size={12} /></button></div>
         </div>
         {notice && <p className="workflow-notice" role="status">{notice}</p>}
-        {workflowPhotos.length === 0 ? <div className="workflow-empty">从图库或看图将照片加入处理队列</div> : <div className="batch-queue-list">{workflowPhotos.map((photo) => {
+        {workflowPhotos.length === 0 && promptItems.length === 0 ? <div className="workflow-empty">从图库添加照片，或从已选文件夹添加生图项</div> : <div className="batch-queue-list">{workflowPhotos.map((photo) => {
             const result = revisions[photo.id]?.result;
             const task = analysisTasks.get(photo.id);
             const imageTasks = latestGenerationTasks(photo.id);
@@ -4466,11 +4685,27 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
             const state = imageTasks.length && (active || pending.length || failed.length || candidates.length === 0)
               ? `${active ? taskStage(active) : pending.length ? pending.every((item) => item.status === 'paused') ? '已暂停' : '等待生成' : failed.length ? '生成失败' : imageTasks.every((item) => item.status === 'canceled') ? '已取消' : '生成完成'} · ${completed}/${imageTasks.length}`
               : candidates.length > 0 ? `已生成 · ${candidates.length} 个版本` : task && isUnfinished(task) ? '视觉分析中' : '待生成';
-            return <article className={`batch-queue-item${photo.id === effectiveCurrentId ? ' is-active' : ''}`} data-workflow-asset-id={photo.id} key={photo.id} onClick={() => { setLocalFocusId(photo.id); onFocusAsset(photo.id); }} onContextMenu={(event) => { event.preventDefault(); setLocalFocusId(photo.id); onFocusAsset(photo.id); setBatchContextMenu({ x: event.clientX, y: event.clientY, assetId: photo.id }); }}><div className="batch-queue-source" onClick={(event) => { event.stopPropagation(); onOpenViewer(photo.id, workflowAssetIds, { target: 'latest-ai' }); }}><span className="batch-queue-original" data-label-color={photo.labelColor ?? undefined}>{photo.thumbnailSrc || photo.src ? <img src={photo.thumbnailSrc ?? photo.src} alt="" /> : <Image size={20} />}<small>原图</small></span><span className="batch-queue-file"><strong>{photo.fileName}</strong><em>{active && <LoaderCircle size={12} className="batch-generation-spinner" />}{state}</em>{pending.length > 0 && <progress aria-label={`${photo.fileName} 已结束版本`} value={imageTasks.filter((item) => !isUnfinished(item)).length} max={imageTasks.length} />}</span></div><div className="batch-item-settings"><label className="batch-item-instruction"><textarea aria-label={`${photo.fileName} 本图补充要求`} value={(itemRules[photo.id] ?? []).filter((rule) => rule.enabled).map((rule) => rule.text).join('\n')} onClick={(event) => event.stopPropagation()} onChange={(event) => setItemRules((current) => ({ ...current, [photo.id]: [{ id: `prompt-${photo.id}`, text: event.target.value, enabled: true }] }))} placeholder="补充这张图片的独立要求" /></label></div><GenerationTree results={candidates} labelColor={photo.labelColor} onOpen={(candidate) => { void openGeneratedViewer(candidate); }} onContextMenu={(event, candidate) => setBatchContextMenu({ x: event.clientX, y: event.clientY, assetId: photo.id, resultId: candidate.id })} /><div className="batch-queue-meta"><span>{failed.length > 0 ? <span className="batch-generation-error" role="alert">{failed.length} 个版本失败 · {generationFailureMessage(failed[0]!.errorCode)} <code>{failed[0]!.errorCode}</code> <button type="button" aria-label="复制生成错误" title="复制生成错误" onClick={(event) => { event.stopPropagation(); void navigator.clipboard.writeText(failed.map((item) => `图片：${photo.fileName}\n错误码：${item.errorCode ?? '未知错误'}\n任务 ID：${item.id}`).join('\n\n')); }}><Copy size={13} /></button></span> : result?.catalog.shortDescription ?? ''}</span><div><button type="button" aria-label={`${failed.length ? '重试失败版本' : '再次生成'} ${photo.fileName}`} title={failed.length ? '仅重试失败版本' : '再次生成'} disabled={busy || pending.length > 0} onClick={(event) => { event.stopPropagation(); setLocalFocusId(photo.id); onFocusAsset(photo.id); void (failed.length ? retryGeneration(failed) : generate(photo.id, true)); }}><RotateCcw size={12} /></button><button type="button" aria-label={`移除 ${photo.fileName}`} onClick={(event) => { event.stopPropagation(); onRemoveAsset(photo.id); }}><X size={12} /></button></div></div></article>;
+            return <article className={`batch-queue-item${photo.id === effectiveCurrentId ? ' is-active' : ''}`} style={{ '--reference-strip-width': `${Math.min(8, (referenceAssetIds[photo.id]?.length ?? 0) + 2) * 77}px` } as React.CSSProperties} data-workflow-asset-id={photo.id} key={photo.id} onClick={() => { setLocalFocusId(photo.id); onCurrentWorkflowItemChange(photo.id); onFocusAsset(photo.id); }} onContextMenu={(event) => { event.preventDefault(); setLocalFocusId(photo.id); onCurrentWorkflowItemChange(photo.id); onFocusAsset(photo.id); setBatchContextMenu({ x: event.clientX, y: event.clientY, assetId: photo.id }); }}><div className="batch-queue-source">{referenceStrip(photo.id, [photo.id, ...(referenceAssetIds[photo.id] ?? [])], false)}<span className="batch-queue-file"><strong>{photo.fileName}</strong><em>{active && <LoaderCircle size={12} className="batch-generation-spinner" />}{state}</em>{pending.length > 0 && <progress aria-label={`${photo.fileName} 已结束版本`} value={imageTasks.filter((item) => !isUnfinished(item)).length} max={imageTasks.length} />}</span></div><div className="batch-item-settings"><label className="batch-item-instruction"><textarea aria-label={`${photo.fileName} 本图补充要求`} value={(itemRules[photo.id] ?? []).filter((rule) => rule.enabled).map((rule) => rule.text).join('\n')} onClick={(event) => event.stopPropagation()} onChange={(event) => setItemRules((current) => ({ ...current, [photo.id]: [{ id: `prompt-${photo.id}`, text: event.target.value, enabled: true }] }))} placeholder="补充这张图片的独立要求" /></label></div><GenerationTree results={candidates} labelColor={photo.labelColor} onOpen={(candidate) => { void openGeneratedViewer(candidate); }} onContextMenu={(event, candidate) => setBatchContextMenu({ x: event.clientX, y: event.clientY, assetId: photo.id, resultId: candidate.id })} /><div className="batch-queue-meta"><span>{failed.length > 0 ? <span className="batch-generation-error" role="alert">{failed.length} 个版本失败 · {generationFailureMessage(failed[0]!.errorCode)} <code>{failed[0]!.errorCode}</code> <button type="button" aria-label="复制生成错误" title="复制生成错误" onClick={(event) => { event.stopPropagation(); void navigator.clipboard.writeText(failed.map((item) => `图片：${photo.fileName}\n错误码：${item.errorCode ?? '未知错误'}\n任务 ID：${item.id}`).join('\n\n')); }}><Copy size={13} /></button></span> : result?.catalog.shortDescription ?? ''}</span><div><button type="button" aria-label={`运行 ${photo.fileName}`} title="单独运行此项" disabled={busy || pending.length > 0 || generationResultsReadyKey !== idsKey} onClick={(event) => { event.stopPropagation(); void generate(photo.id); }}><Play size={12} /></button><button type="button" aria-label={`${failed.length ? '重试失败版本' : '再次生成'} ${photo.fileName}`} title={failed.length ? '仅重试失败版本' : '再次生成'} disabled={busy || pending.length > 0} onClick={(event) => { event.stopPropagation(); setLocalFocusId(photo.id); onFocusAsset(photo.id); void (failed.length ? retryGeneration(failed) : generate(photo.id, true)); }}><RotateCcw size={12} /></button><button type="button" aria-label={`移除 ${photo.fileName}`} onClick={(event) => { event.stopPropagation(); onRemoveAsset(photo.id); }}><X size={12} /></button></div></div></article>;
 
+          })}{promptItems.map((item) => {
+            const itemTasks = promptItemTasks[item.id] ?? [];
+            const failed = itemTasks.filter((task) => task.status === 'failed');
+            const pending = itemTasks.filter(isUnfinished);
+            const active = pending.find((task) => !['queued', 'draft', 'paused'].includes(task.status));
+            const candidates = itemTasks.flatMap((task) => {
+              const parsed = generationResultSchema.safeParse(task.result?.generation);
+              return parsed.success ? [parsed.data] : [];
+            }).sort((a, b) => a.createdAt - b.createdAt);
+            const done = itemTasks.filter((task) => !isUnfinished(task)).length;
+            const state = active ? taskStage(active) : pending.length ? pending.every((task) => task.status === 'paused') ? '已暂停' : '等待生成' : failed.length ? '生成失败' : candidates.length ? `已生成 ${candidates.length} 张` : '待生成';
+            return <article className={`batch-queue-item batch-prompt-item${currentWorkflowItemId === item.id ? ' is-active' : ''}`} key={item.id} data-prompt-generation-item={item.id} onClick={() => onCurrentWorkflowItemChange(item.id)}>
+              <div className="batch-prompt-input-row" style={{ '--reference-strip-width': `${Math.min(8, item.referenceAssetIds.length + 1) * 77}px` } as React.CSSProperties}>{referenceStrip(item.id, item.referenceAssetIds, true)}<div className="batch-item-settings"><label className="batch-item-instruction"><textarea aria-label="生图提示词" value={item.prompt} onChange={(event) => setPromptItems((current) => current.map((entry) => entry.id === item.id ? { ...entry, prompt: event.target.value } : entry))} placeholder="描述要生成的图片，以及各参考图的用途" /></label></div></div>
+              <GenerationTree results={candidates} onOpen={(candidate) => onOpenViewer(candidate.assetId, [candidate.assetId], { resultId: candidate.id, results: candidates })} onContextMenu={(event) => event.preventDefault()} />
+              <div className="batch-queue-meta"><span>{failed.length ? <span className="batch-generation-error" role="alert">{failed.length} 个版本失败 · {generationFailureMessage(failed[0]!.errorCode)} <code>{failed[0]!.errorCode}</code></span> : `${state}${itemTasks.length ? ` · ${done}/${itemTasks.length}` : ''}`}</span><div><button type="button" aria-label="运行生图项" title="单独运行此项" disabled={busy || pending.length > 0} onClick={(event) => { event.stopPropagation(); void generatePromptItem(item); }}><Play size={12} /></button><button type="button" aria-label="再次生成生图" title="重新生成此项" disabled={busy || pending.length > 0} onClick={() => void generatePromptItem(item)}><RotateCcw size={12} /></button><button type="button" aria-label="移除生图项" title="移除队列项" onClick={() => setPromptItems((current) => current.filter((entry) => entry.id !== item.id))}><X size={12} /></button></div></div>
+            </article>;
           })}</div>}
+        {referencePicker && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setReferencePicker(null); }}><section className="batch-reference-dialog" role="dialog" aria-modal="true" aria-label="添加参考图"><header><strong>添加参考图</strong><button type="button" aria-label="关闭参考图选择" onClick={() => setReferencePicker(null)}><X size={15} /></button></header><input autoFocus aria-label="搜索参考图" value={referencePicker.query} onChange={(event) => setReferencePicker({ ...referencePicker, query: event.target.value })} placeholder="搜索已关联照片的文件名" /><div className="batch-reference-options">{pickerPhotos.filter((photo) => promptItems.some((item) => item.id === referencePicker.itemId) || photo.id !== referencePicker.itemId).map((photo) => <button type="button" key={photo.id} onClick={() => { addReferences(referencePicker.itemId, [photo.id], promptItems.some((item) => item.id === referencePicker.itemId)); setReferencePicker(null); }}><img src={photo.thumbnailSrc ?? photo.src} alt="" /><span>{photo.fileName}</span></button>)}{pickerPhotos.length === 0 && <p>没有匹配的已关联照片。</p>}</div></section></div>}
         {batchContextMenu && <div className="batch-context-menu" role="menu" aria-label="批量修图操作" style={{ left: Math.min(batchContextMenu.x, window.innerWidth - 220), top: Math.min(batchContextMenu.y, window.innerHeight - 180) }} onPointerDown={(event) => event.stopPropagation()}><button type="button" role="menuitem" onClick={() => { void generate(batchContextMenu.assetId, true); setBatchContextMenu(null); }}><RotateCcw size={13} />从原图再次生成</button>{batchContextMenu.resultId && <button type="button" role="menuitem" onClick={() => { void generate(batchContextMenu.assetId, true, batchContextMenu.resultId); setBatchContextMenu(null); }}><WandSparkles size={13} />基于此版本继续修图</button>}<button type="button" role="menuitem" onClick={() => { void window.desktopApi.revealCatalogAsset(batchContextMenu.assetId); setBatchContextMenu(null); }}><FolderOpen size={13} />打开原图位置</button>{batchContextMenu.resultId && <button type="button" role="menuitem" onClick={() => { void window.desktopApi.revealGenerationResult(batchContextMenu.resultId!); setBatchContextMenu(null); }}><FolderOpen size={13} />打开生成图位置</button>}</div>}
-        {regenerateConfirmation && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setRegenerateConfirmation(null); }}><section className="removal-dialog" role="alertdialog" aria-modal="true" aria-labelledby="regenerate-generation-title"><header><span className="dialog-icon"><RotateCcw size={17} /></span><div><h2 id="regenerate-generation-title">重新生成全部图片？</h2><p>当前处理列表中的图片都已有生成版本。重新生成会新增一批结果，不会覆盖或删除已有版本。</p></div></header><footer><button autoFocus className="quiet-button" type="button" disabled={busy} onClick={() => setRegenerateConfirmation(null)}>取消</button><button className="primary-action compact" type="button" disabled={busy} onClick={() => { setRegenerateConfirmation(null); void generate(undefined, true); }}>重新生成</button></footer></section></div>}
       </section>
     </div>
   </main>;
@@ -4545,6 +4780,15 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
       setCacheMaxBytes(settings.cacheMaxBytes);
     });
   }, [onExportPresetsChange]);
+
+  useEffect(() => window.desktopApi.onCatalogChanged(() => {
+    void window.desktopApi.getAppSettings().then((settings) => {
+      setGenerationStorageMode(settings.generationStorageMode);
+      setTheme(settings.theme);
+      setLocalePreference(settings.locale);
+      setCacheMaxBytes(settings.cacheMaxBytes);
+    });
+  }), []);
 
   const saveStorageMode = async (value: AppSettings['generationStorageMode']) => {
     setGenerationStorageMode(value);
@@ -4945,6 +5189,7 @@ function AnalysisFailure({ code, taskId, className = '' }: { code: string | null
 function taskScope(task: PersistedTask): string {
   if (task.kind === 'analysis') return '单图分析';
   if (task.kind === 'generation') {
+    if (typeof task.payload.outputFolderId === 'string') return `文字生图 · 候选 ${typeof task.payload.resultIndex === 'number' ? task.payload.resultIndex : 1}`;
     const count = Array.isArray(task.payload.inputSources) ? task.payload.inputSources.length : 1;
     return `${count > 1 ? `${count} 图合成` : '单图'} · 候选 ${typeof task.payload.resultIndex === 'number' ? task.payload.resultIndex : 1}`;
   }
@@ -4954,7 +5199,8 @@ function taskScope(task: PersistedTask): string {
 }
 
 function taskImageName(task: PersistedTask, photos: Photo[]): string {
-  return task.assetFileName ?? photos.find((photo) => photo.id === task.assetId)?.fileName ?? (task.assetId ? `图片 ${task.assetId.slice(0, 8)}` : taskLabels[task.kind]);
+  const generated = generationResultSchema.safeParse(task.result?.generation);
+  return task.assetFileName ?? photos.find((photo) => photo.id === task.assetId)?.fileName ?? (generated.success ? generated.data.fileName : task.assetId ? `图片 ${task.assetId.slice(0, 8)}` : taskLabels[task.kind]);
 }
 
 function taskStage(task: PersistedTask): string {
@@ -4996,6 +5242,7 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
   const [taskCounts, setTaskCounts] = useState({ queued: 0, paused: 0, active: 0, failed: 0, failedGeneration: 0 });
   const [loadingMoreTasks, setLoadingMoreTasks] = useState(false);
   const loadedTaskHistory = useRef(false);
+  const operationHistorySignature = useRef('');
   const [fileOperations, setFileOperations] = useState<FileOperationHistoryItem[]>([]);
   const [message, setMessage] = useState('');
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
@@ -5008,22 +5255,36 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
   const [countDraft, setCountDraft] = useState(1);
   const [undoBusyId, setUndoBusyId] = useState<string | null>(null);
   const [expandedExportTaskId, setExpandedExportTaskId] = useState<string | null>(null);
-  const [taskView, setTaskView] = useState<'all' | 'queued' | 'active' | 'paused' | 'failed' | 'history'>('all');
+  const [taskView, setTaskView] = useState<'all' | 'queued' | 'failed' | 'history'>('all');
+  const [taskCategory, setTaskCategory] = useState<'all' | 'generation' | 'file'>('all');
+  const taskPageSignature = useRef('');
+  const taskItemsRef = useRef(taskItems);
+  const nextTaskCursorRef = useRef(nextTaskCursor);
 
-  const applyTaskPage = (page: Awaited<ReturnType<typeof window.desktopApi.listTaskPage>>, append = false) => {
-    setTaskItems((current) => append
-      ? [...new Map([...current, ...page.items].map((item) => [item.id, item])).values()]
-      : page.items);
-    if (!append) setNextTaskCursor(page.nextCursor);
-    setTaskTotalCount(page.totalCount);
-    setTaskCounts({
+  const applyTaskPage = useCallback((page: Awaited<ReturnType<typeof window.desktopApi.listTaskPage>>, append = false) => {
+    const nextItems = append
+      ? [...new Map([...taskItemsRef.current, ...page.items].map((item) => [item.id, item])).values()]
+      : page.items;
+    const signature = nextItems.map((item) => `${item.id}:${item.updatedAt}:${item.status}:${item.progress}:${item.position}`).join('|');
+    if (signature !== taskPageSignature.current) {
+      taskPageSignature.current = signature;
+      taskItemsRef.current = nextItems;
+      setTaskItems(nextItems);
+    }
+    if (!append && JSON.stringify(page.nextCursor) !== JSON.stringify(nextTaskCursorRef.current)) {
+      nextTaskCursorRef.current = page.nextCursor;
+      setNextTaskCursor(page.nextCursor);
+    }
+    setTaskTotalCount((current) => current === page.totalCount ? current : page.totalCount);
+    const nextCounts = {
       queued: page.queuedCount,
       paused: page.pausedCount,
       active: page.activeCount,
       failed: page.failedCount,
       failedGeneration: page.failedGenerationCount
-    });
-  };
+    };
+    setTaskCounts((current) => Object.keys(nextCounts).every((key) => current[key as keyof typeof current] === nextCounts[key as keyof typeof nextCounts]) ? current : nextCounts);
+  }, []);
   const fetchPage = async (): Promise<TaskPage> => {
     return window.desktopApi.listTaskPage({ includeBatchMembers: true, limit: 50, cursor: null });
   };
@@ -5041,20 +5302,36 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
       ]);
       if (active) {
         applyTaskPage(page, loadedTaskHistory.current);
-        setFileOperations(operations);
+        const signature = operations.map((item) => `${item.id}:${item.status}:${item.succeeded}:${item.total}`).join('|');
+        if (signature !== operationHistorySignature.current) {
+          operationHistorySignature.current = signature;
+          setFileOperations(operations);
+        }
       }
     };
     const safePoll = () => poll().catch(() => { if (active) setMessage('任务加载失败，请稍后重试。'); });
     void safePoll();
     const changed = (event: Event) => {
       const deleted = new Set((event as CustomEvent<{ deletedIds?: string[] }>).detail?.deletedIds ?? []);
-      if (deleted.size) setTaskItems((current) => current.filter((task) => !deleted.has(task.id)));
+      if (deleted.size) {
+        taskItemsRef.current = taskItemsRef.current.filter((task) => !deleted.has(task.id));
+        taskPageSignature.current = taskItemsRef.current.map((item) => `${item.id}:${item.updatedAt}:${item.status}:${item.progress}:${item.position}`).join('|');
+        setTaskItems(taskItemsRef.current);
+      }
       void safePoll();
     };
     window.addEventListener(TASKS_CHANGED_EVENT, changed);
-    const interval = window.setInterval(safePoll, 1_000);
-    return () => { active = false; window.clearInterval(interval); window.removeEventListener(TASKS_CHANGED_EVENT, changed); };
-  }, []);
+    let timer = 0;
+    const schedule = () => {
+      const activeTasks = taskCounts.active + taskCounts.queued + taskCounts.paused;
+      timer = window.setTimeout(() => {
+        if (document.visibilityState === 'visible') void safePoll();
+        schedule();
+      }, activeTasks > 0 ? 2_000 : 10_000);
+    };
+    schedule();
+    return () => { active = false; window.clearTimeout(timer); window.removeEventListener(TASKS_CHANGED_EVENT, changed); };
+  }, [applyTaskPage, taskCounts.active, taskCounts.queued, taskCounts.paused]);
   useEffect(() => {
     void Promise.all([window.desktopApi.listProviderProfiles(), window.desktopApi.listPromptTemplates()]).then(([profiles, items]) => {
       setGenerationProfiles(profiles.filter((profile) => profile.purpose === 'generation' && profile.enabled));
@@ -5062,9 +5339,11 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
     });
   }, []);
 
-  const retryFailedGeneration = async () => {
+  const retryFailedVisibleTasks = async () => {
     try {
-      const count = await window.desktopApi.retryFailedTasks();
+      const count = taskCategory === 'generation'
+        ? (await window.desktopApi.retryFailedGenerationTasks()).retried
+        : await window.desktopApi.retryFailedTasks();
       setMessage(`已重新排队 ${count} 个任务。`);
       window.dispatchEvent(new CustomEvent(TASKS_CHANGED_EVENT));
       await refresh();
@@ -5181,27 +5460,50 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
     }
   };
 
-  const waiting = taskCounts.queued;
-  const failed = taskCounts.failed;
+  const categoryTasks = taskItems.filter((task) => taskCategory === 'all' || (taskCategory === 'generation' ? task.kind === 'generation' : task.kind === 'export'));
+  const categoryOperations = taskCategory === 'generation' ? [] : fileOperations;
+  const waiting = categoryTasks.filter((task) => task.status === 'queued').length + categoryOperations.filter((operation) => operation.status === 'planned').length;
+  const failed = categoryTasks.filter((task) => task.status === 'failed').length + categoryOperations.filter((operation) => ['failed', 'partial', 'compensation_failed'].includes(operation.status)).length;
   const taskBatches = groupTaskBatches(taskItems);
   const onOpenViewer: OpenTaskViewer = (assetId, assetIds, options) => openViewer(assetId, assetIds ?? taskBatches.find((batch) => batch.tasks.some((task) => task.assetId === assetId))?.tasks.flatMap((task) => task.assetId ? [task.assetId] : []), options ?? { target: 'latest-ai' });
-  const filteredBatches = taskBatches.filter((batch) => taskView === 'all' || (taskView === 'active'
-    ? batch.active > 0 : taskView === 'queued' ? batch.queued > 0 : taskView === 'paused' ? batch.paused > 0
+  const filteredBatches = groupTaskBatches(categoryTasks).filter((batch) => taskView === 'all' || (taskView === 'queued' ? batch.queued > 0
     : taskView === 'failed' ? batch.failed > 0 : batch.settled === batch.total));
+  const filteredOperations = categoryOperations.filter((operation) => taskView === 'all' || (taskView === 'queued' ? operation.status === 'planned'
+    : taskView === 'failed' ? ['failed', 'partial', 'compensation_failed'].includes(operation.status)
+      : ['completed', 'undone', 'partial', 'failed', 'compensation_failed'].includes(operation.status)));
+  const timeline: Array<{ kind: 'task'; batch: typeof filteredBatches[number]; createdAt: number } | { kind: 'file'; operation: FileOperationHistoryItem; createdAt: number }> = [
+    ...filteredBatches.map((batch) => ({ kind: 'task' as const, batch, createdAt: Math.max(...batch.tasks.map((task) => task.createdAt)) })),
+    ...filteredOperations.map((operation) => ({ kind: 'file' as const, operation, createdAt: operation.createdAt }))
+  ].sort((a, b) => b.createdAt - a.createdAt);
+  const visibleTotal = categoryTasks.length + categoryOperations.length;
+  const ended = categoryTasks.filter((task) => ['completed', 'failed', 'canceled'].includes(task.status)).length
+    + categoryOperations.filter((operation) => ['completed', 'undone', 'partial', 'failed', 'compensation_failed'].includes(operation.status)).length;
 
   return (
     <TaskActions tasks={taskBatches.flatMap((batch) => batch.tasks)} onOpenViewer={onOpenViewer} onEditTask={openPromptEditor}>
     <div className="task-center-page">
       <nav className="task-view-switch" aria-label="筛选任务">{([
-        ['all', '全部', taskTotalCount], ['queued', '排队', waiting], ['active', '运行', taskCounts.active],
-        ['paused', '暂停', taskCounts.paused], ['failed', '失败', failed],
-        ['history', '已结束', taskTotalCount - waiting - taskCounts.active - taskCounts.paused]
-      ] as const).map(([value, label, count]) => <button type="button" key={value} aria-label={label} aria-pressed={taskView === value} onClick={() => setTaskView(value)}>{label}<span className="task-tab-count">{count}</span></button>)}<div className="task-toolbar-actions"><button className="quiet-button" type="button" disabled={failed === 0} onClick={() => void retryFailedGeneration()}><RotateCcw size={13} />重试</button><TaskClearButton disabled={taskTotalCount === 0} /></div></nav>
+        ['all', '全部', visibleTotal], ['queued', '排队', waiting], ['failed', '失败', failed], ['history', '已结束', ended]
+      ] as const).map(([value, label, count]) => <button type="button" key={value} aria-label={label} aria-pressed={taskView === value} onClick={() => setTaskView(value)}>{label}<span className="task-tab-count">{count}</span></button>)}<div className="task-toolbar-actions"><div className="task-category-switch" role="group" aria-label="任务分类">{([['all', '全部'], ['generation', '生成'], ['file', '文件']] as const).map(([value, label]) => <button key={value} type="button" aria-label={`${label}分类`} aria-pressed={taskCategory === value} onClick={() => setTaskCategory(value)}>{label}</button>)}</div>{(taskView === 'all' || taskView === 'failed') && <button className="quiet-button" type="button" disabled={taskCategory === 'file' || (taskCategory === 'generation' ? taskCounts.failedGeneration === 0 : taskCounts.failed === 0)} onClick={() => void retryFailedVisibleTasks()}><RotateCcw size={13} />重试</button>}<TaskClearButton disabled={taskTotalCount === 0} /></div></nav>
       {message && <span className="task-feedback" role="status">{message}</span>}
+      {editingTaskId && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !editBusy) setEditingTaskId(null); }}><form className="rename-dialog task-prompt-editor" role="dialog" aria-modal="true" aria-labelledby="task-prompt-title" onSubmit={(event) => { event.preventDefault(); void savePrompt(); }}><header><div><span className="dialog-icon"><FilePenLine size={16} /></span><div><h2 id="task-prompt-title">编辑等待任务</h2><p>修改只作用于尚未开始的任务；同批生成数量会安全增减队尾任务。</p></div></div><IconButton label="关闭提示词编辑器" disabled={editBusy} onClick={() => setEditingTaskId(null)}><X size={15} /></IconButton></header><div className="form-grid two-columns"><label className="rename-field"><span>生成模型</span><select aria-label="任务生成模型" value={providerDraft} onChange={(event) => setProviderDraft(event.target.value)}>{generationProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label><label className="rename-field"><span>生成数量</span><input aria-label="任务生成数量" type="number" min="1" max="20" value={countDraft} onChange={(event) => setCountDraft(Number(event.target.value))} /></label></div><label className="rename-field"><span>提示词模板</span><select aria-label="任务提示词模板" value={templateDraft} disabled={!taskItems.find((item) => item.id === editingTaskId)?.payload.analysisRevisionId} onChange={(event) => void previewTaskTemplate(event.target.value)}><option value="">保留当前通用方案</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name} · V{template.version}</option>)}</select></label><label className="rename-field"><span>最终生成提示词</span><textarea autoFocus value={promptDraft} maxLength={50_000} onChange={(event) => setPromptDraft(event.target.value)} /></label><footer><span>{promptDraft.length.toLocaleString()} / 50,000</span><div><button className="quiet-button" type="button" disabled={editBusy} onClick={() => setEditingTaskId(null)}>取消</button><button className="primary-action compact" type="submit" disabled={!providerDraft || !promptDraft.trim() || countDraft < 1 || countDraft > 20 || editBusy}>{editBusy ? '保存中…' : '保存修改'}</button></div></footer></form></div>}
+      <div className="task-center-scroll">
       <div className="task-table">
-        {filteredBatches.length === 0 ? (
-          <div className="task-empty"><Clock3 size={30} /><h2>{taskItems.length ? '当前筛选下暂无任务' : '暂无任务'}</h2><p>{nextTaskCursor ? '可继续加载任务记录。' : '开始视觉分析、生成或导出后，在这里查看执行记录。'}</p></div>
-        ) : filteredBatches.map((batch) => <TaskBatchGroup key={batch.id} tasks={batch.tasks} photos={photos} onOpenViewer={onOpenViewer}>{batch.tasks.map((task) => {
+        {timeline.length === 0 ? (
+          <div className="task-empty"><Clock3 size={30} /><h2>{visibleTotal ? '当前筛选下暂无记录' : '暂无记录'}</h2><p>{nextTaskCursor ? '可继续加载任务记录。' : '开始生成或执行文件操作后，在这里查看记录。'}</p></div>
+        ) : timeline.map((entry) => {
+          if (entry.kind === 'file') {
+            const operation = entry.operation;
+            return <div className="operation-history-row" key={`file:${operation.id}`}>
+              <span><strong>{fileOperationLabels[operation.kind]}</strong><small>{operation.fileNames.join('、')}{operation.total > operation.fileNames.length ? ` 等 ${operation.total} 项` : ''}</small></span>
+              <span className={`operation-state state-${operation.status}`}>{fileOperationStatusLabels[operation.status]}</span>
+              <span>{operation.succeeded}/{operation.total}</span>
+              <time>{new Date(operation.createdAt).toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</time>
+              <span className="operation-actions">{operation.undoable && <IconButton label={`撤销${fileOperationLabels[operation.kind]}`} disabled={undoBusyId !== null} onClick={() => void undoFileOperation(operation)}><RotateCcw size={13} /></IconButton>}</span>
+            </div>;
+          }
+          const batch = entry.batch;
+          return <TaskBatchGroup key={batch.id} tasks={batch.tasks} photos={photos} onOpenViewer={onOpenViewer}>{batch.tasks.map((task) => {
           const report = exportTaskReport(task);
           const reportOpen = expandedExportTaskId === task.id;
           return <Fragment key={task.id}>
@@ -5229,26 +5531,11 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
             </div>
           </section>}
           </Fragment>;
-        })}</TaskBatchGroup>)}
+        })}</TaskBatchGroup>;
+        })}
         {nextTaskCursor && <div className="task-load-more"><button className="secondary-action compact" type="button" disabled={loadingMoreTasks} onClick={() => void loadMoreTasks()}>{loadingMoreTasks ? '加载中…' : '加载更多任务'}</button></div>}
       </div>
-      {editingTaskId && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !editBusy) setEditingTaskId(null); }}><form className="rename-dialog task-prompt-editor" role="dialog" aria-modal="true" aria-labelledby="task-prompt-title" onSubmit={(event) => { event.preventDefault(); void savePrompt(); }}><header><div><span className="dialog-icon"><FilePenLine size={16} /></span><div><h2 id="task-prompt-title">编辑等待任务</h2><p>修改只作用于尚未开始的任务；同批生成数量会安全增减队尾任务。</p></div></div><IconButton label="关闭提示词编辑器" disabled={editBusy} onClick={() => setEditingTaskId(null)}><X size={15} /></IconButton></header><div className="form-grid two-columns"><label className="rename-field"><span>生成模型</span><select aria-label="任务生成模型" value={providerDraft} onChange={(event) => setProviderDraft(event.target.value)}>{generationProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label><label className="rename-field"><span>生成数量</span><input aria-label="任务生成数量" type="number" min="1" max="20" value={countDraft} onChange={(event) => setCountDraft(Number(event.target.value))} /></label></div><label className="rename-field"><span>提示词模板</span><select aria-label="任务提示词模板" value={templateDraft} disabled={!taskItems.find((item) => item.id === editingTaskId)?.payload.analysisRevisionId} onChange={(event) => void previewTaskTemplate(event.target.value)}><option value="">保留当前通用方案</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name} · V{template.version}</option>)}</select></label><label className="rename-field"><span>最终生成提示词</span><textarea autoFocus value={promptDraft} maxLength={50_000} onChange={(event) => setPromptDraft(event.target.value)} /></label><footer><span>{promptDraft.length.toLocaleString()} / 50,000</span><div><button className="quiet-button" type="button" disabled={editBusy} onClick={() => setEditingTaskId(null)}>取消</button><button className="primary-action compact" type="submit" disabled={!providerDraft || !promptDraft.trim() || countDraft < 1 || countDraft > 20 || editBusy}>{editBusy ? '保存中…' : '保存修改'}</button></div></footer></form></div>}
-      <section className="operation-history">
-        <header><div><History size={15} /><span><strong>文件操作</strong><small>最近 {fileOperations.length} 条</small></span></div></header>
-        {fileOperations.length === 0 ? <div className="operation-history-empty">暂无文件操作</div> : (
-          <div className="operation-history-list">
-            {fileOperations.map((operation) => (
-              <div className="operation-history-row" key={operation.id}>
-                <span><strong>{fileOperationLabels[operation.kind]}</strong><small>{operation.fileNames.join('、')}{operation.total > operation.fileNames.length ? ` 等 ${operation.total} 项` : ''}</small></span>
-                <span className={`operation-state state-${operation.status}`}>{fileOperationStatusLabels[operation.status]}</span>
-                <span>{operation.succeeded}/{operation.total}</span>
-                <time>{new Date(operation.createdAt).toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</time>
-                <span className="operation-actions">{operation.undoable && <IconButton label={`撤销${fileOperationLabels[operation.kind]}`} disabled={undoBusyId !== null} onClick={() => void undoFileOperation(operation)}><RotateCcw size={13} /></IconButton>}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
+      </div>
     </div>
     </TaskActions>
   );
@@ -5398,10 +5685,24 @@ function TemplatePage(): React.JSX.Element {
   );
 }
 
-function InlinePhotoViewer({ workspace, photo, items, onPhotoChange, onClose, resultId, options, onSelectResult, onRemoveResult }: { workspace: LibraryWorkspaceProps; photo: Photo; items: Photo[]; onPhotoChange: (photo: Photo) => void; onClose: () => void; resultId: string | undefined; options: ViewerOpenOptions; onSelectResult: (result: GenerationResult) => void; onRemoveResult: (resultId: string) => void }): React.JSX.Element {
+function InlinePhotoViewer({ workspace, photo, items, onPhotoChange, onClose, resultId, options, onSelectResult, onRemoveResult, onDisplayedFileChange }: { workspace: LibraryWorkspaceProps; photo: Photo; items: Photo[]; onPhotoChange: (photo: Photo) => void; onClose: () => void; resultId: string | undefined; options: ViewerOpenOptions; onSelectResult: (result: GenerationResult) => void; onRemoveResult: (resultId: string) => void; onDisplayedFileChange?: ((file: ViewerDisplayedFile) => void) | undefined }): React.JSX.Element {
   const panelRef = useRef<HTMLElement>(null);
   const displayItems = items.map((item) => photo.workflow && item.workflow?.id === photo.workflow.id ? photo : item);
   const [selection, setSelection] = useState<SelectionState>(() => ({ selectedIds: new Set([photo.id]), anchorId: photo.id, focusId: photo.id }));
+  const { availablePhotos: catalogPhotos, onSelectedAssetChange, onSelectionChange } = workspace;
+  const selectViewedPhoto = useCallback((next: Photo) => {
+    onPhotoChange(next);
+    if (!catalogPhotos.some((item) => item.id === next.id)) return;
+    onSelectedAssetChange(next.id);
+  }, [onPhotoChange, catalogPhotos, onSelectedAssetChange]);
+  useEffect(() => {
+    const availableIds = new Set(catalogPhotos.map((item) => item.id));
+    const selectedIds = new Set([...selection.selectedIds].filter((id) => availableIds.has(id)));
+    if (selectedIds.size === 0) return;
+    const anchorId = selection.anchorId && availableIds.has(selection.anchorId) ? selection.anchorId : null;
+    const focusId = selection.focusId && availableIds.has(selection.focusId) ? selection.focusId : null;
+    onSelectionChange((current) => current.anchorId === anchorId && current.focusId === focusId && current.selectedIds.size === selectedIds.size && [...selectedIds].every((id) => current.selectedIds.has(id)) ? current : { selectedIds, anchorId, focusId });
+  }, [selection, catalogPhotos, onSelectionChange]);
   const itemIdsKey = JSON.stringify(items.map((item) => item.id));
   const selectionPhotoId = useRef(photo.id);
   selectionPhotoId.current = photo.id;
@@ -5428,7 +5729,7 @@ function InlinePhotoViewer({ workspace, photo, items, onPhotoChange, onClose, re
     event.preventDefault();
     event.stopPropagation();
     onClose();
-  }}><LibraryWorkspace {...workspace} active view="viewer" availablePhotos={displayItems} selectedAssetId={photo.id} selection={selection} onSelectionChange={setSelection} onSelectedAssetChange={(id) => { const next = displayItems.find((item) => item.id === id); if (next) onPhotoChange(next); }} onWorkflowStageChange={(next) => { setSelection((current) => ({ selectedIds: new Set([...current.selectedIds].map((id) => id === photo.id ? next.id : id)), anchorId: current.anchorId === photo.id ? next.id : current.anchorId, focusId: current.focusId === photo.id ? next.id : current.focusId })); onPhotoChange(next); }} totalCount={items.length} hasMore={false} onCloseViewer={onClose} initialResultId={resultId} initialVersionTarget={options.target} resultSequence={options.results} onSelectViewerResult={onSelectResult} onRemoveViewerResult={onRemoveResult} /></section>;
+  }}><LibraryWorkspace {...workspace} active view="viewer" availablePhotos={displayItems} selectedAssetId={photo.id} selection={selection} onSelectionChange={setSelection} onSelectedAssetChange={(id) => { const next = displayItems.find((item) => item.id === id); if (next) selectViewedPhoto(next); }} onWorkflowStageChange={(next) => { setSelection((current) => ({ selectedIds: new Set([...current.selectedIds].map((id) => id === photo.id ? next.id : id)), anchorId: current.anchorId === photo.id ? next.id : current.anchorId, focusId: current.focusId === photo.id ? next.id : current.focusId })); selectViewedPhoto(next); }} totalCount={items.length} hasMore={false} onCloseViewer={onClose} initialResultId={resultId} initialVersionTarget={options.target} resultSequence={options.results} onSelectViewerResult={onSelectResult} onRemoveViewerResult={onRemoveResult} onDisplayedFileChange={onDisplayedFileChange} /></section>;
 }
 
 function QuickPhotoViewer({ session, photo, onPhotoChange, onClose }: { session: QuickViewSession; photo: Photo; onPhotoChange: (photo: Photo) => void; onClose: () => void }): React.JSX.Element {
@@ -5684,6 +5985,9 @@ export function App(): React.JSX.Element {
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [viewerPhoto, setViewerPhoto] = useState<Photo | null>(null);
+  const viewerPhotoRef = useRef<Photo | null>(null);
+  viewerPhotoRef.current = viewerPhoto;
+  const [viewerDisplayedFile, setViewerDisplayedFile] = useState<ViewerDisplayedFile | null>(null);
   const [quickSession, setQuickSession] = useState<QuickViewSession | null>(null);
   const [quickPhoto, setQuickPhoto] = useState<Photo | null>(null);
   const quickSessionRef = useRef<QuickViewSession | null>(null);
@@ -5779,9 +6083,11 @@ export function App(): React.JSX.Element {
   const openViewerRef = useRef<(assetId: string, assetIds?: string[]) => void>(() => undefined);
   const viewerOrigin = useRef<{ focus: HTMLElement | null; drawerOpen: boolean; scroll: Array<{ element: HTMLElement; top: number; left: number }> } | null>(null);
   const closeViewer = useCallback(() => {
+    const viewedId = viewerPhotoRef.current?.id;
     viewerRequest.current += 1;
     viewerCatalogScope.current = null;
     setViewerPhoto(null);
+    setViewerDisplayedFile(null);
     setViewerPhotos([]);
     setViewerResultId(undefined);
     setViewerPreloading(false);
@@ -5793,26 +6099,37 @@ export function App(): React.JSX.Element {
         for (const { element, top, left } of origin.scroll) {
           if (element.isConnected) element.scrollTo(left, top);
         }
-        if (origin.focus?.isConnected) origin.focus.focus({ preventScroll: true });
+        const viewedCard = viewedId ? document.querySelector<HTMLElement>(`.workspace-source-page [data-asset-id="${CSS.escape(viewedId)}"]`) : null;
+        if (viewedCard) {
+          viewedCard.focus({ preventScroll: true });
+          viewedCard.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        } else if (origin.focus?.isConnected) origin.focus.focus({ preventScroll: true });
       });
     }
   }, []);
   const [sharedSelection, setSharedSelection] = useState<SelectionState>({ selectedIds: new Set(), anchorId: null, focusId: null });
   const [workflowAssetIds, setWorkflowAssetIds] = useState<string[]>(() => loadWorkflowDraft().workflowAssetIds);
   const [workflowAssetMeta, setWorkflowAssetMeta] = useState<Record<string, WorkflowAssetMeta>>(() => loadWorkflowDraft().workflowAssetMeta);
+  const [workflowReferenceAssetIds, setWorkflowReferenceAssetIds] = useState<Record<string, string[]>>(() => loadWorkflowDraft().referenceAssetIds);
+  const [workflowPromptItems, setWorkflowPromptItems] = useState<PromptGenerationItem[]>(() => loadWorkflowDraft().promptItems);
+  const [currentWorkflowItemId, setCurrentWorkflowItemId] = useState<string | null>(null);
+  const [referenceNotice, setReferenceNotice] = useState('');
   const [workflowRules, setWorkflowRules] = useState<WorkflowRule[]>(() => loadWorkflowDraft().globalRules);
   const [workflowTemplateId, setWorkflowTemplateId] = useState(() => loadWorkflowDraft().templateId);
   useEffect(() => {
     const timeout = window.setTimeout(() => {
       try {
         const draft = loadWorkflowDraft();
-        window.localStorage.setItem(WORKFLOW_DRAFT_KEY, JSON.stringify({ ...draft, workflowAssetIds, workflowAssetMeta, globalRules: workflowRules, templateId: workflowTemplateId } satisfies WorkflowDraft));
+        window.localStorage.setItem(WORKFLOW_DRAFT_KEY, JSON.stringify({ ...draft, workflowAssetIds, workflowAssetMeta, referenceAssetIds: workflowReferenceAssetIds, promptItems: workflowPromptItems, globalRules: workflowRules, templateId: workflowTemplateId } satisfies WorkflowDraft));
       } catch {
         // localStorage may be unavailable in restricted sessions; the in-memory queue remains usable.
       }
     }, 250);
     return () => window.clearTimeout(timeout);
-  }, [workflowAssetIds, workflowAssetMeta, workflowRules, workflowTemplateId]);
+  }, [workflowAssetIds, workflowAssetMeta, workflowReferenceAssetIds, workflowPromptItems, workflowRules, workflowTemplateId]);
+  useEffect(() => {
+    if (currentWorkflowItemId && !workflowAssetIds.includes(currentWorkflowItemId) && !workflowPromptItems.some((item) => item.id === currentWorkflowItemId)) setCurrentWorkflowItemId(null);
+  }, [currentWorkflowItemId, workflowAssetIds, workflowPromptItems]);
   const [viewerPreloading, setViewerPreloading] = useState(false);
   useEffect(() => { closeViewer(); }, [activeTab, closeViewer]);
   useEffect(() => {
@@ -5871,11 +6188,19 @@ export function App(): React.JSX.Element {
       setLocale(settings.locale);
       refresh();
     });
+    const unsubscribeSettings = window.desktopApi.onCatalogChanged(() => {
+      void window.desktopApi.getAppSettings().then((settings) => {
+        preference = settings.theme;
+        setLocale(settings.locale);
+        refresh();
+      });
+    });
     media.addEventListener('change', refresh);
     window.addEventListener(THEME_CHANGE_EVENT, onThemeChange);
     return () => {
       media.removeEventListener('change', refresh);
       window.removeEventListener(THEME_CHANGE_EVENT, onThemeChange);
+      unsubscribeSettings();
     };
   }, []);
 
@@ -6260,7 +6585,7 @@ export function App(): React.JSX.Element {
     ?? catalogPhotos.find((photo) => photo.id === sharedSelection.focusId)
     ?? availablePhotos.find((photo) => photo.id === selectedAssetId)
     ?? availablePhotos[0];
-  const contextSelectedIds = useMemo(() => quickPhoto ? new Set<string>() : viewerPhoto ? new Set([viewerPhoto.id]) : sharedSelection.selectedIds, [quickPhoto, viewerPhoto, sharedSelection.selectedIds]);
+  const contextSelectedIds = useMemo(() => quickPhoto ? new Set<string>() : viewerPhoto && sharedSelection.selectedIds.size === 0 ? new Set([viewerPhoto.id]) : sharedSelection.selectedIds, [quickPhoto, viewerPhoto, sharedSelection.selectedIds]);
   const contextPhotos = useMemo(() => {
     if (quickPhoto) return [];
     if (!viewerPhoto) return availablePhotos;
@@ -6285,6 +6610,21 @@ export function App(): React.JSX.Element {
       return next;
     });
   }, [contextPhotos]);
+  const addAssetsAsReferences = useCallback((assetIds: string[]) => {
+    const itemId = currentWorkflowItemId;
+    if (!itemId || (!workflowAssetIds.includes(itemId) && !workflowPromptItems.some((item) => item.id === itemId))) {
+      return;
+    }
+    const validIds = [...new Set(assetIds)].filter((id) => contextPhotos.some((photo) => photo.id === id) && id !== itemId);
+    const promptItem = workflowPromptItems.some((item) => item.id === itemId);
+    const existing = promptItem ? workflowPromptItems.find((item) => item.id === itemId)?.referenceAssetIds ?? [] : workflowReferenceAssetIds[itemId] ?? [];
+    const limit = promptItem ? 8 : 7;
+    const additions = validIds.filter((id) => !existing.includes(id)).slice(0, Math.max(0, limit - existing.length));
+    if (!additions.length) { setReferenceNotice(existing.length >= limit ? '这一项最多支持 8 张输入图片。' : '所选图片已在参考图列表中。'); return; }
+    if (promptItem) setWorkflowPromptItems((items) => items.map((item) => item.id === itemId ? { ...item, referenceAssetIds: [...item.referenceAssetIds, ...additions] } : item));
+    else setWorkflowReferenceAssetIds((current) => ({ ...current, [itemId]: [...(current[itemId] ?? []), ...additions] }));
+    setReferenceNotice('');
+  }, [contextPhotos, currentWorkflowItemId, workflowAssetIds, workflowPromptItems, workflowReferenceAssetIds]);
   const removeWorkflowAsset = useCallback((assetId: string) => {
     setWorkflowAssetIds((current) => current.filter((id) => id !== assetId));
     setWorkflowAssetMeta((current) => {
@@ -6426,6 +6766,7 @@ export function App(): React.JSX.Element {
       viewerOrigin.current = origin;
       viewerCatalogScope.current = JSON.stringify([selectedFolderId, selectedFolderIds.length > 1 ? selectedFolderIds : [], selectedAlbumId, selectedSmartCollection, selectedTagId]);
       setViewerPhotos(ids.flatMap((id) => byId.has(id) ? [byId.get(id)!] : []));
+      setViewerDisplayedFile(null);
       setViewerPhoto(photo);
       setViewerResultId(options.resultId);
       setViewerOptions(options);
@@ -6442,6 +6783,10 @@ export function App(): React.JSX.Element {
     if (!next) return;
     setViewerPhoto(next);
     setViewerResultId(result.id);
+    if (availablePhotos.some((photo) => photo.id === next.id)) {
+      setSelectedAssetId(next.id);
+      setSharedSelection({ selectedIds: new Set([next.id]), anchorId: next.id, focusId: next.id });
+    }
     window.requestAnimationFrame(() => document.querySelector<HTMLElement>('.inline-photo-viewer .canvas-wrap')?.focus({ preventScroll: true }));
   };
   const removeViewerResult = (resultId: string) => {
@@ -6503,12 +6848,12 @@ export function App(): React.JSX.Element {
               <div className="workspace-page-stack">
               <div className="workspace-source-page" inert={Boolean(viewerPhoto)} aria-hidden={viewerPhoto ? true : undefined} style={viewerPhoto ? { visibility: 'hidden' } : undefined}>
               {activeTab === 'library' ? <LibraryWorkspace {...workspaceProps} />
-                : activeTab === 'batch' || activeTab === 'workflow' ? <AiWorkflowPage photos={availablePhotos} focusId={sharedSelection.focusId} workflowAssetIds={workflowAssetIds} workflowAssetMeta={workflowAssetMeta} tasks={globalTasks} globalRules={workflowRules} onGlobalRulesChange={setWorkflowRules} templateId={workflowTemplateId} onRemoveAsset={removeWorkflowAsset} onMoveAsset={moveWorkflowAsset} onClearAssets={() => { setWorkflowAssetIds([]); setWorkflowAssetMeta({}); }} onOpenTasks={() => openWorkspaceTab('tasks')} onOpenViewer={(assetId, assetIds, options) => void openViewer(assetId, assetIds, options)} onFocusAsset={(id) => setSharedSelection((current) => ({ ...current, focusId: id }))} />
+                : activeTab === 'batch' || activeTab === 'workflow' ? <AiWorkflowPage photos={availablePhotos} focusId={sharedSelection.focusId} workflowAssetIds={workflowAssetIds} workflowAssetMeta={workflowAssetMeta} tasks={globalTasks} globalRules={workflowRules} onGlobalRulesChange={setWorkflowRules} templateId={workflowTemplateId} outputFolderId={selectedFolderIds.length <= 1 ? selectedFolderId : null} outputFolderName={catalogFolders.find((folder) => folder.id === selectedFolderId)?.name ?? '当前文件夹'} enablePromptItems={activeTab === 'batch'} referenceAssetIds={workflowReferenceAssetIds} onReferenceAssetIdsChange={setWorkflowReferenceAssetIds} promptItems={workflowPromptItems} onPromptItemsChange={setWorkflowPromptItems} currentWorkflowItemId={currentWorkflowItemId} onCurrentWorkflowItemChange={setCurrentWorkflowItemId} onRemoveAsset={removeWorkflowAsset} onMoveAsset={moveWorkflowAsset} onClearAssets={() => { setWorkflowAssetIds([]); setWorkflowAssetMeta({}); }} onOpenTasks={() => openWorkspaceTab('tasks')} onOpenViewer={(assetId, assetIds, options) => void openViewer(assetId, assetIds, options)} onFocusAsset={(id) => setSharedSelection((current) => ({ ...current, focusId: id }))} />
                 : activeTab === 'settings' ? <SettingsPage onExportPresetsChange={setExportPresets} />
                   : activeTab === 'tasks' ? <TaskCenterPage onCatalogChanged={refreshCatalog} onOpenViewer={(assetId, assetIds, options) => void openViewer(assetId, assetIds, options)} photos={availablePhotos} />
                     : <TemplatePage />}
               </div>
-              {viewerPhoto && <InlinePhotoViewer workspace={workspaceProps} photo={viewerPhoto} items={viewerPhotos} onPhotoChange={(photo) => { setViewerPhoto(photo); setViewerResultId(undefined); }} onClose={closeViewer} resultId={viewerResultId} options={viewerOptions} onSelectResult={selectViewerResult} onRemoveResult={removeViewerResult} />}
+              {viewerPhoto && <InlinePhotoViewer workspace={workspaceProps} photo={viewerPhoto} items={viewerPhotos} onPhotoChange={(photo) => { setViewerPhoto(photo); setViewerResultId(undefined); }} onClose={closeViewer} resultId={viewerResultId} options={viewerOptions} onSelectResult={selectViewerResult} onRemoveResult={removeViewerResult} onDisplayedFileChange={setViewerDisplayedFile} />}
               {quickSession && quickPhoto && <QuickPhotoViewer key={quickSession.selectedId} session={quickSession} photo={quickPhoto} onPhotoChange={setQuickPhoto} onClose={() => { quickSessionRef.current = null; setQuickSession(null); setQuickPhoto(null); }} />}
               {viewerPreloading && <div className="viewer-preload-indicator" role="status"><span className="working-pulse" />正在准备预览</div>}
               </div>
@@ -6516,7 +6861,7 @@ export function App(): React.JSX.Element {
               <div hidden={!panelVisibility.right} className={`workspace-side-panel right-dock-stack${dockLayout.collapsed ? ' is-collapsed' : ''}`}>
                 <div className="inspector unified-dock">
                   <div className="inspector-tabs"><button className={dockTab === 'ai' ? 'is-active' : ''} type="button" onClick={() => { setDockTab('ai'); setAgentDockOpen(false); }}><Bot size={14} />AI</button><button className={dockTab === 'agent' ? 'is-active' : ''} type="button" onClick={() => { setDockTab('agent'); setAgentDockOpen(true); }}><Sparkles size={14} />Agent</button><button className={dockTab === 'details' ? 'is-active' : ''} type="button" onClick={() => { setDockTab('details'); setAgentDockOpen(false); }}><Info size={14} />详情</button></div>
-                  <div className="inspector-scroll">{dockTab === 'agent' ? <AgentDockPanel selectedIds={contextSelectedIds} photos={contextPhotos} onOpenResult={(result, results, assetIds) => { void openViewer(result.assetId, assetIds, { resultId: result.id, results }); }} onOpenAsset={(assetId, assetIds) => { void openViewer(assetId, assetIds); }} onClose={() => { setDockTab('ai'); setAgentDockOpen(false); }} onCollapse={() => saveDockLayout({ ...dockLayout, collapsed: true })} onMove={() => saveDockLayout({ ...dockLayout, order: ['details', 'agent'] })} /> : dockTab === 'details' && globalFocusPhoto ? <GlobalDetailsPanel photo={globalFocusPhoto} /> : <GlobalAiPanel onOpenBatch={() => openWorkspaceTab('batch')} photo={globalFocusPhoto} selectedIds={contextSelectedIds} isDemo={isDemo} workspaceTab={activeTab} onOpenTemplates={() => openWorkspaceTab('templates')} onAddAssetsToWorkflow={addAssetsToWorkflow} workflowAssetIds={workflowAssetIds} tasks={globalTasks} workflowRules={workflowRules} onWorkflowRulesChange={setWorkflowRules} workflowTemplateId={workflowTemplateId} onWorkflowTemplateChange={setWorkflowTemplateId} />}</div>
+                  <div className="inspector-scroll">{dockTab === 'agent' ? <AgentDockPanel selectedIds={contextSelectedIds} photos={contextPhotos} onOpenResult={(result, results, assetIds) => { void openViewer(result.assetId, assetIds, { resultId: result.id, results }); }} onOpenAsset={(assetId, assetIds) => { void openViewer(assetId, assetIds); }} onClose={() => { setDockTab('ai'); setAgentDockOpen(false); }} onCollapse={() => saveDockLayout({ ...dockLayout, collapsed: true })} onMove={() => saveDockLayout({ ...dockLayout, order: ['details', 'agent'] })} /> : dockTab === 'details' && globalFocusPhoto ? <GlobalDetailsPanel photo={globalFocusPhoto} displayedFile={viewerPhoto && viewerDisplayedFile && (viewerDisplayedFile.kind === 'result' ? viewerDisplayedFile.result.assetId === viewerPhoto.id : viewerDisplayedFile.photo.id === viewerPhoto.id || viewerPhoto.workflow?.members.some((member) => member.asset.id === viewerDisplayedFile.photo.id)) ? viewerDisplayedFile : undefined} /> : <GlobalAiPanel onOpenBatch={() => openWorkspaceTab('batch')} photo={globalFocusPhoto} selectedIds={contextSelectedIds} isDemo={isDemo} workspaceTab={activeTab} onOpenTemplates={() => openWorkspaceTab('templates')} onAddAssetsToWorkflow={addAssetsToWorkflow} onAddAssetsAsReferences={addAssetsAsReferences} currentWorkflowItemId={currentWorkflowItemId && (workflowAssetIds.includes(currentWorkflowItemId) || workflowPromptItems.some((item) => item.id === currentWorkflowItemId)) ? currentWorkflowItemId : null} referenceNotice={referenceNotice} workflowAssetIds={workflowAssetIds} tasks={globalTasks} workflowRules={workflowRules} onWorkflowRulesChange={setWorkflowRules} workflowTemplateId={workflowTemplateId} onWorkflowTemplateChange={setWorkflowTemplateId} />}</div>
                 </div>
                 {dockLayout.collapsed && <button className="dock-restore" type="button" onClick={() => saveDockLayout({ ...dockLayout, collapsed: false })}>展开 Dock 面板</button>}
               </div>

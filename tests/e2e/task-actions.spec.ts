@@ -22,6 +22,7 @@ test('batch and image menus have separate scopes and running batch deletion requ
   const d = makeTask('d', 'second');
   makeTask('e', 'second');
   const f = makeTask('f', 'third');
+  for (let index = 0; index < 12; index += 1) makeTask(`history-${index}`, 'scroll-history');
   service.close();
   const database = new DatabaseSync(databasePath);
   database.prepare("UPDATE tasks SET status = 'completed' WHERE id IN (?, ?)").run(a.id, f.id);
@@ -42,8 +43,23 @@ test('batch and image menus have separate scopes and running batch deletion requ
     await page.getByRole('menuitem', { name: '任务中心', exact: true }).click();
     const center = page.locator('.task-center-page');
     await expect(center.locator('h2').filter({ hasText: '任务中心' })).toHaveCount(0);
-    await expect(center.getByRole('button', { name: '全部', exact: true })).toHaveText('全部6');
-    await expect(center.getByRole('button', { name: '暂停', exact: true })).toHaveText('暂停3');
+    await expect(center.getByRole('button', { name: '全部', exact: true })).toHaveText('全部18');
+    await expect(center.getByRole('button', { name: '排队', exact: true })).toHaveText('排队0');
+    await expect(center.getByRole('button', { name: '运行', exact: true })).toHaveCount(0);
+    await expect(center.getByRole('button', { name: '暂停', exact: true })).toHaveCount(0);
+    await center.getByRole('button', { name: '生成分类' }).click();
+    await expect(center.locator('.task-batch-group')).toHaveCount(0);
+    await center.getByRole('button', { name: '文件分类' }).click();
+    await expect(center.locator('.task-batch-group')).toHaveCount(0);
+    await expect(center.getByRole('button', { name: '重试', exact: true })).toBeDisabled();
+    await center.getByRole('button', { name: '全部分类' }).click();
+    await center.getByRole('button', { name: '排队', exact: true }).click();
+    await expect(center.getByRole('button', { name: '重试', exact: true })).toHaveCount(0);
+    await center.getByRole('button', { name: '失败', exact: true }).click();
+    await expect(center.getByRole('button', { name: '重试', exact: true })).toBeVisible();
+    await center.getByRole('button', { name: '已结束', exact: true }).click();
+    await expect(center.getByRole('button', { name: '重试', exact: true })).toHaveCount(0);
+    await center.getByRole('button', { name: '全部', exact: true }).click();
     const firstBatch = center.locator('.task-batch-group').filter({ has: page.locator(`[data-task-id="${a.id}"]`) });
     const firstSummary = firstBatch.locator(':scope > summary');
     await firstSummary.click({ button: 'right' });
@@ -71,12 +87,23 @@ test('batch and image menus have separate scopes and running batch deletion requ
     await expect(firstBatch).toHaveAttribute('open', '');
     await expect.poll(() => page.evaluate((id) => window.desktopApi.getTask(id).then((task) => task?.status), b.id)).toBe('failed');
     database.prepare("UPDATE tasks SET status = 'processing' WHERE id = ?").run(c.id);
-    await expect(center.getByRole('button', { name: '运行', exact: true })).toHaveText('运行1');
+    await expect.poll(() => page.evaluate((id) => window.desktopApi.getTask(id).then((task) => task?.status), c.id)).toBe('processing');
     for (const width of [1440, 900]) {
       await app.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0]!.setSize(width, 900), width);
       await expect.poll(() => center.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
       await page.screenshot({ path: `test-results/task-actions-${width}.png` });
     }
+    await center.locator('.task-batch-group').filter({ hasText: 'history-' }).locator(':scope > summary').click();
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(900, 420));
+    const taskScroll = page.locator('.task-center-scroll');
+    const taskTabs = center.locator('.task-view-switch');
+    await expect.poll(() => taskScroll.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+    const tabsTop = await taskTabs.evaluate((element) => element.getBoundingClientRect().top);
+    await taskScroll.hover();
+    await page.mouse.wheel(0, 500);
+    await expect.poll(() => taskScroll.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    await expect.poll(() => taskTabs.evaluate((element) => element.getBoundingClientRect().top)).toBe(tabsTop);
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.setSize(900, 900));
     await firstSummary.getByRole('button', { name: '删除批次', exact: true }).click();
     await expect.poll(() => app.evaluate(() => (globalThis as unknown as { taskDialog: { messages: string[] } }).taskDialog.messages.length)).toBe(1);
     await expect(firstBatch).toBeVisible();
@@ -84,7 +111,7 @@ test('batch and image menus have separate scopes and running batch deletion requ
     await app.evaluate(() => { (globalThis as unknown as { taskDialog: { response: number } }).taskDialog.response = 1; });
     await firstSummary.getByRole('button', { name: '删除批次', exact: true }).click();
     await expect(firstBatch).toHaveCount(0);
-    await expect(center.getByRole('button', { name: '全部', exact: true })).toHaveText('全部3');
+    await expect(center.getByRole('button', { name: '全部', exact: true })).toHaveText('全部15');
     await page.getByRole('button', { name: '后台任务', exact: true }).click();
     const drawer = page.locator('.task-drawer');
     const secondBatch = drawer.locator('.task-batch-group').filter({ has: page.locator(`[data-task-id="${d.id}"]`) });

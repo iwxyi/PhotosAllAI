@@ -21,6 +21,7 @@ export const agentCallSchema = z.object({
 export const agentSessionSchema = z.object({
     source: z.enum(['internal', 'external']).optional(), externalOwner: z.string().optional(),
     id: z.string().uuid(), title: z.string(), assetIds: z.array(z.string()),
+    folderScope: z.object({ folderId: z.string(), assetIds: z.array(z.string()), nextIndex: z.number().int().min(0) }).optional(),
     status: z.enum(['idle', 'running', 'awaiting_input', 'awaiting_approval', 'waiting', 'paused', 'completed', 'failed', 'canceled']),
     messages: z.array(agentMessageSchema), calls: z.array(agentCallSchema),
     requestCallStart: z.number().int().min(0).optional(),

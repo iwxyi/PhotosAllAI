@@ -4,7 +4,7 @@ export type Locale = 'zh-CN' | 'en-US';
 
 const messages = {
   'zh-CN': {
-    library: '图库', viewer: '看图', agent: 'Agent 批处理', batch: 'AI 批量修图', workflow: 'AI 批量修图', templates: '提示词模板', tasks: '任务中心', settings: '设置',
+    library: '图库', viewer: '看图', agent: 'Agent 批处理', batch: '图片生成', workflow: '图片生成', templates: '提示词模板', tasks: '任务中心', settings: '设置',
     openWorkspace: '打开工作区', addFolder: '添加关联文件夹…', refreshCatalog: '刷新图库',
     analyze: '分析选中照片', generate: '生成修图结果', taskQueue: '任务队列', shortcuts: '快捷键',
     appearance: '外观', language: '界面语言', simplifiedChinese: '简体中文', english: 'English',
@@ -12,7 +12,7 @@ const messages = {
     file: '文件', edit: '编辑', help: '帮助', window: '窗口'
   },
   'en-US': {
-    library: 'Library', viewer: 'Viewer', agent: 'Agent Batch', batch: 'AI Batch Edit', workflow: 'AI Batch Edit', templates: 'Prompt Templates', tasks: 'Task Center', settings: 'Settings',
+    library: 'Library', viewer: 'Viewer', agent: 'Agent Batch', batch: 'Image Generation', workflow: 'Image Generation', templates: 'Prompt Templates', tasks: 'Task Center', settings: 'Settings',
     openWorkspace: 'Open workspace', addFolder: 'Add linked folder…', refreshCatalog: 'Refresh library',
     analyze: 'Analyze selected photos', generate: 'Generate edited results', taskQueue: 'Task queue', shortcuts: 'Shortcuts',
     appearance: 'Appearance', language: 'Language', simplifiedChinese: '简体中文', english: 'English',

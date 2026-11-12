@@ -104,6 +104,7 @@ describe('persistent task service', () => {
       const analysis = tasks.enqueue({ kind: 'analysis', assetId: 'photo-1', payload: { submissionId } });
       expect(tasks.enqueue({ kind: 'analysis', assetId: 'photo-1', payload: { submissionId: 'another-submission' } }).id).not.toBe(analysis.id);
       expect(tasks.listBatch('generation', submissionId).map((task) => task.id)).toEqual([generation.id]);
+      expect(tasks.listBatch('generation', base.batchId).map((task) => task.id)).toEqual([generation.id]);
       const resized = tasks.resizeQueuedGenerationBatch({ batchId: base.batchId, assetId: 'photo-1', count: 3 });
       expect(resized.every((task) => task.payload.submissionId === submissionId)).toBe(true);
       expect(tasks.listBatch('generation', submissionId)).toHaveLength(3);

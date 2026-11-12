@@ -78,7 +78,7 @@ test('adds selected images to the batch queue and edits each prompt', async () =
   await cards.nth(1).click();
   await cards.nth(1).click({ button: 'right' });
   await page.getByRole('menuitem', { name: /加入 AI 批量修图/ }).click();
-  await openTab('AI 批量修图');
+  await openTab('图片生成');
   await expect(page.locator('.batch-queue-item')).toHaveCount(2);
   await page.getByRole('textbox', { name: '批次整体提示词' }).fill('统一自然色调');
   const first = page.locator('.batch-queue-item').first();

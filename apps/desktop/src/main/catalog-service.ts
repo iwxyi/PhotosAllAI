@@ -1805,6 +1805,18 @@ export class CatalogService {
     return directory ? path.join(directory.rootPath, directory.relativePath) : null;
   }
 
+  async registerGeneratedFile(folderId: string, filePath: string): Promise<string> {
+    const directory = this.#resolveDirectory(folderId);
+    if (!directory) throw new Error('CATALOG_FOLDER_NOT_FOUND');
+    const selectedPath = path.resolve(directory.rootPath, directory.relativePath);
+    const outputPath = path.resolve(filePath);
+    if (path.dirname(outputPath) !== selectedPath || !isSupportedBrowseMedia(outputPath)) throw new Error('GENERATED_FILE_OUTSIDE_FOLDER');
+    await this.synchronizeImportedFile(directory.rootPath, path.relative(directory.rootPath, outputPath));
+    const asset = this.#database.prepare('SELECT id FROM assets WHERE path = ? AND removed_at IS NULL').get(outputPath) as { id: string } | undefined;
+    if (!asset) throw new Error('GENERATED_FILE_INDEX_FAILED');
+    return asset.id;
+  }
+
   async synchronizeFolder(folderId: string): Promise<{ discovered: number; offline: number }> {
     const directory = this.#resolveDirectory(folderId);
     if (!directory) throw new Error('CATALOG_FOLDER_NOT_FOUND');

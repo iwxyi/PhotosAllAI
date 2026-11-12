@@ -25,7 +25,7 @@ test('restores an old AI workflow session without blanking the window', async ()
       env: { ...process.env, PHOTOALLISAI_USER_DATA: userDataDirectory }
     });
     const page = await app.firstWindow();
-    await expect(page.getByRole('tab', { name: 'AI 批量修图' })).toHaveAttribute('aria-selected', 'true');
+    await expect(page.getByRole('tab', { name: '图片生成' })).toHaveAttribute('aria-selected', 'true');
     await expect(page.getByLabel('批次整体提示词')).toBeVisible();
     await expect(page.locator('.batch-workspace')).toBeVisible();
     await expect(page.getByRole('tab', { name: '看图', exact: true })).toHaveCount(0);

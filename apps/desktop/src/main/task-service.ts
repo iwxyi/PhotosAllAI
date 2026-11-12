@@ -182,9 +182,12 @@ export class TaskService {
     const expectedInputs = payload.success
       ? payload.data.inputSources ?? (payload.data.sourceResultId
         ? [{ kind: 'result' as const, resultId: payload.data.sourceResultId }]
-        : [{ kind: 'asset' as const, assetId: task.assetId ?? '' }])
+        : payload.data.outputFolderId ? [] : [{ kind: 'asset' as const, assetId: task.assetId ?? '' }])
       : [];
-    if (!payload.success || !committed.success || task.assetId !== result.assetId
+    const targetMatches = payload.success && payload.data.outputFolderId
+      ? result.outputFolderId === payload.data.outputFolderId
+      : task.assetId === result.assetId;
+    if (!payload.success || !committed.success || !targetMatches
       || payload.data.batchId !== result.batchId || payload.data.providerProfileId !== result.providerProfileId
       || payload.data.prompt !== result.prompt || payload.data.storageMode !== result.storageMode
       || payload.data.templateId !== result.templateId || payload.data.templateVersion !== result.templateVersion
@@ -216,7 +219,7 @@ export class TaskService {
   }
 
   listBatch(kind: PersistedTask['kind'], batchId: string): PersistedTask[] {
-    return (this.#database.prepare(`SELECT * FROM tasks WHERE kind = ? AND COALESCE(json_extract(payload_json, '$.submissionId'), json_extract(payload_json, '$.batchId'), id) = ? ORDER BY position, created_at, id`).all(kind, batchId) as TaskRow[]).map((row) => this.#toTask(row));
+    return (this.#database.prepare(`SELECT * FROM tasks WHERE kind = ? AND (json_extract(payload_json, '$.submissionId') = ? OR json_extract(payload_json, '$.batchId') = ? OR (json_extract(payload_json, '$.submissionId') IS NULL AND json_extract(payload_json, '$.batchId') IS NULL AND id = ?)) ORDER BY position, created_at, id`).all(kind, batchId, batchId, batchId) as TaskRow[]).map((row) => this.#toTask(row));
   }
 
   hasQueued(kinds: readonly PersistedTask['kind'][]): boolean {

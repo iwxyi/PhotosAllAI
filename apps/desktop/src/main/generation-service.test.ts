@@ -30,8 +30,9 @@ async function fixture(
   moveFile?: ConstructorParameters<typeof GenerationService>[6],
   providerKind: ProviderProfile['kind'] = 'nanobanana-compatible',
   onRequest?: (url: string | undefined, body: string) => void,
-  responseStatus = 200
-): Promise<{ service: GenerationService; directory: string; sourcePath: string; setSourcePath: (value: string) => void }> {
+  responseStatus = 200,
+  textToImageFolder = false
+): Promise<{ service: GenerationService; directory: string; sourcePath: string; setSourcePath: (value: string) => void; outputFolderId: string | null; closeCatalog: () => void; resolveIndexedAsset: (id: string) => ReturnType<CatalogService['resolveAssetFile']> }> {
   const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-generation-'));
   temporaryDirectories.push(directory);
   const previewPath = path.join(directory, 'preview.jpg');
@@ -76,12 +77,22 @@ async function fixture(
     enabled: true,
     updatedAt: Date.now()
   };
+  const databasePath = path.join(directory, 'catalog.sqlite');
+  const outputPath = path.join(directory, 'photos');
+  let catalog: CatalogService | null = null;
+  let outputFolderId: string | null = null;
+  if (textToImageFolder) {
+    await mkdir(outputPath, { recursive: true });
+    catalog = new CatalogService(databasePath);
+    await catalog.importFolders([outputPath]);
+    outputFolderId = catalog.listFolders()[0]?.id ?? null;
+  }
   const service = new GenerationService(
-    path.join(directory, 'catalog.sqlite'),
+    databasePath,
     path.join(directory, 'managed', 'generated'),
     { resolve: async () => ({ profile, apiKey: 'secret' }) },
     { getOrCreate: async () => previewPath },
-    { resolveAssetFile: () => ({
+    catalog ?? { resolveAssetFile: () => ({
       path: currentSourcePath,
       fileName: path.basename(currentSourcePath),
       modifiedAt: 1,
@@ -90,7 +101,7 @@ async function fixture(
     publishTemporaryFile,
     moveFile
   );
-  return { service, directory, sourcePath, setSourcePath: (value) => { currentSourcePath = value; } };
+  return { service, directory, sourcePath, setSourcePath: (value) => { currentSourcePath = value; }, outputFolderId, closeCatalog: () => catalog?.close(), resolveIndexedAsset: (id) => catalog?.resolveAssetFile(id) ?? null };
 }
 
 function payload(resultIndex = 1) {
@@ -98,6 +109,55 @@ function payload(resultIndex = 1) {
 }
 
 describe('managed generation results', () => {
+  it('creates text-to-image results directly in the selected catalog folder without image inputs', async () => {
+    let requestPath = '';
+    let requestBody = '';
+    const { service, directory, outputFolderId, closeCatalog, resolveIndexedAsset } = await fixture(
+      () => ({ data: [{ b64_json: png.toString('base64') }] }),
+      undefined, undefined, undefined, 'nanobanana-compatible',
+      (url, body) => { requestPath = url ?? ''; requestBody = body; }, 200, true
+    );
+    try {
+      const result = await service.generate(null, {
+        ...payload(), outputFolderId, textItemId: '8af36a1e-48d5-4c21-b99e-9aa4efcd8b13', inputSources: []
+      }, undefined, 'bce8c75f-d7d0-4ca5-ae95-53147bcf0298');
+      expect(requestPath).toBe('/v1/images/generations');
+      expect(JSON.parse(requestBody)).toEqual({ model: 'image-model', prompt: payload().prompt, n: 1 });
+      expect(result).toMatchObject({ outputFolderId, inputSources: [], version: 1 });
+      expect(await readFile(path.join(directory, 'photos', result.fileName))).toEqual(png);
+      expect(await realpath(resolveIndexedAsset(result.assetId)!.path)).toBe(await realpath(path.join(directory, 'photos', result.fileName)));
+      expect(service.list(result.assetId)).toMatchObject([result]);
+    } finally { service.close(); closeCatalog(); }
+  });
+
+  it('uses ordered reference images for a folder generation task', async () => {
+    let requestPath = '';
+    let requestBody = '';
+    const { service, outputFolderId, directory, closeCatalog } = await fixture(
+      () => ({ data: [{ b64_json: png.toString('base64') }] }),
+      undefined, undefined, undefined, 'nanobanana-compatible',
+      (url, body) => { requestPath = url ?? ''; requestBody = body; }, 200, true
+    );
+    try {
+      const firstPath = path.join(directory, 'photos', 'first.png');
+      const secondPath = path.join(directory, 'photos', 'second.png');
+      await writeFile(firstPath, png);
+      await writeFile(secondPath, png);
+      const catalog = new CatalogService(path.join(directory, 'catalog.sqlite'));
+      await catalog.synchronizeFolder(outputFolderId!);
+      const ids = catalog.listAssets().filter((asset) => asset.fileName === 'first.png' || asset.fileName === 'second.png').sort((a, b) => b.fileName.localeCompare(a.fileName)).map((asset) => asset.id);
+      catalog.close();
+      const inputSources = ids.map((assetId) => ({ kind: 'asset' as const, assetId }));
+      const result = await service.generate(null, {
+        ...payload(), outputFolderId, textItemId: '8af36a1e-48d5-4c21-b99e-9aa4efcd8b13', inputSources
+      });
+      expect(requestPath).toBe('/v1/images/edits');
+      expect(JSON.parse(requestBody).image).toEqual(Array(2).fill({ mime_type: 'image/jpeg', data: Buffer.from('bounded-preview').toString('base64') }));
+      expect(result.inputSources).toEqual(inputSources);
+      expect(service.list(result.assetId)[0]?.inputSources).toEqual(inputSources);
+    } finally { service.close(); closeCatalog(); }
+  });
+
   it('does not replay a paid generation POST after a gateway error', async () => {
     let requests = 0;
     const { service } = await fixture(

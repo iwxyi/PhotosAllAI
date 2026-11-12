@@ -5,10 +5,119 @@ import { describe, expect, it, vi } from 'vitest';
 import { CatalogService } from './catalog-service';
 import { FileOperationService } from './file-operation-service';
 import { TemplateService } from './template-service';
+import { TaskService } from './task-service';
 import { createAgentProgramTools } from './agent-program-tools';
+import { agentSessionSchema } from '@photoallisai/contracts';
 import type { AgentToolContext } from './agent-tools';
 
 describe('Agent program tools', () => {
+  it('imports and pages a folder larger than 500 photos with persisted progress', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-large-import-'));
+    const catalog = new CatalogService(join(root, 'catalog.sqlite'));
+    try {
+      const source = join(root, 'photos');
+      await mkdir(source, { recursive: true });
+      await Promise.all(Array.from({ length: 501 }, (_, i) => writeFile(join(source, `${i}.jpg`), 'fixture')));
+      const session = agentSessionSchema.parse({ id: crypto.randomUUID(), title: 'batch', assetIds: [], status: 'running', messages: [], calls: [], turns: 0, outputs: 0, createdAt: 1, updatedAt: 1, error: null });
+      const save = vi.fn();
+      const context = { session, save } as unknown as AgentToolContext;
+      const tools = createAgentProgramTools({ catalog, watchFolders: vi.fn(), changed: vi.fn() } as unknown as Parameters<typeof createAgentProgramTools>[0]);
+      const imported = (await tools.find((tool) => tool.name === 'folders.import')!.execute({ paths: [source] }, context)).result as { scope: { hasNext: boolean; total: number }; addedFolders: Array<{ id: string }> };
+      expect(imported.scope).toMatchObject({ hasNext: true, total: 501 });
+      expect(session.assetIds).toHaveLength(100);
+      expect(session.folderScope?.nextIndex).toBe(100);
+      expect(agentSessionSchema.parse(JSON.parse(JSON.stringify(session))).folderScope?.nextIndex).toBe(100);
+      const folderId = imported.addedFolders[0]!.id;
+      const select = tools.find((tool) => tool.name === 'scope.folder')!;
+      const seen = new Set(session.assetIds);
+      session.turns = 99; session.outputs = 100;
+      for (let batch = 2; batch <= 5; batch++) {
+        const page = (await select.execute({ folderId, next: true }, context)).result as { assetIds: string[]; hasNext: boolean; remaining: number };
+        expect(page).toMatchObject({ hasNext: true, remaining: 501 - batch * 100 });
+        expect(page.assetIds).toHaveLength(100);
+        expect(page.assetIds.some((id) => seen.has(id))).toBe(false);
+        page.assetIds.forEach((id) => seen.add(id));
+        expect(session.turns).toBe(0);
+        expect(session.outputs).toBe(0);
+      }
+      const next = (await select.execute({ folderId, next: true }, context)).result as { assetIds: string[]; hasNext: boolean; remaining: number };
+      expect(next).toMatchObject({ hasNext: false, remaining: 0 });
+      expect(next.assetIds).toHaveLength(1);
+      expect(session.assetIds).toEqual(next.assetIds);
+      expect((await select.execute({ folderId, next: true }, context)).result).toMatchObject({ assetIds: [], hasNext: false });
+      expect(save).toHaveBeenCalledTimes(6);
+    } finally {
+      catalog.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('imports a folder and scopes its photos for follow-up Agent actions', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-import-'));
+    const catalog = new CatalogService(join(root, 'catalog.sqlite'));
+    try {
+      const source = join(root, 'photos');
+      await mkdir(join(source, 'nested'), { recursive: true });
+      await writeFile(join(source, 'one.jpg'), 'fixture');
+      await writeFile(join(source, 'nested', 'two.jpg'), 'fixture');
+      const watchFolders = vi.fn(); const changed = vi.fn(); const save = vi.fn();
+      const session = { assetIds: [] as string[] };
+      const context = { session, save } as unknown as AgentToolContext;
+      const tools = createAgentProgramTools({ catalog, watchFolders, changed } as unknown as Parameters<typeof createAgentProgramTools>[0]);
+      const importer = tools.find((tool) => tool.name === 'folders.import')!;
+      expect(importer.approval).toBe(false);
+      const imported = (await importer.execute({ paths: [source] }, context)).result as { scoped: number; addedFolders: Array<{ id: string }> };
+      expect(imported.scoped).toBe(2);
+      expect(imported.addedFolders).toHaveLength(1);
+      expect(session.assetIds).toHaveLength(2);
+      expect(save).toHaveBeenCalledOnce();
+      expect(watchFolders).toHaveBeenCalledOnce();
+      expect(changed).toHaveBeenCalledOnce();
+
+      const folder = catalog.listFolders().find((item) => item.name === 'nested')!;
+      session.assetIds = [];
+      const select = tools.find((tool) => tool.name === 'scope.folder')!;
+      expect((await select.execute({ folderId: folder.id }, context)).result).toMatchObject({ added: 1, assetIds: [expect.any(String)] });
+      expect(session.assetIds).toHaveLength(1);
+      await expect(select.execute({ folderId: 'missing' }, context)).rejects.toThrow('FOLDER_NOT_FOUND');
+    } finally {
+      catalog.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('controls eligible tasks across the app without touching completed results', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-tasks-'));
+    const tasks = new TaskService(join(root, 'catalog.sqlite'));
+    try {
+      const input = { kind: 'analysis' as const, assetId: 'photo', payload: { providerProfileId: 'model', mode: 'full' } };
+      const first = tasks.enqueue(input);
+      const second = tasks.enqueue({ ...input, assetId: 'another' });
+      const completed = tasks.enqueue({ ...input, assetId: 'finished' });
+      tasks.claimNext(['analysis']);
+      tasks.advance(first.id, 'processing', .1);
+      tasks.advance(first.id, 'downloading', .8);
+      tasks.advance(first.id, 'saving', .9);
+      tasks.finish(first.id, 'completed', { saved: true });
+      const cancelTask = vi.fn(); const wake = vi.fn();
+      const tools = createAgentProgramTools({ tasks, cancelTask, wake } as unknown as Parameters<typeof createAgentProgramTools>[0]);
+      const control = tools.find((tool) => tool.name === 'tasks.control-many')!;
+      expect(control.approval).toBe(false);
+      const context = { session: { calls: [] } } as unknown as AgentToolContext;
+      const paused = (await control.execute({ action: 'pause', scope: 'all' }, context)).result;
+      expect(paused).toMatchObject({ matched: 3, changed: 2, skipped: 1, failed: [] });
+      expect(tasks.find(first.id)?.status).toBe('completed');
+      expect(tasks.find(second.id)?.status).toBe('paused');
+      expect(tasks.find(completed.id)?.status).toBe('paused');
+      expect(cancelTask).toHaveBeenCalledTimes(2);
+      const resumed = (await control.execute({ action: 'resume', scope: 'all' }, context)).result;
+      expect(resumed).toMatchObject({ changed: 2, skipped: 1, failed: [] });
+      expect(wake).toHaveBeenCalledTimes(2);
+    } finally {
+      tasks.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('creates, revises, lists, batch saves, and archives prompt templates through Agent tools', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-templates-'));
     const templates = new TemplateService(join(root, 'catalog.sqlite'));

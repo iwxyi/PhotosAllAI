@@ -4,6 +4,7 @@ import { appendFileSync, constants as fsConstants, existsSync, mkdirSync, statSy
 import { copyFile, mkdir, realpath, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { imageSizeFromFile } from 'image-size/fromFile';
 
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, net, protocol, safeStorage, shell, type MenuItemConstructorOptions } from 'electron';
 import {
@@ -1060,6 +1061,16 @@ function registerIpc(): void {
     if (!filePath || !existsSync(filePath)) return false;
     shell.showItemInFolder(filePath);
     return true;
+  });
+  ipcMain.handle('generation.result.details.v1', async (_event, input: unknown) => {
+    const { resultId } = generationResultIdInputSchema.parse({ resultId: input });
+    const filePath = generation.resolveResultFile(resultId);
+    if (!filePath) throw new Error('生成版本不可用');
+    const metadata = await stat(filePath);
+    if (!metadata.isFile()) throw new Error('生成文件不可用');
+    const dimensions = await imageSizeFromFile(filePath).catch(() => null);
+    return fileDetailsSchema.parse({ path: filePath, sizeBytes: metadata.size, modifiedAt: metadata.mtimeMs,
+      ...(dimensions?.width && dimensions.height ? { width: dimensions.width, height: dimensions.height } : {}) });
   });
   ipcMain.handle('generation.results.export.v1', async (_event, input: unknown) => {
     const { resultIds, presetId } = exportGenerationResultsInputSchema.parse(input);

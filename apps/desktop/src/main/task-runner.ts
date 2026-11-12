@@ -28,7 +28,7 @@ interface AnalysisProcessor {
 }
 
 interface GenerationProcessor {
-  generate(assetId: string, payload: unknown, signal?: AbortSignal, requestId?: string): Promise<unknown>;
+  generate(assetId: string | null, payload: unknown, signal?: AbortSignal, requestId?: string): Promise<unknown>;
 }
 
 interface ExportProcessor {
@@ -102,7 +102,7 @@ export class TaskRunner {
         const controller = new AbortController();
         this.#controllers.set(task.id, controller);
         try {
-          if ((task.kind === 'analysis' || task.kind === 'generation') && !task.assetId) throw new Error('TASK_ASSET_MISSING');
+          if (task.kind === 'analysis' && !task.assetId) throw new Error('TASK_ASSET_MISSING');
           this.#tasks.advance(task.id, 'processing', 0.1);
           let taskResult: Record<string, unknown> | null = null;
           if (task.kind === 'analysis') {
@@ -117,7 +117,8 @@ export class TaskRunner {
             taskResult = collectionAnalysisReportSchema.parse(await this.#analysis.analyzeCollection(payload.assetIds, payload.providerProfileId, controller.signal, payload.locale));
           } else if (task.kind === 'generation') {
             const payload = generationTaskPayloadSchema.parse(task.payload);
-            const generated = await this.#generation.generate(task.assetId!, payload, controller.signal, task.id);
+            if (!task.assetId && !payload.outputFolderId) throw new Error('TASK_ASSET_MISSING');
+            const generated = await this.#generation.generate(task.assetId, payload, controller.signal, task.id);
             if (generated && typeof generated === 'object') taskResult = { generation: generated };
           } else if (task.kind === 'agent') {
             const payload = agentTaskPayloadSchema.parse(task.payload);
