@@ -768,6 +768,17 @@ kbd { padding: 1px 5px; color: var(--dim); background: var(--surface-3); border:
 .diagnostic-grid { max-width: 560px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }.diagnostic-grid span { padding: 10px; display: grid; gap: 4px; color: var(--dim); background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm); font-size: 9px; }.diagnostic-grid strong { color: var(--text); font-size: 11px; font-weight: 600; }.diagnostic-grid small { color: var(--dim); font-size: 9px; }
 .diagnostic-health-strip { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; color: var(--dim); font-size: 9px; }.diagnostic-health-strip span { padding: 5px 7px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); }
 .settings-heading { display: flex; justify-content: space-between; align-items: start; }
+.lightroom-mappings,.lightroom-preview { max-width: 900px; margin-top: 18px; display: grid; gap: 8px; }
+.lightroom-mapping { min-width: 0; display: grid; grid-template-columns: minmax(160px, 1fr) minmax(180px, 1fr) auto; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
+.lightroom-mapping > span,.lightroom-mapping > button { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lightroom-import-options { margin-top: 15px; display: flex; align-items: end; flex-wrap: wrap; gap: 12px; }
+.lightroom-import-options label { display: grid; gap: 5px; color: var(--muted); font-size: 10px; }
+.lightroom-stats { display: flex; flex-wrap: wrap; gap: 7px 18px; color: var(--muted); font-size: 10px; }
+.lightroom-stats strong { margin-left: 4px; color: var(--text); font-variant-numeric: tabular-nums; }
+.lightroom-examples { max-height: 280px; overflow: auto; border-top: 1px solid var(--line); }
+.lightroom-examples > div { min-height: 31px; display: grid; grid-template-columns: minmax(130px, 1.4fr) repeat(2, minmax(110px, 1fr)); align-items: center; gap: 10px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 10px; }
+.lightroom-examples strong { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+@container (max-width: 650px) { .lightroom-mapping { grid-template-columns: 1fr; padding-block: 8px; border-bottom: 1px solid var(--line); }.lightroom-examples > div { grid-template-columns: 1fr 1fr; padding-block: 6px; }.lightroom-examples strong { grid-column: 1 / -1; } }
 .settings-heading p { margin: 0; color: var(--muted); }
 .settings-heading > span { height: 26px; padding: 0 8px; display: flex; align-items: center; gap: 6px; color: var(--cyan); background: rgb(97 213 200 / 7%); border: 1px solid rgb(97 213 200 / 16%); border-radius: var(--radius-sm); font-size: 9px; }
 .provider-layout { width: 100%; max-width: 1030px; min-width: 0; margin-top: 0; display: grid; grid-template-columns: minmax(0, 1fr); border: 1px solid var(--line); border-radius: var(--radius-md); overflow: hidden; background: var(--surface-1); }

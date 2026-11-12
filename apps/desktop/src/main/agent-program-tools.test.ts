@@ -4,10 +4,43 @@ import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { CatalogService } from './catalog-service';
 import { FileOperationService } from './file-operation-service';
+import { TemplateService } from './template-service';
 import { createAgentProgramTools } from './agent-program-tools';
 import type { AgentToolContext } from './agent-tools';
 
 describe('Agent program tools', () => {
+  it('creates, revises, lists, batch saves, and archives prompt templates through Agent tools', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-templates-'));
+    const templates = new TemplateService(join(root, 'catalog.sqlite'));
+    const changed = vi.fn();
+    try {
+      const tools = createAgentProgramTools({ templates, changed } as unknown as Parameters<typeof createAgentProgramTools>[0]);
+      const context = {} as AgentToolContext;
+      const create = tools.find((tool) => tool.name === 'templates.save')!;
+      const list = tools.find((tool) => tool.name === 'templates.list')!;
+      const batchSave = tools.find((tool) => tool.name === 'templates.save-batch')!;
+      const archiveBatch = tools.find((tool) => tool.name === 'templates.archive-batch')!;
+      const first = await create.execute({ name: '清理背景', description: '清除背景杂物', category: '其他', body: '保留主体与自然光影。' }, context);
+      const created = first.result as { id: string; version: number };
+      expect(created.version).toBe(1);
+      expect(changed).toHaveBeenCalledOnce();
+
+      await create.execute({ id: created.id, name: '清理背景', description: '清除背景杂物并自然融合', category: '其他', body: '保留主体、材质和自然光影。' }, context);
+      expect((await list.execute({}, context)).result).toMatchObject([{ id: created.id, version: 2, body: '保留主体、材质和自然光影。' }]);
+
+      const batch = await batchSave.execute({ templates: [{ name: '修复污渍', description: '清理污渍', category: '其他', body: '只移除污渍，保留纹理。' }] }, context);
+      expect(batch.result).toMatchObject({ saved: 1, failed: [] });
+      const all = (await list.execute({}, context)).result as Array<{ id: string }>;
+      const extraId = all.find((item) => item.id !== created.id)!.id;
+      const archived = await archiveBatch.execute({ ids: [created.id, extraId] }, context);
+      expect(archived.result).toMatchObject({ count: 2, failed: [] });
+      expect(await list.execute({}, context)).toMatchObject({ result: [] });
+    } finally {
+      templates.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('relocates every affected asset after renaming a folder larger than one page', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-folder-'));
     const catalog = new CatalogService(join(root, 'catalog.sqlite'));

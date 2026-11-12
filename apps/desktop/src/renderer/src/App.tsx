@@ -41,6 +41,8 @@ import type {
   WorkspaceSession,
   WorkspaceTab,
   AppSettings,
+  LightroomImportPreview,
+  LightroomMapping,
   MenuCommand
 } from '@photoallisai/contracts';
 import { analysisResultSchema, collectionAnalysisReportSchema, generationResultSchema, agentTaskResultSchema } from '@photoallisai/contracts';
@@ -86,7 +88,6 @@ import {
   ListFilter,
   Maximize2,
   Plus,
-  Plug,
   Search,
   Server,
   Settings,
@@ -4476,8 +4477,14 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
 }
 
 function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (presets: ExportPreset[]) => void }): React.JSX.Element {
-  type SettingsSection = 'appearance' | 'models' | 'workflow' | 'export' | 'storage' | 'tasks' | 'shortcuts' | 'privacy' | 'mcp' | 'diagnostics';
+  type SettingsSection = 'appearance' | 'models' | 'workflow' | 'transfer' | 'storage' | 'shortcuts' | 'advanced';
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('models');
+  const [lightroomSource, setLightroomSource] = useState<{ token: string; catalogName: string; sourceRoots: string[] } | null>(null);
+  const [lightroomMappings, setLightroomMappings] = useState<LightroomMapping[]>([]);
+  const [lightroomPolicy, setLightroomPolicy] = useState<'fill-empty' | 'overwrite'>('fill-empty');
+  const [lightroomPreview, setLightroomPreview] = useState<LightroomImportPreview | null>(null);
+  const [lightroomBusy, setLightroomBusy] = useState(false);
+  const [lightroomMessage, setLightroomMessage] = useState('');
   const settingsContentRef = useRef<HTMLElement>(null);
   const providerNameRef = useRef<HTMLInputElement>(null);
   useEffect(() => { settingsContentRef.current?.scrollTo({ top: 0 }); }, [settingsSection]);
@@ -4771,16 +4778,13 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
   return (
     <div className="settings-page">
       <aside className="settings-nav">
-        <button className={settingsSection === 'workflow' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('workflow')} aria-current={settingsSection === 'workflow' ? 'page' : undefined}><Layers3 size={14} />文件流程</button>
         <button className={settingsSection === 'appearance' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('appearance')} aria-current={settingsSection === 'appearance' ? 'page' : undefined}><SunMoon size={14} />外观</button>
         <button className={settingsSection === 'models' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('models')} aria-current={settingsSection === 'models' ? 'page' : undefined}><Bot size={14} />AI 模型</button>
-        <button className={settingsSection === 'export' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('export')} aria-current={settingsSection === 'export' ? 'page' : undefined}><Download size={14} />图片导出</button>
+        <button className={settingsSection === 'workflow' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('workflow')} aria-current={settingsSection === 'workflow' ? 'page' : undefined}><Layers3 size={14} />文件流程</button>
+        <button className={settingsSection === 'transfer' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('transfer')} aria-current={settingsSection === 'transfer' ? 'page' : undefined}><FolderInput size={14} />导入与导出</button>
         <button className={settingsSection === 'storage' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('storage')} aria-current={settingsSection === 'storage' ? 'page' : undefined}><Folder size={14} />图库与存储</button>
-        <button className={settingsSection === 'tasks' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('tasks')} aria-current={settingsSection === 'tasks' ? 'page' : undefined}><Clock3 size={14} />任务与重试</button>
         <button className={settingsSection === 'shortcuts' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('shortcuts')} aria-current={settingsSection === 'shortcuts' ? 'page' : undefined}><Command size={14} />快捷键</button>
-        <button className={settingsSection === 'privacy' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('privacy')} aria-current={settingsSection === 'privacy' ? 'page' : undefined}><ShieldCheck size={14} />隐私与安全</button>
-        <button className={settingsSection === 'mcp' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('mcp')} aria-current={settingsSection === 'mcp' ? 'page' : undefined}><Plug size={14} />MCP</button>
-        <button className={settingsSection === 'diagnostics' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('diagnostics')} aria-current={settingsSection === 'diagnostics' ? 'page' : undefined}><ShieldCheck size={14} />诊断与维护</button>
+        <button className={settingsSection === 'advanced' ? 'is-active' : ''} type="button" onClick={() => setSettingsSection('advanced')} aria-current={settingsSection === 'advanced' ? 'page' : undefined}><Settings size={14} />高级</button>
       </aside>
       <main className="settings-content" ref={settingsContentRef}>
         {settingsSection === 'workflow' && <FileWorkflowEditor scope={{ folderId: null, albumId: null }} folders={[]} scopeName="全局默认流程" />}
@@ -4818,7 +4822,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
           </div>
 
           <form className="provider-form" onSubmit={(event) => { event.preventDefault(); void save(); }}>
-            <div className="form-title"><span className="provider-icon"><Plus size={16} /></span><div><strong>{form.id ? '编辑模型配置' : '添加模型配置'}</strong><small>所有字段均保存在本机</small></div></div>
+            <div className="form-title"><span className="provider-icon"><Plus size={16} /></span><div><strong>{form.id ? '编辑模型配置' : '添加模型配置'}</strong></div></div>
             <div className="form-grid two-columns">
               <label><span>用途</span><select value={form.purpose} onChange={(event) => patchForm('purpose', event.target.value as SaveProviderProfileInput['purpose'])}><option value="vision" disabled={form.kind === 'acedata-nano-banana'}>视觉分析模型</option><option value="generation">图片生成模型</option></select></label>
               <label><span>接口类型</span><select value={form.kind} onChange={(event) => { const kind = event.target.value as SaveProviderProfileInput['kind']; patchForm('kind', kind); if (kind === 'acedata-nano-banana') { setForm((current) => ({ ...current, kind, purpose: 'generation', baseUrl: current.baseUrl || 'https://api.acedata.cloud', modelId: current.modelId || 'nano-banana-pro' })); } }}><option value="openai-compatible">OpenAI Compatible</option><option value="nanobanana-compatible">NanoBanana Compatible</option><option value="acedata-nano-banana">ACE Data · Nano Banana</option></select></label>
@@ -4839,15 +4843,27 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
           </form>
         </section>
         </>}
-        {settingsSection === 'export' && <section className="settings-section export-presets-section">
-          <div className="settings-heading"><div><h2>导出预设</h2><p>原格式导出不会重新编码。</p></div></div>
-          <div className="preset-row"><input aria-label="导出预设名称" placeholder="例如：客户交付" value={presetName} onChange={(event) => { setPresetName(event.target.value); setPresetMessage(''); }} /><select aria-label="导出格式" value={presetFormat} onChange={(event) => setPresetFormat(event.target.value as ExportPreset['format'])}><option value="jpeg">JPEG</option><option value="png">PNG</option><option value="original">原格式</option></select><input aria-label="JPEG 质量" type="number" min="1" max="100" disabled={presetFormat !== 'jpeg'} value={presetQuality} onChange={(event) => setPresetQuality(Number(event.target.value))} /><select aria-label="导出尺寸" value={presetMaxDimension ?? ''} onChange={(event) => setPresetMaxDimension(event.target.value ? Number(event.target.value) : null)}><option value="">原始尺寸</option><option value="2048">长边 2048px</option><option value="3840">长边 3840px</option><option value="6000">长边 6000px</option></select><button className="primary-action compact" type="button" disabled={!presetName.trim()} onClick={async () => { try { const saved = await window.desktopApi.saveExportPreset({ name: presetName.trim(), format: presetFormat, quality: presetQuality, maxDimension: presetMaxDimension, conflictPolicy: 'auto-rename', namingPattern: '{name}_{version}' }); setPresets((current) => { const next = [...current.filter((item) => item.id !== saved.id), saved]; onExportPresetsChange(next); return next; }); setPresetName(''); setPresetMessage('预设已保存'); } catch { setPresetMessage('名称已存在或保存失败'); } }}>保存预设</button></div>
+        {settingsSection === 'transfer' && <>
+        <section className="settings-section export-presets-section">
+          <div className="settings-heading"><h2>图片导出预设</h2></div>
+          <div className="preset-row"><label className="export-preset-name"><span>预设名称</span><input aria-label="导出预设名称" placeholder="例如：客户交付 JPEG" value={presetName} onChange={(event) => { setPresetName(event.target.value); setPresetMessage(''); }} /></label><select aria-label="导出格式" value={presetFormat} onChange={(event) => setPresetFormat(event.target.value as ExportPreset['format'])}><option value="jpeg">JPEG</option><option value="png">PNG</option><option value="original">原格式</option></select><input aria-label="JPEG 质量" type="number" min="1" max="100" disabled={presetFormat !== 'jpeg'} value={presetQuality} onChange={(event) => setPresetQuality(Number(event.target.value))} /><select aria-label="导出尺寸" value={presetMaxDimension ?? ''} onChange={(event) => setPresetMaxDimension(event.target.value ? Number(event.target.value) : null)}><option value="">原始尺寸</option><option value="2048">长边 2048px</option><option value="3840">长边 3840px</option><option value="6000">长边 6000px</option></select><button className="primary-action compact" type="button" disabled={!presetName.trim()} onClick={async () => { try { const saved = await window.desktopApi.saveExportPreset({ name: presetName.trim(), format: presetFormat, quality: presetQuality, maxDimension: presetMaxDimension, conflictPolicy: 'auto-rename', namingPattern: '{name}' }); setPresets((current) => { const next = [...current.filter((item) => item.id !== saved.id), saved]; onExportPresetsChange(next); return next; }); setPresetName(''); setPresetMessage('预设已保存'); } catch { setPresetMessage('名称已存在或保存失败'); } }}>保存预设</button></div>
           <div className="preset-list">{presets.length === 0 ? <small>暂无导出预设</small> : presets.map((preset) => <div className="preset-item" key={preset.id}><span><strong>{preset.name}</strong><small>{preset.format === 'original' ? '原格式' : preset.format.toUpperCase()}{preset.format === 'jpeg' ? ` · 质量 ${preset.quality}` : ''}{preset.maxDimension ? ` · 长边 ${preset.maxDimension}px` : ''} · {preset.conflictPolicy === 'skip' ? '跳过同名' : '自动编号'}</small></span><button type="button" aria-label={`删除导出预设 ${preset.name}`} onClick={async () => { await window.desktopApi.deleteExportPreset(preset.id); setPresets((current) => { const next = current.filter((item) => item.id !== preset.id); onExportPresetsChange(next); return next; }); }}>删除</button></div>)}</div>
           {presetMessage && <div className="form-feedback" role="status">{presetMessage}</div>}
-        </section>}
+        </section>
+        <section className="settings-section lightroom-import-section">
+          <div className="settings-heading"><div><h2>导入 Lightroom Classic 评分与颜色标签</h2><p>读取 .lrcat 目录，只更新当前已关联照片的图库记录。</p></div></div>
+          <div className="cache-actions"><button className="secondary-action" type="button" disabled={lightroomBusy} onClick={async () => { setLightroomBusy(true); setLightroomMessage(''); try { const selected = await window.desktopApi.chooseLightroomCatalog(); if (selected) { setLightroomSource(selected); setLightroomMappings([]); setLightroomPreview(null); } } catch (error) { setLightroomMessage(error instanceof Error ? error.message : '无法读取目录'); } finally { setLightroomBusy(false); } }}><FolderOpen size={14} />选择 .lrcat 文件</button>{lightroomSource && <strong>{lightroomSource.catalogName}</strong>}</div>
+          {lightroomSource && <>
+            <div className="lightroom-mappings"><strong>目录位置</strong>{lightroomSource.sourceRoots.map((root) => { const mapping = lightroomMappings.find((item) => item.sourceRoot === root); return <div className="lightroom-mapping" key={root}><span title={root}>{root}</span><button type="button" className="secondary-action compact" disabled={lightroomBusy} onClick={async () => { const targetRoot = await window.desktopApi.chooseLightroomTarget(); if (!targetRoot) return; setLightroomMappings((current) => [...current.filter((item) => item.sourceRoot !== root), { sourceRoot: root, targetRoot }]); setLightroomPreview(null); }}>{mapping ? mapping.targetRoot : '选择当前目录'}</button>{mapping && <button type="button" className="quiet-button" onClick={() => { setLightroomMappings((current) => current.filter((item) => item.sourceRoot !== root)); setLightroomPreview(null); }}>清除映射</button>}</div>; })}</div>
+            <div className="lightroom-import-options"><label>已有评分与颜色<select aria-label="Lightroom 导入冲突策略" value={lightroomPolicy} onChange={(event) => { setLightroomPolicy(event.target.value as 'fill-empty' | 'overwrite'); setLightroomPreview(null); }}><option value="fill-empty">仅填补空值</option><option value="overwrite">使用 Lightroom 值覆盖</option></select></label><button type="button" className="secondary-action" disabled={lightroomBusy} onClick={async () => { setLightroomBusy(true); setLightroomMessage(''); try { setLightroomPreview(await window.desktopApi.previewLightroomImport({ token: lightroomSource.token, mappings: lightroomMappings, policy: lightroomPolicy })); } catch (error) { setLightroomMessage(error instanceof Error ? error.message : '预览失败'); } finally { setLightroomBusy(false); } }}>{lightroomBusy ? '读取中…' : '预览匹配结果'}</button></div>
+          </>}
+          {lightroomPreview && <div className="lightroom-preview"><div className="lightroom-stats"><span>Lightroom 照片 <strong>{lightroomPreview.sourceCount.toLocaleString()}</strong></span><span>已关联照片 <strong>{lightroomPreview.linkedCount.toLocaleString()}</strong></span><span>匹配 <strong>{lightroomPreview.matchedCount.toLocaleString()}</strong></span><span>将更新 <strong>{lightroomPreview.changedCount.toLocaleString()}</strong></span><span>未匹配 <strong>{lightroomPreview.unmatchedCount.toLocaleString()}</strong></span><span>有歧义 <strong>{lightroomPreview.ambiguousCount.toLocaleString()}</strong></span></div>{lightroomPreview.unknownLabels.length > 0 && <p>未识别的颜色名称将跳过：{lightroomPreview.unknownLabels.map((item) => `${item.label}（${item.count}）`).join('、')}</p>}<div className="lightroom-examples">{lightroomPreview.examples.map((item, index) => <div key={index}><strong title={item.fileName}>{item.fileName}</strong><span>{item.ratingBefore} 星 → {item.ratingAfter} 星</span><span>{item.colorBefore ?? '无颜色'} → {item.colorAfter ?? '无颜色'}</span></div>)}</div><button type="button" className="primary-action compact" disabled={lightroomBusy || lightroomPreview.changedCount === 0} onClick={async () => { setLightroomBusy(true); setLightroomMessage(''); try { const result = await window.desktopApi.applyLightroomImport(lightroomPreview.token); setLightroomPreview(null); setLightroomMessage(`已更新 ${result.updated} 张；${result.skipped} 张因图库记录变化而跳过。`); } catch (error) { setLightroomMessage(error instanceof Error ? error.message : '导入失败'); } finally { setLightroomBusy(false); } }}>确认导入 {lightroomPreview.changedCount} 张</button></div>}
+          <div className="form-feedback" role="status">{lightroomMessage}</div>
+        </section>
+        </>}
         {settingsSection === 'storage' && <>
         <section className="settings-section storage-section">
-          <div className="settings-heading"><div><h2>生成结果存储</h2><p>仅作用于新任务，不会覆盖原图。</p></div></div>
+          <div className="settings-heading"><div><h2>生成结果存储</h2></div></div>
           <div className="storage-options" aria-label="生成结果存储策略">
             <label className={generationStorageMode === 'managed' ? 'is-selected' : ''}><input type="radio" name="generation-storage" checked={generationStorageMode === 'managed'} disabled={storageBusy} onChange={() => void saveStorageMode('managed')} /><span><strong>集中受管（默认）</strong><small>保存到应用图库的 generated 目录，适合统一管理和批量导出。</small></span><Check size={15} /></label>
             <label className={generationStorageMode === 'portable' ? 'is-selected' : ''}><input type="radio" name="generation-storage" checked={generationStorageMode === 'portable'} disabled={storageBusy} onChange={() => void saveStorageMode('portable')} /><span><strong>原图旁便携目录</strong><small>在原图目录创建 _PhotoAllIsAI，不扫描回图库，也不会自动回退。</small></span><Check size={15} /></label>
@@ -4855,7 +4871,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
           <div className="form-feedback" role="status">{storageMessage || '便携模式需要原图目录具有写入权限；失败时任务会明确报错。'}</div>
         </section>
         <section className="settings-section cache-section">
-          <div className="settings-heading"><div><h2>预览缓存</h2><p>缓存可安全重建，不会删除原图、生成结果或分析数据。</p></div><span>{cacheStats ? `${cacheStats.files} 个文件 · ${(cacheStats.bytes / 1_073_741_824).toFixed(2)} GiB` : '正在读取'}</span></div>
+          <div className="settings-heading"><div><h2>预览缓存</h2></div><span>{cacheStats ? `${cacheStats.files} 个文件 · ${(cacheStats.bytes / 1_073_741_824).toFixed(2)} GiB` : '正在读取'}</span></div>
           <label className="cache-limit"><span><strong>磁盘上限</strong><small>达到上限后优先清理最久未使用的缩略图和屏幕预览。</small></span><select aria-label="预览缓存磁盘上限" value={cacheMaxBytes} disabled={cacheBusy} onChange={(event) => void saveCacheMaxBytes(Number(event.target.value))}><option value={1024 ** 3}>1 GiB</option><option value={5 * 1024 ** 3}>5 GiB</option><option value={10 * 1024 ** 3}>10 GiB</option><option value={20 * 1024 ** 3}>20 GiB</option><option value={50 * 1024 ** 3}>50 GiB</option></select></label>
           <div className="cache-actions"><button className="secondary-action" type="button" disabled={cacheBusy || !cacheStats || cacheStats.bytes === 0} onClick={async () => { setCacheBusy(true); try { const result = await window.desktopApi.pruneImageCache({ maxBytes: 0 }); setCacheMessage(`已清理 ${result.removedFiles} 个缓存文件。`); setCacheStats(await window.desktopApi.getImageCacheStats()); } catch { setCacheMessage('缓存清理失败，请稍后重试。'); } finally { setCacheBusy(false); } }}>{cacheBusy ? '清理中…' : '清理全部可重建缓存'}</button><span role="status">{cacheMessage}</span></div>
         </section>
@@ -4872,20 +4888,12 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
           <div className="cache-actions"><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void backupDatabase()}>{backupBusy ? '备份中…' : '仅备份数据库'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void backupCompleteLibrary()}>{libraryBackupBusy ? '备份中…' : '完整图库备份'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void verifyCompleteLibraryBackup()}>{backupVerifyBusy ? '验证中…' : '验证备份包'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void restoreCompleteLibraryBackup()}>{restoreBusy ? '准备恢复…' : '从完整备份恢复'}</button><span role="status">{backupMessage || '恢复会保留当前图库副本；原图与便携结果不在备份包内。'}</span></div>
         </section>
         </>}
-        {settingsSection === 'tasks' && <section className="settings-section settings-info-section">
-          <div className="settings-heading"><h2>队列执行</h2></div>
-          <div className="settings-info-grid"><article><strong>并发策略</strong><span>生成与 Agent 共用一条执行链，分析与导出共用另一条；等待中的任务可在任务中心调整。</span></article><article><strong>失败恢复</strong><span>失败任务保留错误状态和重试次数；远端结果未知的生成需先核对再重试。</span></article><article><strong>取消边界</strong><span>取消只作用于尚未提交结果的任务，已落盘版本继续保留。</span></article></div>
-        </section>}
         {settingsSection === 'shortcuts' && <section className="settings-section settings-info-section">
           <div className="settings-heading"><h2>快捷键</h2></div>
           <div className="shortcut-list"><span><kbd>G / E</kbd><em>图库网格 / 列表；胶片带网格 / 横向布局</em></span><span><kbd>空格</kbd><em>从图库打开看图</em></span><span><kbd>← / →</kbd><em>切换照片；胶片带使用方向键移动选择</em></span><span><kbd>F / Z</kbd><em>看图适应窗口 / 切换实际像素</em></span><span><kbd>O</kbd><em>按住临时查看原图</em></span><span><kbd>Tab</kbd><em>同时隐藏或恢复两侧栏</em></span><span><kbd>Shift+L / Shift+R</kbd><em>单独切换左侧栏 / 右侧栏</em></span><span><kbd>⌘ / Ctrl</kbd><strong>+</strong><kbd>A</kbd><em>选择当前列表全部照片</em></span><span><kbd>P / X / U</kbd><em>留用 / 排除 / 清除旗标</em></span><span><kbd>0–5</kbd><em>设置选中照片星级</em></span><span><kbd>6–9</kbd><em>设置红、黄、绿、蓝颜色标签</em></span><span><kbd>B</kbd><em>切换收藏</em></span><span><kbd>F2</kbd><em>重命名选中照片或侧边栏文件夹</em></span><span><kbd>⌘ / Ctrl + Alt + A</kbd><em>AI 分析选中照片</em></span><span><kbd>⌘ / Ctrl + Alt + G</kbd><em>按默认方案生成 AI 版本</em></span><span><kbd>⌘ / Ctrl + Alt + B</kbd><em>加入 AI 批量修图</em></span><span><kbd>Shift</kbd><strong>+</strong><em>范围选择</em></span><span><kbd>⌘ / Ctrl</kbd><strong>+</strong><em>点击追加选择</em></span></div>
         </section>}
-        {settingsSection === 'privacy' && <section className="settings-section settings-info-section">
-          <div className="settings-heading"><div><h2>数据边界</h2><p>图库保存在本机。执行 AI 任务时，图片会发送至所选模型服务。</p></div></div>
-          <div className="settings-info-grid"><article><strong>凭据</strong><span>API Key 保存在应用配置中，不写入 SQLite、manifest、日志或诊断摘要，可随配置迁移。</span></article><article><strong>图片上传</strong><span>分析和生成使用缓存预览图发送，任务完成后服务端响应不会写入日志。</span></article><article><strong>诊断</strong><span>诊断摘要只包含版本、数量和缓存统计，不包含路径、密钥或图片内容。</span></article></div>
-        </section>}
-        {settingsSection === 'mcp' && <section className="settings-section settings-info-section">
-          <div className="settings-heading"><div><h2>外部 MCP</h2><p>让外部 Agent 通过 MCP 调用本应用的图库、任务和修图能力。</p></div></div>
+        {settingsSection === 'advanced' && <section className="settings-section settings-info-section">
+          <div className="settings-heading"><h2>MCP</h2></div>
           <label className="enabled-row"><input type="checkbox" aria-label="开启 MCP 服务" checked={mcp?.enabled ?? false} disabled={mcpBusy || !mcp} onChange={(event) => {
             const enabled = event.target.checked; const previous = mcp; setMcpBusy(true); setMcpMessage('');
             void window.desktopApi.setMcpEnabled(enabled).then(setMcp).catch((error: unknown) => { setMcp(previous); setMcpMessage(error instanceof Error ? error.message : 'MCP 设置失败'); }).finally(() => setMcpBusy(false));
@@ -4893,8 +4901,8 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
           {mcp?.enabled && <div className="mcp-connection-card"><span><strong>连接地址</strong><code>{mcp.url}</code></span><button className="secondary-action compact" type="button" onClick={() => { void navigator.clipboard.writeText(JSON.stringify({ mcpServers: { PhotoAllIsAI: { url: mcp.url, headers: { Authorization: `Bearer ${mcp.token}` } } } }, null, 2)).then(() => setMcpMessage('连接配置已复制')).catch(() => setMcpMessage('复制失败，请检查剪贴板权限')); }}><Copy size={13} />复制连接配置</button></div>}
           <div className="form-feedback" role="status">{mcpMessage || (mcp?.enabled ? `${mcp.tools} 个工具已开放` : 'MCP 当前关闭')}</div>
         </section>}
-        {settingsSection === 'diagnostics' && <section className="settings-section diagnostics-section">
-          <div className="settings-heading"><div><h2>诊断摘要</h2><p>仅包含运行统计，不包含路径、密钥、图片内容或模型响应。</p></div></div>
+        {settingsSection === 'advanced' && <section className="settings-section diagnostics-section">
+          <div className="settings-heading"><h2>诊断与维护</h2></div>
           {diagnostics && <div className="diagnostic-health-strip"><span>自动备份：{diagnostics.startupRecovery.automaticBackup.status === 'completed' ? '已完成' : diagnostics.startupRecovery.automaticBackup.status === 'skipped' ? '已跳过' : diagnostics.startupRecovery.automaticBackup.status === 'failed' ? '失败' : '进行中'}</span><span>目录监听：{diagnostics.catalogWatcher.activeWatchers}/{diagnostics.catalogWatcher.watchedFolders}</span><span>监听失败：{diagnostics.catalogWatcher.watchFailures}</span><span>协调失败：{diagnostics.catalogWatcher.reconciliationFailures}</span></div>}
           {diagnostics && <div className="cache-actions"><button className="secondary-action compact" type="button" disabled={integrityBusy} onClick={() => void runIntegrityCheck()}><ShieldCheck size={13} />{integrityBusy ? '检查中…' : '重新检查图库'}</button><button className="secondary-action compact" type="button" onClick={() => void copyDiagnostics()}><Copy size={13} />复制脱敏摘要</button><button className="secondary-action compact" type="button" disabled={diagnosticBusy} onClick={() => void exportDiagnostics()}><Download size={13} />{diagnosticBusy ? '导出中…' : '导出诊断文件'}</button><span role="status">{diagnosticMessage}</span></div>}
           {diagnostics ? <div className="diagnostic-grid"><span>版本<strong>{diagnostics.appVersion}</strong></span><span>图库<strong>{diagnostics.catalog.assets} 张 · 离线 {diagnostics.catalog.offline}</strong></span><span className={`integrity-result is-${diagnostics.integrity.status}`}>完整性<strong>{diagnostics.integrity.status === 'healthy' ? '正常' : diagnostics.integrity.status === 'warning' ? '需关注' : '发现错误'}</strong><small>数据库 {diagnostics.integrity.databaseStatus === 'ok' ? '正常' : diagnostics.integrity.databaseStatus === 'corrupt' ? '损坏' : '无法读取'} · 活动缺失 {diagnostics.integrity.missingActiveFiles} · 孤立 {diagnostics.integrity.unexpectedGeneratedFiles + diagnostics.integrity.unexpectedTrashFiles} · 待恢复 {diagnostics.integrity.pendingGenerationWrites}（异常 {diagnostics.integrity.unsafeGenerationWriteIntents}）</small></span><span>启动恢复<strong>{diagnostics.startupRecovery.trashPurges.recovered + diagnostics.startupRecovery.fileOperations.resolved + diagnostics.startupRecovery.generationWrites.recovered} 项</strong><small>冲突 {diagnostics.startupRecovery.trashPurges.conflicts} · 失败 {diagnostics.startupRecovery.trashPurges.failed + diagnostics.startupRecovery.fileOperations.failed + diagnostics.startupRecovery.generationWrites.failed}</small></span><span>模型<strong>{diagnostics.providers.enabled}/{diagnostics.providers.total} 已启用</strong></span><span>缓存<strong>{(diagnostics.cache.bytes / 1_073_741_824).toFixed(2)} GiB</strong><small>命中 {diagnostics.cache.performance.hits} · 未命中 {diagnostics.cache.performance.misses}</small></span><span>解码<strong>{diagnostics.cache.performance.decodes} 次</strong><small>累计 {Math.round(diagnostics.cache.performance.decodeMsTotal)} ms</small></span><span>RAW 代理<strong>{diagnostics.cache.raw.imageMagick ? 'ImageMagick' : diagnostics.cache.raw.sips ? 'sips' : '未安装'}</strong><small>原生入口已启用；完整显影仍按发布计划推进</small></span></div> : <small>正在读取诊断摘要…</small>}
@@ -5287,7 +5295,13 @@ function TemplatePage(): React.JSX.Element {
   const [message, setMessage] = useState('');
   const [archiveCandidate, setArchiveCandidate] = useState<string | null>(null);
 
-  useEffect(() => { void window.desktopApi.listPromptTemplates().then(setTemplateItems); }, []);
+  useEffect(() => {
+    let active = true;
+    const refresh = () => { void window.desktopApi.listPromptTemplates().then((items) => { if (active) setTemplateItems(items); }); };
+    refresh();
+    const unsubscribe = window.desktopApi.onCatalogChanged(refresh);
+    return () => { active = false; unsubscribe(); };
+  }, []);
 
   useEffect(() => {
     if (!previewTemplate) return;

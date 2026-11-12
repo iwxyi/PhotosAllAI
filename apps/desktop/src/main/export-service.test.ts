@@ -17,7 +17,7 @@ afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-async function fixture(imageEncoder?: ImageEncoder) {
+async function fixture(imageEncoder?: ImageEncoder, originalFileName?: string) {
   const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-export-'));
   temporaryDirectories.push(directory);
   const managedDirectory = path.join(directory, 'managed');
@@ -31,12 +31,20 @@ async function fixture(imageEncoder?: ImageEncoder) {
   ]);
   const databasePath = path.join(directory, 'catalog.sqlite');
   const service = new ExportService(databasePath, {
-    resolveResultFile: (id) => id === firstId ? source : id === secondId ? secondSource : null
+    resolveResultFile: (id) => id === firstId ? source : id === secondId ? secondSource : null,
+    resolveResultOriginalName: (id) => id === firstId ? originalFileName ?? null : null
   }, imageEncoder);
   return { service, source, secondSource, destination, databasePath };
 }
 
 describe('generation result export', () => {
+  it('uses the source photo name for default exports', async () => {
+    const { service, destination } = await fixture(undefined, 'Portrait.jpg');
+    const report = await service.exportToDirectory([firstId], destination);
+    expect(report.files[0]?.fileName).toBe('Portrait.jpg');
+    service.close();
+  });
+
   it('copies managed results without modifying the source', async () => {
     const { service, source, destination } = await fixture();
     const report = await service.exportToDirectory([firstId], destination);

@@ -14,7 +14,7 @@ Object.assign(toolLabels, {
   'program.run': '运行文件处理程序',
   'generation.review': '审阅生成版本', 'generation.trash-list': '读取版本回收站', 'generation.trash': '回收生成版本', 'generation.restore': '恢复生成版本',
   'tasks.search': '查询作业', 'tasks.control': '管理关联作业', 'tasks.control-global': '管理其他作业', 'tasks.reorder': '调整作业顺序', 'tasks.update-generation': '调整排队提示词',
-  'templates.list': '读取提示词模板', 'templates.save': '保存提示词模板', 'templates.archive': '归档提示词模板',
+  'templates.list': '读取提示词模板', 'templates.save': '保存提示词模板', 'templates.save-batch': '批量保存提示词模板', 'templates.archive': '归档提示词模板', 'templates.archive-batch': '批量归档提示词模板',
   'export.results': '导出生成版本', 'export.presets': '读取导出预设', 'export.preset-save': '保存导出预设', 'export.preset-delete': '删除导出预设',
   'workflow.read': '读取流程', 'workflow.configure': '修改流程', 'settings.read': '读取设置', 'settings.update': '修改设置', 'app.diagnostics': '检查程序状态'
 });

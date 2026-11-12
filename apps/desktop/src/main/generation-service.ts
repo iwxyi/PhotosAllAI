@@ -193,6 +193,13 @@ export class GenerationService {
     return row?.file_path ?? null;
   }
 
+  resolveResultOriginalName(resultId: string): string | null {
+    const row = this.#database.prepare('SELECT asset_id FROM generation_results WHERE id = ? AND trashed_at IS NULL').get(resultId) as { asset_id: string } | undefined;
+    if (!row) return null;
+    const source = this.#catalog.resolveAssetFile(row.asset_id);
+    return source ? path.basename(source.path) : null;
+  }
+
   async findCommittedTaskResult(taskId: string): Promise<GenerationResult | null> {
     const row = this.#database.prepare('SELECT * FROM generation_results WHERE task_id = ? AND trashed_at IS NULL')
       .get(taskId) as ResultRow | undefined;

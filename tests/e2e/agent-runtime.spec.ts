@@ -122,7 +122,7 @@ test('Agent autonomously inspects, edits, verifies, and opens results; MCP is us
   await expect(page.locator('.canvas-wrap')).toBeVisible();
   await page.getByRole('button', { name: '打开工作区' }).click();
   await page.getByRole('menuitem', { name: '设置' }).click();
-  await page.getByRole('button', { name: 'MCP', exact: true }).click();
+  await page.getByRole('button', { name: '高级', exact: true }).click();
   const mcpToggle = page.getByLabel('开启 MCP 服务');
   if (!(await mcpToggle.isChecked())) await mcpToggle.click();
   await expect(mcpToggle).toBeChecked();

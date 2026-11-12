@@ -9,6 +9,7 @@ import { exportReportSchema, type ExportPreset, type ExportReport } from '@photo
 
 interface ResultResolver {
   resolveResultFile(resultId: string): string | null;
+  resolveResultOriginalName?(resultId: string): string | null;
 }
 
 type ExportRunItemRow = {
@@ -128,7 +129,7 @@ export class ExportService {
       try {
         await removeOwnedTemporaryFile(temporaryPath);
         try {
-          const prepared = await prepareWithPreset(sourcePath, temporaryPath, this.#imageEncoder, preset, signal);
+          const prepared = await prepareWithPreset(sourcePath, temporaryPath, this.#imageEncoder, preset, this.#results.resolveResultOriginalName?.(resultId), signal);
           const fileName = await this.#publishPrepared(id, resultId, destinationDirectory, prepared, preset, signal);
           completedFiles.set(resultId, fileName);
         } finally {
@@ -285,12 +286,14 @@ async function prepareWithPreset(
   temporaryPath: string,
   imageEncoder: ImageEncoder,
   preset?: ExportPreset,
+  originalFileName?: string | null,
   signal?: AbortSignal
 ): Promise<PreparedExport> {
   signal?.throwIfAborted();
   const source = await lstat(sourcePath);
   if (!source.isFile()) throw new Error('EXPORT_SOURCE_NOT_FILE');
   const parsed = path.parse(sourcePath);
+  const original = originalFileName ? path.parse(originalFileName) : parsed;
   if (!preset || preset.format === 'original') {
     await copyFile(sourcePath, temporaryPath, constants.COPYFILE_EXCL);
   } else {
@@ -315,8 +318,8 @@ async function prepareWithPreset(
   const version = parsed.name.match(/(?:^|[-_])(v\d+)$/i)?.[1] ?? 'original';
   const extension = preset?.format === 'jpeg' ? '.jpg' : preset?.format === 'png' ? '.png' : parsed.ext;
   const requestedName = preset
-    ? preset.namingPattern.replaceAll('{name}', parsed.name).replaceAll('{version}', version) + extension
-    : parsed.base;
+    ? preset.namingPattern.replaceAll('{name}', original.name).replaceAll('{version}', version) + extension
+    : original.base;
   const sha256 = await sha256File(temporaryPath);
   signal?.throwIfAborted();
   return { temporaryPath, requestedName, extension, sha256, sizeBytes: copied.size };

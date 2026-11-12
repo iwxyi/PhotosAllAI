@@ -125,7 +125,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
     requestTimeoutMs: 300_000, retryCount: 2, customHeaders: {}
   });
 
-  await page.getByRole('button', { name: '图片导出' }).click();
+  await page.getByRole('button', { name: '导入与导出' }).click();
   await page.getByLabel('导出预设名称').fill('PNG 交付');
   await page.getByLabel('导出格式').selectOption('png');
   await page.getByLabel('导出尺寸').selectOption('2048');
@@ -278,7 +278,7 @@ test('analyzes, generates, compares, and persists managed and portable results',
   await expect(stat(managedResultPath)).rejects.toMatchObject({ code: 'ENOENT' });
   expect((await readdir(trashRoot, { recursive: true })).some((file) => file.endsWith('.jpg'))).toBe(false);
   expect(await readFile(sourcePath)).toEqual(originalBytes);
-  await page.getByRole('button', { name: '诊断与维护' }).click();
+  await page.getByRole('button', { name: '高级' }).click();
   await expect(page.locator('.integrity-result')).toContainText('完整性正常');
   await page.getByRole('button', { name: '重新检查图库' }).click();
   await expect(page.locator('.diagnostics-section').getByRole('status')).toContainText('图库完整性检查通过');

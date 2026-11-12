@@ -428,6 +428,31 @@ export class CatalogService {
     return this.#toAssets(rows);
   }
 
+  listLightroomImportAssets(): Array<{ id: string; path: string; fileName: string; rating: number; labelColor: AssetRow['label_color'] }> {
+    return this.#database.prepare(`
+      SELECT id, path, file_name AS fileName, rating, label_color AS labelColor
+      FROM assets WHERE removed_at IS NULL
+    `).all() as Array<{ id: string; path: string; fileName: string; rating: number; labelColor: AssetRow['label_color'] }>;
+  }
+
+  applyLightroomMetadata(changes: Array<{ id: string; previousRating: number; previousColor: AssetRow['label_color']; rating: number; labelColor: AssetRow['label_color'] }>): { updated: number; skipped: number } {
+    const update = this.#database.prepare(`
+      UPDATE assets SET rating = ?, label_color = ?
+      WHERE id = ? AND removed_at IS NULL AND rating = ? AND label_color IS ?
+    `);
+    let updated = 0;
+    this.#database.exec('BEGIN IMMEDIATE');
+    try {
+      for (const item of changes) updated += Number(update.run(item.rating, item.labelColor, item.id, item.previousRating, item.previousColor).changes);
+      this.#database.exec('COMMIT');
+    } catch (error) {
+      this.#database.exec('ROLLBACK');
+      throw error;
+    }
+    this.#countCache.clear();
+    return { updated, skipped: changes.length - updated };
+  }
+
   getStats(): { assets: number; offline: number } {
     const row = this.#database.prepare(`
       SELECT COUNT(*) AS assets, SUM(CASE WHEN offline_at IS NOT NULL THEN 1 ELSE 0 END) AS offline

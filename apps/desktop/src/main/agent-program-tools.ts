@@ -46,6 +46,8 @@ export function createAgentProgramTools(d: {
     if (!c.session.calls.some((call) => call.taskIds.includes(id))) throw new Error('不是本会话作业，使用 tasks.control-global 并确认。');
   };
   const idSchema = z.object({ id: z.string().uuid() }).strict();
+  const templateBatchSchema = z.object({ templates: z.array(savePromptTemplateInputSchema).min(1).max(50) }).strict();
+  const templateIdsSchema = z.object({ ids: z.array(z.string().uuid()).min(1).max(100) }).strict();
   const renamePatternSchema = z.object({
     scope: z.enum(['folder', 'all-associated']),
     folderId: z.string().min(1).optional(),
@@ -175,9 +177,11 @@ export function createAgentProgramTools(d: {
     define('tasks.control-global', '控制其他来源作业，需用户确认避免打断其他工作。', taskSchema, true, false, controlTask),
     define('tasks.reorder', '调整本会话排队任务顺序。', moveQueuedTaskInputSchema, false, false, (a, c) => { taskScope(a.taskId, c); return toRendererTask(d.tasks.moveQueued(a)); }),
     define('tasks.update-generation', '修改本会话尚未执行的生成任务提示词。', updateQueuedGenerationTaskInputSchema, false, true, (a, c) => { taskScope(a.taskId, c); return toRendererTask(d.tasks.updateQueuedGeneration(a)); }),
-    define('templates.list', '读取用户提示词模板及版本。', z.object({}).strict(), false, true, () => d.templates.list()),
-    define('templates.save', '保存提示词模板新版本，不覆盖历史。', savePromptTemplateInputSchema, false, false, (a) => d.templates.save(a)),
-    define('templates.archive', '归档指定提示词模板。', idSchema, true, false, (a) => { d.templates.archive(a.id); return { archived: a.id }; }),
+    define('templates.list', '读取全部活动提示词模板及当前版本。创建、修改前先读取，依据已有模板判断新建还是创建下一版本。', z.object({}).strict(), false, true, () => d.templates.list()),
+    define('templates.save', '创建提示词模板或保存指定模板的新版本；传 id 表示修改，历史版本会保留。根据用户的简短意图主动扩写为专业、具体、可执行的修图提示词，包含目标、操作边界、主体/身份保护、光影与质感保留、伪影检查和变量占位符；不要只把用户原话复制进 body。保存后再调用 templates.list 核实实际结果。', savePromptTemplateInputSchema, false, false, (a) => { const result = d.templates.save(a); d.changed(); return result; }),
+    define('templates.save-batch', '批量创建模板或保存多个模板的新版本，最多 50 项；每项都应根据意图优化为完整、专业、可执行的修图提示词。已有模板传 id 创建新版本。先 templates.list 检查目标，再保存并读取核实；回执会分别列出成功与失败。', templateBatchSchema, false, false, (a) => { const templates: unknown[] = []; const failed: Array<{ name: string; error: string }> = []; for (const item of a.templates) { try { templates.push(d.templates.save(item)); } catch (error) { failed.push({ name: item.name, error: error instanceof Error ? error.message : String(error) }); } } if (templates.length) d.changed(); return { saved: templates.length, templates, failed }; }),
+    define('templates.archive', '归档指定提示词模板，使其不再用于新任务，历史任务和版本保留。', idSchema, true, false, (a) => { d.templates.archive(a.id); d.changed(); return { archived: a.id }; }),
+    define('templates.archive-batch', '批量归档指定提示词模板，最多 100 个；只接受 templates.list 返回的现有模板 ID；回执会分别列出成功与失败。', templateIdsSchema, true, false, (a) => { const archived: string[] = []; const failed: Array<{ id: string; error: string }> = []; for (const id of a.ids) { try { d.templates.archive(id); archived.push(id); } catch (error) { failed.push({ id, error: error instanceof Error ? error.message : String(error) }); } } if (archived.length) d.changed(); return { archived, count: archived.length, failed }; }),
     define('export.presets', '读取导出预设。', z.object({}).strict(), false, true, () => d.exportPresets.list()),
     define('export.preset-save', '保存导出预设，包含尺寸、格式和文件命名。', saveExportPresetInputSchema, false, false, (a) => d.exportPresets.save(a)),
     define('export.preset-delete', '删除指定导出预设，已导出文件不变。', idSchema, true, false, (a) => { d.exportPresets.delete(a.id); return { deleted: a.id }; }),

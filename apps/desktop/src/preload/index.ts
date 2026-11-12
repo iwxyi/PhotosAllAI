@@ -85,6 +85,10 @@ const api: DesktopApi = {
     ipcRenderer.invoke('catalog.album.assets.update.v1', input) as ReturnType<DesktopApi['updateCatalogAlbumAssets']>,
   updateCatalogMetadata: (input) =>
     ipcRenderer.invoke('catalog.metadata.update.v1', input) as ReturnType<DesktopApi['updateCatalogMetadata']>,
+  chooseLightroomCatalog: () => ipcRenderer.invoke('lightroom.catalog.choose.v1') as ReturnType<DesktopApi['chooseLightroomCatalog']>,
+  chooseLightroomTarget: () => ipcRenderer.invoke('lightroom.target.choose.v1') as ReturnType<DesktopApi['chooseLightroomTarget']>,
+  previewLightroomImport: (input) => ipcRenderer.invoke('lightroom.import.preview.v1', input) as ReturnType<DesktopApi['previewLightroomImport']>,
+  applyLightroomImport: (token) => ipcRenderer.invoke('lightroom.import.apply.v1', token) as ReturnType<DesktopApi['applyLightroomImport']>,
   updateCatalogTags: (input) =>
     ipcRenderer.invoke('catalog.tags.update.v1', input) as ReturnType<DesktopApi['updateCatalogTags']>,
   moveCatalogAssets: (input) =>

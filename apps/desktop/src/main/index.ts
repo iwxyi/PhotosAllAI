@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { EventEmitter } from 'node:events';
 import { appendFileSync, constants as fsConstants, existsSync, mkdirSync, statSync } from 'node:fs';
 import { copyFile, mkdir, realpath, stat, writeFile } from 'node:fs/promises';
@@ -71,6 +71,7 @@ import {
   deleteTasksInputSchema,
   taskBatchActionInputSchema,
   updateCatalogMetadataInputSchema,
+  lightroomImportOptionsSchema,
   updateCatalogTagsInputSchema,
   unregisterCatalogFolderInputSchema,
   unregisterCatalogFolderReportSchema,
@@ -86,6 +87,7 @@ import { fileDetailsPageInputSchema, fileDetailsPageSchema, fileDetailsSchema, q
 import type { AppSettings, MenuCommand, MenuState, QuickViewSession } from '@photoallisai/contracts';
 
 import { CatalogService } from './catalog-service';
+import { LightroomImportService } from './lightroom-import-service';
 import { isDirectPreviewImage, ImageFileService } from './image-file-service';
 import { TemporaryMediaIndex } from './temporary-media-index';
 import { identifyMediaFormat, isSupportedBrowseMedia } from './media-format-registry';
@@ -662,6 +664,38 @@ function registerIpc(): void {
     const updated = catalog.updateMetadata(updateCatalogMetadataInputSchema.parse(input));
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1', updated);
     return updated;
+  });
+  const lightroomImport = new LightroomImportService(catalog);
+  let lightroomCatalogName = '';
+  let lightroomSelectionToken = '';
+  ipcMain.handle('lightroom.catalog.choose.v1', async () => {
+    const selection = await dialog.showOpenDialog({
+      title: '选择 Lightroom Classic 目录',
+      properties: ['openFile'],
+      filters: [{ name: 'Lightroom Classic 目录', extensions: ['lrcat'] }]
+    });
+    if (selection.canceled || !selection.filePaths[0]) return null;
+    const selected = selection.filePaths[0];
+    if (extname(selected).toLowerCase() !== '.lrcat') throw new Error('请选择 .lrcat 文件');
+    const roots = lightroomImport.select(selected);
+    lightroomCatalogName = basename(selected);
+    lightroomSelectionToken = randomUUID();
+    return { token: lightroomSelectionToken, catalogName: lightroomCatalogName, sourceRoots: roots };
+  });
+  ipcMain.handle('lightroom.target.choose.v1', async () => {
+    const selection = await dialog.showOpenDialog({ title: '选择当前照片目录', properties: ['openDirectory'] });
+    return selection.canceled ? null : selection.filePaths[0] ?? null;
+  });
+  ipcMain.handle('lightroom.import.preview.v1', (_event, input: unknown) => {
+    const raw = input as { token?: unknown };
+    if (raw?.token !== lightroomSelectionToken || !lightroomCatalogName) throw new Error('请先选择 Lightroom 目录');
+    return lightroomImport.preview({ ...lightroomImportOptionsSchema.parse(raw), catalogName: lightroomCatalogName });
+  });
+  ipcMain.handle('lightroom.import.apply.v1', (_event, token: unknown) => {
+    if (typeof token !== 'string') throw new Error('导入预览已失效');
+    const result = lightroomImport.apply(token);
+    if (result.updated) for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1');
+    return result;
   });
   ipcMain.handle('catalog.tags.update.v1', (_event, input: unknown) =>
     catalog.updateTags(updateCatalogTagsInputSchema.parse(input))

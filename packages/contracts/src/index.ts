@@ -593,6 +593,30 @@ export const updateCatalogMetadataInputSchema = z.object({
 
 export type UpdateCatalogMetadataInput = z.infer<typeof updateCatalogMetadataInputSchema>;
 
+export const lightroomMappingSchema = z.object({
+  sourceRoot: z.string().min(1),
+  targetRoot: z.string().min(1)
+});
+export type LightroomMapping = z.infer<typeof lightroomMappingSchema>;
+export const lightroomImportOptionsSchema = z.object({
+  mappings: z.array(lightroomMappingSchema).max(100),
+  policy: z.enum(['fill-empty', 'overwrite'])
+});
+export type LightroomImportOptions = z.infer<typeof lightroomImportOptionsSchema>;
+export type LightroomImportPreview = {
+  token: string;
+  catalogName: string;
+  sourceRoots: string[];
+  sourceCount: number;
+  linkedCount: number;
+  matchedCount: number;
+  changedCount: number;
+  unmatchedCount: number;
+  ambiguousCount: number;
+  unknownLabels: Array<{ label: string; count: number }>;
+  examples: Array<{ fileName: string; ratingBefore: number; ratingAfter: number; colorBefore: string | null; colorAfter: string | null }>;
+};
+
 export const updateCatalogTagsInputSchema = z.object({
   assetIds: z.array(z.string().min(1)).min(1).max(10_000),
   addTags: z.array(z.string().min(1).max(100)).max(50).default([]),
@@ -1189,6 +1213,10 @@ export interface DesktopApi {
   deleteCatalogAlbum(albumId: string): Promise<void>;
   updateCatalogAlbumAssets(input: UpdateCatalogAlbumAssetsInput): Promise<CatalogAlbum>;
   updateCatalogMetadata(input: UpdateCatalogMetadataInput): Promise<CatalogAsset[]>;
+  chooseLightroomCatalog(): Promise<{ token: string; catalogName: string; sourceRoots: string[] } | null>;
+  chooseLightroomTarget(): Promise<string | null>;
+  previewLightroomImport(input: { token: string } & LightroomImportOptions): Promise<LightroomImportPreview>;
+  applyLightroomImport(token: string): Promise<{ updated: number; skipped: number }>;
   updateCatalogTags(input: UpdateCatalogTagsInput): Promise<CatalogTag[]>;
   moveCatalogAssets(input: MoveCatalogAssetsInput): Promise<MoveCatalogAssetsReport>;
   copyCatalogAssets(input: CopyCatalogAssetsInput): Promise<CopyCatalogAssetsReport>;
