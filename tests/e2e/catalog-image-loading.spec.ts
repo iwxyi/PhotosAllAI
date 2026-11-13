@@ -10,8 +10,8 @@ test('gallery defers distant thumbnails and reuses a medium preview when cards g
   const photos = path.join(directory, 'photos');
   await mkdir(path.join(userData, 'library'), { recursive: true });
   await mkdir(photos);
-  for (let index = 0; index < 80; index += 1) {
-    await copyFile(path.resolve('apps/desktop/src/renderer/public/demo/mountain.jpg'), path.join(photos, `${String(index).padStart(3, '0')}.jpg`));
+  for (let index = 0; index < 160; index += 1) {
+    await copyFile(path.resolve(`apps/desktop/src/renderer/public/demo/${index > 0 && index % 3 === 0 ? 'portrait' : 'mountain'}.jpg`), path.join(photos, `${String(index).padStart(3, '0')}.jpg`));
   }
   const catalog = new CatalogService(path.join(userData, 'library', 'catalog.sqlite'));
   await catalog.importFolders([photos]);
@@ -24,11 +24,23 @@ test('gallery defers distant thumbnails and reuses a medium preview when cards g
     await page.evaluate(() => localStorage.setItem('photoallisai.thumbnail-size', '100'));
     await page.reload();
     const cards = page.locator('.catalog-card');
-    await expect(cards).toHaveCount(80);
+    await expect(cards).toHaveCount(160);
     const first = cards.first().locator('img');
     const last = cards.last().locator('img');
     await expect(first).toHaveClass('is-ready');
     await expect(first).toHaveAttribute('src', /photoasset:\/\/thumbnail\//);
+    const aheadIndex = await cards.evaluateAll((items) => {
+      const bottom = items[0]!.closest('.catalog-grid')!.getBoundingClientRect().bottom;
+      return items.findIndex((item, index) => {
+        const top = item.getBoundingClientRect().top;
+        return index % 3 === 0 && top > bottom + 100 && top < bottom + 700;
+      });
+    });
+    expect(aheadIndex).toBeGreaterThan(0);
+    const ahead = cards.nth(aheadIndex).locator('img');
+    await expect(ahead).toHaveAttribute('src', /photoasset:\/\/thumbnail\//);
+    await expect(ahead).toHaveClass('is-ready');
+    expect(await ahead.evaluate((image: HTMLImageElement) => image.naturalHeight > image.naturalWidth)).toBe(true);
     expect(await last.getAttribute('src')).toBeNull();
     await first.evaluate((image) => {
       const mutations: string[] = [];

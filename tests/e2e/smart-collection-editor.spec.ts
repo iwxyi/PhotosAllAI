@@ -19,6 +19,9 @@ test('creates and edits a smart collection with a selected directory and conditi
   const app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js')], env: { ...process.env, PHOTOALLISAI_USER_DATA: userData } });
   try {
     const page = await app.firstWindow();
+    const allPhotos = page.locator('.smart-collection-row').first().getByRole('button', { name: /所有照片/ });
+    await expect(allPhotos).toBeVisible();
+    await expect(allPhotos).toHaveClass(/is-active/);
     await page.getByRole('button', { name: '创建智能集合' }).click();
     const dialog = page.getByRole('dialog', { name: '创建智能集合' });
     await dialog.getByRole('textbox', { name: '名称' }).fill('待交付');
@@ -32,6 +35,11 @@ test('creates and edits a smart collection with a selected directory and conditi
     await dialog.getByRole('button', { name: '保存集合' }).click();
     await expect(page.getByRole('button', { name: /待交付 1/ })).toBeVisible();
     await expect(page.locator('.catalog-card')).toHaveCount(1);
+    await expect(allPhotos).not.toHaveClass(/is-active/);
+    await allPhotos.click();
+    await expect(page.locator('.catalog-card')).toHaveCount(2);
+    await expect(allPhotos).toHaveClass(/is-active/);
+    await page.getByRole('button', { name: /待交付 1/ }).click();
     await page.getByRole('button', { name: /待交付 1/ }).click({ button: 'right' });
     await page.getByRole('menuitem', { name: '编辑智能集合…' }).click();
     const editor = page.getByRole('dialog', { name: '编辑智能集合' });

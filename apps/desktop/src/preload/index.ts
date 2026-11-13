@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { CatalogAsset, DesktopApi, MenuCommand } from '@photoallisai/contracts';
 
 const api: DesktopApi = {
+  getCacheActivity: () => ipcRenderer.invoke('cache.activity.v1') as ReturnType<DesktopApi['getCacheActivity']>,
   cancelPreviewRequest: (requestId) => ipcRenderer.send('image.preview.cancel.v1', requestId),
   createAgentSession: (input) => ipcRenderer.invoke('agent.sessions.create.v1', input),
   getMcpStatus: () => ipcRenderer.invoke('agent.mcp.status.v1'),
@@ -117,6 +118,9 @@ const api: DesktopApi = {
     ipcRenderer.invoke('catalog.assets.trash.v1', input) as ReturnType<DesktopApi['trashCatalogAssets']>,
   listFileOperationHistory: () =>
     ipcRenderer.invoke('files.operations.list.v1') as ReturnType<DesktopApi['listFileOperationHistory']>,
+  listBackgroundFileTasks: () =>
+    ipcRenderer.invoke('files.background.list.v1') as ReturnType<DesktopApi['listBackgroundFileTasks']>,
+  reportUserActivity: () => { ipcRenderer.send('app.user-activity.v1'); },
   undoFileOperation: (input) =>
     ipcRenderer.invoke('files.operations.undo.v1', input) as ReturnType<DesktopApi['undoFileOperation']>,
   importFolders: () =>

@@ -12,6 +12,7 @@ let page: Page;
 let testRoot: string;
 let databasePath: string;
 let queuedExportTaskId: string;
+let secondExportTaskId: string;
 
 test.beforeAll(async () => {
   testRoot = await mkdtemp(path.join(tmpdir(), 'photoallisai-task-controls-'));
@@ -38,7 +39,7 @@ test.beforeAll(async () => {
     assetId: 'asset-A',
     payload: { destinationDirectory: '/private/export-target', resultIds: [] }
   }).id;
-  queued.enqueue({ kind: 'export', assetId: 'asset-B', payload: {} });
+  secondExportTaskId = queued.enqueue({ kind: 'export', assetId: 'asset-B', payload: {} }).id;
   queued.close();
 });
 
@@ -61,11 +62,13 @@ test('reorders queued work and batch-retries failed generation tasks', async () 
   }));
   await page.getByRole('button', { name: '打开工作区' }).click();
   await page.getByRole('menuitem', { name: '任务中心' }).click();
+  const exportBatch = page.locator(`.task-center-page .task-batch-group[data-task-ids~="${queuedExportTaskId}"]`);
+  await exportBatch.locator(':scope > summary').click();
+  await page.locator(`.task-center-page .task-batch-group[data-task-ids~="${secondExportTaskId}"]`).locator(':scope > summary').click();
   const rows = page.locator('.task-table-row');
-  await expect(rows).toHaveCount(3);
+  await expect(rows).toHaveCount(2);
   await expect(rows.filter({ hasText: 'asset-A' })).toHaveCount(1);
   await expect(rows.filter({ hasText: 'asset-B' })).toHaveCount(1);
-  await rows.filter({ hasText: 'asset-A' }).locator('xpath=../..').locator(':scope > summary').click();
 
   const exportRow = rows.filter({ hasText: 'asset-A' });
   await exportRow.click({ button: 'right' });
@@ -143,11 +146,10 @@ test('reorders queued work and batch-retries failed generation tasks', async () 
   }
   historyDatabase.exec('COMMIT');
   historyDatabase.close();
-  await expect(page.getByRole('button', { name: '全部', exact: true })).toContainText('66');
+  await page.evaluate(() => window.dispatchEvent(new Event('photoallisai:tasks-changed')));
   const loadMore = page.getByRole('button', { name: '加载更多任务' });
-  if (await loadMore.count()) {
-    await loadMore.click();
-    await expect(page.getByRole('button', { name: '全部', exact: true })).toContainText('66');
-  }
+  await expect(loadMore).toBeVisible();
+  await loadMore.click();
+  await expect(page.getByRole('button', { name: '全部', exact: true })).toContainText('66');
   await page.screenshot({ path: 'test-results/task-history-pagination.png', animations: 'disabled' });
 });

@@ -60,7 +60,7 @@ test('batch and image menus have separate scopes and running batch deletion requ
     await center.getByRole('button', { name: '已结束', exact: true }).click();
     await expect(center.getByRole('button', { name: '重试', exact: true })).toHaveCount(0);
     await center.getByRole('button', { name: '全部', exact: true }).click();
-    const firstBatch = center.locator('.task-batch-group').filter({ has: page.locator(`[data-task-id="${a.id}"]`) });
+    const firstBatch = center.locator(`.task-batch-group[data-task-ids~="${a.id}"]`);
     const firstSummary = firstBatch.locator(':scope > summary');
     await firstSummary.click({ button: 'right' });
     const batchMenu = page.getByRole('menu', { name: '批次操作' });
@@ -114,10 +114,11 @@ test('batch and image menus have separate scopes and running batch deletion requ
     await expect(center.getByRole('button', { name: '全部', exact: true })).toHaveText('全部15');
     await page.getByRole('button', { name: '后台任务', exact: true }).click();
     const drawer = page.locator('.task-drawer');
-    const secondBatch = drawer.locator('.task-batch-group').filter({ has: page.locator(`[data-task-id="${d.id}"]`) });
+    const secondBatch = drawer.locator(`.task-batch-group[data-task-ids~="${d.id}"]`);
     await secondBatch.locator(':scope > summary').click({ button: 'right' });
     await expect(page.getByRole('menu', { name: '批次操作' })).toBeVisible();
     await page.getByRole('menuitem', { name: '展开批次', exact: true }).click();
+    await expect(secondBatch.locator('.task-activity-row')).toHaveCount(2);
     const orderedIds = await secondBatch.locator('[data-task-id]').evaluateAll((rows) => rows.map((row) => (row as HTMLElement).dataset.taskId!));
     await drawer.locator(`[data-task-id="${orderedIds[0]}"]`).click({ button: 'right' });
     await expect(page.getByRole('menu', { name: '图片任务操作' })).toBeVisible();
@@ -162,13 +163,13 @@ test('uncertain generation stays out of batch retry and requires confirmation fo
     const page = await app.firstWindow();
     await page.getByRole('button', { name: '打开工作区', exact: true }).click();
     await page.getByRole('menuitem', { name: '任务中心', exact: true }).click();
-    const batch = page.locator('.task-center-page .task-batch-group').filter({ has: page.locator(`[data-task-id="${uncertain.id}"]`) });
+    const batch = page.locator(`.task-center-page .task-batch-group[data-task-ids~="${uncertain.id}"]`);
+    await batch.locator(':scope > summary').click();
     await expect(batch).toContainText('先到模型服务核对结果和费用');
     await batch.locator(':scope > summary').getByRole('button', { name: '重试批次失败项' }).click();
     await expect.poll(() => page.evaluate((id) => window.desktopApi.getTask(id).then((task) => task?.attempt), ordinary.id)).toBe(1);
     expect(await page.evaluate((id) => window.desktopApi.getTask(id).then((task) => task?.attempt), uncertain.id)).toBe(0);
 
-    await batch.locator(':scope > summary').click();
     await batch.locator(`[data-task-id="${uncertain.id}"]`).click({ button: 'right' });
     let message = '';
     page.once('dialog', async (confirmation) => {

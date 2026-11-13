@@ -74,6 +74,17 @@ describe('safe catalog file moves', () => {
     expect(await readdir(context.target)).toEqual(['capture.NEF']);
   });
 
+  it('finds a RAW companion for a HEIC camera preview', async () => {
+    const context = await fixture(['capture.heic', 'capture.NEF']);
+    const preview = context.catalog.listAssets().find((asset) => asset.fileName === 'capture.heic')!;
+    const raw = context.catalog.listAssets().find((asset) => asset.fileName === 'capture.NEF')!;
+    const service = new FileOperationService(context.databasePath);
+    services.push(service);
+    await expect(service.previewCompanions([preview.id])).resolves.toMatchObject({
+      files: [{ sourceAssetId: preview.id, assetId: raw.id, kind: 'raw' }]
+    });
+  });
+
   it('moves an opted-in RAW, JPEG, and XMP group in one recoverable operation', async () => {
     const context = await fixture(['capture.NEF', 'capture.jpg', 'capture.xmp']);
     const assets = context.catalog.listAssets();

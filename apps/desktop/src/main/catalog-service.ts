@@ -55,6 +55,15 @@ const IMPORT_STAT_CONCURRENCY = 16;
 const RECONCILE_BATCH_SIZE = 256;
 const COUNT_CACHE_LIMIT = 64;
 const EXIF_FIELDS = new Set(['width', 'height', 'cameraMake', 'cameraModel', 'lensMake', 'lensModel', 'city', 'country', 'takenAt', 'exposureSeconds', 'aperture', 'focalLength', 'iso']);
+const RAW_EXTENSIONS_SQL = "'.dng', '.cr2', '.cr3', '.nef', '.nrw', '.arw', '.raf', '.rw2', '.orf', '.pef'";
+const CAMERA_PREVIEW_EXTENSIONS_SQL = "'.jpg', '.jpeg', '.heic', '.heif', '.tif', '.tiff'";
+const pairedRawSql = `assets.extension COLLATE NOCASE IN (${RAW_EXTENSIONS_SQL}) AND EXISTS (
+  SELECT 1 FROM assets AS companion
+  WHERE companion.removed_at IS NULL AND companion.offline_at IS NULL AND companion.folder_id = assets.folder_id
+    AND companion.extension COLLATE NOCASE IN (${CAMERA_PREVIEW_EXTENSIONS_SQL})
+    AND lower(substr(companion.path, 1, length(companion.path) - length(companion.extension))) =
+        lower(substr(assets.path, 1, length(assets.path) - length(assets.extension)))
+)`;
 
 type AssetRow = {
   id: string;
@@ -129,6 +138,8 @@ export class CatalogService {
   #countCacheVersion = '';
   #folderCache: CatalogFolder[] | null = null;
   #folderCacheVersion = '';
+  #mergedFolderCache: CatalogFolder[] | null = null;
+  #mergedFolderCacheVersion = '';
   #directoryLookup = new Map<string, { rootId: string; rootPath: string; relativePath: string }>();
   #externalRelocations: RelinkCatalogFolderOperationResult['relocations'] = [];
 
@@ -138,6 +149,9 @@ export class CatalogService {
       typeof pattern === 'string' && typeof candidate === 'string' && validateSmartRegex(pattern).test(candidate) ? 1 : 0);
     this.#database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
     this.#migrate();
+    this.#database.exec(`CREATE INDEX IF NOT EXISTS assets_pair_lookup_idx ON assets(
+      folder_id, lower(substr(path, 1, length(path) - length(extension)))
+    ) WHERE removed_at IS NULL`);
   }
 
   #migrate(): void {
@@ -490,6 +504,8 @@ export class CatalogService {
     if (input.cursor && input.offset !== undefined) throw new RangeError('Use either cursor or offset for catalog paging');
     const baseConditions: string[] = ['removed_at IS NULL'];
     const baseValues: (string | number)[] = [];
+    if (!input.assetIds) baseConditions.push('offline_at IS NULL');
+    if (input.mergeRawPairs && !input.assetIds) baseConditions.push(`NOT (${pairedRawSql})`);
     if (input.assetIds) {
       baseConditions.push(`id IN (${input.assetIds.map(() => '?').join(',')})`);
       baseValues.push(...input.assetIds);
@@ -609,8 +625,8 @@ export class CatalogService {
       : input.sortBy === 'rating'
         ? `rating ${direction}, id ASC`
         : `modified_at ${direction}, id ASC`;
-    const plainFolder = baseConditions.length === 2 && baseConditions[1] === 'folder_id = ?';
-    const plainCatalog = baseConditions.length === 1;
+    const plainFolder = baseConditions.length === 3 && baseConditions[1] === 'offline_at IS NULL' && baseConditions[2] === 'folder_id = ?';
+    const plainCatalog = baseConditions.length === 2 && baseConditions[1] === 'offline_at IS NULL';
     const browseField = input.sortBy === 'fileName' ? 'name' : input.sortBy === 'rating' ? 'rating' : 'modified';
     const browseDirection = direction === 'asc' ? 'asc' : 'desc';
     const browseIndex = plainFolder
@@ -660,7 +676,35 @@ export class CatalogService {
     }));
   }
 
-  listFolders(): CatalogFolder[] {
+  listFolders(mergeRawPairs = false): CatalogFolder[] {
+    if (mergeRawPairs) {
+      const version = this.#databaseVersion();
+      if (this.#mergedFolderCache && this.#mergedFolderCacheVersion === version) return this.#mergedFolderCache;
+      const folders = this.listFolders();
+      const paired = this.#database.prepare(`SELECT folder_id, path, offline_at FROM assets WHERE removed_at IS NULL AND ${pairedRawSql}`)
+        .all() as Array<{ folder_id: string; path: string; offline_at: number | null }>;
+      const reductions = new Map<string, { total: number; offline: number }>();
+      const roots = new Map(folders.filter((folder) => folder.isRoot).map((folder) => [folder.id, this.resolveFolderPath(folder.id)]));
+      for (const asset of paired) {
+        const root = roots.get(asset.folder_id);
+        if (!root) continue;
+        const relative = path.relative(root, path.dirname(asset.path));
+        const ids = [asset.folder_id];
+        if (relative && relative !== '.' && !relative.startsWith('..') && !path.isAbsolute(relative)) {
+          const parts = relative.split(path.sep);
+          for (let depth = 1; depth <= parts.length; depth += 1) ids.push(stableDirectoryId(asset.folder_id, parts.slice(0, depth).join(path.sep)));
+        }
+        for (const id of ids) {
+          const count = reductions.get(id) ?? { total: 0, offline: 0 };
+          count.total += 1;
+          if (asset.offline_at !== null) count.offline += 1;
+          reductions.set(id, count);
+        }
+      }
+      this.#mergedFolderCache = folders.map((folder) => ({ ...folder, assetCount: folder.assetCount - (reductions.get(folder.id)?.total ?? 0), offlineCount: folder.offlineCount - (reductions.get(folder.id)?.offline ?? 0) }));
+      this.#mergedFolderCacheVersion = version;
+      return this.#mergedFolderCache;
+    }
     const version = this.#databaseVersion();
     if (this.#folderCache && this.#folderCacheVersion === version) return this.#folderCache;
     const roots = this.#database.prepare(`
@@ -1185,7 +1229,7 @@ export class CatalogService {
         COUNT(assets.id) AS asset_count
       FROM albums
       LEFT JOIN album_assets ON album_assets.album_id = albums.id
-      LEFT JOIN assets ON assets.id = album_assets.asset_id AND assets.removed_at IS NULL
+      LEFT JOIN assets ON assets.id = album_assets.asset_id AND assets.removed_at IS NULL AND assets.offline_at IS NULL
       GROUP BY albums.id
       ORDER BY albums.name COLLATE NOCASE ASC, albums.id ASC
     `).all() as Array<{
@@ -1206,7 +1250,7 @@ export class CatalogService {
     return rows.map((row) => {
       const rule = smartCollectionRuleSchema.parse(JSON.parse(row.rule_json));
       const { sql, values } = this.#compileSmartCollection(rule);
-      const count = this.#database.prepare(`SELECT COUNT(*) AS value FROM assets WHERE removed_at IS NULL AND (${sql})`).get(...values) as { value: number };
+      const count = this.#database.prepare(`SELECT COUNT(*) AS value FROM assets WHERE removed_at IS NULL AND offline_at IS NULL AND (${sql})`).get(...values) as { value: number };
       if (rule.conditions.some((condition) => EXIF_FIELDS.has(condition.field)) && missingExif === null) missingExif = this.listExifIndexCandidates(1).length > 0;
       return catalogSmartCollectionSchema.parse({ id: row.id, name: row.name, rule, assetCount: count.value, isDefault: Boolean(row.is_default), indexing: rule.conditions.some((condition) => EXIF_FIELDS.has(condition.field)) && missingExif });
     });
@@ -1479,7 +1523,7 @@ export class CatalogService {
       SELECT tags.id, tags.name, COUNT(asset_tags.asset_id) AS asset_count
       FROM tags
       LEFT JOIN asset_tags ON asset_tags.tag_id = tags.id
-        AND asset_tags.asset_id IN (SELECT id FROM assets WHERE removed_at IS NULL)
+        AND asset_tags.asset_id IN (SELECT id FROM assets WHERE removed_at IS NULL AND offline_at IS NULL)
       GROUP BY tags.id, tags.name
       HAVING COUNT(asset_tags.asset_id) > 0
       ORDER BY tags.name COLLATE NOCASE ASC, tags.id ASC
@@ -1585,8 +1629,9 @@ export class CatalogService {
     return this.listTags();
   }
 
-  async importFolders(folderPaths: readonly string[], seenPaths?: Set<string>): Promise<number> {
+  async importFolders(folderPaths: readonly string[], seenPaths?: Set<string>, onProgress?: (processed: number, imported: number) => void): Promise<number> {
     let importedCount = 0;
+    let processedCount = 0;
 
     for (const requestedPath of folderPaths) {
       const folderPath = await realpath(requestedPath);
@@ -1606,12 +1651,12 @@ export class CatalogService {
 
       const upsert = this.#database.prepare(`
         INSERT INTO assets (
-          id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at, offline_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+          id, folder_id, path, file_name, name_sort_key, extension, size_bytes, modified_at, imported_at, offline_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
         ON CONFLICT(path) DO UPDATE SET
           folder_id = excluded.folder_id,
           file_name = excluded.file_name,
-          name_sort_key = CASE WHEN assets.file_name = excluded.file_name THEN assets.name_sort_key ELSE NULL END,
+          name_sort_key = excluded.name_sort_key,
           extension = excluded.extension,
           content_hash = CASE
             WHEN assets.size_bytes = excluded.size_bytes AND assets.modified_at = excluded.modified_at THEN assets.content_hash
@@ -1652,6 +1697,7 @@ export class CatalogService {
               folderId,
               file.path,
               path.basename(file.path),
+              naturalSortKey(path.basename(file.path)),
               path.extname(file.path).toLowerCase(),
               file.size,
               file.modifiedAt,
@@ -1661,6 +1707,8 @@ export class CatalogService {
           }
           this.#database.exec('COMMIT');
           importedCount += newlyImported;
+          processedCount += batch.length;
+          onProgress?.(processedCount, importedCount);
           for (const file of batch) seenPaths?.add(file.path);
         } catch (error) {
           this.#database.exec('ROLLBACK');
@@ -1681,17 +1729,24 @@ export class CatalogService {
     return importedCount;
   }
 
-  async indexPendingContentHashes(maxFiles = 1, maxBytes = 512 * 1024 * 1024): Promise<{ indexed: number; remaining: number }> {
-    const safeFiles = Math.max(1, Math.min(Math.trunc(maxFiles), 32));
+  async indexPendingContentHashes(
+    maxFiles = 1,
+    maxBytes = 512 * 1024 * 1024,
+    shouldContinue: () => boolean = () => true,
+    maxFileBytes = maxBytes
+  ): Promise<{ indexed: number; remaining: number }> {
+    const safeFiles = Math.max(1, Math.min(Math.trunc(maxFiles), 64));
     const safeBytes = Math.max(1, Math.min(Math.trunc(maxBytes), 2 * 1024 * 1024 * 1024));
+    const safeFileBytes = Math.max(1, Math.min(Math.trunc(maxFileBytes), safeBytes));
     const candidates = this.#database.prepare(`
       SELECT id, path, size_bytes, modified_at FROM assets
-      WHERE removed_at IS NULL AND offline_at IS NULL AND content_hash IS NULL
+      WHERE removed_at IS NULL AND offline_at IS NULL AND content_hash IS NULL AND size_bytes <= ?
       ORDER BY imported_at ASC, id ASC LIMIT ?
-    `).all(safeFiles * 4) as Array<Pick<AssetRow, 'id' | 'path' | 'size_bytes' | 'modified_at'>>;
+    `).all(safeFileBytes, safeFiles * 4) as Array<Pick<AssetRow, 'id' | 'path' | 'size_bytes' | 'modified_at'>>;
     let indexed = 0;
     let scheduledBytes = 0;
     for (const candidate of candidates) {
+      if (!shouldContinue()) break;
       if (indexed >= safeFiles || (indexed > 0 && scheduledBytes + candidate.size_bytes > safeBytes)) break;
       scheduledBytes += candidate.size_bytes;
       try {
@@ -1710,8 +1765,8 @@ export class CatalogService {
     }
     const remaining = this.#database.prepare(`
       SELECT COUNT(*) AS value FROM assets
-      WHERE removed_at IS NULL AND offline_at IS NULL AND content_hash IS NULL
-    `).get() as { value: number };
+      WHERE removed_at IS NULL AND offline_at IS NULL AND content_hash IS NULL AND size_bytes <= ?
+    `).get(safeFileBytes) as { value: number };
     return { indexed, remaining: remaining.value };
   }
 

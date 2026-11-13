@@ -45,11 +45,15 @@ export const diagnosticSnapshotSchema = z.object({
     fullScanMsTotal: z.number().int().nonnegative()
   }),
   providers: z.object({ total: z.number().int().nonnegative(), enabled: z.number().int().nonnegative() }),
+  backgroundFiles: z.object({ running: z.number().int().nonnegative() }),
   tasks: z.record(z.string(), z.number().int().nonnegative()),
   cache: z.object({
     files: z.number().int().nonnegative(),
     bytes: z.number().int().nonnegative(),
     performance: z.object({
+      activeDecodes: z.number().int().nonnegative(),
+      pendingDecodes: z.number().int().nonnegative(),
+      inFlightPreviews: z.number().int().nonnegative(),
       hits: z.number().int().nonnegative(),
       misses: z.number().int().nonnegative(),
       decodes: z.number().int().nonnegative(),
@@ -98,6 +102,14 @@ export const diagnosticSnapshotSchema = z.object({
 });
 export type DiagnosticSnapshot = z.infer<typeof diagnosticSnapshotSchema>;
 
+export const cacheActivitySchema = z.object({
+  thumbnailPending: z.number().int().nonnegative(),
+  thumbnailCompleted: z.number().int().nonnegative(),
+  activeDecodes: z.number().int().nonnegative(),
+  pendingDecodes: z.number().int().nonnegative()
+});
+export type CacheActivity = z.infer<typeof cacheActivitySchema>;
+
 export const diagnosticExportResultSchema = z.object({
   canceled: z.boolean(),
   bytes: z.number().int().nonnegative(),
@@ -139,6 +151,7 @@ export type LibraryRestoreResult = z.infer<typeof libraryRestoreResultSchema>;
 
 export const appSettingsSchema = z.object({
   generationStorageMode: z.enum(['managed', 'portable']).default('managed'),
+  mergeRawPairs: z.boolean().default(true),
   theme: z.enum(['system', 'dark', 'light']).default('system'),
   locale: z.enum(['zh-CN', 'en-US']).default('zh-CN'),
   cacheMaxBytes: z.number().int().min(1024 ** 3).max(50 * 1024 ** 3).default(5 * 1024 ** 3)
@@ -299,6 +312,7 @@ export type CatalogAssetCursor = z.infer<typeof catalogAssetCursorSchema>;
 
 export const listCatalogAssetsInputSchema = z.object({
   assetIds: z.array(z.string().min(1)).min(1).max(500).optional(),
+  mergeRawPairs: z.boolean().default(false),
   folderId: z.string().min(1).nullable().default(null),
   tagId: z.string().uuid().nullable().default(null),
   albumId: z.string().uuid().nullable().default(null),
@@ -564,6 +578,13 @@ export const fileOperationHistoryItemSchema = z.object({
 });
 export type FileOperationHistoryItem = z.infer<typeof fileOperationHistoryItemSchema>;
 
+export const backgroundFileTaskSchema = z.object({
+  id: z.string().uuid(), label: z.string(), status: z.enum(['running', 'completed', 'failed']),
+  processed: z.number().int().nonnegative(), total: z.number().int().nonnegative().nullable(),
+  startedAt: z.number().nonnegative(), updatedAt: z.number().nonnegative(), error: z.string().nullable()
+});
+export type BackgroundFileTask = z.infer<typeof backgroundFileTaskSchema>;
+
 export const undoFileOperationInputSchema = z.object({ operationId: z.string().uuid() });
 export type UndoFileOperationInput = z.infer<typeof undoFileOperationInputSchema>;
 export const undoFileOperationReportSchema = z.object({
@@ -627,7 +648,6 @@ export const updateCatalogTagsInputSchema = z.object({
 export type UpdateCatalogTagsInput = z.input<typeof updateCatalogTagsInputSchema>;
 
 export const catalogSnapshotSchema = z.object({
-  assets: z.array(catalogAssetSchema),
   importedCount: z.number().int().nonnegative()
 });
 
@@ -1184,6 +1204,7 @@ export const pruneImageCacheInputSchema = z.object({ maxBytes: z.number().int().
 
 export * from './agent';
 export interface DesktopApi {
+  getCacheActivity(): Promise<CacheActivity>;
   cancelPreviewRequest(requestId: string): void;
   createAgentSession(input: { assetIds: string[] }): Promise<AgentSession>;
   getMcpStatus(): Promise<McpStatus>;
@@ -1242,6 +1263,8 @@ export interface DesktopApi {
   removeCatalogAssets(input: CatalogAssetRemovalInput): Promise<CatalogAssetRemovalReport>;
   trashCatalogAssets(input: CatalogAssetRemovalInput): Promise<CatalogAssetRemovalReport>;
   listFileOperationHistory(): Promise<FileOperationHistoryItem[]>;
+  listBackgroundFileTasks(): Promise<BackgroundFileTask[]>;
+  reportUserActivity(): void;
   undoFileOperation(input: UndoFileOperationInput): Promise<UndoFileOperationReport>;
   importFolders(): Promise<CatalogSnapshot | null>;
   relinkCatalogFolder(folderId: string): Promise<RelinkCatalogFolderResult | null>;

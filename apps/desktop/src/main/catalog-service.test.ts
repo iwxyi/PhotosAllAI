@@ -20,6 +20,33 @@ afterEach(async () => {
 });
 
 describe('catalog image discovery', () => {
+  it('merges same-directory camera previews and RAWs without hiding physical assets', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    for (const name of ['A/shot.jpg', 'A/shot.CR3', 'A/second.heic', 'A/second.NEF', 'A/alone.ARW', 'B/shot.NEF']) {
+      const file = path.join(photos, name);
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, 'fixture');
+    }
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([photos]);
+      expect(catalog.listAssetPage({ mergeRawPairs: false }).totalCount).toBe(6);
+      const merged = catalog.listAssetPage({ mergeRawPairs: true, sortBy: 'fileName', limit: 2 });
+      expect(merged.totalCount).toBe(4);
+      expect(merged.items).toHaveLength(2);
+      const next = catalog.listAssetPage({ mergeRawPairs: true, sortBy: 'fileName', cursor: merged.nextCursor, limit: 2 });
+      expect(next.items).toHaveLength(2);
+      expect(next.nextCursor).toBeNull();
+      expect([...merged.items, ...next.items].map((item) => item.fileName).sort()).toEqual(['alone.ARW', 'second.heic', 'shot.NEF', 'shot.jpg']);
+      const folders = catalog.listFolders(true);
+      expect(folders.find((folder) => folder.name === 'photos')?.assetCount).toBe(4);
+      expect(folders.find((folder) => folder.name === 'A')?.assetCount).toBe(3);
+      expect(folders.find((folder) => folder.name === 'B')?.assetCount).toBe(1);
+      const rawId = catalog.listAssets().find((item) => item.fileName === 'shot.CR3')!.id;
+      expect(catalog.listAssetPage({ assetIds: [rawId], mergeRawPairs: true }).items[0]?.id).toBe(rawId);
+    } finally { catalog.close(); }
+  });
   it('trashes a parent folder once and removes its descendants from the catalog', async () => {
     const root = await createTemporaryDirectory();
     const source = path.join(root, 'photos');
@@ -245,11 +272,11 @@ describe('catalog image discovery', () => {
     await writeFile(path.join(source, '2026', '春季', 'three.jpg'), 'three');
     expect(await catalog.synchronizeFolder(spring.id)).toEqual({ discovered: 1, offline: 1 });
     expect(catalog.resolveFolderPath(spring.id)).toBe(await realpath(path.join(source, '2026', '春季')));
-    expect(catalog.listAssetPage({ folderId: spring.id, cursor: null, limit: 20 }).items)
-      .toEqual(expect.arrayContaining([
-        expect.objectContaining({ fileName: 'one.jpg', offline: true }),
-        expect.objectContaining({ fileName: 'three.jpg', offline: false })
-      ]));
+    const visible = catalog.listAssetPage({ folderId: spring.id, cursor: null, limit: 20 });
+    expect(visible.totalCount).toBe(1);
+    expect(visible.items).toEqual([expect.objectContaining({ fileName: 'three.jpg', offline: false })]);
+    const offlineId = catalog.listAssets().find((asset) => asset.fileName === 'one.jpg')!.id;
+    expect(catalog.listAssetPage({ assetIds: [offlineId] }).items).toEqual([expect.objectContaining({ id: offlineId, offline: true })]);
     catalog.close();
   });
 
@@ -711,10 +738,35 @@ describe('catalog image discovery', () => {
     await unlink(photoPath);
     await catalog.reconcileImportedFolders();
     expect(catalog.listAssets()[0]?.offline).toBe(true);
+    expect(catalog.listAssetPage({}).totalCount).toBe(0);
+    expect(catalog.listSmartCollections().find((item) => item.id === 'unrated')?.assetCount).toBe(0);
+    expect(catalog.listFolders()[0]).toMatchObject({ assetCount: 1, offlineCount: 1 });
     await writeFile(photoPath, 'photo-restored');
     await catalog.reconcileImportedFolders();
     expect(catalog.listAssets()[0]?.offline).toBe(false);
+    expect(catalog.listAssetPage({}).totalCount).toBe(1);
+    expect(catalog.listSmartCollections().find((item) => item.id === 'unrated')?.assetCount).toBe(1);
     catalog.close();
+  });
+
+  it('shows an online RAW when its camera preview is offline', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    await mkdir(photos);
+    await writeFile(path.join(photos, 'shot.jpg'), 'preview');
+    await writeFile(path.join(photos, 'shot.CR3'), 'raw');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([photos]);
+      expect(catalog.listAssetPage({ mergeRawPairs: true }).items.map((asset) => asset.fileName)).toEqual(['shot.jpg']);
+      await unlink(path.join(photos, 'shot.jpg'));
+      await catalog.synchronizeImportedRoot(photos);
+      const page = catalog.listAssetPage({ mergeRawPairs: true });
+      expect(page.totalCount).toBe(1);
+      expect(page.items.map((asset) => asset.fileName)).toEqual(['shot.CR3']);
+      const folder = catalog.listFolders(true)[0]!;
+      expect(folder.assetCount - folder.offlineCount).toBe(page.totalCount);
+    } finally { catalog.close(); }
   });
 
   it('keeps accessible photos online throughout a root rescan', async () => {
@@ -1142,6 +1194,34 @@ describe('catalog image discovery', () => {
     catalog.close();
   });
 
+  it('skips files above the requested background hash budget', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    await mkdir(photos, { recursive: true });
+    await writeFile(path.join(photos, 'large.jpg'), 'larger-than-budget');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    await catalog.importFolders([photos]);
+
+    await expect(catalog.indexPendingContentHashes(1, 4)).resolves.toEqual({ indexed: 0, remaining: 0 });
+    catalog.close();
+  });
+
+  it('stops background hashing between files when interactive work resumes', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    await mkdir(photos);
+    await Promise.all(['a.jpg', 'b.jpg', 'c.jpg'].map((name) => writeFile(path.join(photos, name), name)));
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([photos]);
+      let checks = 0;
+      await expect(catalog.indexPendingContentHashes(3, 100, () => ++checks === 1, 10))
+        .resolves.toEqual({ indexed: 1, remaining: 2 });
+      await expect(catalog.indexPendingContentHashes(3, 100, () => true, 10))
+        .resolves.toEqual({ indexed: 2, remaining: 0 });
+    } finally { catalog.close(); }
+  });
+
   it('counts reappearing and newly discovered files while preserving asset identity', async () => {
     const root = await createTemporaryDirectory();
     const photos = path.join(root, 'photos');
@@ -1158,6 +1238,23 @@ describe('catalog image discovery', () => {
     expect(await catalog.importFolders([photos])).toBe(1);
     expect(await catalog.importFolders([photos])).toBe(0);
     expect(catalog.listAssets().find((asset) => asset.fileName === 'old.jpg')).toMatchObject({ id, offline: false });
+    catalog.close();
+  });
+
+  it('reimports an unregistered folder from disk while reusing catalog rows', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    await mkdir(photos);
+    await writeFile(path.join(photos, 'export 10.jpg'), 'camera-photo');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    expect(await catalog.importFolders([photos])).toBe(1);
+    const before = catalog.listAssets()[0]!;
+
+    expect(catalog.unregisterFolder(before.folderId)).toMatchObject({ assetCount: 1 });
+    expect(catalog.listAssets()).toHaveLength(0);
+    expect(await catalog.importFolders([photos])).toBe(1);
+
+    expect(catalog.listAssets()).toEqual([expect.objectContaining({ id: before.id, fileName: before.fileName, offline: false })]);
     catalog.close();
   });
 });

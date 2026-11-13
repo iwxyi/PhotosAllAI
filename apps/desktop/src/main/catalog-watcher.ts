@@ -19,6 +19,9 @@ export class CatalogWatcher {
   readonly #debounceMs: number;
   readonly #retryMs: number;
   readonly #onChanged: () => void | Promise<void>;
+  readonly #enabled: boolean;
+  readonly #onFullScanStart: ((folder: string) => void) | undefined;
+  readonly #onFullScanEnd: ((folder: string, error?: unknown) => void) | undefined;
   readonly #watchers = new Map<string, WatchHandle>();
   readonly #folders = new Set<string>();
   #debounceTimer: NodeJS.Timeout | null = null;
@@ -36,16 +39,20 @@ export class CatalogWatcher {
 
   constructor(
     catalog: CatalogReconciler,
-    options: { watchFactory?: WatchFactory; debounceMs?: number; retryMs?: number; onChanged?: () => void | Promise<void> } = {}
+    options: { enabled?: boolean; watchFactory?: WatchFactory; debounceMs?: number; retryMs?: number; onChanged?: () => void | Promise<void>; onFullScanStart?: (folder: string) => void; onFullScanEnd?: (folder: string, error?: unknown) => void } = {}
   ) {
     this.#catalog = catalog;
+    this.#enabled = options.enabled ?? true;
     this.#watchFactory = options.watchFactory ?? defaultWatchFactory;
     this.#debounceMs = options.debounceMs ?? 750;
     this.#retryMs = options.retryMs ?? 30_000;
     this.#onChanged = options.onChanged ?? (() => undefined);
+    this.#onFullScanStart = options.onFullScanStart;
+    this.#onFullScanEnd = options.onFullScanEnd;
   }
 
   watchFolders(folders: readonly string[]): void {
+    if (!this.#enabled) return;
     this.#active = true;
     const nextFolders = new Set(folders);
     for (const [folder, watcher] of this.#watchers) {
@@ -177,6 +184,7 @@ export class CatalogWatcher {
         this.#dirtyRenames.delete(folder);
         if (!this.#folders.has(folder)) continue;
         const scanStartedAt = fullScan ? performance.now() : 0;
+        if (fullScan) this.#onFullScanStart?.(folder);
         const work = fullScan ? this.#catalog.synchronizeImportedRoot(folder) : renames?.size
           ? (async () => {
             for (const relative of renames) {
@@ -188,7 +196,8 @@ export class CatalogWatcher {
             await Promise.all([...(files ?? [])].map((file) => this.#catalog.synchronizeImportedFile(folder, file)));
           })()
           : Promise.all([...(files ?? [])].map((file) => this.#catalog.synchronizeImportedFile(folder, file)));
-        await work.then(async () => this.#onChanged()).catch(() => {
+        await work.then(async () => { if (fullScan) this.#onFullScanEnd?.(folder); await this.#onChanged(); }).catch((error: unknown) => {
+          if (fullScan) this.#onFullScanEnd?.(folder, error);
           this.#reconciliationFailures += 1;
         }).finally(() => {
           if (fullScan) {

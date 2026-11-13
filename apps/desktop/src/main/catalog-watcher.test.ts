@@ -15,6 +15,21 @@ afterEach(() => {
 });
 
 describe('catalog watcher', () => {
+  it('does not start automatic reconciliation when disabled', () => {
+    const synchronizeImportedRoot = vi.fn();
+    const watchFactory = vi.fn(() => new FakeWatcher());
+    const watcher = new CatalogWatcher(
+      { synchronizeImportedRoot, synchronizeImportedFile, synchronizeImportedDirectory },
+      { enabled: false, watchFactory }
+    );
+    watcher.watchFolders(['/photos']);
+    watcher.refresh();
+    expect(watchFactory).not.toHaveBeenCalled();
+    expect(synchronizeImportedRoot).not.toHaveBeenCalled();
+    expect(watcher.getStats().watchedFolders).toBe(0);
+    watcher.stop();
+  });
+
   it('updates changed files without scanning roots and escalates rename events', async () => {
     vi.useFakeTimers();
     let notify: (eventType?: string, filename?: string | Buffer | null) => void = () => undefined;

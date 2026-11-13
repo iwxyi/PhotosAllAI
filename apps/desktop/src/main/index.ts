@@ -9,6 +9,7 @@ import { imageSizeFromFile } from 'image-size/fromFile';
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, net, protocol, safeStorage, shell, type MenuItemConstructorOptions } from 'electron';
 import {
   appInfoSchema,
+  backgroundFileTaskSchema,
   createAgentSessionSchema,
   agentSessionIdSchema,
   agentSendSchema,
@@ -17,6 +18,7 @@ import {
   fileWorkflowConfigSchema,
   previewFileWorkflowInputSchema,
   diagnosticSnapshotSchema,
+  cacheActivitySchema,
   diagnosticExportResultSchema,
   databaseBackupResultSchema,
   libraryBackupResultSchema,
@@ -123,6 +125,7 @@ import { LibraryBackupService } from './library-backup-service';
 import { DatabaseMigrationService } from './database-migration-service';
 import { LibraryRestoreService } from './library-restore-service';
 import { LibraryIntegrityService } from './library-integrity-service';
+import { BackgroundFileTasks } from './background-file-tasks';
 import { classifyAutomaticBackupFailure, classifyAutomaticBackupResult, type AutomaticBackupStatus } from './automatic-backup-status';
 import { settleBeforeShutdown } from './shutdown-coordinator';
 import { createStartupFailureDialog, writeStartupFailureLog } from './startup-failure';
@@ -130,6 +133,10 @@ import { getWindowChromeOptions } from './window-chrome';
 
 const APP_ORIGIN = 'app://photoallisai';
 const APPLICATION_SCHEMA_VERSION = 4;
+const backgroundFileTasks = new BackgroundFileTasks();
+const watcherTaskIds = new Map<string, string>();
+let lastUserActivityAt = 0;
+const maintenanceIdle = () => Date.now() - lastUserActivityAt >= 30_000;
 let catalog: CatalogService;
 let fileWorkflows: FileWorkflowService;
 let catalogWatcher: CatalogWatcher;
@@ -157,9 +164,10 @@ let libraryBackup: LibraryBackupService;
 let libraryRestore: LibraryRestoreService;
 let libraryIntegrity: LibraryIntegrityService;
 let contentHashTimer: NodeJS.Timeout | undefined;
-let catalogValidationTimer: NodeJS.Timeout | undefined;
 let contentHashPass: Promise<void> | undefined;
 let contentHashPassRunning = false;
+let contentHashTaskId: string | null = null;
+let contentHashProcessed = 0;
 let shuttingDown = false;
 let shutdownStarted = false;
 let shutdownFinished = false;
@@ -335,6 +343,7 @@ async function createDiagnosticSnapshot() {
     catalog: catalog.getStats(),
     catalogWatcher: catalogWatcher.getStats(),
     providers: { total: profiles.length, enabled: profiles.filter((profile) => profile.enabled).length },
+    backgroundFiles: { running: backgroundFileTasks.list().filter((task) => task.status === 'running').length },
     tasks: taskCounts,
     cache: { ...cacheStats, performance: imageCache.getPerformanceStats(), raw },
     startupRecovery,
@@ -390,22 +399,29 @@ function scheduleVisibleDimensions(ids: readonly string[]): void {
 function scheduleSmartCollectionExifIndex(): void {
   if (exifIndexRunning || !catalog.hasExifSmartCollections()) return;
   exifIndexRunning = true;
+  const taskId = backgroundFileTasks.start('拍摄信息索引');
   setImmediate(() => {
     void (async () => {
       let afterId = '';
+      let processed = 0;
       try {
         for (;;) {
-          const ids = catalog.listExifIndexCandidates(8, afterId);
+          if (!maintenanceIdle()) { await new Promise((resolve) => setTimeout(resolve, 1_000)); continue; }
+          const ids = catalog.listExifIndexCandidates(2, afterId);
           if (!ids.length) break;
           afterId = ids.at(-1)!;
           await Promise.allSettled(ids.map(async (id) => {
             const details = await imageFiles.details(id);
             catalog.saveExifDetails(id, details);
           }));
+          processed += ids.length;
+          backgroundFileTasks.update(taskId, processed);
           await new Promise<void>((resolve) => setImmediate(resolve));
         }
-      } finally { exifIndexRunning = false; }
-    })().catch(() => { exifIndexRunning = false; });
+        backgroundFileTasks.finish(taskId);
+      } catch (error) { backgroundFileTasks.finish(taskId, error); }
+      finally { exifIndexRunning = false; }
+    })();
   });
 }
 
@@ -533,12 +549,13 @@ function registerIpc(): void {
   );
   ipcMain.handle('app.settings.get.v1', () => appSettings.get());
   ipcMain.handle('app.settings.save.v1', async (_event, input: unknown) => {
-    const parsed = appSettingsSchema.parse(input);
     const previous = await appSettings.get();
+    const parsed = appSettingsSchema.parse({ ...previous, ...(input && typeof input === 'object' ? input : {}) });
     const saved = await appSettings.save(parsed);
     appLocale = saved.locale;
     buildApplicationMenu();
     if (saved.cacheMaxBytes !== previous.cacheMaxBytes) await imageCache.setMaxBytes(saved.cacheMaxBytes);
+    if (saved.mergeRawPairs !== previous.mergeRawPairs) for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1');
     return saved;
   });
   ipcMain.handle('app.diagnostics.v1', createDiagnosticSnapshot);
@@ -634,11 +651,13 @@ function registerIpc(): void {
 
   ipcMain.handle('catalog.assets.list.v1', () => catalog.listAssets());
   ipcMain.handle('catalog.assets.page.v1', async (_event, input: unknown) => {
-    const page = await fileWorkflows.page(listCatalogAssetsInputSchema.parse(input));
+    const settings = await appSettings.get();
+    const parsed = listCatalogAssetsInputSchema.parse(input);
+    const page = await fileWorkflows.page({ ...parsed, mergeRawPairs: settings.mergeRawPairs && !parsed.assetIds });
     scheduleVisibleDimensions(page.items.filter((item) => !item.width || !item.height).map((item) => item.id));
     return page;
   });
-  ipcMain.handle('catalog.folders.list.v1', () => catalog.listFolders());
+  ipcMain.handle('catalog.folders.list.v1', async () => catalog.listFolders((await appSettings.get()).mergeRawPairs));
   ipcMain.handle('catalog.tags.list.v1', () => catalog.listTags());
   ipcMain.handle('catalog.tags.delete.v1', (_event, input: unknown) => {
     catalog.deleteTag(deleteCatalogTagInputSchema.parse(input));
@@ -777,6 +796,8 @@ function registerIpc(): void {
     )
   );
   ipcMain.handle('files.operations.list.v1', () => fileOperations.listHistory());
+  ipcMain.handle('files.background.list.v1', () => backgroundFileTasks.list().map((item) => backgroundFileTaskSchema.parse(item)));
+  ipcMain.on('app.user-activity.v1', () => { lastUserActivityAt = Date.now(); });
   ipcMain.handle('files.operations.undo.v1', async (_event, input: unknown) => {
     const parsed = undoFileOperationInputSchema.parse(input);
     const previous = new Map(fileOperations.getUndoAssetIds(parsed.operationId)
@@ -797,9 +818,17 @@ function registerIpc(): void {
     });
     if (result.canceled) return null;
 
-    const importedCount = await catalog.importFolders(result.filePaths);
+    const taskId = backgroundFileTasks.start(`关联文件夹：${result.filePaths.map((filePath) => basename(filePath)).join('、')}`);
+    let importedCount: number;
+    try {
+      importedCount = await catalog.importFolders(result.filePaths, undefined, (processed) => backgroundFileTasks.update(taskId, processed));
+      backgroundFileTasks.finish(taskId);
+    } catch (error) {
+      backgroundFileTasks.finish(taskId, error);
+      throw error;
+    }
     catalogWatcher.watchFolders(catalog.listFolderPaths());
-    return catalogSnapshotSchema.parse({ assets: catalog.listAssets(), importedCount });
+    return catalogSnapshotSchema.parse({ importedCount });
   });
   ipcMain.handle('catalog.folder.relink.v1', async (_event, input: unknown) => {
     const folderId = String(input);
@@ -1111,6 +1140,7 @@ function registerIpc(): void {
     exportPresets.delete(String(input));
   });
   ipcMain.handle('cache.stats.get.v1', async () => imageCacheStatsSchema.parse(await imageCache.getStats()));
+  ipcMain.handle('cache.activity.v1', () => cacheActivitySchema.parse(imageCache.getActivityStats()));
   ipcMain.handle('cache.prune.v1', async (_event, input: unknown) => {
     const result = await imageCache.prune(pruneImageCacheInputSchema.parse(input).maxBytes);
     return result;
@@ -1158,8 +1188,6 @@ function createWindow(): BrowserWindow {
     if (parsed.protocol === 'https:') void shell.openExternal(url);
     return { action: 'deny' };
   });
-
-  window.on('focus', () => catalogWatcher?.refresh());
 
   window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
     console.error(`[renderer] failed to load ${validatedURL}: ${errorCode} ${errorDescription}`);
@@ -1287,7 +1315,14 @@ app.whenReady().then(async () => {
   imageFiles = new ImageFileService(catalog, temporaryMediaIndex);
   fileWorkflows = new FileWorkflowService(join(app.getPath('userData'), 'settings', 'file-workflows.json'), catalog);
   enterStartupStage('准备关联文件夹监听');
-  catalogWatcher = new CatalogWatcher(catalog, { onChanged: async () => {
+  catalogWatcher = new CatalogWatcher(catalog, {
+    onFullScanStart: (folder) => { watcherTaskIds.set(folder, backgroundFileTasks.start(`复查文件夹：${basename(folder)}`)); },
+    onFullScanEnd: (folder, error) => {
+      const id = watcherTaskIds.get(folder);
+      if (id) backgroundFileTasks.finish(id, error);
+      watcherTaskIds.delete(folder);
+    },
+    onChanged: async () => {
     await Promise.allSettled(catalog.takeExternalRelocations().map((item) => generation.relocatePortableResults(
       item.assetId, item.previousPath, item.nextPath, item.previousFileName, item.nextFileName
     )));
@@ -1402,15 +1437,32 @@ app.whenReady().then(async () => {
     if (shuttingDown) return;
     contentHashTimer = setTimeout(async () => {
       if (shuttingDown) return;
-      const active = tasks.hasActiveTasks();
-      let nextDelay = active ? 10_000 : 60_000;
+      const otherFileWorkActive = backgroundFileTasks.list().some((task) => task.status === 'running' && task.id !== contentHashTaskId);
+      const active = tasks.hasActiveTasks() || otherFileWorkActive || !maintenanceIdle();
+      let nextDelay = active ? 30_000 : 60_000;
       if (!active && !contentHashPassRunning) {
         contentHashPassRunning = true;
         contentHashPass = (async () => {
           try {
-            const result = await catalog.indexPendingContentHashes(1);
-            nextDelay = result.remaining === 0 ? 5 * 60_000 : result.indexed > 0 ? 2_000 : 60_000;
-          } catch {
+            const result = await catalog.indexPendingContentHashes(
+              32, 256 * 1024 * 1024,
+              () => !shuttingDown && maintenanceIdle() && !tasks.hasActiveTasks()
+                && !backgroundFileTasks.list().some((task) => task.status === 'running' && task.id !== contentHashTaskId),
+              64 * 1024 * 1024
+            );
+            if (result.remaining > 0 || contentHashTaskId) {
+              contentHashTaskId ??= backgroundFileTasks.start('文件指纹索引');
+              contentHashProcessed += result.indexed;
+              backgroundFileTasks.update(contentHashTaskId, contentHashProcessed, contentHashProcessed + result.remaining);
+              if (result.remaining === 0) {
+                backgroundFileTasks.finish(contentHashTaskId);
+                contentHashTaskId = null;
+              }
+            }
+            nextDelay = result.remaining === 0 ? 5 * 60_000 : result.indexed > 0 ? 2_000 : 30_000;
+          } catch (error) {
+            if (contentHashTaskId) backgroundFileTasks.finish(contentHashTaskId, error);
+            contentHashTaskId = null;
             // Hash indexing is opportunistic and must never block normal catalog work.
           } finally {
             contentHashPassRunning = false;
@@ -1423,7 +1475,7 @@ app.whenReady().then(async () => {
     }, delayMs);
     contentHashTimer.unref();
   };
-  scheduleContentHashPass();
+  scheduleContentHashPass(60_000);
 
   enterStartupStage('注册图片协议');
   const activePreviewRequests = new Map<string, AbortController>();
@@ -1508,12 +1560,6 @@ app.whenReady().then(async () => {
   enterStartupStage('打开主窗口');
   showMainWindow();
   enterStartupStage('主窗口已创建');
-  // Keep the last committed index available immediately. Validation of large
-  // imported roots can take minutes on external disks and must not gate UI.
-  catalogValidationTimer = setInterval(() => {
-    if (!shuttingDown && !tasks.hasActiveTasks()) catalogWatcher.refresh();
-  }, 30_000);
-  catalogValidationTimer.unref();
   buildApplicationMenu();
   const startupPaths = [...pendingOpenPaths, ...process.argv.filter((arg) => isAbsolute(arg) && isSupportedBrowseMedia(arg))];
   pendingOpenPaths = [];
@@ -1549,7 +1595,6 @@ app.on('before-quit', (event) => {
   void (async () => {
     try {
       if (contentHashTimer) clearTimeout(contentHashTimer);
-      if (catalogValidationTimer) clearInterval(catalogValidationTimer);
       traceCrash('watcher-stop-start');
       catalogWatcher?.stop();
       traceCrash('watcher-stop-done');

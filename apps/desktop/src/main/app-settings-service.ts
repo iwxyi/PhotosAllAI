@@ -30,7 +30,7 @@ export class AppSettingsService {
   }
 
   async save(input: Partial<AppSettings>): Promise<AppSettings> {
-    const settings = appSettingsSchema.parse(input);
+    const settings = appSettingsSchema.parse({ ...await this.get(), ...input });
     await mkdir(path.dirname(this.#settingsPath), { recursive: true });
     await replaceRegularFileSafely(this.#settingsPath, Buffer.from(JSON.stringify(settings, null, 2)));
     return settings;

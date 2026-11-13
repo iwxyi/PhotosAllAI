@@ -4,6 +4,7 @@ import path from 'node:path';
 import { fileWorkflowConfigSchema, listCatalogAssetsInputSchema, type CatalogAsset, type CatalogAssetPage, type CatalogFolder, type FileWorkflowBinding, type FileWorkflowConfig, type FileWorkflowPreset, type FileWorkflowScope, type ListCatalogAssetsInput } from '@photoallisai/contracts';
 import type { CatalogService } from './catalog-service';
 import { matchWorkflowFilesIsolated, type WorkflowMatchFile } from './file-workflow-matcher';
+import { identifyMediaFormat } from './media-format-registry';
 import { quarantineInvalidRegularFile, replaceRegularFileSafely } from './safe-file-write';
 
 export function resolveFileWorkflow(config: FileWorkflowConfig, folders: CatalogFolder[], folderId: string | null, albumId: string | null): { preset: FileWorkflowPreset | null; owner: string | null } {
@@ -107,7 +108,8 @@ export class FileWorkflowService {
       const group = grouped.get(match.group)!;
       group.sort((left, right) => left.stageIndex - right.stageIndex || left.variant.localeCompare(right.variant, undefined, { numeric: true }) || byId.get(left.id)!.fileName.localeCompare(byId.get(right.id)!.fileName) || left.id.localeCompare(right.id));
       const lastStage = group.reduce((latest, member) => byId.get(member.id)!.offline ? latest : Math.max(latest, member.stageIndex), -1);
-      const representative = group.find((member) => member.stageIndex === lastStage && !byId.get(member.id)!.offline) ?? group[0]!;
+      const representative = (input.mergeRawPairs ? group.find((member) => member.stageIndex === lastStage && !byId.get(member.id)!.offline && identifyMediaFormat(byId.get(member.id)!.fileName)?.id !== 'raw') : undefined)
+        ?? group.find((member) => member.stageIndex === lastStage && !byId.get(member.id)!.offline) ?? group[0]!;
       projected.push({ ...byId.get(representative.id)!, workflow: {
         id: createHash('sha256').update(match.group).digest('hex'), key: match.key,
         name: fileById.get(match.id)!.preset.name,

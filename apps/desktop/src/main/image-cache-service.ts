@@ -57,6 +57,8 @@ export class ImageCacheService {
   #cachePublishMsTotal = 0;
   #cacheCleanupMsTotal = 0;
   #closed = false;
+  #thumbnailPending = 0;
+  #thumbnailCompleted = 0;
 
   constructor(
     cacheDirectory: string,
@@ -109,6 +111,9 @@ export class ImageCacheService {
 
   getPerformanceStats() {
     return {
+      activeDecodes: this.#decodeQueue.stats.active,
+      pendingDecodes: this.#decodeQueue.stats.pending,
+      inFlightPreviews: this.#inFlight.size,
       hits: this.#hits,
       misses: this.#misses,
       decodes: this.#decodes,
@@ -130,6 +135,11 @@ export class ImageCacheService {
       eventLoopDelayMaxMs: Math.round(this.#eventLoopDelay.max / 10_000) / 100,
       eventLoopDelayMeanMs: Number.isFinite(this.#eventLoopDelay.mean) ? Math.round(this.#eventLoopDelay.mean / 10_000) / 100 : 0
     };
+  }
+
+  getActivityStats(): { thumbnailPending: number; thumbnailCompleted: number; activeDecodes: number; pendingDecodes: number } {
+    const queue = this.#decodeQueue.stats;
+    return { thumbnailPending: this.#thumbnailPending, thumbnailCompleted: this.#thumbnailCompleted, activeDecodes: queue.active, pendingDecodes: queue.pending };
   }
 
   async getDecoderCapabilities(): Promise<{ nativeImage: boolean; imageMagick: boolean; sips: boolean }> {
@@ -253,6 +263,7 @@ export class ImageCacheService {
 
     const startedAt = performance.now();
     let createStartedAt: number | null = null;
+    if (variant === 'thumbnail') this.#thumbnailPending += 1;
     const operation = this.#decodeQueue.enqueue(async () => {
       this.#queueWaitMsTotal += performance.now() - startedAt;
       if (await isRegularFile(destination)) {
@@ -266,10 +277,12 @@ export class ImageCacheService {
       finally { this.#createMsTotal += performance.now() - createStartedAt; }
     }, priority, cacheKey)
       .then((result) => {
+        if (variant === 'thumbnail') this.#thumbnailCompleted += 1;
         this.#schedulePrune();
         return result;
       })
       .finally(() => {
+        if (variant === 'thumbnail') this.#thumbnailPending -= 1;
         if (createStartedAt !== null) {
           this.#decodes += 1;
           this.#decodeMsTotal += performance.now() - startedAt;
@@ -334,7 +347,7 @@ export class ImageCacheService {
     this.#pruneTimer = setTimeout(() => {
       this.#pruneTimer = null;
       void this.prune(this.#maxBytes);
-    }, 30_000);
+    }, 5 * 60_000);
     this.#pruneTimer.unref();
   }
 
@@ -353,7 +366,7 @@ export class ImageCacheService {
     let image: Electron.NativeImage | null = null;
     let encoded: Buffer | null = null;
     const format = identifyMediaFormat(sourcePath);
-    if (format?.id === 'tiff') {
+    if (format?.kind === 'image' && format.id !== 'raw') {
       const externalStartedAt = performance.now();
       encoded = await this.#decodeWithSharp(sourcePath, specification);
       this.#externalDecodeMsTotal += performance.now() - externalStartedAt;

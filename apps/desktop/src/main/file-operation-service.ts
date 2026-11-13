@@ -94,7 +94,7 @@ const nodeFileSystem: FileSystemPort = {
 };
 
 const RAW_EXTENSIONS = new Set(['.dng', '.cr2', '.cr3', '.nef', '.nrw', '.arw', '.raf', '.rw2', '.orf', '.pef']);
-const JPEG_EXTENSIONS = new Set(['.jpg', '.jpeg']);
+const JPEG_EXTENSIONS = new Set(['.jpg', '.jpeg', '.heic', '.heif', '.tif', '.tiff']);
 type CompanionFile = { path: string; fileName: string; bytes: number; kind: 'raw' | 'jpeg' | 'xmp'; asset: AssetLocationRow | null; owner: AssetLocationRow };
 
 export class FileOperationService {
