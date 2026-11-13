@@ -3,7 +3,7 @@ import path from 'node:path';
 
 import type { CatalogService } from './catalog-service';
 
-type CatalogReconciler = Pick<CatalogService, 'synchronizeImportedRoot' | 'synchronizeImportedFile' | 'synchronizeImportedDirectory'>;
+type CatalogReconciler = Pick<CatalogService, 'synchronizeImportedRoot' | 'synchronizeImportedFile' | 'synchronizeImportedDirectory'> & Partial<Pick<CatalogService, 'synchronizeFolder'>>;
 type WatchHandle = {
   close(): void;
   on(event: 'error', listener: (error: Error) => void): unknown;
@@ -12,6 +12,7 @@ type WatchFactory = (folder: string, onChange: (eventType?: string, filename?: s
 
 const defaultWatchFactory: WatchFactory = (folder, onChange) =>
   watch(folder, { recursive: true }, onChange);
+const SCAN_COOLDOWN_MS = 30_000;
 
 export class CatalogWatcher {
   readonly #catalog: CatalogReconciler;
@@ -31,6 +32,10 @@ export class CatalogWatcher {
   readonly #dirtyFolders = new Set<string>();
   readonly #dirtyFiles = new Map<string, Set<string>>();
   readonly #dirtyRenames = new Map<string, Set<string>>();
+  readonly #unselectedChanges = new Map<string, Map<string, string>>();
+  readonly #pendingScopes = new Map<string, { root: string; dueAt: number }>();
+  readonly #lastScopeScans = new Map<string, number>();
+  #activeScopes: Map<string, Array<{ id: string; path: string }>> | null = null;
   #active = false;
   #watchFailures = 0;
   #reconciliationFailures = 0;
@@ -62,6 +67,8 @@ export class CatalogWatcher {
       this.#dirtyFolders.delete(folder);
       this.#dirtyFiles.delete(folder);
       this.#dirtyRenames.delete(folder);
+      this.#unselectedChanges.delete(folder);
+      for (const [id, pending] of this.#pendingScopes) if (pending.root === folder) this.#pendingScopes.delete(id);
     }
     this.#folders.clear();
     this.#refreshCursor = 0;
@@ -70,6 +77,28 @@ export class CatalogWatcher {
       this.#attach(folder);
     }
     this.#scheduleRetry();
+  }
+
+  setActiveFolders(folders: readonly { id: string; path: string; rootPath: string }[]): void {
+    const next = new Map<string, Array<{ id: string; path: string }>>();
+    for (const item of folders) next.set(item.rootPath, [...(next.get(item.rootPath) ?? []), { id: item.id, path: item.path }]);
+    this.#activeScopes = next;
+    for (const root of this.#dirtyFolders) if (!next.has(root)) this.#dirtyFolders.delete(root);
+    for (const root of this.#dirtyFiles.keys()) if (!next.has(root)) this.#dirtyFiles.delete(root);
+    for (const root of this.#dirtyRenames.keys()) if (!next.has(root)) this.#dirtyRenames.delete(root);
+    for (const [id, pending] of this.#pendingScopes) {
+      if (!next.get(pending.root)?.some((scope) => scope.id === id)) this.#pendingScopes.delete(id);
+    }
+    for (const [root, changes] of this.#unselectedChanges) {
+      if (!next.has(root)) continue;
+      for (const [relative, eventType] of changes) {
+        if (!this.#matchesActiveScope(root, relative)) continue;
+        changes.delete(relative);
+        this.#scheduleWatchEvent(root, eventType, relative);
+      }
+      if (!changes.size) this.#unselectedChanges.delete(root);
+    }
+    if (this.#dirtyFolders.size || this.#dirtyFiles.size || this.#dirtyRenames.size || this.#pendingScopes.size) this.#scheduleReconciliation();
   }
 
   stop(): void {
@@ -85,9 +114,15 @@ export class CatalogWatcher {
     this.#dirtyFolders.clear();
     this.#dirtyFiles.clear();
     this.#dirtyRenames.clear();
+    this.#unselectedChanges.clear();
+    this.#pendingScopes.clear();
+    this.#lastScopeScans.clear();
   }
 
   refresh(maxRoots = 2): void {
+    if (this.#activeScopes) {
+      return;
+    }
     if (!this.#active || this.#folders.size === 0 || maxRoots <= 0) return;
     const folders = [...this.#folders];
     const budget = Math.min(Math.floor(maxRoots), folders.length);
@@ -137,19 +172,54 @@ export class CatalogWatcher {
 
   #scheduleReconciliation(folder?: string): void {
     if (!this.#active) return;
-    if (folder && this.#folders.has(folder)) { this.#dirtyFolders.add(folder); this.#dirtyFiles.delete(folder); this.#dirtyRenames.delete(folder); }
-    if (this.#dirtyFolders.size === 0 && this.#dirtyFiles.size === 0 && this.#dirtyRenames.size === 0) return;
+    if (folder && this.#activeScopes && !this.#activeScopes.has(folder)) return;
+    if (folder && this.#folders.has(folder)) {
+      if (this.#activeScopes) {
+        for (const scope of this.#activeScopes.get(folder) ?? []) this.#queueScope(folder, scope.id, true);
+      } else this.#dirtyFolders.add(folder);
+      this.#dirtyFiles.delete(folder);
+      this.#dirtyRenames.delete(folder);
+    }
+    if (this.#dirtyFolders.size === 0 && this.#dirtyFiles.size === 0 && this.#dirtyRenames.size === 0 && this.#pendingScopes.size === 0) return;
     if (this.#running) return;
     if (this.#debounceTimer) clearTimeout(this.#debounceTimer);
+    const nextDue = this.#pendingScopes.size ? Math.min(...[...this.#pendingScopes.values()].map((pending) => pending.dueAt)) : Infinity;
+    const delay = this.#dirtyFolders.size || this.#dirtyFiles.size || this.#dirtyRenames.size
+      ? this.#debounceMs : Math.max(this.#debounceMs, nextDue - Date.now());
     this.#debounceTimer = setTimeout(() => {
       this.#debounceTimer = null;
       void this.#reconcileUntilCurrent();
-    }, this.#debounceMs);
+    }, delay);
+  }
+
+  #queueScope(root: string, id: string, changed: boolean): void {
+    const last = this.#lastScopeScans.get(id);
+    if (!changed && last !== undefined && Date.now() - last < SCAN_COOLDOWN_MS) return;
+    const dueAt = Math.max(Date.now(), (last ?? -Infinity) + SCAN_COOLDOWN_MS);
+    const pending = this.#pendingScopes.get(id);
+    if (!pending || dueAt < pending.dueAt) this.#pendingScopes.set(id, { root, dueAt });
   }
 
   #scheduleWatchEvent(folder: string, eventType?: string, filename?: string | Buffer | null): void {
     if (!this.#active || !this.#folders.has(folder)) return;
     const relative = typeof filename === 'string' ? filename : Buffer.isBuffer(filename) ? filename.toString('utf8') : '';
+    const scope = this.#activeScopes?.get(folder);
+    if (this.#activeScopes && (!scope || (relative && !this.#matchesActiveScope(folder, relative)))) {
+      if (relative && !relative.includes('\0') && !path.isAbsolute(relative)
+        && !relative.split(/[\\/]/u).some((part) => part === '..' || part === '.')) {
+        const changes = this.#unselectedChanges.get(folder) ?? new Map<string, string>();
+        if (changes.size < 128) changes.set(relative, eventType ?? 'unknown');
+        this.#unselectedChanges.set(folder, changes);
+      }
+      return;
+    }
+    if (scope && relative) {
+      const changedPath = path.resolve(folder, relative);
+      if (scope.some((item) => item.path.startsWith(changedPath + path.sep))) {
+        this.#scheduleReconciliation(folder);
+        return;
+      }
+    }
     if (!relative || relative.includes('\0') || path.isAbsolute(relative) || relative.split(/[\\/]/u).some((part) => part === '..' || part === '.')) {
       this.#scheduleReconciliation(folder);
       return;
@@ -171,11 +241,39 @@ export class CatalogWatcher {
     this.#scheduleReconciliation();
   }
 
+  #matchesActiveScope(root: string, relative: string): boolean {
+    const changedPath = path.resolve(root, relative);
+    return this.#activeScopes?.get(root)?.some((item) => changedPath === item.path
+      || changedPath.startsWith(item.path + path.sep) || item.path.startsWith(changedPath + path.sep)) ?? false;
+  }
+
   async #reconcileUntilCurrent(): Promise<void> {
     if (this.#running) return;
     this.#running = true;
     try {
-      while (this.#active && (this.#dirtyFolders.size > 0 || this.#dirtyRenames.size > 0 || this.#dirtyFiles.size > 0)) {
+      while (this.#active && (this.#dirtyFolders.size > 0 || this.#dirtyRenames.size > 0 || this.#dirtyFiles.size > 0 || [...this.#pendingScopes.values()].some((pending) => pending.dueAt <= Date.now()))) {
+        if (this.#activeScopes && this.#pendingScopes.size > 0 && this.#dirtyFolders.size === 0 && this.#dirtyRenames.size === 0 && this.#dirtyFiles.size === 0) {
+          const ready = [...this.#pendingScopes].find(([, pending]) => pending.dueAt <= Date.now());
+          if (!ready) break;
+          const [id, pending] = ready;
+          this.#pendingScopes.delete(id);
+          if (!this.#folders.has(pending.root) || !this.#activeScopes.get(pending.root)?.some((scope) => scope.id === id)) continue;
+          const startedAt = performance.now();
+          this.#lastScopeScans.set(id, Date.now());
+          this.#onFullScanStart?.(pending.root);
+          try {
+            await this.#catalog.synchronizeFolder?.(id);
+            await this.#onChanged();
+            this.#onFullScanEnd?.(pending.root);
+          } catch (error) {
+            this.#reconciliationFailures += 1;
+            this.#onFullScanEnd?.(pending.root, error);
+          } finally {
+            this.#fullScans += 1;
+            this.#fullScanMsTotal += performance.now() - startedAt;
+          }
+          continue;
+        }
         const folder = this.#dirtyFolders.size > 0 ? this.#dirtyFolders.values().next().value! : this.#dirtyRenames.size > 0 ? this.#dirtyRenames.keys().next().value! : this.#dirtyFiles.keys().next().value!;
         const fullScan = this.#dirtyFolders.delete(folder);
         const files = this.#dirtyFiles.get(folder);
@@ -185,11 +283,18 @@ export class CatalogWatcher {
         if (!this.#folders.has(folder)) continue;
         const scanStartedAt = fullScan ? performance.now() : 0;
         if (fullScan) this.#onFullScanStart?.(folder);
-        const work = fullScan ? this.#catalog.synchronizeImportedRoot(folder) : renames?.size
+        const scope = this.#activeScopes?.get(folder);
+        if (this.#activeScopes && !scope) continue;
+        const scan = async () => {
+          if (scope && this.#catalog.synchronizeFolder) {
+            for (const item of scope) this.#queueScope(folder, item.id, true);
+          } else await this.#catalog.synchronizeImportedRoot(folder);
+        };
+        const work = fullScan ? scan() : renames?.size
           ? (async () => {
             for (const relative of renames) {
               if (!await this.#catalog.synchronizeImportedDirectory(folder, relative)) {
-                await this.#catalog.synchronizeImportedRoot(folder);
+                await scan();
                 return;
               }
             }
@@ -208,6 +313,7 @@ export class CatalogWatcher {
       }
     } finally {
       this.#running = false;
+      if (this.#active) this.#scheduleReconciliation();
     }
   }
 

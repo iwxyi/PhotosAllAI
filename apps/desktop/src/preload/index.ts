@@ -137,6 +137,7 @@ const api: DesktopApi = {
     ipcRenderer.invoke('catalog.folder.move.v1', input) as ReturnType<DesktopApi['moveCatalogFolder']>,
   synchronizeCatalogFolder: (folderId) =>
     ipcRenderer.invoke('catalog.folder.synchronize.v1', folderId) as ReturnType<DesktopApi['synchronizeCatalogFolder']>,
+  setActiveCatalogFolders: (folderIds) => { ipcRenderer.send('catalog.folders.active.v1', folderIds); },
   revealCatalogFolder: (folderId) =>
     ipcRenderer.invoke('catalog.folder.reveal.v1', folderId) as ReturnType<DesktopApi['revealCatalogFolder']>,
   unregisterCatalogFolder: (input) =>

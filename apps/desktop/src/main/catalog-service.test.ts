@@ -102,7 +102,7 @@ describe('catalog image discovery', () => {
       const photoRoot = path.join(root, 'photos');
       const january = new Date(2026, 0, 15, 12);
       const february = new Date(2026, 1, 1, 0);
-      for (const [relative, date] of [['A/one.jpg', january], ['A/two.png', january], ['B/three.jpg', february], ['A/sub/four.jpg', january]] as const) {
+      for (const [relative, date] of [['A/one.jpg', january], ['A/two.png', january], ['A2/other.jpg', january], ['B/three.jpg', february], ['A/sub/four.jpg', january]] as const) {
         const file = path.join(photoRoot, relative);
         await mkdir(path.dirname(file), { recursive: true });
         await writeFile(file, 'fixture');
@@ -112,11 +112,12 @@ describe('catalog image discovery', () => {
       const folders = catalog.listFolders();
       const folderA = folders.find((folder) => folder.name === 'A')!;
       const folderB = folders.find((folder) => folder.name === 'B')!;
+      expect(catalog.listAssetPage({ folderId: folderA.id }).items.map((asset) => asset.fileName).sort()).toEqual(['four.jpg', 'one.jpg', 'two.png']);
       expect(catalog.listAssetPage({ folderIds: [folderA.id] }).totalCount).toBe(3);
       expect(catalog.listAssetPage({ folderIds: [folderA.id, folderB.id] }).totalCount).toBe(4);
       expect(catalog.listAssetPage({ folderIds: [folderA.id, folders.find((folder) => folder.name === 'sub')!.id] }).totalCount).toBe(3);
       expect(catalog.listAssetPage({ folderIds: ['missing'] }).totalCount).toBe(0);
-      expect(catalog.listAssetPage({ months: ['2026-01', '2026-02'], formats: ['jpg', 'PNG'] }).totalCount).toBe(4);
+      expect(catalog.listAssetPage({ months: ['2026-01', '2026-02'], formats: ['jpg', 'PNG'] }).totalCount).toBe(5);
       const filters = { folderIds: [folderA.id, folderB.id], dateFrom: new Date(2026, 0, 1).getTime(), dateTo: february.getTime(), months: ['2026-01'], formats: ['JPG'], sortBy: 'fileName' as const, limit: 1 };
       const first = catalog.listAssetPage(filters);
       expect(first.totalCount).toBe(2);
@@ -270,7 +271,9 @@ describe('catalog image discovery', () => {
     expect(page.items.map((asset) => asset.fileName).sort()).toEqual(['one.jpg', 'two.jpg']);
     await unlink(path.join(source, '2026', '春季', 'one.jpg'));
     await writeFile(path.join(source, '2026', '春季', 'three.jpg'), 'three');
+    await writeFile(path.join(source, '2026', '夏季', 'later.jpg'), 'later');
     expect(await catalog.synchronizeFolder(spring.id)).toEqual({ discovered: 1, offline: 1 });
+    expect(catalog.listAssets().some((asset) => asset.fileName === 'later.jpg')).toBe(false);
     expect(catalog.resolveFolderPath(spring.id)).toBe(await realpath(path.join(source, '2026', '春季')));
     const visible = catalog.listAssetPage({ folderId: spring.id, cursor: null, limit: 20 });
     expect(visible.totalCount).toBe(1);

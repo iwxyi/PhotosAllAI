@@ -15,6 +15,113 @@ afterEach(() => {
 });
 
 describe('catalog watcher', () => {
+  it('only scans the active child folder after selection and watcher errors', async () => {
+    vi.useFakeTimers();
+    let notify: (eventType?: string, filename?: string | Buffer | null) => void = () => undefined;
+    const handle = new FakeWatcher();
+    const synchronizeFolder = vi.fn().mockResolvedValue({ discovered: 0, offline: 0 });
+    const synchronizeImportedRoot = vi.fn().mockResolvedValue({ discovered: 0, offline: 0 });
+    const watcher = new CatalogWatcher(
+      { synchronizeFolder, synchronizeImportedRoot, synchronizeImportedFile, synchronizeImportedDirectory },
+      { debounceMs: 10, retryMs: 20, watchFactory: (_folder, onChange) => { notify = onChange; return handle; } }
+    );
+    watcher.watchFolders(['/photos']);
+    watcher.setActiveFolders([{ id: 'child', path: '/photos/child', rootPath: '/photos' }]);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(synchronizeFolder).not.toHaveBeenCalled();
+    notify('rename', 'unrelated/new.jpg');
+    await vi.advanceTimersByTimeAsync(10);
+    expect(synchronizeFolder).not.toHaveBeenCalled();
+    handle.emit('error', new Error('offline'));
+    await vi.advanceTimersByTimeAsync(30);
+    expect(synchronizeFolder).toHaveBeenCalledExactlyOnceWith('child');
+    expect(synchronizeImportedRoot).not.toHaveBeenCalled();
+    watcher.stop();
+  });
+
+  it('does not scan on selection, repeated selection, or refresh', async () => {
+    vi.useFakeTimers();
+    const synchronizeFolder = vi.fn();
+    const watcher = new CatalogWatcher(
+      { synchronizeFolder, synchronizeImportedRoot: vi.fn(), synchronizeImportedFile, synchronizeImportedDirectory },
+      { debounceMs: 10, watchFactory: () => new FakeWatcher() }
+    );
+    watcher.watchFolders(['/photos']);
+    const selected = [{ id: 'child', path: '/photos/child', rootPath: '/photos' }];
+    watcher.setActiveFolders(selected);
+    watcher.setActiveFolders([]);
+    watcher.setActiveFolders(selected);
+    watcher.refresh();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(synchronizeFolder).not.toHaveBeenCalled();
+    watcher.stop();
+  });
+
+  it('replays a changed file when its folder becomes selected', async () => {
+    vi.useFakeTimers();
+    let notify: (eventType?: string, filename?: string | Buffer | null) => void = () => undefined;
+    const changedFile = vi.fn().mockResolvedValue(undefined);
+    const synchronizeFolder = vi.fn();
+    const watcher = new CatalogWatcher(
+      { synchronizeFolder, synchronizeImportedRoot: vi.fn(), synchronizeImportedFile: changedFile, synchronizeImportedDirectory },
+      { debounceMs: 10, watchFactory: (_folder, onChange) => { notify = onChange; return new FakeWatcher(); } }
+    );
+    watcher.watchFolders(['/photos']);
+    watcher.setActiveFolders([]);
+    notify('change', 'child/new.jpg');
+    watcher.setActiveFolders([{ id: 'child', path: '/photos/child', rootPath: '/photos' }]);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(changedFile).toHaveBeenCalledExactlyOnceWith('/photos', 'child/new.jpg');
+    expect(synchronizeFolder).not.toHaveBeenCalled();
+    watcher.stop();
+  });
+
+  it('runs event-triggered selected folder scans serially', async () => {
+    vi.useFakeTimers();
+    let notify: (eventType?: string, filename?: string | Buffer | null) => void = () => undefined;
+    let finishFirst: () => void = () => undefined;
+    const firstPass = new Promise<void>((resolve) => { finishFirst = resolve; });
+    const synchronizeFolder = vi.fn().mockImplementationOnce(() => firstPass)
+      .mockResolvedValue({ discovered: 0, offline: 0 });
+    const watcher = new CatalogWatcher(
+      { synchronizeFolder, synchronizeImportedRoot: vi.fn(), synchronizeImportedFile, synchronizeImportedDirectory },
+      { debounceMs: 10, watchFactory: (_folder, onChange) => { notify = onChange; return new FakeWatcher(); } }
+    );
+    watcher.watchFolders(['/photos']);
+    watcher.setActiveFolders([
+      { id: 'first', path: '/photos/first', rootPath: '/photos' },
+      { id: 'second', path: '/photos/second', rootPath: '/photos' }
+    ]);
+    notify();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(synchronizeFolder.mock.calls.map(([id]) => id)).toEqual(['first']);
+    finishFirst();
+    await vi.runAllTimersAsync();
+    expect(synchronizeFolder.mock.calls.map(([id]) => id)).toEqual(['first', 'second']);
+    watcher.stop();
+  });
+
+  it('coalesces repeated ambiguous watcher events into one delayed scan', async () => {
+    vi.useFakeTimers();
+    let notify: (eventType?: string, filename?: string | Buffer | null) => void = () => undefined;
+    const synchronizeFolder = vi.fn().mockResolvedValue({ discovered: 0, offline: 0 });
+    const watcher = new CatalogWatcher(
+      { synchronizeFolder, synchronizeImportedRoot: vi.fn(), synchronizeImportedFile, synchronizeImportedDirectory },
+      { debounceMs: 10, watchFactory: (_folder, onChange) => { notify = onChange; return new FakeWatcher(); } }
+    );
+    watcher.watchFolders(['/photos']);
+    watcher.setActiveFolders([{ id: 'child', path: '/photos/child', rootPath: '/photos' }]);
+    notify();
+    notify();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(synchronizeFolder).toHaveBeenCalledTimes(1);
+    notify();
+    await vi.advanceTimersByTimeAsync(29_989);
+    expect(synchronizeFolder).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(synchronizeFolder).toHaveBeenCalledTimes(2);
+    watcher.stop();
+  });
   it('does not start automatic reconciliation when disabled', () => {
     const synchronizeImportedRoot = vi.fn();
     const watchFactory = vi.fn(() => new FakeWatcher());

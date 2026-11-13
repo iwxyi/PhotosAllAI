@@ -6172,6 +6172,9 @@ export function App(): React.JSX.Element {
   const [exportPresets, setExportPresets] = useState<ExportPreset[]>([]);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [selectedFolderIds, setSelectedFolderIds] = useState<string[]>([]);
+  useEffect(() => {
+    if (sessionReady) window.desktopApi.setActiveCatalogFolders(selectedFolderIds.length ? selectedFolderIds : selectedFolderId ? [selectedFolderId] : []);
+  }, [sessionReady, selectedFolderId, selectedFolderIds]);
   const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(null);
   const [selectedSmartCollection, setSelectedSmartCollection] = useState<CatalogSmartCollection['id'] | null>(null);
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
@@ -6485,13 +6488,7 @@ export function App(): React.JSX.Element {
     setLoadingMore(true);
     try {
       const loadNavigation = refreshNavigation || !catalogNavigationLoaded.current;
-      const [page, folders, tags, albums, smartCollections] = await Promise.all([
-        window.desktopApi.listCatalogAssetPage({ ...catalogFilterInput, folderId: folderIds.length ? null : folderId, folderIds, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: selectedSmartCollection, favoriteOnly, sortBy, ...(sortDirection ? { sortDirection } : {}), query: searchQuery, cursor: null, limit: 200 }),
-        loadNavigation ? window.desktopApi.listCatalogFolders() : Promise.resolve(null),
-        loadNavigation ? window.desktopApi.listCatalogTags() : Promise.resolve(null),
-        loadNavigation ? window.desktopApi.listCatalogAlbums() : Promise.resolve(null),
-        loadNavigation ? window.desktopApi.listCatalogSmartCollections() : Promise.resolve(null)
-      ]);
+      const page = await window.desktopApi.listCatalogAssetPage({ ...catalogFilterInput, folderId: folderIds.length ? null : folderId, folderIds, tagId: selectedTagId, albumId: selectedAlbumId, smartCollection: selectedSmartCollection, favoriteOnly, sortBy, ...(sortDirection ? { sortDirection } : {}), query: searchQuery, cursor: null, limit: 200 });
       if (request !== catalogRequest.current) return;
       const accumulated = [...page.items];
       let cursor = page.nextCursor;
@@ -6513,27 +6510,33 @@ export function App(): React.JSX.Element {
         setViewerResultId(undefined);
         setViewerOptions({});
       }
-      if (folders) {
-        catalogNavigationLoaded.current = true;
-        setCatalogFolders(folders);
-      }
-      if (tags) setCatalogTags(tags);
-      if (albums) setCatalogAlbums(albums);
-      if (smartCollections && collectionsRequest === smartCollectionsRequest.current) setCatalogSmartCollections(smartCollections);
-      if (smartCollections && selectedSmartCollection && !smartCollections.some((collection) => collection.id === selectedSmartCollection)) setSelectedSmartCollection(null);
-      if (folders) {
-        const folderIds = new Set(folders.map((folder) => folder.id));
-        if (selectedFolderId && !folderIds.has(selectedFolderId)) setSelectedFolderId(null);
-        setSelectedFolderIds((current) => {
-          const next = current.filter((id) => folderIds.has(id));
-          return next.length === current.length ? current : next;
-        });
-      }
-      if (tags && selectedTagId && !tags.some((tag) => tag.id === selectedTagId)) setSelectedTagId(null);
-      if (albums && selectedAlbumId && !albums.some((album) => album.id === selectedAlbumId)) setSelectedAlbumId(null);
       setCatalogTotal(page.totalCount);
       setNextCursor(cursor);
       setCatalogReady(true);
+      // A cold folder-tree rebuild can scan the whole library on the main
+      // thread. Let the first photo page paint before requesting navigation.
+      if (loadNavigation) window.setTimeout(() => { void Promise.all([
+        window.desktopApi.listCatalogFolders(),
+        window.desktopApi.listCatalogTags(),
+        window.desktopApi.listCatalogAlbums(),
+        window.desktopApi.listCatalogSmartCollections()
+      ]).then(([folders, tags, albums, smartCollections]) => {
+        if (request !== catalogRequest.current || collectionsRequest !== smartCollectionsRequest.current) return;
+        catalogNavigationLoaded.current = true;
+        setCatalogFolders(folders);
+        setCatalogTags(tags);
+        setCatalogAlbums(albums);
+        setCatalogSmartCollections(smartCollections);
+        if (selectedSmartCollection && !smartCollections.some((collection) => collection.id === selectedSmartCollection)) setSelectedSmartCollection(null);
+        const validFolderIds = new Set(folders.map((folder) => folder.id));
+        if (selectedFolderId && !validFolderIds.has(selectedFolderId)) setSelectedFolderId(null);
+        setSelectedFolderIds((current) => {
+          const next = current.filter((id) => validFolderIds.has(id));
+          return next.length === current.length ? current : next;
+        });
+        if (selectedTagId && !tags.some((tag) => tag.id === selectedTagId)) setSelectedTagId(null);
+        if (selectedAlbumId && !albums.some((album) => album.id === selectedAlbumId)) setSelectedAlbumId(null);
+      }).catch(() => { /* The next refresh retries navigation without hiding photos. */ }); }, 50);
     } catch (error) {
       if (request === catalogRequest.current) {
         setCatalogLoadError(error instanceof Error ? error.message : '无法加载图库');

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { EventEmitter } from 'node:events';
 import { appendFileSync, constants as fsConstants, existsSync, mkdirSync, statSync } from 'node:fs';
 import { copyFile, mkdir, realpath, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, extname, isAbsolute, join, relative } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { imageSizeFromFile } from 'image-size/fromFile';
 
@@ -379,14 +379,22 @@ async function relocatePortableAfterFileOperation(
 let exifIndexRunning = false;
 const dimensionIndexPending = new Set<string>();
 let dimensionIndexRunning = false;
+let dimensionIndexTimer: ReturnType<typeof setTimeout> | null = null;
 function scheduleVisibleDimensions(ids: readonly string[]): void {
   for (const id of ids) dimensionIndexPending.add(id);
-  if (dimensionIndexRunning || dimensionIndexPending.size === 0) return;
-  dimensionIndexRunning = true;
-  setImmediate(() => {
+  if (dimensionIndexRunning || dimensionIndexTimer || dimensionIndexPending.size === 0) return;
+  // Let the first page paint and its visible thumbnails start before EXIF
+  // reads compete for the same source files and decoder resources.
+  dimensionIndexTimer = setTimeout(() => {
+    dimensionIndexTimer = null;
+    dimensionIndexRunning = true;
     void (async () => {
       while (dimensionIndexPending.size > 0 && !shuttingDown) {
-        const ids = [...dimensionIndexPending].slice(0, 8);
+        if (imageCache.getActivityStats().thumbnailPending > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          continue;
+        }
+        const ids = [...dimensionIndexPending].slice(0, 2);
         for (const id of ids) dimensionIndexPending.delete(id);
         await Promise.allSettled(ids.map(async (id) => {
           if (!catalog.hasCurrentDimensions(id)) catalog.saveExifDetails(id, await imageFiles.details(id));
@@ -394,7 +402,8 @@ function scheduleVisibleDimensions(ids: readonly string[]): void {
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
     })().finally(() => { dimensionIndexRunning = false; });
-  });
+  }, 750);
+  dimensionIndexTimer.unref();
 }
 function scheduleSmartCollectionExifIndex(): void {
   if (exifIndexRunning || !catalog.hasExifSmartCollections()) return;
@@ -860,6 +869,18 @@ function registerIpc(): void {
       item.assetId, item.previousPath, item.nextPath, item.previousFileName, item.nextFileName
     )));
     return catalogFolderSyncReportSchema.parse(report);
+  });
+  ipcMain.on('catalog.folders.active.v1', (_event, input: unknown) => {
+    if (!Array.isArray(input)) return;
+    const selected = input.filter((id): id is string => typeof id === 'string' && /^[a-f0-9]{32}$/u.test(id)).slice(0, 8);
+    const roots = catalog.listFolderPaths();
+    const scopes = selected.flatMap((id) => {
+      const folderPath = catalog.resolveFolderPath(id);
+      if (!folderPath) return [];
+      const rootPath = roots.find((root) => folderPath === root || folderPath.startsWith(root + sep));
+      return rootPath ? [{ id, path: folderPath, rootPath }] : [];
+    });
+    catalogWatcher.setActiveFolders(scopes);
   });
   ipcMain.handle('catalog.folder.reveal.v1', (_event, input: unknown) => {
     const folderId = String(input);
@@ -1328,6 +1349,7 @@ app.whenReady().then(async () => {
     )));
     for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1');
   } });
+  catalogWatcher.setActiveFolders([]);
   enterStartupStage('初始化文件操作与任务');
   fileOperations = new FileOperationService(databasePath, undefined, {
     trashItem: (filePath) => shell.trashItem(filePath)

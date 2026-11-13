@@ -2100,6 +2100,7 @@ export interface DesktopApi {
     createCatalogFolder(input: CreateCatalogFolderInput): Promise<RenameCatalogFolderResult>;
     moveCatalogFolder(input: MoveCatalogFolderInput): Promise<MoveCatalogFolderResult>;
     synchronizeCatalogFolder(folderId: string): Promise<CatalogFolderSyncReport>;
+    setActiveCatalogFolders(folderIds: string[]): void;
     revealCatalogFolder(folderId: string): Promise<boolean>;
     unregisterCatalogFolder(input: UnregisterCatalogFolderInput): Promise<UnregisterCatalogFolderReport>;
     revealCatalogAsset(assetId: string): Promise<boolean>;

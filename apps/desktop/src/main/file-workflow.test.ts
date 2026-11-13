@@ -105,4 +105,21 @@ describe('folder workflow matching', () => {
       expect((await service.page({ folderId: firstRoot.id }, albumConfig)).totalCount).toBe(2);
     } finally { catalog.close(); }
   });
+
+  it('uses indexed paging for a disabled folder even when other folders have workflows', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'photo-workflow-disabled-')); roots.push(root);
+    const source = path.join(root, 'photos');
+    await mkdir(path.join(source, 'plain'), { recursive: true });
+    await writeFile(path.join(source, 'plain', 'one.jpg'), 'fixture');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([source]);
+      const plain = catalog.listFolders().find((folder) => folder.name === 'plain')!;
+      const configured = { ...config(), folders: { [plain.id]: { mode: 'off' as const } } };
+      const service = new FileWorkflowService(path.join(root, 'config.json'), catalog);
+      const page = await service.page({ folderId: plain.id }, configured);
+      expect(page.items.map((asset) => asset.fileName)).toEqual(['one.jpg']);
+      expect(page.workflowStatus).toBeUndefined();
+    } finally { catalog.close(); }
+  });
 });

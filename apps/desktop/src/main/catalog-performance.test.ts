@@ -14,6 +14,26 @@ afterEach(async () => {
 });
 
 describe('large catalog pagination', () => {
+  it('keeps the folder tree cached across EXIF and unrelated database writes', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-folder-revision-'));
+    temporaryDirectories.push(directory);
+    const databasePath = path.join(directory, 'catalog.sqlite');
+    const catalog = new CatalogService(databasePath);
+    const writer = new DatabaseSync(databasePath);
+    writer.prepare('INSERT INTO folders (id, path, name, imported_at) VALUES (?, ?, ?, ?)').run('revision-root', '/fixture/revision', 'Revision', 1);
+    writer.prepare(`INSERT INTO assets (id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at)
+      VALUES ('revision-one', 'revision-root', '/fixture/revision/one.jpg', 'one.jpg', '.jpg', 1, 1, 1)`).run();
+    const folders = catalog.listFolders();
+    writer.prepare('INSERT INTO asset_exif (asset_id, source_size, source_modified_at, width, height) VALUES (?, 1, 1, 100, 50)').run('revision-one');
+    expect(catalog.listFolders()).toBe(folders);
+    expect(catalog.listFolders(true)).toBe(catalog.listFolders(true));
+    writer.prepare("UPDATE assets SET offline_at = 5 WHERE id = 'revision-one'").run();
+    expect(catalog.listFolders()).not.toBe(folders);
+    expect(catalog.listFolders()[0]?.offlineCount).toBe(1);
+    writer.close();
+    catalog.close();
+  });
+
   it('rebuilds folder navigation after local and external path changes', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-folder-cache-'));
     temporaryDirectories.push(directory);

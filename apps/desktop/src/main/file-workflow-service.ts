@@ -70,6 +70,22 @@ export class FileWorkflowService {
     const config = override ?? await this.get();
     if (input.assetIds || !input.workflow || (!config.defaultPresetId && !Object.keys(config.folders).length && !Object.keys(config.albums).length)) return this.#catalog.listAssetPage(input);
     const folders = this.#catalog.listFolders();
+    // A disabled folder needs ordinary indexed paging unless a descendant
+    // explicitly enables its own workflow. Avoid reading the entire catalog
+    // and running the workflow matcher for these common small-folder views.
+    if (input.folderId && !input.albumId && resolveFileWorkflow(config, folders, input.folderId, null).preset === null) {
+      const parents = new Map(folders.map((folder) => [folder.id, folder.parentId]));
+      const hasEnabledDescendant = Object.entries(config.folders).some(([id, binding]) => {
+        if (binding.mode === 'off') return false;
+        const seen = new Set<string>();
+        for (let current = parents.get(id); current && !seen.has(current); current = parents.get(current)) {
+          if (current === input.folderId) return true;
+          seen.add(current);
+        }
+        return false;
+      });
+      if (!hasEnabledDescendant) return this.#catalog.listAssetPage(input);
+    }
     const scope: FileWorkflowScope = { folderId: input.folderId, albumId: input.albumId };
     const assets = this.#all(scope);
     const locations = this.#catalog.workflowFileLocations();
