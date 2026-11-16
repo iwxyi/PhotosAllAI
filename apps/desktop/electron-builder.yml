@@ -8,6 +8,9 @@ files:
   - out/**
   - package.json
 asar: true
+asarUnpack:
+  - '**/node_modules/exiftool-vendored.pl/**'
+  - '**/node_modules/exiftool-vendored.exe/**'
 compression: maximum
 afterSign: apps/desktop/build/after-sign.cjs
 fileAssociations:

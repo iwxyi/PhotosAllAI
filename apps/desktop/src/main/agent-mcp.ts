@@ -11,6 +11,7 @@ const openSchema = z.object({ assetIds: z.array(z.string().min(1)).max(500), goa
 const getSchema = z.object({ sessionId: z.string().uuid() }).strict();
 const controlSchema = getSchema.extend({ action: z.enum(['pause', 'resume', 'cancel']) }).strict();
 const invokeSchema = getSchema.extend({ requestId: z.string().uuid(), input: z.record(z.string(), z.unknown()) }).strict();
+const galleryInspectSchema = z.object({}).strict();
 
 /** Each enabled connection owns its sessions; approval is available only through desktop IPC. */
 export class AgentMcpServer {
@@ -21,8 +22,9 @@ export class AgentMcpServer {
   private readonly connections = new Set<Server>();
   private lifecycle: Promise<unknown> = Promise.resolve();
   constructor(private readonly runtime: AgentRuntime,
-    private readonly preview?: (session: AgentSession, kind: 'original' | 'result', id: string) => Promise<string>) {}
-  status(): McpStatus { return { enabled: !!this.http, url: this.url, token: this.token, tools: this.runtime.toolDefinitions().length }; }
+    private readonly preview?: (session: AgentSession, kind: 'original' | 'result', id: string) => Promise<string>,
+    private readonly inspectGallery?: () => Promise<unknown>) {}
+  status(): McpStatus { return { enabled: !!this.http, url: this.url, token: this.token, tools: this.runtime.toolDefinitions().length + (this.inspectGallery ? 1 : 0) }; }
   setEnabled(enabled: boolean): Promise<McpStatus> {
     const operation = this.lifecycle.then(async () => {
       if (enabled) await this.start(); else await this.stop();
@@ -87,6 +89,7 @@ export class AgentMcpServer {
       { name: 'sessions.open', description: '创建外部 Agent 会话，冻结图片范围。不会启动内置规划模型。', inputSchema: z.toJSONSchema(openSchema) },
       { name: 'sessions.get', description: '读取本连接会话、真实回执及异步作业状态。', inputSchema: z.toJSONSchema(getSchema) },
       { name: 'sessions.control', description: '暂停、恢复或取消本连接会话。不能批准重要操作。', inputSchema: z.toJSONSchema(controlSchema) },
+      ...(this.inspectGallery ? [{ name: 'gallery.inspect', description: '只读检查当前图库已挂载图片的索引尺寸、解码尺寸、实际显示尺寸及分组位置。虚拟窗口外的图片不在结果中。', inputSchema: z.toJSONSchema(galleryInspectSchema) }] : []),
       ...this.runtime.toolDefinitions().map((t) => ({ name: t.name, description: `${t.description}${t.approval ? ' 桌面程序确认后执行。' : ''}`, inputSchema: {
         type: 'object' as const, properties: { sessionId: { type: 'string', format: 'uuid' }, requestId: { type: 'string', format: 'uuid' }, input: t.parameters }, required: ['sessionId', 'requestId', 'input'], additionalProperties: false
       } }))
@@ -97,6 +100,7 @@ export class AgentMcpServer {
         let result: unknown;
         if (name === 'sessions.open') { const a = openSchema.parse(request.params.arguments); result = this.runtime.createExternal(a.assetIds, a.goal, owner); }
         else if (name === 'sessions.get') { const a = getSchema.parse(request.params.arguments); result = this.runtime.external(a.sessionId, owner); }
+        else if (name === 'gallery.inspect' && this.inspectGallery) { galleryInspectSchema.parse(request.params.arguments ?? {}); result = await this.inspectGallery(); }
         else if (name === 'sessions.control') {
           const a = controlSchema.parse(request.params.arguments); this.runtime.external(a.sessionId, owner);
           result = await this.runtime.control(a.sessionId, a.action);

@@ -2,10 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { readdir, opendir, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import exifr from 'exifr';
+import { ExifTool } from 'exiftool-vendored';
 import { imageSizeFromFile } from 'image-size/fromFile';
 import type { CatalogAsset, FileDetails, QuickViewSession } from '@photoallisai/contracts';
 import type { CatalogService } from './catalog-service';
-import { isSupportedBrowseMedia } from './media-format-registry';
+import { identifyMediaFormat, isSupportedBrowseMedia } from './media-format-registry';
+import { exifOrientation, swapsDimensions } from './exif-orientation';
 import type { TemporaryMediaIndex } from './temporary-media-index';
 
 export { isDirectPreviewImage } from './media-format-registry';
@@ -14,11 +16,17 @@ export { isDirectPreviewImage } from './media-format-registry';
 export class ImageFileService {
   readonly #temporary = new Map<string, string>();
   readonly #detailsCache = new Map<string, { sizeBytes: number; modifiedAt: number; details: FileDetails }>();
+  #exiftool: ExifTool | null = null;
   #openGeneration = 0;
   constructor(private readonly catalog: Pick<CatalogService, 'resolveAssetFile'>, private readonly temporaryIndex?: TemporaryMediaIndex) {}
 
   resolve(id: string): string | null {
     return this.temporaryIndex?.resolve(id) ?? this.#temporary.get(id) ?? this.catalog.resolveAssetFile(id)?.path ?? null;
+  }
+
+  async close(): Promise<void> {
+    await this.#exiftool?.end();
+    this.#exiftool = null;
   }
 
   pageTemporary(sessionId: string, offset: number, limit: number, selectedId?: string): { items: CatalogAsset[]; totalCount: number; selectedPosition?: number | null } {
@@ -170,8 +178,24 @@ export class ImageFileService {
     const cached = this.#detailsCache.get(file);
     if (cached?.sizeBytes === metadata.size && cached.modifiedAt === metadata.mtimeMs) return { ...cached.details };
     const result: FileDetails = { path: file, sizeBytes: metadata.size, modifiedAt: metadata.mtimeMs };
+    if (identifyMediaFormat(file)?.kind === 'video') {
+      try {
+        this.#exiftool ??= new ExifTool({ maxProcs: 2 });
+        const tags = await this.#exiftool.read(file, { readArgs: ['-fast2'] });
+        const width = Number(tags.ImageWidth ?? tags.ExifImageWidth);
+        const height = Number(tags.ImageHeight ?? tags.ExifImageHeight);
+        const rotation = Number(tags.Rotation ?? 0);
+        if (width > 0 && height > 0) {
+          const rotated = Number.isFinite(rotation) && Math.abs(rotation % 180) === 90;
+          result.width = rotated ? height : width;
+          result.height = rotated ? width : height;
+        }
+      } catch { result.metadataWarning = '此文件未提供可读取的视频尺寸'; }
+      this.#detailsCache.set(file, { sizeBytes: metadata.size, modifiedAt: metadata.mtimeMs, details: result });
+      return result;
+    }
     try {
-      const tags = await exifr.parse(file, { iptc: true, xmp: true, pick: ['Make', 'Model', 'LensMake', 'LensModel', 'DateTimeOriginal', 'ExposureTime', 'FNumber', 'ISO', 'FocalLength', 'ExifImageWidth', 'ExifImageHeight', 'ImageWidth', 'ImageHeight', 'Orientation', 'City', 'Country', 'CountryName'] });
+      const tags = await exifr.parse(file, { iptc: true, xmp: true, translateValues: false, pick: ['Make', 'Model', 'LensMake', 'LensModel', 'DateTimeOriginal', 'ExposureTime', 'FNumber', 'ISO', 'FocalLength', 'ExifImageWidth', 'ExifImageHeight', 'ImageWidth', 'ImageHeight', 'Orientation', 'City', 'Country', 'CountryName'] });
       if (tags) {
         result.camera = [tags.Make, tags.Model].filter(Boolean).join(' ') || undefined;
         result.lens = tags.LensModel;
@@ -188,7 +212,7 @@ export class ImageFileService {
         for (const [key, value] of Object.entries({ aperture: tags.FNumber, iso: tags.ISO, focalLength: tags.FocalLength, width: tags.ExifImageWidth ?? tags.ImageWidth, height: tags.ExifImageHeight ?? tags.ImageHeight })) {
           if (typeof value === 'number' && Number.isFinite(value) && value > 0) Object.assign(result, { [key]: value });
         }
-        if (result.width && result.height && [5, 6, 7, 8].includes(Number(tags.Orientation))) [result.width, result.height] = [result.height, result.width];
+        if (result.width && result.height && swapsDimensions(exifOrientation(tags.Orientation))) [result.width, result.height] = [result.height, result.width];
       }
     } catch {
       result.metadataWarning = '此文件未提供可读取的拍摄信息';
@@ -201,6 +225,19 @@ export class ImageFileService {
           if (size.orientation && [5, 6, 7, 8].includes(size.orientation)) [result.width, result.height] = [result.height, result.width];
         }
       } catch { /* RAW or unsupported formats may only expose dimensions through EXIF. */ }
+    }
+    if (!result.width || !result.height) {
+      try {
+        this.#exiftool ??= new ExifTool({ maxProcs: 2 });
+        const tags = await this.#exiftool.read(file, { readArgs: ['-fast2'] });
+        const width = Number(tags.ExifImageWidth ?? tags.ImageWidth);
+        const height = Number(tags.ExifImageHeight ?? tags.ImageHeight);
+        if (width > 0 && height > 0) {
+          const rotated = swapsDimensions(exifOrientation(tags.Orientation));
+          result.width = rotated ? height : width;
+          result.height = rotated ? width : height;
+        }
+      } catch { /* Leave unsupported media without indexed dimensions. */ }
     }
     this.#detailsCache.delete(file);
     this.#detailsCache.set(file, { sizeBytes: metadata.size, modifiedAt: metadata.mtimeMs, details: result });

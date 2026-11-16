@@ -88,6 +88,20 @@ test('quit releases the process and lock so the same library can immediately reo
   await expect((await reopened.firstWindow()).getByRole('tab', { name: '图库', exact: true })).toBeVisible();
 });
 
+test('quitting after the last Mac window closes does not leave a Dock process', async () => {
+  test.skip(process.platform !== 'darwin');
+  const app = await launch();
+  const child = app.process();
+  const closed = app.waitForEvent('close');
+  await app.evaluate(({ app, BrowserWindow }) => {
+    BrowserWindow.getAllWindows()[0]!.close();
+    setTimeout(() => app.quit(), 0);
+  });
+  await closed;
+  await expect.poll(() => child.exitCode).toBe(0);
+  application = undefined;
+});
+
 test('closing the development window exits instead of leaving an orphan process', async () => {
   const server = createServer((_request, response) => { response.end('<!doctype html><title>Development lifecycle</title>'); });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));

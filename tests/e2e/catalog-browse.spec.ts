@@ -3,6 +3,7 @@ import { copyFile, mkdir, mkdtemp, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { _electron as electron, expect, test, type Page } from '@playwright/test';
 import { CatalogService } from '../../apps/desktop/src/main/catalog-service';
+import { galleryInspectionScript } from '../../apps/desktop/src/main/gallery-inspection';
 
 test('gallery dimensions group the complete folder with independent masonry sections', async () => {
   const directory = await mkdtemp(path.join(tmpdir(), 'photo-browse-'));
@@ -35,6 +36,15 @@ test('gallery dimensions group the complete folder with independent masonry sect
     await utimes(file, date, date);
   }
   await catalog.importFolders([path.join(directory, 'photos')]);
+  const dimensions = new Map<string, [number, number]>([
+    ['one.jpg', [1800, 2251]], ['two.png', [1800, 2297]],
+    ['three.jpg', [1800, 2700]], ['four.jpg', [1800, 1197]],
+    ['five.jpg', [1800, 1107]], ['six.jpg', [1800, 1200]]
+  ]);
+  for (const asset of catalog.listAssetPage({ limit: 20 }).items) {
+    const size = dimensions.get(asset.fileName)!;
+    catalog.saveDimensions(asset.id, size[0], size[1]);
+  }
   catalog.close();
   const app = await electron.launch({ args: [path.resolve('apps/desktop/out/main/index.js')], env: { ...process.env, PHOTOALLISAI_USER_DATA: userData } });
   try {
@@ -112,13 +122,22 @@ test('gallery dimensions group the complete folder with independent masonry sect
     expect(await page.evaluate(() => [...document.querySelectorAll<HTMLElement>('.catalog-card')].every((card) => (window as unknown as { browseImages: Map<string, Element> }).browseImages.get(card.dataset.assetId!) === card.querySelector('img')))).toBe(true);
     await page.getByRole('button', { name: '按文件夹分组', exact: true }).click();
     await expect(page.locator('.catalog-photo-group')).toHaveCount(3);
-    await expect(page.locator('.catalog-group-heading').first()).toContainText('photos / A');
+    await expect(page.locator('.catalog-group-heading').first()).toContainText('A');
+    await page.screenshot({ path: 'test-results/catalog-multi-group-before.png', animations: 'disabled' });
+    const inspection = await page.evaluate(galleryInspectionScript) as {
+      groups: Array<{ bounds: { x: number } }>;
+      images: Array<{ card: { x: number }; frame: { width: number; height: number }; indexed: { width: number; height: number } }>;
+    };
+    expect(inspection.groups).toHaveLength(3);
+    expect(inspection.groups[0]!.bounds.x).toBe(inspection.images[0]!.card.x);
+    expect(inspection.images.every((item) => item.indexed.width > 0 && item.indexed.height > 0
+      && Math.abs(item.frame.width / item.frame.height - item.indexed.width / item.indexed.height) < .05)).toBe(true);
     await page.getByRole('button', { name: '文件夹：正序，点击切换' }).click();
-    await expect(page.locator('.catalog-group-heading').first()).toContainText('photos / B / sub');
+    await expect(page.locator('.catalog-group-heading').first()).toContainText('B / sub');
     await folderButton.click();
     await folderButton.click();
     await expect(page.getByRole('button', { name: '文件夹：逆序，点击切换' })).toBeVisible();
-    await expect(page.locator('.catalog-group-heading').first()).toContainText('photos / B / sub');
+    await expect(page.locator('.catalog-group-heading').first()).toContainText('B / sub');
     await page.getByRole('button', { name: '文件夹：逆序，点击切换' }).click();
     await page.getByRole('button', { name: '按月份分组', exact: true }).click();
     await expect(page.locator('.catalog-card')).toHaveCount(6);
@@ -138,7 +157,7 @@ test('gallery dimensions group the complete folder with independent masonry sect
     await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
     await dragGroup(page);
     await page.keyboard.press('Escape');
-    await expect(page.locator('.catalog-group-heading').first()).toContainText('2026-02 · photos / B');
+    await expect(page.locator('.catalog-group-heading').first()).toContainText('2026-02 · B');
     await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
     await dragGroup(page);
     await page.keyboard.press('Escape');
@@ -146,7 +165,7 @@ test('gallery dimensions group the complete folder with independent masonry sect
     await expect(page.locator('.catalog-list-row')).toHaveCount(6);
     await expect(page.locator('.catalog-group-heading')).toHaveCount(5);
     await page.getByRole('button', { name: '瀑布流视图', exact: true }).click();
-    await expect(page.locator('.catalog-group-heading').first()).toContainText('photos / A');
+    await expect(page.locator('.catalog-group-heading').first()).toContainText('A');
     await expect(page.locator('.catalog-group-heading').first()).toContainText('2026-01');
     await page.getByRole('button', { name: '月份：逆序，点击切换' }).click();
     await expect(page.locator('.catalog-group-heading').nth(1)).toContainText('2026-01');

@@ -50,6 +50,7 @@ import {
   listCatalogAssetsInputSchema,
   listTaskPageInputSchema,
   listGenerationResultsInputSchema,
+  listGenerationResultsPageInputSchema,
   moveQueuedTaskInputSchema,
   updateGenerationResultReviewInputSchema,
   moveCatalogAssetsInputSchema,
@@ -113,6 +114,7 @@ import { createAgentTools } from './agent-tools';
 import { createAgentAppTools } from './agent-app-tools';
 import { createAgentProgramTools } from './agent-program-tools';
 import { AgentMcpServer } from './agent-mcp';
+import { galleryInspectionScript } from './gallery-inspection';
 import { TaskRunner } from './task-runner';
 import { AgentProcessor } from './agent-processor';
 import { toRendererTask } from './task-sanitizer';
@@ -135,7 +137,7 @@ const APP_ORIGIN = 'app://photoallisai';
 const APPLICATION_SCHEMA_VERSION = 4;
 const backgroundFileTasks = new BackgroundFileTasks();
 const watcherTaskIds = new Map<string, string>();
-let lastUserActivityAt = 0;
+let lastUserActivityAt = Date.now();
 const maintenanceIdle = () => Date.now() - lastUserActivityAt >= 30_000;
 let catalog: CatalogService;
 let fileWorkflows: FileWorkflowService;
@@ -377,61 +379,85 @@ async function relocatePortableAfterFileOperation(
 }
 
 let exifIndexRunning = false;
-const dimensionIndexPending = new Set<string>();
-let dimensionIndexRunning = false;
-let dimensionIndexTimer: ReturnType<typeof setTimeout> | null = null;
-function scheduleVisibleDimensions(ids: readonly string[]): void {
-  for (const id of ids) dimensionIndexPending.add(id);
-  if (dimensionIndexRunning || dimensionIndexTimer || dimensionIndexPending.size === 0) return;
-  // Let the first page paint and its visible thumbnails start before EXIF
-  // reads compete for the same source files and decoder resources.
-  dimensionIndexTimer = setTimeout(() => {
-    dimensionIndexTimer = null;
-    dimensionIndexRunning = true;
-    void (async () => {
-      while (dimensionIndexPending.size > 0 && !shuttingDown) {
-        if (imageCache.getActivityStats().thumbnailPending > 0) {
-          await new Promise((resolve) => setTimeout(resolve, 250));
-          continue;
-        }
-        const ids = [...dimensionIndexPending].slice(0, 2);
-        for (const id of ids) dimensionIndexPending.delete(id);
-        await Promise.allSettled(ids.map(async (id) => {
-          if (!catalog.hasCurrentDimensions(id)) catalog.saveExifDetails(id, await imageFiles.details(id));
-        }));
-        await new Promise<void>((resolve) => setImmediate(resolve));
-      }
-    })().finally(() => { dimensionIndexRunning = false; });
-  }, 750);
-  dimensionIndexTimer.unref();
-}
-function scheduleSmartCollectionExifIndex(): void {
-  if (exifIndexRunning || !catalog.hasExifSmartCollections()) return;
+let dimensionIndexPriorityFolderId: string | null = null;
+let dimensionIndexForegroundRemaining = 0;
+let lastDimensionIndexStartAt = 0;
+let lastDimensionIndexForegroundAt = 0;
+function scheduleCatalogDimensionIndex(priorityFolderId?: string | null, foreground = false): void {
+  if (priorityFolderId) dimensionIndexPriorityFolderId = priorityFolderId;
+  if (foreground && Date.now() - lastDimensionIndexForegroundAt >= 30_000) {
+    dimensionIndexForegroundRemaining = Math.max(dimensionIndexForegroundRemaining, 128);
+    lastDimensionIndexForegroundAt = Date.now();
+  }
+  if (exifIndexRunning || shuttingDown) return;
+  const now = Date.now();
+  if (!priorityFolderId && dimensionIndexForegroundRemaining === 0 && now - lastDimensionIndexStartAt < 15_000) return;
+  const initialRemaining = catalog.countUnindexedDimensions();
+  if (initialRemaining === 0) return;
   exifIndexRunning = true;
-  const taskId = backgroundFileTasks.start('拍摄信息索引');
+  lastDimensionIndexStartAt = now;
+  const taskId = backgroundFileTasks.start('图片尺寸索引', initialRemaining);
   setImmediate(() => {
     void (async () => {
-      let afterId = '';
       let processed = 0;
+      let changesSinceCatalogEvent = 0;
+      let globalAfterId = '';
+      let foregroundAfterId = '';
+      let priorityAfterId = '';
+      let priorityFolderId = dimensionIndexPriorityFolderId;
       try {
         for (;;) {
-          if (!maintenanceIdle()) { await new Promise((resolve) => setTimeout(resolve, 1_000)); continue; }
-          const ids = catalog.listExifIndexCandidates(2, afterId);
+          if (shuttingDown) break;
+          if (dimensionIndexPriorityFolderId && dimensionIndexPriorityFolderId !== priorityFolderId) {
+            priorityFolderId = dimensionIndexPriorityFolderId;
+            priorityAfterId = '';
+          }
+          if ((!priorityFolderId && dimensionIndexForegroundRemaining === 0 && !maintenanceIdle()) || imageCache.getActivityStats().thumbnailPending > 0) {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            continue;
+          }
+          const foregroundBatch = !priorityFolderId && dimensionIndexForegroundRemaining > 0;
+          let ids = priorityFolderId
+            ? catalog.listDimensionIndexCandidates(8, priorityFolderId, priorityAfterId)
+            : foregroundBatch
+              ? catalog.listDimensionIndexCandidates(Math.min(8, dimensionIndexForegroundRemaining), null, foregroundAfterId, true)
+              : catalog.listDimensionIndexCandidates(2, null, globalAfterId);
+          if (!ids.length && priorityFolderId) {
+            priorityFolderId = null;
+            priorityAfterId = '';
+            ids = catalog.listDimensionIndexCandidates(2, null, globalAfterId);
+          }
           if (!ids.length) break;
-          afterId = ids.at(-1)!;
-          await Promise.allSettled(ids.map(async (id) => {
+          if (priorityFolderId) priorityAfterId = ids.at(-1)!;
+          else if (foregroundBatch) foregroundAfterId = ids.at(-1)!;
+          else globalAfterId = ids.at(-1)!;
+          if (foregroundBatch) dimensionIndexForegroundRemaining = Math.max(0, dimensionIndexForegroundRemaining - ids.length);
+          dimensionIndexPriorityFolderId = null;
+          const outcomes = await Promise.allSettled(ids.map(async (id) => {
             const details = await imageFiles.details(id);
-            catalog.saveExifDetails(id, details);
+            if (details.width && details.height) catalog.saveExifDetails(id, details);
           }));
-          processed += ids.length;
-          backgroundFileTasks.update(taskId, processed);
-          await new Promise<void>((resolve) => setImmediate(resolve));
+          processed += outcomes.filter((outcome) => outcome.status === 'fulfilled').length;
+          changesSinceCatalogEvent += outcomes.length;
+          backgroundFileTasks.update(taskId, processed, Math.max(initialRemaining, processed));
+          if (changesSinceCatalogEvent >= 32) {
+            changesSinceCatalogEvent = 0;
+            for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1', []);
+          }
+          await new Promise((resolve) => setTimeout(resolve, priorityFolderId || foregroundBatch ? 40 : 250));
         }
+        if (processed > 0) for (const window of BrowserWindow.getAllWindows()) window.webContents.send('catalog.changed.v1');
         backgroundFileTasks.finish(taskId);
       } catch (error) { backgroundFileTasks.finish(taskId, error); }
-      finally { exifIndexRunning = false; }
+      finally {
+        exifIndexRunning = false;
+        if (!shuttingDown && dimensionIndexPriorityFolderId) scheduleCatalogDimensionIndex(dimensionIndexPriorityFolderId);
+      }
     })();
   });
+}
+function scheduleSmartCollectionExifIndex(): void {
+  if (catalog.hasExifSmartCollections()) scheduleCatalogDimensionIndex();
 }
 
 function registerIpc(): void {
@@ -662,11 +688,14 @@ function registerIpc(): void {
   ipcMain.handle('catalog.assets.page.v1', async (_event, input: unknown) => {
     const settings = await appSettings.get();
     const parsed = listCatalogAssetsInputSchema.parse(input);
+    scheduleCatalogDimensionIndex(parsed.folderId, !parsed.folderId && !parsed.cursor);
     const page = await fileWorkflows.page({ ...parsed, mergeRawPairs: settings.mergeRawPairs && !parsed.assetIds });
-    scheduleVisibleDimensions(page.items.filter((item) => !item.width || !item.height).map((item) => item.id));
     return page;
   });
-  ipcMain.handle('catalog.folders.list.v1', async () => catalog.listFolders((await appSettings.get()).mergeRawPairs));
+  ipcMain.handle('catalog.folders.list.v1', async () => {
+    scheduleCatalogDimensionIndex();
+    return catalog.listFolders((await appSettings.get()).mergeRawPairs);
+  });
   ipcMain.handle('catalog.tags.list.v1', () => catalog.listTags());
   ipcMain.handle('catalog.tags.delete.v1', (_event, input: unknown) => {
     catalog.deleteTag(deleteCatalogTagInputSchema.parse(input));
@@ -1088,6 +1117,27 @@ function registerIpc(): void {
     if (shuttingDown) return [];
     return generation.list(assetId);
   });
+  ipcMain.handle('generation.results.page.v1', async (_event, input: unknown) => {
+    const assetIds = listGenerationResultsPageInputSchema.parse(input);
+    if (shuttingDown) return {};
+    const results = generation.listPage(assetIds);
+    const missing = Object.values(results).flat().filter((result) => !result.width || !result.height);
+    for (let offset = 0; offset < missing.length; offset += 6) {
+      await Promise.all(missing.slice(offset, offset + 6).map(async (result) => {
+        const filePath = generation.resolveResultFile(result.id);
+        if (!filePath) return;
+        const dimensions = await imageSizeFromFile(filePath).catch(() => null);
+        const rotated = dimensions?.orientation && [5, 6, 7, 8].includes(dimensions.orientation);
+        const width = rotated ? dimensions?.height : dimensions?.width;
+        const height = rotated ? dimensions?.width : dimensions?.height;
+        if (!width || !height) return;
+        result.width = width;
+        result.height = height;
+        generation.saveResultDimensions(result.id, width, height, false);
+      }));
+    }
+    return results;
+  });
   ipcMain.handle('generation.results.trash.list.v1', (_event, input: unknown) => {
     const { assetId } = listGenerationResultsInputSchema.parse(input);
     if (shuttingDown) return [];
@@ -1119,8 +1169,12 @@ function registerIpc(): void {
     const metadata = await stat(filePath);
     if (!metadata.isFile()) throw new Error('生成文件不可用');
     const dimensions = await imageSizeFromFile(filePath).catch(() => null);
+    const rotated = dimensions?.orientation && [5, 6, 7, 8].includes(dimensions.orientation);
+    const width = rotated ? dimensions?.height : dimensions?.width;
+    const height = rotated ? dimensions?.width : dimensions?.height;
+    if (width && height) generation.saveResultDimensions(resultId, width, height);
     return fileDetailsSchema.parse({ path: filePath, sizeBytes: metadata.size, modifiedAt: metadata.mtimeMs,
-      ...(dimensions?.width && dimensions.height ? { width: dimensions.width, height: dimensions.height } : {}) });
+      ...(width && height ? { width, height } : {}) });
   });
   ipcMain.handle('generation.results.export.v1', async (_event, input: unknown) => {
     const { resultIds, presetId } = exportGenerationResultsInputSchema.parse(input);
@@ -1331,7 +1385,7 @@ app.whenReady().then(async () => {
   appLocale = initialAppSettings.locale;
   databaseBackup = new DatabaseBackupService(databasePath);
   enterStartupStage('初始化图库');
-  catalog = new CatalogService(databasePath);
+  catalog = new CatalogService(databasePath, true);
   temporaryMediaIndex = new TemporaryMediaIndex();
   imageFiles = new ImageFileService(catalog, temporaryMediaIndex);
   fileWorkflows = new FileWorkflowService(join(app.getPath('userData'), 'settings', 'file-workflows.json'), catalog);
@@ -1373,7 +1427,12 @@ app.whenReady().then(async () => {
     join(libraryDirectory, 'generated'),
     providers,
     imageCache,
-    catalog
+    catalog,
+    undefined,
+    undefined,
+    (assetId) => {
+      for (const window of BrowserWindow.getAllWindows()) window.webContents.send('generation.results.changed.v1', assetId);
+    }
   );
   catalogWatcher.watchFolders(catalog.listFolderPaths());
   enterStartupStage('恢复中断的文件操作');
@@ -1447,6 +1506,10 @@ app.whenReady().then(async () => {
     const allowed = kind === 'original' ? session.assetIds.includes(id) : session.assetIds.some((assetId) => generation.list(assetId).some((r) => r.id === id));
     if (!allowed) throw new Error('图片超出会话范围');
     return agentVision.preview(id, kind);
+  }, async () => {
+    const window = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed() && !candidate.webContents.isLoading());
+    if (!window) return { available: false, reason: 'WINDOW_NOT_READY' };
+    return window.webContents.executeJavaScript(galleryInspectionScript);
   });
   void databaseBackup.createAutomatic(join(libraryDirectory, 'backups'))
     .then((result) => {
@@ -1622,6 +1685,7 @@ app.on('before-quit', (event) => {
       traceCrash('watcher-stop-done');
       const result = await settleBeforeShutdown([
         ...(imageCache ? [imageCache.stop().then(() => traceCrash('image-cache-stopped'))] : []),
+        ...(imageFiles ? [imageFiles.close()] : []),
         ...(taskRunner ? [taskRunner.stop()] : []),
         ...(agentRuntime ? [agentRuntime.stop()] : []),
         ...(agentMcp ? [agentMcp.stop()] : []),

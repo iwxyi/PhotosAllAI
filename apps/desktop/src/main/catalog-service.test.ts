@@ -477,6 +477,30 @@ describe('catalog image discovery', () => {
     catalog.close();
   });
 
+  it('counts unanalyzed visible assets once per asset when analysis has revisions', async () => {
+    const root = await createTemporaryDirectory();
+    const source = path.join(root, 'photos');
+    await mkdir(source);
+    await writeFile(path.join(source, 'one.jpg'), 'one');
+    await writeFile(path.join(source, 'two.jpg'), 'two');
+    const databasePath = path.join(root, 'catalog.sqlite');
+    const catalog = new CatalogService(databasePath);
+    try {
+      await catalog.importFolders([source]);
+      const assets = catalog.listAssets();
+      const database = new DatabaseSync(databasePath);
+      try {
+        database.exec('CREATE TABLE analysis_revisions (id TEXT PRIMARY KEY, asset_id TEXT NOT NULL)');
+        expect(catalog.listSmartCollections().find((item) => item.id === 'unanalyzed')?.assetCount).toBe(2);
+        database.prepare('INSERT INTO analysis_revisions (id, asset_id) VALUES (?, ?)').run('first', assets[0]!.id);
+        database.prepare('INSERT INTO analysis_revisions (id, asset_id) VALUES (?, ?)').run('second', assets[0]!.id);
+        expect(catalog.listSmartCollections().find((item) => item.id === 'unanalyzed')?.assetCount).toBe(1);
+        database.prepare('UPDATE assets SET offline_at = 1 WHERE id = ?').run(assets[1]!.id);
+        expect(catalog.listSmartCollections().find((item) => item.id === 'unanalyzed')?.assetCount).toBe(0);
+      } finally { database.close(); }
+    } finally { catalog.close(); }
+  });
+
   it('saves editable rules and follows folder renames and moves', async () => {
     const root = await createTemporaryDirectory();
     const source = path.join(root, 'photos');
@@ -653,8 +677,9 @@ describe('catalog image discovery', () => {
     try {
       expect(repaired.listSmartCollections()).toHaveLength(6);
       const verification = new DatabaseSync(databasePath);
-      expect(verification.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 });
+      expect(verification.prepare('PRAGMA user_version').get()).toEqual({ user_version: 17 });
       expect(verification.prepare("SELECT name FROM sqlite_master WHERE name = 'asset_exif'").get()).toEqual({ name: 'asset_exif' });
+      expect(verification.prepare('PRAGMA table_info(asset_exif)').all()).toContainEqual(expect.objectContaining({ name: 'dimension_version' }));
       verification.close();
     } finally { repaired.close(); }
   });
@@ -797,11 +822,47 @@ describe('catalog image discovery', () => {
       await catalog.importFolders([photos]);
       const asset = catalog.listAssetPage({}).items[0]!;
       catalog.saveExifDetails(asset.id, { path: path.join(photos, 'portrait.jpg'), sizeBytes: asset.sizeBytes, modifiedAt: asset.modifiedAt, width: 2000, height: 3000 });
+      catalog.saveDimensions(asset.id, 3000, 4000);
+      expect(catalog.currentDimensions([asset.id]).get(asset.id)).toEqual({ width: 3000, height: 4000 });
+      catalog.saveExifDetails(asset.id, { path: path.join(photos, 'portrait.jpg'), sizeBytes: asset.sizeBytes, modifiedAt: asset.modifiedAt, cameraMake: 'Canon' });
+      catalog.saveDimensions(asset.id, 2000, 3000);
       expect(catalog.listAssetPage({}).items[0]).toMatchObject({ width: 2000, height: 3000 });
+      expect(catalog.currentDimensions([asset.id]).get(asset.id)).toEqual({ width: 2000, height: 3000 });
       const database = new DatabaseSync(path.join(root, 'catalog.sqlite'));
+      expect(database.prepare('SELECT camera_make FROM asset_exif WHERE asset_id = ?').get(asset.id)).toEqual({ camera_make: 'Canon' });
       database.prepare('UPDATE assets SET modified_at = modified_at + 1 WHERE id = ?').run(asset.id);
       database.close();
       expect(catalog.listAssetPage({}).items[0]?.width).toBeUndefined();
+      expect(catalog.currentDimensions([asset.id]).has(asset.id)).toBe(false);
+    } finally { catalog.close(); }
+  });
+
+  it('reindexes legacy dimensions without clearing folder counts or visiting sibling folders', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    await mkdir(path.join(photos, 'selected'), { recursive: true });
+    await mkdir(path.join(photos, 'other'), { recursive: true });
+    await writeFile(path.join(photos, 'selected', 'portrait.jpg'), 'portrait');
+    await writeFile(path.join(photos, 'other', 'landscape.jpg'), 'landscape');
+    const databasePath = path.join(root, 'catalog.sqlite');
+    const first = new CatalogService(databasePath);
+    await first.importFolders([photos]);
+    const assets = first.listAssetPage({ limit: 10 }).items;
+    for (const asset of assets) first.saveDimensions(asset.id, 3000, 2000);
+    first.close();
+    const database = new DatabaseSync(databasePath);
+    database.exec('UPDATE asset_exif SET dimension_version = 0');
+    database.close();
+    const catalog = new CatalogService(databasePath, true);
+    try {
+      const selected = catalog.listFolders().find((folder) => folder.name === 'selected')!;
+      const portrait = assets.find((asset) => asset.fileName === 'portrait.jpg')!;
+      expect(selected.assetCount).toBe(1);
+      expect(catalog.listAssetPage({ folderId: selected.id }).totalCount).toBe(0);
+      expect(catalog.listDimensionIndexCandidates(10, selected.id)).toEqual([portrait.id]);
+      catalog.saveDimensions(portrait.id, 2000, 3000);
+      expect(catalog.listAssetPage({ folderId: selected.id }).items[0]).toMatchObject({ width: 2000, height: 3000 });
+      expect(catalog.listFolders().find((folder) => folder.name === 'selected')?.assetCount).toBe(1);
     } finally { catalog.close(); }
   });
 

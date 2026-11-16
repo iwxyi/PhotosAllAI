@@ -15,7 +15,7 @@ import type { AgentTool } from './agent-tools';
 const cleanup: (() => Promise<void>)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
 
-async function fixture() {
+async function fixture(inspectGallery?: () => Promise<unknown>) {
   const root = await mkdtemp(join(tmpdir(), 'photo-mcp-'));
   const write = vi.fn(); const model = vi.fn();
   const tools: AgentTool[] = [
@@ -28,7 +28,7 @@ async function fixture() {
   ];
   const runtime = new AgentRuntime(new AgentStore(join(root, 'catalog.sqlite')), { next: model }, tools);
   const preview = vi.fn(async (session, _kind: string, id: string) => { if (!session.assetIds.includes(id)) throw new Error('OUT_OF_SCOPE'); return Buffer.from('test image').toString('base64'); });
-  const server = new AgentMcpServer(runtime, preview);
+  const server = new AgentMcpServer(runtime, preview, inspectGallery);
   const status = await server.setEnabled(true);
   cleanup.push(async () => { await server.setEnabled(false); await runtime.stop(); runtime.close(); await rm(root, { recursive: true, force: true }); });
   const connect = async () => {
@@ -49,6 +49,17 @@ function parseSession(result: unknown) {
 }
 
 describe('application MCP', () => {
+  it('exposes the current painted gallery through a read-only inspection tool', async () => {
+    const inspect = vi.fn(async () => ({ available: true, mountedCount: 1, images: [{ fileName: 'portrait.jpg', frame: { width: 120, height: 180 } }] }));
+    const f = await fixture(inspect);
+    const listed = await f.client.listTools();
+    expect(listed.tools.map((tool) => tool.name)).toContain('gallery.inspect');
+    const result = await f.client.callTool({ name: 'gallery.inspect', arguments: {} });
+    expect(result.isError).not.toBe(true);
+    expect(JSON.parse((result.content as Array<{ text: string }>)[0]!.text)).toMatchObject({ images: [{ frame: { width: 120, height: 180 } }] });
+    expect(inspect).toHaveBeenCalledOnce();
+    expect(f.model).not.toHaveBeenCalled();
+  });
   it('keeps a paused external session paused until explicitly resumed', async () => {
     const f = await fixture();
     await f.client.callTool({ name: 'sessions.control', arguments: { sessionId: f.session.id, action: 'pause' } });

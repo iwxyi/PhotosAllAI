@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { access, copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { imageSize } from 'image-size';
 
 import {
   generationResultSchema,
@@ -42,6 +43,8 @@ type ResultRow = {
   version: number;
   file_name: string;
   file_path: string;
+  width: number | null;
+  height: number | null;
   prompt: string;
   provider_profile_id: string;
   template_id: string | null;
@@ -84,6 +87,20 @@ const MAX_PROVIDER_RESPONSE_BYTES = 75 * 1024 * 1024;
 const GENERATION_TIMEOUT_MS = 5 * 60 * 1_000;
 const DOWNLOAD_TIMEOUT_MS = 60 * 1_000;
 
+function safeImageDimensions(bytes: Uint8Array): { width?: number; height?: number } {
+  try {
+    const dimensions = imageSize(bytes);
+    if (!dimensions.width || !dimensions.height) return {};
+    return dimensions.orientation && [5, 6, 7, 8].includes(dimensions.orientation)
+      ? { width: dimensions.height, height: dimensions.width }
+      : { width: dimensions.width, height: dimensions.height };
+  } catch {
+    // A provider response can pass the format signature check while still
+    // being a fixture or an image type without a supported dimension parser.
+    return {};
+  }
+}
+
 export class GenerationService {
   readonly #database: DatabaseSync;
   readonly #generatedDirectory: string;
@@ -93,6 +110,7 @@ export class GenerationService {
   readonly #catalog: CatalogSource;
   readonly #publishTemporaryFile: TemporaryFilePublisher;
   readonly #moveFile: VerifiedFileMover;
+  readonly #onResultChanged: (assetId: string) => void;
 
   constructor(
     databasePath: string,
@@ -101,8 +119,10 @@ export class GenerationService {
     images: GenerationImageSource,
     catalog: CatalogSource,
     publishTemporaryFile: TemporaryFilePublisher = publishTemporaryFileSafely,
-    moveFile: VerifiedFileMover = moveFileVerified
+    moveFile: VerifiedFileMover = moveFileVerified,
+    onResultChanged: (assetId: string) => void = () => undefined
   ) {
+    this.#onResultChanged = onResultChanged;
     this.#generatedDirectory = generatedDirectory;
     this.#trashDirectory = path.resolve(path.dirname(generatedDirectory), 'trash', 'generation');
     this.#providers = providers;
@@ -165,6 +185,8 @@ export class GenerationService {
       this.#database.exec('ALTER TABLE generation_results ADD COLUMN task_id TEXT');
     }
     if (!columns.some((column) => column.name === 'output_folder_id')) this.#database.exec('ALTER TABLE generation_results ADD COLUMN output_folder_id TEXT');
+    if (!columns.some((column) => column.name === 'width')) this.#database.exec('ALTER TABLE generation_results ADD COLUMN width REAL');
+    if (!columns.some((column) => column.name === 'height')) this.#database.exec('ALTER TABLE generation_results ADD COLUMN height REAL');
     this.#database.exec('CREATE UNIQUE INDEX IF NOT EXISTS generation_result_task_idx ON generation_results(task_id) WHERE task_id IS NOT NULL');
     const intentColumns = this.#database.prepare('PRAGMA table_info(generation_write_intents)').all() as { name: string }[];
     if (!intentColumns.some((column) => column.name === 'task_id')) {
@@ -184,6 +206,21 @@ export class GenerationService {
     `).all(assetId) as ResultRow[]).map((row) => this.#toResult(row));
   }
 
+  listPage(assetIds: readonly string[]): Record<string, GenerationResult[]> {
+    const result: Record<string, GenerationResult[]> = {};
+    for (const assetId of assetIds) result[assetId] = [];
+    for (let offset = 0; offset < assetIds.length; offset += 400) {
+      const ids = assetIds.slice(offset, offset + 400);
+      const placeholders = ids.map(() => '?').join(',');
+      const rows = this.#database.prepare(`
+        SELECT * FROM generation_results WHERE asset_id IN (${placeholders}) AND trashed_at IS NULL
+        ORDER BY asset_id, version DESC
+      `).all(...ids) as ResultRow[];
+      for (const row of rows) result[row.asset_id]!.push(this.#toResult(row));
+    }
+    return result;
+  }
+
   listTrashed(assetId: string): TrashedGenerationResult[] {
     return (this.#database.prepare(`
       SELECT * FROM generation_results WHERE asset_id = ? AND trashed_at IS NOT NULL ORDER BY trashed_at DESC
@@ -196,6 +233,14 @@ export class GenerationService {
   resolveResultFile(resultId: string): string | null {
     const row = this.#database.prepare('SELECT file_path FROM generation_results WHERE id = ? AND trashed_at IS NULL').get(resultId) as { file_path: string } | undefined;
     return row?.file_path ?? null;
+  }
+
+  saveResultDimensions(resultId: string, width: number, height: number, notify = true): void {
+    if (!(width > 0 && height > 0)) return;
+    const row = this.#database.prepare('SELECT asset_id FROM generation_results WHERE id = ? AND trashed_at IS NULL').get(resultId) as { asset_id?: string } | undefined;
+    const updated = this.#database.prepare('UPDATE generation_results SET width = ?, height = ? WHERE id = ? AND trashed_at IS NULL')
+      .run(width, height, resultId);
+    if (notify && updated.changes && row?.asset_id) this.#onResultChanged(row.asset_id);
   }
 
   resolveResultOriginalName(resultId: string): string | null {
@@ -251,6 +296,7 @@ export class GenerationService {
       }
       throw error;
     }
+    this.#onResultChanged(row.asset_id);
     return trashedGenerationResultSchema.parse({ ...this.#toResult(row), trashedAt });
   }
 
@@ -285,6 +331,7 @@ export class GenerationService {
       throw error;
     }
     await rmdir(path.dirname(row.trash_path)).catch(() => undefined);
+    this.#onResultChanged(row.asset_id);
     return this.#toResult({ ...row, trashed_at: null, trash_path: null });
   }
 
@@ -572,6 +619,7 @@ export class GenerationService {
       throw error;
     }
     const updated = this.#database.prepare('SELECT * FROM generation_results WHERE id = ?').get(input.resultId) as ResultRow;
+    this.#onResultChanged(row.asset_id);
     return this.#toResult(updated);
   }
 
@@ -634,6 +682,7 @@ export class GenerationService {
       if (error instanceof Error) Object.assign(error, { generationOutcomeUncertain: true });
       throw error;
     }
+    const dimensions = safeImageDimensions(bytes);
     const id = randomUUID();
     const maximum = this.#database.prepare(`
       SELECT COALESCE(MAX(version), 0) AS value FROM generation_results WHERE asset_id = ?
@@ -663,11 +712,12 @@ export class GenerationService {
       this.#database.prepare(`
         INSERT INTO generation_results (
           id, task_id, asset_id, batch_id, version, file_name, file_path, prompt,
-          provider_profile_id, template_id, template_version, storage_mode, input_sources, created_at, output_folder_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+          provider_profile_id, template_id, template_version, storage_mode, input_sources, created_at, output_folder_id, width, height
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
       `).run(
         id, requestId ?? null, assetId, payload.batchId, version, fileName, filePath, payload.prompt,
-        payload.providerProfileId, payload.templateId, payload.templateVersion, payload.storageMode, JSON.stringify(inputSources), createdAt
+        payload.providerProfileId, payload.templateId, payload.templateVersion, payload.storageMode, JSON.stringify(inputSources), createdAt,
+        dimensions.width ?? null, dimensions.height ?? null
       );
       await this.#writeManifest(batchDirectory, assetId, payload.batchId, provider.profile, payload.storageMode);
       if (this.#database.prepare('DELETE FROM generation_write_intents WHERE result_id = ?').run(id).changes !== 1) {
@@ -688,13 +738,16 @@ export class GenerationService {
       throw error;
     }
 
-    return generationResultSchema.parse({
+    const result = generationResultSchema.parse({
       id, assetId, batchId: payload.batchId, inputSources, version, fileName,
+      ...(dimensions.width && dimensions.height ? { width: dimensions.width, height: dimensions.height } : {}),
       resultUrl: `photoresult://result/${id}`, prompt: payload.prompt,
       providerProfileId: payload.providerProfileId, templateId: payload.templateId,
       templateVersion: payload.templateVersion, storageMode: payload.storageMode,
       reviewState: 'undecided', createdAt
     });
+    this.#onResultChanged(assetId);
+    return result;
   }
 
   async #generateFromPrompt(
@@ -731,6 +784,7 @@ export class GenerationService {
       if (error instanceof Error) Object.assign(error, { generationOutcomeUncertain: true });
       throw error;
     }
+    const dimensions = safeImageDimensions(bytes);
     const id = randomUUID();
     const shortId = (requestId ?? id).replaceAll('-', '').slice(0, 8).toUpperCase();
     const fileName = `AI_${new Date().toISOString().replace(/[-:.TZ]/gu, '').slice(0, 14)}_${shortId}.${format}`;
@@ -753,17 +807,20 @@ export class GenerationService {
       this.#database.prepare(`
         INSERT INTO generation_results (
           id, task_id, asset_id, batch_id, version, file_name, file_path, prompt,
-          provider_profile_id, template_id, template_version, storage_mode, input_sources, created_at, output_folder_id
-        ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'managed', ?, ?, ?)
+          provider_profile_id, template_id, template_version, storage_mode, input_sources, created_at, output_folder_id, width, height
+        ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'managed', ?, ?, ?, ?, ?)
       `).run(id, requestId ?? null, outputAssetId, payload.batchId, fileName, filePath, payload.prompt,
-        payload.providerProfileId, payload.templateId, payload.templateVersion, JSON.stringify(inputSources), createdAt, folderId);
+        payload.providerProfileId, payload.templateId, payload.templateVersion, JSON.stringify(inputSources), createdAt, folderId,
+        dimensions.width ?? null, dimensions.height ?? null);
       if (this.#database.prepare('DELETE FROM generation_write_intents WHERE result_id = ?').run(id).changes !== 1) throw new Error('GENERATION_WRITE_INTENT_CONCURRENT_CHANGE');
-      return generationResultSchema.parse({
+      const result = generationResultSchema.parse({
         id, assetId: outputAssetId, batchId: payload.batchId, inputSources, outputFolderId: folderId,
-        version: 1, fileName, resultUrl: `photoresult://result/${id}`, prompt: payload.prompt,
+        version: 1, fileName, ...(dimensions.width && dimensions.height ? { width: dimensions.width, height: dimensions.height } : {}), resultUrl: `photoresult://result/${id}`, prompt: payload.prompt,
         providerProfileId: payload.providerProfileId, templateId: payload.templateId,
         templateVersion: payload.templateVersion, storageMode: 'managed', reviewState: 'undecided', createdAt
       });
+      this.#onResultChanged(outputAssetId);
+      return result;
     } catch (error) {
       if (!published) {
         await unlink(temporaryPath).catch(() => undefined);
@@ -844,7 +901,7 @@ export class GenerationService {
     return generationResultSchema.parse({
       id: row.id, assetId: row.asset_id, batchId: row.batch_id, inputSources: row.input_sources ? JSON.parse(row.input_sources) as unknown : [{ kind: 'asset', assetId: row.asset_id }], version: row.version,
       ...(row.output_folder_id ? { outputFolderId: row.output_folder_id } : {}),
-      fileName: row.file_name, resultUrl: `photoresult://result/${row.id}`,
+      fileName: row.file_name, ...(row.width && row.height ? { width: row.width, height: row.height } : {}), resultUrl: `photoresult://result/${row.id}`,
       prompt: row.prompt, providerProfileId: row.provider_profile_id,
       templateId: row.template_id, templateVersion: row.template_version, reviewState: row.review_state, createdAt: row.created_at
       , storageMode: row.storage_mode

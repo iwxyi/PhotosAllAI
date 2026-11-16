@@ -1,18 +1,19 @@
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile as nodeExecFile } from 'node:child_process';
-import { tmpdir } from 'node:os';
+import { availableParallelism, tmpdir } from 'node:os';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { promisify } from 'node:util';
 import path from 'node:path';
-
 import { nativeImage } from 'electron';
 import sharp from 'sharp';
+import { ExifTool } from 'exiftool-vendored';
 
 import type { CatalogService } from './catalog-service';
 import { publishTemporaryFileSafely } from './safe-file-write';
 import { PreviewWorkQueue, type PreviewPriority } from './preview-work-queue';
 import { identifyMediaFormat } from './media-format-registry';
+import { exifOrientation } from './exif-orientation';
 
 export type ImageVariant = 'thumbnail' | 'medium' | 'preview';
 type DecoderCapabilities = { imageMagick: boolean; sips: boolean };
@@ -29,11 +30,12 @@ export class ImageCacheService {
   readonly #inFlight = new Map<string, Promise<string>>();
   readonly #inFlightConsumers = new Map<string, number>();
   readonly #eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
-  readonly #decodeQueue = new PreviewWorkQueue(2, 128, 64);
+  readonly #decodeQueue = new PreviewWorkQueue(Math.min(4, Math.max(2, Math.floor(availableParallelism() / 2))), 128, 64);
   readonly #cacheDirectory: string;
   readonly #catalog: CatalogService;
   readonly #decoderProbe: DecoderProbe;
   #decoderAvailability: Promise<DecoderCapabilities> | null = null;
+  #exiftool: ExifTool | null = null;
   #maxBytes: number;
   #pruneQueue: Promise<void> = Promise.resolve();
   #pruneTimer: ReturnType<typeof setTimeout> | null = null;
@@ -339,6 +341,8 @@ export class ImageCacheService {
     this.#pruneTimer = null;
     await this.#decodeQueue.close();
     await Promise.allSettled([...this.#inFlight.values(), this.#pruneQueue]);
+    await this.#exiftool?.end();
+    this.#exiftool = null;
   }
 
   #schedulePrune(): void {
@@ -366,6 +370,11 @@ export class ImageCacheService {
     let image: Electron.NativeImage | null = null;
     let encoded: Buffer | null = null;
     const format = identifyMediaFormat(sourcePath);
+    if (format?.id === 'raw' && specification.width <= variants.medium.width) {
+      const rawPreviewStartedAt = performance.now();
+      encoded = await this.#decodeRawPreview(sourcePath, specification);
+      this.#externalDecodeMsTotal += performance.now() - rawPreviewStartedAt;
+    }
     if (format?.kind === 'image' && format.id !== 'raw') {
       const externalStartedAt = performance.now();
       encoded = await this.#decodeWithSharp(sourcePath, specification);
@@ -434,6 +443,33 @@ export class ImageCacheService {
     });
     this.#cacheWriteMsTotal += performance.now() - writeStartedAt;
     return result;
+  }
+
+  async #decodeRawPreview(sourcePath: string, specification: { width: number; height: number; quality: number }): Promise<Buffer | null> {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-raw-preview-'));
+    const previewPath = path.join(directory, 'preview.jpg');
+    try {
+      this.#exiftool ??= new ExifTool({ maxProcs: 2 });
+      await this.#exiftool.extractPreview(sourcePath, previewPath);
+      const tags = await this.#exiftool.read(sourcePath, { readArgs: ['-fast2'] });
+      const orientation = exifOrientation(tags.Orientation);
+      const rotation = orientation === 3 ? 180 : orientation === 5 || orientation === 6 ? 90 : orientation === 7 || orientation === 8 ? 270 : 0;
+      let image = sharp(previewPath, { failOn: 'none' });
+      if (rotation) image = image.rotate(rotation);
+      if (orientation === 2 || orientation === 5 || orientation === 7) image = image.flop();
+      if (orientation === 4) image = image.flip();
+      return await image.resize({
+        width: specification.width,
+        height: specification.height,
+        fit: 'inside',
+        withoutEnlargement: true,
+        kernel: 'lanczos3'
+      }).jpeg({ quality: specification.quality, mozjpeg: true }).toBuffer();
+    } catch {
+      return null;
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 
   async #decodeWithExternalTools(sourcePath: string, destination: string, specification: { width: number; height: number; quality: number }): Promise<Buffer | null> {

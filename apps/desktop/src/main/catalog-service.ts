@@ -139,6 +139,7 @@ async function* walkImages(root: string, strict = false): AsyncGenerator<string>
 
 export class CatalogService {
   readonly #database: DatabaseSync;
+  readonly #requireIndexedDimensions: boolean;
   readonly #countCache = new Map<string, number>();
   #countCacheVersion = '';
   #folderCache: CatalogFolder[] | null = null;
@@ -148,8 +149,9 @@ export class CatalogService {
   #directoryLookup = new Map<string, { rootId: string; rootPath: string; relativePath: string }>();
   #externalRelocations: RelinkCatalogFolderOperationResult['relocations'] = [];
 
-  constructor(databasePath: string) {
+  constructor(databasePath: string, requireIndexedDimensions = false) {
     this.#database = new DatabaseSync(databasePath);
+    this.#requireIndexedDimensions = requireIndexedDimensions;
     this.#database.function('smart_regexp', (pattern: unknown, candidate: unknown) =>
       typeof pattern === 'string' && typeof candidate === 'string' && validateSmartRegex(pattern).test(candidate) ? 1 : 0);
     this.#database.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
@@ -356,7 +358,8 @@ export class CatalogService {
         CREATE TABLE IF NOT EXISTS asset_exif (
           asset_id TEXT PRIMARY KEY REFERENCES assets(id) ON DELETE CASCADE,
           source_size INTEGER NOT NULL, source_modified_at INTEGER NOT NULL,
-          width REAL, height REAL, camera_make TEXT, camera_model TEXT,
+          width REAL, height REAL, dimension_version INTEGER NOT NULL DEFAULT 0,
+          camera_make TEXT, camera_model TEXT,
           lens_make TEXT, lens_model TEXT, city TEXT, country TEXT,
           taken_at INTEGER, exposure_seconds REAL, aperture REAL, focal_length REAL, iso REAL
         );
@@ -378,6 +381,25 @@ export class CatalogService {
         CREATE INDEX IF NOT EXISTS assets_browse_all_natural_name_asc_idx ON assets(name_sort_key ASC, id ASC) WHERE removed_at IS NULL;
         CREATE INDEX IF NOT EXISTS assets_browse_all_natural_name_desc_idx ON assets(name_sort_key DESC, id ASC) WHERE removed_at IS NULL;
         PRAGMA user_version = 15;
+        COMMIT;
+      `);
+    }
+    const dimensionVersion = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    const hasDimensionVersion = (this.#database.prepare('PRAGMA table_info(asset_exif)').all() as Array<{ name: string }>).some((column) => column.name === 'dimension_version');
+    if (dimensionVersion.user_version < 16 || !hasDimensionVersion) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        ${hasDimensionVersion ? '' : 'ALTER TABLE asset_exif ADD COLUMN dimension_version INTEGER NOT NULL DEFAULT 0;'}
+        ${dimensionVersion.user_version < 16 ? 'PRAGMA user_version = 16;' : ''}
+        COMMIT;
+      `);
+    }
+    if (dimensionVersion.user_version < 17) {
+      this.#database.exec(`
+        BEGIN IMMEDIATE;
+        UPDATE asset_exif SET dimension_version = 0
+        WHERE asset_id IN (SELECT id FROM assets WHERE lower(extension) IN ('mp4', 'm4v', 'mov', 'webm'));
+        PRAGMA user_version = 17;
         COMMIT;
       `);
     }
@@ -448,20 +470,66 @@ export class CatalogService {
     return (this.#database.prepare('SELECT revision FROM folder_tree_revision WHERE id = 1').get() as { revision: number }).revision;
   }
 
-  #countAssets(where: string, values: (string | number)[], indexName?: string): number {
+  #applyIndexedFolderCount(assetId: string): void {
+    if (!this.#folderCache && !this.#mergedFolderCache) return;
+    const asset = this.#database.prepare(`
+      SELECT assets.folder_id, assets.path, assets.offline_at, assets.extension, folders.path AS root_path
+      FROM assets JOIN folders ON folders.id = assets.folder_id
+      WHERE assets.id = ? AND assets.removed_at IS NULL
+    `).get(assetId) as { folder_id: string; path: string; offline_at: number | null; extension: string; root_path: string } | undefined;
+    if (!asset) return;
+    const relative = path.relative(asset.root_path, path.dirname(asset.path));
+    const ids = [asset.folder_id];
+    if (relative && relative !== '.' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) {
+      const parts = relative.split(path.sep).filter(Boolean);
+      for (let depth = 1; depth <= parts.length; depth += 1) ids.push(stableDirectoryId(asset.folder_id, parts.slice(0, depth).join(path.sep)));
+    }
+    const add = (folders: CatalogFolder[] | null, count: number, merged: boolean) => {
+      if (!folders || count === 0) return;
+      const byId = new Map(folders.map((folder) => [folder.id, folder]));
+      if (ids.some((id) => !byId.has(id))) {
+        if (merged) this.#mergedFolderCache = null;
+        else this.#folderCache = null;
+        return;
+      }
+      for (const id of ids) {
+        const folder = byId.get(id);
+        if (!folder) continue;
+        folder.assetCount += count;
+        if (asset.offline_at !== null) folder.offlineCount += count;
+      }
+    };
+    add(this.#folderCache, 1, false);
+    const isRaw = RAW_EXTENSIONS_SQL.includes(`'${asset.extension.toLowerCase()}'`);
+    const hasPreview = isRaw && Boolean(this.#database.prepare(`
+      SELECT 1 FROM assets AS companion WHERE companion.removed_at IS NULL AND companion.offline_at IS NULL
+        AND companion.folder_id = ? AND companion.extension COLLATE NOCASE IN (${CAMERA_PREVIEW_EXTENSIONS_SQL})
+        AND lower(substr(companion.path, 1, length(companion.path) - length(companion.extension))) =
+          lower(substr(?, 1, length(?) - length(?))) LIMIT 1
+    `).get(asset.folder_id, asset.path, asset.path, asset.extension));
+    add(this.#mergedFolderCache, isRaw && hasPreview ? 0 : 1, true);
+  }
+
+  #countAssets(where: string, values: (string | number)[], indexName?: string, indexedFirst = false): number {
     const version = this.#databaseVersion();
     if (this.#countCacheVersion !== version) {
       this.#countCache.clear();
       this.#countCacheVersion = version;
     }
-    const key = JSON.stringify([where, values, indexName]);
+    const key = JSON.stringify([where, values, indexName, indexedFirst]);
     const cached = this.#countCache.get(key);
     if (cached !== undefined) {
       this.#countCache.delete(key);
       this.#countCache.set(key, cached);
       return cached;
     }
-    const row = this.#database.prepare(`SELECT COUNT(*) AS value FROM assets ${indexName ? `INDEXED BY ${indexName}` : ''} ${where}`).get(...values) as { value: number };
+    const from = indexedFirst
+      ? `asset_exif indexed_dimensions CROSS JOIN assets INDEXED BY sqlite_autoindex_assets_1
+          ON assets.id = indexed_dimensions.asset_id AND indexed_dimensions.source_size = assets.size_bytes
+          AND indexed_dimensions.source_modified_at = assets.modified_at AND indexed_dimensions.width > 0
+          AND indexed_dimensions.height > 0 AND indexed_dimensions.dimension_version = 1`
+      : `assets ${indexName ? `INDEXED BY ${indexName}` : ''}`;
+    const row = this.#database.prepare(`SELECT COUNT(*) AS value FROM ${from} ${where}`).get(...values) as { value: number };
     this.#countCache.set(key, row.value);
     if (this.#countCache.size > COUNT_CACHE_LIMIT) this.#countCache.delete(this.#countCache.keys().next().value!);
     return row.value;
@@ -544,7 +612,18 @@ export class CatalogService {
     const baseConditions: string[] = ['removed_at IS NULL'];
     const baseValues: (string | number)[] = [];
     let pathScopedFolder = false;
-    if (!input.assetIds) baseConditions.push('offline_at IS NULL');
+    const indexedDimensionsCondition = `EXISTS (
+        SELECT 1 FROM asset_exif indexed_dimensions
+        WHERE indexed_dimensions.asset_id = assets.id
+          AND indexed_dimensions.source_size = assets.size_bytes
+          AND indexed_dimensions.source_modified_at = assets.modified_at
+          AND indexed_dimensions.width > 0 AND indexed_dimensions.height > 0
+          AND indexed_dimensions.dimension_version = 1
+      )`;
+    if (!input.assetIds) {
+      baseConditions.push('offline_at IS NULL');
+      if (this.#requireIndexedDimensions) baseConditions.push(indexedDimensionsCondition);
+    }
     if (input.mergeRawPairs && !input.assetIds) baseConditions.push(`NOT (${pairedRawSql})`);
     if (input.assetIds) {
       baseConditions.push(`id IN (${input.assetIds.map(() => '?').join(',')})`);
@@ -670,24 +749,32 @@ export class CatalogService {
     const plainCatalog = baseConditions.length === 2 && baseConditions[1] === 'offline_at IS NULL';
     const browseField = input.sortBy === 'fileName' ? 'name' : input.sortBy === 'rating' ? 'rating' : 'modified';
     const browseDirection = direction === 'asc' ? 'asc' : 'desc';
+    const broadIndexedCatalog = this.#requireIndexedDimensions && !input.assetIds && !input.folderId
+      && input.folderIds.length === 0 && !input.tagId && !input.albumId
+      && (!input.smartCollection || input.smartCollection === 'recent')
+      && !input.mergeRawPairs && !input.favoriteOnly && !input.query.trim()
+      && !input.formats.length && !input.months.length && !input.flags.length && !input.colors.length
+      && input.minimumRating === null && input.dateFrom === null && input.dateTo === null;
     const browseIndex = plainFolder
       ? input.sortBy === 'fileName' ? `assets_browse_natural_name_${browseDirection}_idx` : `assets_browse_${browseField}_${browseDirection}_idx`
-      : plainCatalog
+      : plainCatalog || broadIndexedCatalog
         ? input.sortBy === 'fileName' ? `assets_browse_all_natural_name_${browseDirection}_idx` : `assets_browse_all_${browseField}_${browseDirection}_idx`
         : null;
     const indexedBy = pathScopedFolder ? 'INDEXED BY sqlite_autoindex_assets_2' : browseIndex ? `INDEXED BY ${browseIndex}` : '';
     const rows = this.#database.prepare(`
       SELECT id, folder_id, path, file_name, extension, size_bytes, modified_at, rating, label_color, flag, favorite, offline_at,
-        (SELECT width FROM asset_exif WHERE asset_id = assets.id AND source_size = assets.size_bytes AND source_modified_at = assets.modified_at) AS width,
-        (SELECT height FROM asset_exif WHERE asset_id = assets.id AND source_size = assets.size_bytes AND source_modified_at = assets.modified_at) AS height
+        (SELECT width FROM asset_exif WHERE asset_id = assets.id AND source_size = assets.size_bytes AND source_modified_at = assets.modified_at AND dimension_version = 1) AS width,
+        (SELECT height FROM asset_exif WHERE asset_id = assets.id AND source_size = assets.size_bytes AND source_modified_at = assets.modified_at AND dimension_version = 1) AS height
       FROM assets ${indexedBy} ${where}
       ORDER BY ${orderBy}
       LIMIT ? ${input.offset === undefined ? '' : 'OFFSET ?'}
     `).all(...values, input.limit + 1, ...(input.offset === undefined ? [] : [input.offset])) as AssetRow[];
     const hasMore = rows.length > input.limit;
     const pageRows = hasMore ? rows.slice(0, input.limit) : rows;
-    const countWhere = baseConditions.length > 0 ? `WHERE ${baseConditions.join(' AND ')}` : '';
-    const totalCount = this.#countAssets(countWhere, baseValues, pathScopedFolder ? 'sqlite_autoindex_assets_2' : undefined);
+    const indexedFirst = this.#requireIndexedDimensions && !input.assetIds && !input.folderId && input.folderIds.length === 0 && !input.tagId && !input.albumId;
+    const countConditions = indexedFirst ? baseConditions.filter((condition) => condition !== indexedDimensionsCondition) : baseConditions;
+    const countWhere = countConditions.length > 0 ? `WHERE ${countConditions.join(' AND ')}` : '';
+    const totalCount = this.#countAssets(countWhere, baseValues, pathScopedFolder ? 'sqlite_autoindex_assets_2' : undefined, indexedFirst);
     const last = pageRows.at(-1);
     const sortValue = last
       ? input.sortBy === 'fileName'
@@ -722,7 +809,11 @@ export class CatalogService {
       const version = this.#folderTreeVersion();
       if (this.#mergedFolderCache && this.#mergedFolderCacheVersion === version) return this.#mergedFolderCache;
       const folders = this.listFolders();
-      const paired = this.#database.prepare(`SELECT folder_id, path, offline_at FROM assets WHERE removed_at IS NULL AND ${pairedRawSql}`)
+      const paired = this.#database.prepare(`SELECT assets.folder_id, assets.path, assets.offline_at FROM assets
+        ${this.#requireIndexedDimensions ? `JOIN asset_exif ON asset_exif.asset_id = assets.id
+          AND asset_exif.source_size = assets.size_bytes AND asset_exif.source_modified_at = assets.modified_at
+          AND asset_exif.width > 0 AND asset_exif.height > 0` : ''}
+        WHERE assets.removed_at IS NULL AND ${pairedRawSql}`)
         .all() as Array<{ folder_id: string; path: string; offline_at: number | null }>;
       const reductions = new Map<string, { total: number; offline: number }>();
       const roots = new Map(folders.filter((folder) => folder.isRoot).map((folder) => [folder.id, this.resolveFolderPath(folder.id)]));
@@ -753,12 +844,21 @@ export class CatalogService {
       ORDER BY name COLLATE NOCASE ASC, id ASC
     `).all() as { id: string; path: string; name: string }[];
     const rootCounts = new Map((this.#database.prepare(`
-      SELECT folder_id, COUNT(*) AS asset_count,
-        SUM(CASE WHEN offline_at IS NOT NULL THEN 1 ELSE 0 END) AS offline_count
-      FROM assets WHERE removed_at IS NULL GROUP BY folder_id
+      SELECT assets.folder_id, COUNT(*) AS asset_count,
+        SUM(CASE WHEN assets.offline_at IS NOT NULL THEN 1 ELSE 0 END) AS offline_count
+      FROM assets ${this.#requireIndexedDimensions ? `JOIN asset_exif ON asset_exif.asset_id = assets.id
+        AND asset_exif.source_size = assets.size_bytes
+        AND asset_exif.source_modified_at = assets.modified_at
+        AND asset_exif.width > 0 AND asset_exif.height > 0` : ''}
+      WHERE assets.removed_at IS NULL GROUP BY assets.folder_id
     `).all() as { folder_id: string; asset_count: number; offline_count: number }[])
       .map((row) => [row.folder_id, row]));
-    const paths = this.#database.prepare('SELECT path, offline_at FROM assets WHERE folder_id = ? AND removed_at IS NULL');
+    const paths = this.#database.prepare(`SELECT assets.path, assets.offline_at FROM assets
+      ${this.#requireIndexedDimensions ? `JOIN asset_exif ON asset_exif.asset_id = assets.id
+        AND asset_exif.source_size = assets.size_bytes
+        AND asset_exif.source_modified_at = assets.modified_at
+        AND asset_exif.width > 0 AND asset_exif.height > 0` : ''}
+      WHERE assets.folder_id = ? AND assets.removed_at IS NULL`);
     const result: CatalogFolder[] = [];
     const lookup = new Map<string, { rootId: string; rootPath: string; relativePath: string }>();
     for (const root of roots) {
@@ -1291,9 +1391,18 @@ export class CatalogService {
     return rows.map((row) => {
       const rule = smartCollectionRuleSchema.parse(JSON.parse(row.rule_json));
       const { sql, values } = this.#compileSmartCollection(rule);
-      const count = this.#database.prepare(`SELECT COUNT(*) AS value FROM assets WHERE removed_at IS NULL AND offline_at IS NULL AND (${sql})`).get(...values) as { value: number };
+      const onlyUnanalyzed = rule.scope.all && !rule.scope.favorites && !rule.scope.folders && !rule.scope.albums
+        && rule.scope.folderIds.length === 0 && rule.scope.albumIds.length === 0 && rule.match === 'all'
+        && rule.conditions.length === 1 && rule.conditions[0]?.field === 'analyzed'
+        && rule.conditions[0].operator === 'eq' && rule.conditions[0].value === false;
+      const count = onlyUnanalyzed
+        ? this.#countAssets('WHERE removed_at IS NULL AND offline_at IS NULL', []) - (this.#tableExists('analysis_revisions')
+          ? (this.#database.prepare(`SELECT COUNT(DISTINCT assets.id) AS value FROM analysis_revisions
+              CROSS JOIN assets ON assets.id = analysis_revisions.asset_id
+              WHERE assets.removed_at IS NULL AND assets.offline_at IS NULL`).get() as { value: number }).value : 0)
+        : (this.#database.prepare(`SELECT COUNT(*) AS value FROM assets WHERE removed_at IS NULL AND offline_at IS NULL AND (${sql})`).get(...values) as { value: number }).value;
       if (rule.conditions.some((condition) => EXIF_FIELDS.has(condition.field)) && missingExif === null) missingExif = this.listExifIndexCandidates(1).length > 0;
-      return catalogSmartCollectionSchema.parse({ id: row.id, name: row.name, rule, assetCount: count.value, isDefault: Boolean(row.is_default), indexing: rule.conditions.some((condition) => EXIF_FIELDS.has(condition.field)) && missingExif });
+      return catalogSmartCollectionSchema.parse({ id: row.id, name: row.name, rule, assetCount: count, isDefault: Boolean(row.is_default), indexing: rule.conditions.some((condition) => EXIF_FIELDS.has(condition.field)) && missingExif });
     });
   }
 
@@ -1311,15 +1420,49 @@ export class CatalogService {
     `).all(afterId, limit) as Array<{ id: string }>).map((row) => row.id);
   }
 
+  listDimensionIndexCandidates(limit = 4, priorityFolderId?: string | null, afterId = '', recentFirst = false): string[] {
+    const directory = priorityFolderId ? this.#resolveDirectory(priorityFolderId) : null;
+    const priority = directory?.rootId ?? priorityFolderId ?? '';
+    const pathRange = directory?.relativePath ? directoryAssetRange(path.join(directory.rootPath, directory.relativePath)) : null;
+    return (this.#database.prepare(`
+      SELECT assets.id FROM assets ${recentFirst ? 'INDEXED BY assets_modified_at_idx' : !priorityFolderId ? 'INDEXED BY sqlite_autoindex_assets_1' : ''}
+      LEFT JOIN asset_exif indexed_dimensions ON indexed_dimensions.asset_id = assets.id
+        AND indexed_dimensions.source_size = assets.size_bytes
+        AND indexed_dimensions.source_modified_at = assets.modified_at
+        AND indexed_dimensions.width > 0 AND indexed_dimensions.height > 0
+        AND indexed_dimensions.dimension_version = 1
+      WHERE assets.removed_at IS NULL AND assets.offline_at IS NULL AND indexed_dimensions.asset_id IS NULL
+        AND ${recentFirst ? `(? = '' OR assets.modified_at < (SELECT modified_at FROM assets WHERE id = ?)
+          OR (assets.modified_at = (SELECT modified_at FROM assets WHERE id = ?) AND assets.id < ?))` : 'assets.id > ?'}
+        AND (? = '' OR assets.folder_id = ?)
+        ${pathRange ? 'AND assets.path >= ? AND assets.path < ?' : ''}
+      ORDER BY ${recentFirst ? 'assets.modified_at DESC, assets.id DESC' : 'assets.id'}
+      LIMIT ?
+    `).all(...(recentFirst ? [afterId, afterId, afterId, afterId] : [afterId]), priority, priority, ...(pathRange ?? []), Math.max(1, Math.min(32, Math.trunc(limit)))) as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  countUnindexedDimensions(): number {
+    return (this.#database.prepare(`
+      SELECT COUNT(*) AS value FROM assets
+      LEFT JOIN asset_exif indexed_dimensions ON indexed_dimensions.asset_id = assets.id
+        AND indexed_dimensions.source_size = assets.size_bytes
+        AND indexed_dimensions.source_modified_at = assets.modified_at
+        AND indexed_dimensions.width > 0 AND indexed_dimensions.height > 0
+        AND indexed_dimensions.dimension_version = 1
+      WHERE assets.removed_at IS NULL AND assets.offline_at IS NULL AND indexed_dimensions.asset_id IS NULL
+    `).get() as { value: number }).value;
+  }
+
   saveExifDetails(assetId: string, details: FileDetails): void {
     const asset = this.resolveAssetFile(assetId);
     if (!asset || asset.sizeBytes !== details.sizeBytes || asset.modifiedAt !== Math.trunc(details.modifiedAt)) return;
+    const wasCounted = this.#hasStoredDimensions(assetId);
     this.#database.prepare(`
-      INSERT INTO asset_exif (asset_id, source_size, source_modified_at, width, height, camera_make, camera_model, lens_make, lens_model, city, country, taken_at, exposure_seconds, aperture, focal_length, iso)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO asset_exif (asset_id, source_size, source_modified_at, width, height, dimension_version, camera_make, camera_model, lens_make, lens_model, city, country, taken_at, exposure_seconds, aperture, focal_length, iso)
+      VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(asset_id) DO UPDATE SET
         source_size = excluded.source_size, source_modified_at = excluded.source_modified_at,
-        width = excluded.width, height = excluded.height, camera_make = excluded.camera_make, camera_model = excluded.camera_model,
+        width = excluded.width, height = excluded.height, dimension_version = 1, camera_make = excluded.camera_make, camera_model = excluded.camera_model,
         lens_make = excluded.lens_make, lens_model = excluded.lens_model, city = excluded.city, country = excluded.country,
         taken_at = excluded.taken_at, exposure_seconds = excluded.exposure_seconds, aperture = excluded.aperture,
         focal_length = excluded.focal_length, iso = excluded.iso
@@ -1328,6 +1471,15 @@ export class CatalogService {
       details.city ?? null, details.country ?? null, details.takenAt ? Date.parse(details.takenAt) : null,
       details.exposureSeconds ?? null, details.aperture ?? null, details.focalLength ?? null, details.iso ?? null);
     this.#countCache.clear();
+    if (!wasCounted && details.width && details.height) this.#applyIndexedFolderCount(assetId);
+  }
+
+  #hasStoredDimensions(assetId: string): boolean {
+    return Boolean(this.#database.prepare(`
+      SELECT 1 FROM assets JOIN asset_exif ON asset_exif.asset_id = assets.id
+      WHERE assets.id = ? AND assets.removed_at IS NULL AND assets.size_bytes = asset_exif.source_size
+        AND assets.modified_at = asset_exif.source_modified_at AND asset_exif.width > 0 AND asset_exif.height > 0
+    `).get(assetId));
   }
 
   hasCurrentDimensions(assetId: string): boolean {
@@ -1335,7 +1487,40 @@ export class CatalogService {
       SELECT 1 FROM assets JOIN asset_exif ON asset_exif.asset_id = assets.id
       WHERE assets.id = ? AND assets.removed_at IS NULL AND assets.size_bytes = asset_exif.source_size
         AND assets.modified_at = asset_exif.source_modified_at AND asset_exif.width > 0 AND asset_exif.height > 0
+        AND asset_exif.dimension_version = 1
     `).get(assetId));
+  }
+
+  saveDimensions(assetId: string, width: number, height: number): void {
+    if (!(width > 0 && height > 0)) return;
+    const wasCounted = this.#hasStoredDimensions(assetId);
+    this.#database.prepare(`
+      INSERT INTO asset_exif (asset_id, source_size, source_modified_at, width, height, dimension_version)
+      SELECT id, size_bytes, modified_at, ?, ?, 1 FROM assets WHERE id = ? AND removed_at IS NULL
+      ON CONFLICT(asset_id) DO UPDATE SET
+        source_size = excluded.source_size, source_modified_at = excluded.source_modified_at,
+        width = excluded.width, height = excluded.height, dimension_version = 1
+    `).run(width, height, assetId);
+    this.#countCache.clear();
+    if (!wasCounted) this.#applyIndexedFolderCount(assetId);
+  }
+
+  currentDimensions(assetIds: readonly string[]): Map<string, { width: number; height: number }> {
+    const result = new Map<string, { width: number; height: number }>();
+    for (let offset = 0; offset < assetIds.length; offset += 400) {
+      const ids = assetIds.slice(offset, offset + 400);
+      if (!ids.length) continue;
+      const placeholders = ids.map(() => '?').join(',');
+      const rows = this.#database.prepare(`
+        SELECT assets.id, asset_exif.width, asset_exif.height FROM assets
+        JOIN asset_exif ON asset_exif.asset_id = assets.id
+        WHERE assets.id IN (${placeholders}) AND assets.size_bytes = asset_exif.source_size
+          AND assets.modified_at = asset_exif.source_modified_at
+          AND asset_exif.width > 0 AND asset_exif.height > 0 AND asset_exif.dimension_version = 1
+      `).all(...ids) as Array<{ id: string; width: number; height: number }>;
+      for (const row of rows) result.set(row.id, { width: row.width, height: row.height });
+    }
+    return result;
   }
 
   saveSmartCollection(rawInput: SaveSmartCollectionInput): CatalogSmartCollection {
@@ -1561,12 +1746,12 @@ export class CatalogService {
 
   listTags(): CatalogTag[] {
     const rows = this.#database.prepare(`
-      SELECT tags.id, tags.name, COUNT(asset_tags.asset_id) AS asset_count
+      SELECT tags.id, tags.name, COUNT(assets.id) AS asset_count
       FROM tags
-      LEFT JOIN asset_tags ON asset_tags.tag_id = tags.id
-        AND asset_tags.asset_id IN (SELECT id FROM assets WHERE removed_at IS NULL AND offline_at IS NULL)
+      JOIN asset_tags ON asset_tags.tag_id = tags.id
+      JOIN assets ON assets.id = asset_tags.asset_id
+        AND assets.removed_at IS NULL AND assets.offline_at IS NULL
       GROUP BY tags.id, tags.name
-      HAVING COUNT(asset_tags.asset_id) > 0
       ORDER BY tags.name COLLATE NOCASE ASC, tags.id ASC
     `).all() as { id: string; name: string; asset_count: number }[];
     return rows.map((row) => catalogTagSchema.parse({ id: row.id, name: row.name, assetCount: row.asset_count }));

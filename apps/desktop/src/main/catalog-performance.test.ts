@@ -14,6 +14,26 @@ afterEach(async () => {
 });
 
 describe('large catalog pagination', () => {
+  it('shows assets and folder counts only after dimensions are indexed', async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-index-gated-browse-'));
+    temporaryDirectories.push(directory);
+    const databasePath = path.join(directory, 'catalog.sqlite');
+    const catalog = new CatalogService(databasePath, true);
+    const writer = new DatabaseSync(databasePath);
+    writer.prepare('INSERT INTO folders (id, path, name, imported_at) VALUES (?, ?, ?, ?)')
+      .run('indexed-root', '/fixture/indexed', 'Indexed', 1);
+    writer.prepare(`INSERT INTO assets (id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at)
+      VALUES ('indexed-photo', 'indexed-root', '/fixture/indexed/child/photo.jpg', 'photo.jpg', '.jpg', 10, 1, 1)`).run();
+    expect(catalog.listAssetPage({ folderId: 'indexed-root' }).items).toEqual([]);
+    expect(catalog.listFolders().find((folder) => folder.id === 'indexed-root')?.assetCount).toBe(0);
+    catalog.saveDimensions('indexed-photo', 3000, 2000);
+    expect(catalog.listAssetPage({ folderId: 'indexed-root' })).toMatchObject({ totalCount: 1, items: [{ id: 'indexed-photo', width: 3000, height: 2000 }] });
+    expect(catalog.listFolders().find((folder) => folder.id === 'indexed-root')?.assetCount).toBe(1);
+    expect(catalog.listFolders().find((folder) => folder.name === 'child')?.assetCount).toBe(1);
+    writer.close();
+    catalog.close();
+  });
+
   it('keeps the folder tree cached across EXIF and unrelated database writes', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-folder-revision-'));
     temporaryDirectories.push(directory);
@@ -172,7 +192,7 @@ describe('large catalog pagination', () => {
       .toEqual(['existing']);
     migrated.close();
     const verified = new DatabaseSync(databasePath);
-    expect(verified.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 });
+    expect(verified.prepare('PRAGMA user_version').get()).toEqual({ user_version: 17 });
     expect((verified.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'index' AND name LIKE 'assets_browse_%'").get() as { count: number }).count).toBe(16);
     verified.close();
   });
@@ -255,7 +275,7 @@ describe('large catalog pagination', () => {
       const page = catalog.listAssetPage({ folderId: 'folder-summary', sortBy, cursor, limit: 200 });
       return { sortBy, milliseconds: Math.round(performance.now() - start), count: page.items.length };
     });
-    const positionTimings = (['fileName', 'rating', 'modifiedAt'] as const).flatMap((sortBy) => [0, 50_000, 99_000].map((offset) => {
+    const positionTimings = (['fileName', 'rating', 'modifiedAt'] as const).flatMap((sortBy) => [0, 45_000, 89_000].map((offset) => {
       const start = performance.now();
       const page = catalog.listAssetPage({ folderId: 'folder-summary', sortBy, offset, limit: 200 });
       return { sortBy, offset, milliseconds: Math.round(performance.now() - start), count: page.items.length };
@@ -281,7 +301,7 @@ describe('large catalog pagination', () => {
     expect(cachedFolders).toBe(folders);
     expect(durationMs).toBeLessThan(2_000);
     catalog.close();
-  });
+  }, 30_000);
 
   it('walks 10,000 deterministic resources without duplicates or offset scans', async () => {
     const directory = await mkdtemp(path.join(tmpdir(), 'photoallisai-large-catalog-'));

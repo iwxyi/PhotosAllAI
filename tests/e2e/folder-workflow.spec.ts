@@ -35,6 +35,12 @@ test('configures dynamic workflows, browses stages, and refreshes external outpu
     await expect(dialog.getByRole('status')).toHaveText('已保存');
     await page.keyboard.press('Escape');
     await expect(page.locator('.catalog-card')).toHaveCount(2);
+    const versionDimensions = await page.evaluate(async () => {
+      const page = await window.desktopApi.listCatalogAssetPage({ limit: 10 });
+      return page.items.flatMap((item) => item.workflow?.members.map((member) => ({ fileName: member.asset.fileName, width: member.asset.width, height: member.asset.height })) ?? []);
+    });
+    expect(versionDimensions.length).toBeGreaterThanOrEqual(5);
+    expect(versionDimensions.every((item) => (item.width ?? 0) > 0 && (item.height ?? 0) > (item.width ?? 0))).toBe(true);
     const group = page.locator('.catalog-card').filter({ hasText: '5 版本' });
     await group.dblclick();
     const viewer = page.getByRole('region', { name: '看图', exact: true });

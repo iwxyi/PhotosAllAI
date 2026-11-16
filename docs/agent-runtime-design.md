@@ -95,6 +95,8 @@ Agent 必须有基于内容与表达意图的摄影判断：曝光不是拉平�
 
 外部客户端按 `sessions.open`、业务工具、`sessions.get` 的顺序调用。`sessions.open` 的 `assetIds` 是可操作范围，`goal` 是任务目的；业务工具使用 `sessionId`、唯一 UUID `requestId` 和工具自身参数 `input`。返回的 `executing / waiting` 只是进行中，只有调用记录 `done` 和具体回执才代表完成。需要确认时在应用的 Agent 会话列表选择 `MCP` 会话并审阅操作，外部调用不能替用户确认。图片可通过 `photoallisai://sessions/{sessionId}/original/{id}` 或 `/result/{id}` 资源模板按会话范围读取 JPEG 预览。
 
+只读工具 `gallery.inspect` 可直接读取当前打开图库的已挂载图片，不需要创建会话。返回视图模式、图库滚动范围、已加载与已挂载数量、分组标题位置，以及每张已挂载图片的文件名、索引宽高、解码宽高、图片框和实际绘制尺寸。瀑布流项目的 `ratioMismatch` 标记索引或解码比例与图片框不符；网格视图允许留白，不做该判定。图库使用虚拟窗口，未挂载的图片不会出现在 `images` 中；滚动到目标位置后可再次调用。
+
 当前开放的是登记在 `agent-tools.ts`、`agent-app-tools.ts`、`agent-program-tools.ts` 的业务工具以及会话与图片资源接口。窗口布局、系统文件选择器、备份恢复、清空回收站、提供商密钥配置等没有开放为自动工具。Agent 应说明这些能力限制，不能声称已完成。外部连接关闭后，旧 token 和外部会话所有权失效；之前完成的结果仍保留在应用数据库和任务记录中。
 
 ## 实施验证记录（2026-10-29）

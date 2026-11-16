@@ -2,6 +2,7 @@ import { mkdtemp, copyFile, rm, mkdir, symlink, writeFile, realpath } from 'node
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import sharp from 'sharp';
 import { ImageFileService } from './image-file-service';
 import { TemporaryMediaIndex } from './temporary-media-index';
 
@@ -65,6 +66,14 @@ describe('temporary image browsing', () => {
     await rm(source);
     await expect(service.details(session.selectedId)).rejects.toThrow();
     await expect(service.details('unknown')).rejects.toThrow('图片已从图库移除');
+  });
+
+  it('indexes the displayed orientation of a rotated JPEG', async () => {
+    const { directory, service } = await setup();
+    const source = path.join(directory, 'rotated.jpg');
+    await sharp(fixture).resize(60, 40, { fit: 'fill' }).withMetadata({ orientation: 8 }).toFile(source);
+    const session = await service.open([source]);
+    await expect(service.details(session.selectedId)).resolves.toMatchObject({ width: 40, height: 60 });
   });
 
   it('rejects empty directories, unsupported files, and empty requests', async () => {

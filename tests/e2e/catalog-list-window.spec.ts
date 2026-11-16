@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -17,19 +17,43 @@ test.beforeAll(async () => {
   const userData = path.join(root, 'user-data');
   const library = path.join(userData, 'library');
   await mkdir(library, { recursive: true });
+  await mkdir(path.join(root, 'small-photos'));
   const databasePath = path.join(library, 'catalog.sqlite');
   new CatalogService(databasePath).close();
   const database = new DatabaseSync(databasePath);
   database.prepare('INSERT INTO folders (id, path, name, imported_at) VALUES (?, ?, ?, ?)')
     .run('many-list-photos', visibleFixtureRoot, 'Many Photos', 1);
+  database.prepare('INSERT INTO folders (id, path, name, imported_at) VALUES (?, ?, ?, ?)')
+    .run('small-list-photos', path.join(root, 'small-photos'), 'Small Photos', 1);
   const insert = database.prepare(`
     INSERT INTO assets (id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at)
     VALUES (?, 'many-list-photos', ?, ?, '.jpg', 1024, ?, 1)
   `);
+  const insertDimensions = database.prepare(`
+    INSERT INTO asset_exif (asset_id, source_size, source_modified_at, width, height, dimension_version)
+    VALUES (?, 1024, ?, 1800, 1200, 1)
+  `);
   database.exec('BEGIN IMMEDIATE');
   for (let index = 0; index < 1_200; index += 1) {
     const name = `PHOTO_${String(index).padStart(4, '0')}.jpg`;
-    insert.run(`window-photo-${index}`, path.join(visibleFixtureRoot, name), name, Date.UTC(2020, 0, 1) + (1_200 - index) * 86_400_000);
+    const modifiedAt = Date.UTC(2020, 0, 1) + (1_200 - index) * 86_400_000;
+    insert.run(`window-photo-${index}`, path.join(visibleFixtureRoot, name), name, modifiedAt);
+    insertDimensions.run(`window-photo-${index}`, modifiedAt);
+  }
+  const insertSmall = database.prepare(`
+    INSERT INTO assets (id, folder_id, path, file_name, extension, size_bytes, modified_at, imported_at)
+    VALUES (?, 'small-list-photos', ?, ?, '.jpg', 1024, ?, 1)
+  `);
+  for (let index = 0; index < 20; index += 1) {
+    const name = `SMALL_${String(index).padStart(2, '0')}.jpg`;
+    const filePath = path.join(root, 'small-photos', name);
+    await copyFile(path.join(visibleFixtureRoot, 'portrait.jpg'), filePath);
+    const fileStat = await stat(filePath);
+    const modifiedAt = Math.trunc(fileStat.mtimeMs);
+    insertSmall.run(`small-photo-${index}`, filePath, name, modifiedAt);
+    database.prepare('UPDATE assets SET size_bytes = ? WHERE id = ?').run(fileStat.size, `small-photo-${index}`);
+    database.prepare('INSERT INTO asset_exif (asset_id, source_size, source_modified_at, width, height, dimension_version) VALUES (?, ?, ?, 1200, 1800, 1)')
+      .run(`small-photo-${index}`, fileStat.size, modifiedAt);
   }
   database.exec('COMMIT');
   database.close();
@@ -52,6 +76,26 @@ async function showView(mode: '列表视图' | '网格视图' | '瀑布流视图
   }
   await button.click();
 }
+
+test('preloads subsequent catalog pages without scrolling', async () => {
+  await expect.poll(() => page.locator('.catalog-grid, .catalog-list-view').first().getAttribute('data-loaded-count')).toBe('1200');
+});
+
+test('switching folders resets the gallery scroll and restores each folder position', async () => {
+  await showView('列表视图');
+  const tree = page.getByRole('tree', { name: '关联文件夹' });
+  await tree.getByRole('treeitem', { name: /Many Photos/ }).click();
+  const list = page.locator('.catalog-list-view');
+  await expect.poll(() => list.evaluate((element) => element.scrollHeight)).toBeGreaterThan(20_000);
+  await list.evaluate((element) => { element.scrollTop = 2_000; });
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBeGreaterThan(1_900);
+  await page.waitForTimeout(300);
+  await tree.getByRole('treeitem', { name: /Small Photos/ }).click();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBe(0);
+  await tree.getByRole('treeitem', { name: /Many Photos/ }).click();
+  await expect.poll(() => list.evaluate((element) => element.scrollTop)).toBeGreaterThan(1_900);
+  await showView('网格视图');
+});
 
 test('keeps a bounded list DOM after loading and jumping through 1200 photos', async () => {
   await expect(page.locator('.catalog-card').first()).toBeVisible();

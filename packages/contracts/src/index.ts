@@ -1038,6 +1038,7 @@ export type AnalysisRevision = z.infer<typeof analysisRevisionSchema>;
 
 export const listAnalysisInputSchema = z.object({ assetId: z.string().min(1) });
 export const listGenerationResultsInputSchema = z.object({ assetId: z.string().min(1) });
+export const listGenerationResultsPageInputSchema = z.array(z.string().min(1)).max(500);
 export const analysisTaskPayloadSchema = z.object({
   batchId: z.string().uuid().optional(),
   locale: z.enum(['zh-CN', 'en-US']).optional(),
@@ -1105,6 +1106,8 @@ export const generationResultSchema = z.object({
   outputFolderId: z.string().min(1).max(300).optional(),
   version: z.number().int().positive(),
   fileName: z.string().min(1),
+  width: z.number().positive().optional(),
+  height: z.number().positive().optional(),
   resultUrl: z.string(),
   prompt: z.string(),
   providerProfileId: z.string().uuid(),
@@ -1313,6 +1316,8 @@ export interface DesktopApi {
   archivePromptTemplate(templateId: string): Promise<void>;
   listAnalysisRevisions(assetId: string): Promise<AnalysisRevision[]>;
   listGenerationResults(assetId: string): Promise<GenerationResult[]>;
+  listGenerationResultsPage(assetIds: string[]): Promise<Record<string, GenerationResult[]>>;
+  onGenerationResultsChanged(listener: (assetId: string) => void): () => void;
   listTrashedGenerationResults(assetId: string): Promise<TrashedGenerationResult[]>;
   trashGenerationResult(input: GenerationResultIdInput): Promise<TrashedGenerationResult>;
   restoreGenerationResult(input: GenerationResultIdInput): Promise<GenerationResult>;

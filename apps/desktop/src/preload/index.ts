@@ -190,6 +190,13 @@ const api: DesktopApi = {
     ipcRenderer.invoke('analysis.list.v1', { assetId }) as ReturnType<DesktopApi['listAnalysisRevisions']>,
   listGenerationResults: (assetId) =>
     ipcRenderer.invoke('generation.results.list.v1', { assetId }) as ReturnType<DesktopApi['listGenerationResults']>,
+  listGenerationResultsPage: (assetIds) =>
+    ipcRenderer.invoke('generation.results.page.v1', assetIds) as ReturnType<DesktopApi['listGenerationResultsPage']>,
+  onGenerationResultsChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, assetId: string) => listener(assetId);
+    ipcRenderer.on('generation.results.changed.v1', handler);
+    return () => ipcRenderer.removeListener('generation.results.changed.v1', handler);
+  },
   listTrashedGenerationResults: (assetId) =>
     ipcRenderer.invoke('generation.results.trash.list.v1', { assetId }) as ReturnType<DesktopApi['listTrashedGenerationResults']>,
   trashGenerationResult: (input) =>
