@@ -1010,7 +1010,7 @@ export const promptTemplateSchema = z.object({
   description: z.string().max(2_000),
   category: z.string().min(1).max(100),
   body: z.string().min(1).max(20_000),
-  exampleId: z.enum(['portrait', 'street', 'coast', 'none']),
+  exampleImage: z.string().max(8_000_000).refine((value) => value === '' || /^data:image\/[a-z0-9.+-]+;base64,/iu.test(value)),
   version: z.number().int().positive(),
   createdAt: z.number().nonnegative(),
   updatedAt: z.number().nonnegative()
@@ -1020,11 +1020,12 @@ export type PromptTemplate = z.infer<typeof promptTemplateSchema>;
 
 export const savePromptTemplateInputSchema = promptTemplateSchema.omit({
   id: true, version: true, createdAt: true, updatedAt: true
-}).extend({ id: z.string().uuid().optional(), exampleId: z.enum(['portrait', 'street', 'coast', 'none']).optional().default('none') });
+}).extend({ id: z.string().uuid().optional(), description: z.string().trim().min(1).max(2_000), exampleImage: z.string().max(8_000_000).refine((value) => value === '' || /^data:image\/[a-z0-9.+-]+;base64,/iu.test(value)).optional().default('') });
 
-export type SavePromptTemplateInput = Omit<z.infer<typeof savePromptTemplateInputSchema>, 'exampleId'> & {
-  exampleId?: PromptTemplate['exampleId'];
-};
+export const promptTemplateSummarySchema = promptTemplateSchema.pick({ id: true, name: true, category: true, description: true, version: true, updatedAt: true });
+export type PromptTemplateSummary = z.infer<typeof promptTemplateSummarySchema>;
+
+export type SavePromptTemplateInput = Omit<z.infer<typeof savePromptTemplateInputSchema>, 'exampleImage'> & { exampleImage?: string };
 
 export const analysisRevisionSchema = z.object({
   id: z.string().uuid(),
@@ -1312,6 +1313,7 @@ export interface DesktopApi {
   updateQueuedGenerationTasks(input: UpdateQueuedGenerationTasksInput): Promise<PersistedTask[]>;
   resizeQueuedGenerationBatch(input: ResizeQueuedGenerationBatchInput): Promise<PersistedTask[]>;
   listPromptTemplates(): Promise<PromptTemplate[]>;
+  getPromptTemplate(templateId: string): Promise<PromptTemplate>;
   savePromptTemplate(input: SavePromptTemplateInput): Promise<PromptTemplate>;
   archivePromptTemplate(templateId: string): Promise<void>;
   listAnalysisRevisions(assetId: string): Promise<AnalysisRevision[]>;

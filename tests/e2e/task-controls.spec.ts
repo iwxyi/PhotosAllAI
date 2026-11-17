@@ -57,7 +57,7 @@ test('reorders queued work and batch-retries failed generation tasks', async () 
     baseUrl: 'http://127.0.0.1:9/v1', modelId: 'queue-test', apiKey: 'queue-key', enabled: true
   }));
   const template = await page.evaluate(() => window.desktopApi.savePromptTemplate({
-    name: '队列模板', description: '队列编辑测试', category: '人像', exampleId: 'none',
+    name: '队列模板', description: '队列编辑测试', category: '人像',
     body: '模板分析：{{analysis.summary}}\n用户要求：{{user_instruction}}'
   }));
   await page.getByRole('button', { name: '打开工作区' }).click();

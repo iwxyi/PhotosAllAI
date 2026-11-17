@@ -127,6 +127,7 @@ describe('Agent program tools', () => {
       const context = {} as AgentToolContext;
       const create = tools.find((tool) => tool.name === 'templates.save')!;
       const list = tools.find((tool) => tool.name === 'templates.list')!;
+      const get = tools.find((tool) => tool.name === 'templates.get')!;
       const batchSave = tools.find((tool) => tool.name === 'templates.save-batch')!;
       const archiveBatch = tools.find((tool) => tool.name === 'templates.archive-batch')!;
       const first = await create.execute({ name: '清理背景', description: '清除背景杂物', category: '其他', body: '保留主体与自然光影。' }, context);
@@ -135,7 +136,8 @@ describe('Agent program tools', () => {
       expect(changed).toHaveBeenCalledOnce();
 
       await create.execute({ id: created.id, name: '清理背景', description: '清除背景杂物并自然融合', category: '其他', body: '保留主体、材质和自然光影。' }, context);
-      expect((await list.execute({}, context)).result).toMatchObject([{ id: created.id, version: 2, body: '保留主体、材质和自然光影。' }]);
+      expect((await list.execute({}, context)).result).toMatchObject([{ id: created.id, version: 2, description: '清除背景杂物并自然融合' }]);
+      expect((await get.execute({ id: created.id }, context)).result).toMatchObject({ id: created.id, body: '保留主体、材质和自然光影。' });
 
       const batch = await batchSave.execute({ templates: [{ name: '修复污渍', description: '清理污渍', category: '其他', body: '只移除污渍，保留纹理。' }] }, context);
       expect(batch.result).toMatchObject({ saved: 1, failed: [] });

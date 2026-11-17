@@ -14,7 +14,7 @@ type TemplateRow = {
   description: string;
   category: string;
   body: string;
-  example_id: PromptTemplate['exampleId'];
+  example_image: string;
   version: number;
   created_at: number;
   updated_at: number;
@@ -59,6 +59,9 @@ export class TemplateService {
     if (!columns.some((column) => column.name === 'example_id')) {
       this.#database.exec("ALTER TABLE prompt_template_versions ADD COLUMN example_id TEXT NOT NULL DEFAULT 'none'");
     }
+    if (!columns.some((column) => column.name === 'example_image')) {
+      this.#database.exec("ALTER TABLE prompt_template_versions ADD COLUMN example_image TEXT NOT NULL DEFAULT ''");
+    }
     const templateColumns = this.#database.prepare('PRAGMA table_info(prompt_templates)').all() as { name: string }[];
     if (!templateColumns.some((column) => column.name === 'archived_at')) {
       this.#database.exec('ALTER TABLE prompt_templates ADD COLUMN archived_at INTEGER');
@@ -67,7 +70,7 @@ export class TemplateService {
 
   list(): PromptTemplate[] {
     const rows = this.#database.prepare(`
-        SELECT t.id, v.name, v.description, v.category, v.body, v.example_id, v.version,
+        SELECT t.id, v.name, v.description, v.category, v.body, v.example_image, v.version,
         t.created_at, v.created_at AS updated_at
       FROM prompt_templates t
       JOIN prompt_template_versions v ON v.template_id = t.id
@@ -78,6 +81,29 @@ export class TemplateService {
       ORDER BY v.created_at DESC, t.id ASC
     `).all() as TemplateRow[];
     return rows.map((row) => this.#toTemplate(row));
+  }
+
+  listSummaries(): Array<Pick<PromptTemplate, 'id' | 'name' | 'category' | 'description' | 'version' | 'updatedAt'>> {
+    return this.#database.prepare(`
+      SELECT t.id, v.name, v.category, v.description, v.version, v.created_at AS updatedAt
+      FROM prompt_templates t JOIN prompt_template_versions v ON v.template_id = t.id
+      WHERE t.archived_at IS NULL AND v.version = (
+        SELECT MAX(latest.version) FROM prompt_template_versions latest WHERE latest.template_id = t.id
+      ) ORDER BY v.created_at DESC, t.id ASC
+    `).all() as Array<Pick<PromptTemplate, 'id' | 'name' | 'category' | 'description' | 'version' | 'updatedAt'>>;
+  }
+
+  get(templateId: string): PromptTemplate {
+    const row = this.#database.prepare(`
+      SELECT t.id, v.name, v.description, v.category, v.body, v.example_image, v.version,
+        t.created_at, v.created_at AS updated_at
+      FROM prompt_templates t JOIN prompt_template_versions v ON v.template_id = t.id
+      WHERE t.id = ? AND t.archived_at IS NULL AND v.version = (
+        SELECT MAX(latest.version) FROM prompt_template_versions latest WHERE latest.template_id = t.id
+      )
+    `).get(templateId) as TemplateRow | undefined;
+    if (!row) throw new Error('TEMPLATE_NOT_FOUND');
+    return this.#toTemplate(row);
   }
 
   save(rawInput: SavePromptTemplateInput): PromptTemplate {
@@ -101,9 +127,9 @@ export class TemplateService {
       }
       this.#database.prepare(`
         INSERT INTO prompt_template_versions (
-          template_id, version, name, description, category, body, example_id, created_at
+          template_id, version, name, description, category, body, example_image, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, version, input.name.trim(), input.description.trim(), input.category.trim(), input.body.trim(), input.exampleId ?? 'none', now);
+      `).run(id, version, input.name.trim(), input.description.trim(), input.category.trim(), input.body.trim(), input.exampleImage ?? '', now);
       this.#database.exec('COMMIT');
     } catch (error) {
       this.#database.exec('ROLLBACK');
@@ -116,7 +142,7 @@ export class TemplateService {
       description: input.description.trim(),
       category: input.category.trim(),
       body: input.body.trim(),
-      exampleId: input.exampleId ?? 'none',
+      exampleImage: input.exampleImage ?? '',
       version,
       createdAt: existing?.created_at ?? now,
       updatedAt: now
@@ -137,7 +163,7 @@ export class TemplateService {
       description: row.description,
       category: row.category,
       body: row.body,
-      exampleId: row.example_id,
+      exampleImage: row.example_image,
       version: row.version,
       createdAt: row.created_at,
       updatedAt: row.updated_at

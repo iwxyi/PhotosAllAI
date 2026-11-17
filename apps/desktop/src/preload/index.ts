@@ -182,6 +182,8 @@ const api: DesktopApi = {
     ipcRenderer.invoke('tasks.generation.resize.v1', input) as ReturnType<DesktopApi['resizeQueuedGenerationBatch']>,
   listPromptTemplates: () =>
     ipcRenderer.invoke('templates.list.v1') as ReturnType<DesktopApi['listPromptTemplates']>,
+  getPromptTemplate: (templateId) =>
+    ipcRenderer.invoke('templates.get.v1', templateId) as ReturnType<DesktopApi['getPromptTemplate']>,
   savePromptTemplate: (input) =>
     ipcRenderer.invoke('templates.save.v1', input) as ReturnType<DesktopApi['savePromptTemplate']>,
   archivePromptTemplate: (templateId) =>

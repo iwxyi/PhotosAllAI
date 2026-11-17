@@ -4618,6 +4618,7 @@ type WorkflowDraft = {
   templateId: string;
   generationCount: number;
   globalRules: WorkflowRule[];
+  selectedPromptTemplates: Array<{ id: string; body: string }>;
   itemRules: Record<string, WorkflowRule[]>;
   referenceAssetIds: Record<string, string[]>;
   itemTemplateIds: Record<string, string>;
@@ -4633,7 +4634,7 @@ const DEFAULT_WORKFLOW_RULES: WorkflowRule[] = [
 ];
 
 function loadWorkflowDraft(): WorkflowDraft {
-  const fallback: WorkflowDraft = { workflowAssetIds: [], workflowAssetMeta: {}, stage: 'analysis', templateId: '', generationCount: 1, globalRules: DEFAULT_WORKFLOW_RULES, itemRules: {}, referenceAssetIds: {}, itemTemplateIds: {}, promptItems: [], collectionReport: null };
+  const fallback: WorkflowDraft = { workflowAssetIds: [], workflowAssetMeta: {}, stage: 'analysis', templateId: '', generationCount: 1, globalRules: DEFAULT_WORKFLOW_RULES, selectedPromptTemplates: [], itemRules: {}, referenceAssetIds: {}, itemTemplateIds: {}, promptItems: [], collectionReport: null };
   try {
     const value = JSON.parse(window.localStorage.getItem(WORKFLOW_DRAFT_KEY) ?? '') as Partial<WorkflowDraft>;
     const stages: WorkflowStage[] = ['analysis', 'collection', 'optimization', 'prompt', 'generation', 'review'];
@@ -4645,6 +4646,7 @@ function loadWorkflowDraft(): WorkflowDraft {
       templateId: typeof value.templateId === 'string' ? value.templateId : '',
       generationCount: clamp(Number(value.generationCount) || 1, 1, 8),
       globalRules: validRules(value.globalRules) ? value.globalRules : fallback.globalRules,
+      selectedPromptTemplates: Array.isArray(value.selectedPromptTemplates) ? value.selectedPromptTemplates.filter((item): item is { id: string; body: string } => typeof item === 'object' && item !== null && typeof item.id === 'string' && typeof item.body === 'string').slice(0, 100) : [],
       itemRules: value.itemRules && typeof value.itemRules === 'object' ? Object.fromEntries(Object.entries(value.itemRules).filter(([, rules]) => validRules(rules))) : {},
       referenceAssetIds: value.referenceAssetIds && typeof value.referenceAssetIds === 'object' ? Object.fromEntries(Object.entries(value.referenceAssetIds).filter(([, ids]) => Array.isArray(ids)).map(([id, ids]) => [id, (ids as unknown[]).filter((assetId): assetId is string => typeof assetId === 'string').slice(0, 7)])) : {},
       itemTemplateIds: value.itemTemplateIds && typeof value.itemTemplateIds === 'object' ? Object.fromEntries(Object.entries(value.itemTemplateIds).filter(([, id]) => typeof id === 'string')) as Record<string, string> : {},
@@ -4660,7 +4662,7 @@ function AgentDockPanel(props: React.ComponentProps<typeof AgentPanel>): React.J
   return <AgentPanel {...props} />;
 }
 
-function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, workflowAssetMeta, tasks, globalRules, onGlobalRulesChange, templateId, outputFolderId, outputFolderName, enablePromptItems, referenceAssetIds, onReferenceAssetIdsChange, promptItems, onPromptItemsChange, currentWorkflowItemId, onCurrentWorkflowItemChange, onRemoveAsset, onMoveAsset: _onMoveAsset, onClearAssets, onOpenTasks: _onOpenTasks, onFocusAsset, onOpenViewer }: { photos: Photo[]; focusId: string | null; workflowAssetIds: string[]; workflowAssetMeta: Record<string, WorkflowAssetMeta>; tasks: PersistedTask[]; globalRules: WorkflowRule[]; onGlobalRulesChange: React.Dispatch<React.SetStateAction<WorkflowRule[]>>; templateId: string; outputFolderId: string | null; outputFolderName: string; enablePromptItems: boolean; referenceAssetIds: Record<string, string[]>; onReferenceAssetIdsChange: React.Dispatch<React.SetStateAction<Record<string, string[]>>>; promptItems: PromptGenerationItem[]; onPromptItemsChange: React.Dispatch<React.SetStateAction<PromptGenerationItem[]>>; currentWorkflowItemId: string | null; onCurrentWorkflowItemChange: (id: string | null) => void; onRemoveAsset: (id: string) => void; onMoveAsset: (id: string, direction: -1 | 1) => void; onClearAssets: () => void; onOpenTasks: () => void; onFocusAsset: (id: string) => void; onOpenViewer: OpenTaskViewer }): React.JSX.Element {
+function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, workflowAssetMeta, tasks, globalRules, onGlobalRulesChange, selectedPromptTemplates, onSelectedPromptTemplatesChange, templateId, outputFolderId, outputFolderName, enablePromptItems, referenceAssetIds, onReferenceAssetIdsChange, promptItems, onPromptItemsChange, currentWorkflowItemId, onCurrentWorkflowItemChange, onRemoveAsset, onMoveAsset: _onMoveAsset, onClearAssets, onOpenTasks: _onOpenTasks, onFocusAsset, onOpenViewer }: { photos: Photo[]; focusId: string | null; workflowAssetIds: string[]; workflowAssetMeta: Record<string, WorkflowAssetMeta>; tasks: PersistedTask[]; globalRules: WorkflowRule[]; onGlobalRulesChange: React.Dispatch<React.SetStateAction<WorkflowRule[]>>; selectedPromptTemplates: Array<{ id: string; body: string }>; onSelectedPromptTemplatesChange: React.Dispatch<React.SetStateAction<Array<{ id: string; body: string }>>>; templateId: string; outputFolderId: string | null; outputFolderName: string; enablePromptItems: boolean; referenceAssetIds: Record<string, string[]>; onReferenceAssetIdsChange: React.Dispatch<React.SetStateAction<Record<string, string[]>>>; promptItems: PromptGenerationItem[]; onPromptItemsChange: React.Dispatch<React.SetStateAction<PromptGenerationItem[]>>; currentWorkflowItemId: string | null; onCurrentWorkflowItemChange: (id: string | null) => void; onRemoveAsset: (id: string) => void; onMoveAsset: (id: string, direction: -1 | 1) => void; onClearAssets: () => void; onOpenTasks: () => void; onFocusAsset: (id: string) => void; onOpenViewer: OpenTaskViewer }): React.JSX.Element {
   const initialDraft = useMemo(loadWorkflowDraft, []);
   const [stage, setStage] = useState<WorkflowStage>(initialDraft.stage);
   const [revisions, setRevisions] = useState<Record<string, AnalysisRevision | undefined>>({});
@@ -4668,6 +4670,29 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
   const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
   const [generationProfileId, setGenerationProfileId] = useState('');
   const [templates, setTemplates] = useState<PromptTemplate[]>([]);
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
+  const promptEditorRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!templatePickerOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (event.target instanceof Node && !promptEditorRef.current?.contains(event.target)) setTemplatePickerOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setTemplatePickerOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsidePointer);
+    window.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer);
+      window.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [templatePickerOpen]);
+  const [templateOrder, setTemplateOrder] = useState<'recent' | 'created' | 'used' | 'name'>(() => {
+    try { const value = localStorage.getItem('photoallisai.template-picker-order'); return value === 'created' || value === 'used' || value === 'name' ? value : 'recent'; } catch { return 'recent'; }
+  });
+  const [templateUsage, setTemplateUsage] = useState<Record<string, { count: number; lastUsedAt: number }>>(() => {
+    try { const value = JSON.parse(localStorage.getItem('photoallisai.template-usage') ?? '{}'); return value && typeof value === 'object' ? value : {}; } catch { return {}; }
+  });
   const [storageMode, setStorageMode] = useState<AppSettings['generationStorageMode']>('managed');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -4683,6 +4708,24 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
   const setPromptItems = onPromptItemsChange;
   const [promptItemTasks, setPromptItemTasks] = useState<Record<string, PersistedTask[]>>({});
   const ids = workflowAssetIds;
+  const togglePromptTemplate = (template: PromptTemplate) => {
+    const selected = selectedPromptTemplates.some((item) => item.id === template.id);
+    const currentText = globalRules.filter((item) => item.enabled).map((item) => item.text).join('\n');
+    if (selected) {
+      const savedBody = selectedPromptTemplates.find((item) => item.id === template.id)!.body;
+      const nextText = savedBody && currentText.includes(savedBody) ? currentText.replace(savedBody, '').replace(/\n{3,}/gu, '\n\n').trim() : currentText;
+      onGlobalRulesChange([{ id: 'batch-prompt', text: nextText, enabled: true }]);
+      onSelectedPromptTemplatesChange((items) => items.filter((item) => item.id !== template.id));
+    } else {
+      const nextText = [currentText, template.body].filter(Boolean).join('\n\n');
+      onGlobalRulesChange([{ id: 'batch-prompt', text: nextText, enabled: true }]);
+      onSelectedPromptTemplatesChange((items) => [...items, { id: template.id, body: template.body }]);
+      const nextUsage = { ...templateUsage, [template.id]: { count: (templateUsage[template.id]?.count ?? 0) + 1, lastUsedAt: Date.now() } };
+      setTemplateUsage(nextUsage);
+      try { localStorage.setItem('photoallisai.template-usage', JSON.stringify(nextUsage)); } catch { /* usage ordering remains in memory */ }
+    }
+  };
+  const orderedPromptTemplates = useMemo(() => [...templates].sort((a, b) => templateOrder === 'created' ? a.createdAt - b.createdAt : templateOrder === 'used' ? (templateUsage[b.id]?.count ?? 0) - (templateUsage[a.id]?.count ?? 0) || b.updatedAt - a.updatedAt : templateOrder === 'name' ? a.name.localeCompare(b.name, 'zh-CN') : (templateUsage[b.id]?.lastUsedAt ?? 0) - (templateUsage[a.id]?.lastUsedAt ?? 0) || b.updatedAt - a.updatedAt), [templateOrder, templateUsage, templates]);
   const idsKey = ids.join('|');
   const analysisTasks = useMemo(() => {
     const latest = new Map<string, PersistedTask>();
@@ -4881,9 +4924,9 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
   }, [ids, idsKey, revisions]);
   useEffect(() => { if (focusId && ids.includes(focusId)) setLocalFocusId(focusId); }, [focusId, ids, idsKey]);
   useEffect(() => {
-    const timeout = window.setTimeout(() => window.localStorage.setItem(WORKFLOW_DRAFT_KEY, JSON.stringify({ workflowAssetIds, workflowAssetMeta, stage, templateId, generationCount, globalRules, itemRules, referenceAssetIds, itemTemplateIds, promptItems, collectionReport })), 300);
+    const timeout = window.setTimeout(() => window.localStorage.setItem(WORKFLOW_DRAFT_KEY, JSON.stringify({ workflowAssetIds, workflowAssetMeta, stage, templateId, generationCount, globalRules, selectedPromptTemplates, itemRules, referenceAssetIds, itemTemplateIds, promptItems, collectionReport })), 300);
     return () => window.clearTimeout(timeout);
-  }, [collectionReport, generationCount, globalRules, itemRules, referenceAssetIds, itemTemplateIds, promptItems, stage, templateId, workflowAssetIds, workflowAssetMeta]);
+  }, [collectionReport, generationCount, globalRules, selectedPromptTemplates, itemRules, referenceAssetIds, itemTemplateIds, promptItems, stage, templateId, workflowAssetIds, workflowAssetMeta]);
   const openGeneratedViewer = async (candidate: GenerationResult) => {
     try {
       // Browse the same candidates shown in the queue, including earlier submissions.
@@ -5009,7 +5052,7 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
   return <main className="ai-workflow-page batch-workspace" onDragOver={(event) => { if ((event.target as Element).closest('[data-workflow-asset-id], [data-prompt-generation-item]') && hasPhotoDrag(event)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }} onDrop={(event) => { const target = (event.target as Element).closest<HTMLElement>('[data-workflow-asset-id], [data-prompt-generation-item]'); const ids = photoDragIds(event); if (!target || !ids) return; event.preventDefault(); event.stopPropagation(); addReferences(target.dataset.promptGenerationItem ?? target.dataset.workflowAssetId!, ids, Boolean(target.dataset.promptGenerationItem)); activePhotoDragIds = null; }} onFocusCapture={(event) => { const target = (event.target as HTMLElement).closest<HTMLElement>('[data-workflow-asset-id]'); const id = target?.dataset.workflowAssetId; if (id) { setLocalFocusId(id); onCurrentWorkflowItemChange(id); onFocusAsset(id); } }}>
     <div className="workflow-body">
       <section className="workflow-main">
-        <section className="batch-prompt-card"><div><span>批次整体提示词</span><label className="batch-model-choice"><select aria-label="本批生成模型" value={generationProfileId || (profiles.find((item) => item.purpose === 'generation' && item.enabled && item.isDefault) ?? profiles.find((item) => item.purpose === 'generation' && item.enabled))?.id || ''} onChange={(event) => setGenerationProfileId(event.target.value)}>{!profiles.some((item) => item.purpose === 'generation' && item.enabled) && <option value="">尚未配置生成模型</option>}{profiles.filter((item) => item.purpose === 'generation' && item.enabled).map((item) => <option key={item.id} value={item.id}>{item.name}{item.isDefault ? ' · 默认' : ''}</option>)}</select></label></div><textarea aria-label="批次整体提示词" value={globalRules.filter((item) => item.enabled).map((item) => item.text).join('\n')} onChange={(event) => onGlobalRulesChange([{ id: 'batch-prompt', text: event.target.value, enabled: true }])} placeholder="描述所有照片共有的修图要求" /></section>
+        <section className="batch-prompt-card"><div><span>批次整体提示词</span><label className="batch-model-choice"><select aria-label="本批生成模型" value={generationProfileId || (profiles.find((item) => item.purpose === 'generation' && item.enabled && item.isDefault) ?? profiles.find((item) => item.purpose === 'generation' && item.enabled))?.id || ''} onChange={(event) => setGenerationProfileId(event.target.value)}>{!profiles.some((item) => item.purpose === 'generation' && item.enabled) && <option value="">尚未配置生成模型</option>}{profiles.filter((item) => item.purpose === 'generation' && item.enabled).map((item) => <option key={item.id} value={item.id}>{item.name}{item.isDefault ? ' · 默认' : ''}</option>)}</select></label></div><div className="batch-prompt-editor" ref={promptEditorRef}>{enablePromptItems && <><button type="button" className="template-prompt-add" aria-label="插入提示词模板" title="组合提示词模板" aria-expanded={templatePickerOpen} onClick={() => setTemplatePickerOpen((value) => !value)}><Plus size={14} /></button>{selectedPromptTemplates.length > 0 && <div className="template-prompt-chips" aria-label="已选模板">{selectedPromptTemplates.map((item) => <span className="template-prompt-chip" key={item.id} title={templates.find((template) => template.id === item.id)?.name ?? item.id}>{templates.find((template) => template.id === item.id)?.name ?? item.id}</span>)}</div>}</>}<textarea aria-label="批次整体提示词" value={globalRules.filter((item) => item.enabled).map((item) => item.text).join('\n')} onChange={(event) => onGlobalRulesChange([{ id: 'batch-prompt', text: event.target.value, enabled: true }])} placeholder="描述所有照片共有的修图要求" />{enablePromptItems && templatePickerOpen && <div className="template-prompt-picker" role="dialog" aria-label="选择提示词模板"><header><strong>组合模板</strong><select aria-label="模板排序" value={templateOrder} onChange={(event) => { const order = event.target.value as typeof templateOrder; setTemplateOrder(order); try { localStorage.setItem('photoallisai.template-picker-order', order); } catch { /* in-memory order remains */ } }}><option value="recent">最近使用</option><option value="created">创建时间</option><option value="used">使用次数</option><option value="name">名称</option></select><button type="button" aria-label="关闭模板列表" onClick={() => setTemplatePickerOpen(false)}><X size={13} /></button></header><div className="template-prompt-options">{orderedPromptTemplates.map((template) => <label key={template.id}><input type="checkbox" checked={selectedPromptTemplates.some((item) => item.id === template.id)} onChange={() => togglePromptTemplate(template)} /><span><strong>{template.name}</strong><small>{template.category} · {template.description || '暂无描述'}</small></span></label>)}{templates.length === 0 && <p>暂无模板</p>}</div></div>}</div></section>
         <div className="batch-queue-toolbar">
           <div className="batch-queue-heading" role="region" aria-label="本批生成进度" aria-live="polite">
             <strong>处理队列</strong>
@@ -5954,9 +5997,9 @@ function formatTaskDuration(startedAt: number, endedAt: number): string {
 const emptyTemplateForm: SavePromptTemplateInput = {
   name: '',
   description: '',
-  category: '人像',
-  exampleId: 'portrait',
-  body: '{{analysis.summary}}\n\n需要执行：\n{{analysis.generative_actions}}\n\n用户补充：\n{{user_instruction}}\n\n必须保留：\n{{preservation_rules}}'
+  category: '',
+  exampleImage: '',
+  body: ''
 };
 
 function TemplatePage(): React.JSX.Element {
@@ -6010,6 +6053,7 @@ function TemplatePage(): React.JSX.Element {
   };
 
   const save = async () => {
+    if (!form.category.trim()) { setMessage('请填写模板分类'); return; }
     try {
       const saved = await window.desktopApi.savePromptTemplate(form);
       setTemplateItems((current) => [saved, ...current.filter((template) => template.id !== saved.id)]);
@@ -6028,28 +6072,41 @@ function TemplatePage(): React.JSX.Element {
       return matchesCategory && matchesQuery;
     });
   }, [templateCategory, templateItems, templateSearch]);
+  const categories = useMemo(() => [...new Set(templateItems.map((template) => template.category).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-CN')), [templateItems]);
+  const setExampleImage = (file?: File) => {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) { setMessage('请选择图片文件'); return; }
+    if (file.size > 5_500_000) { setMessage('示例图不能超过 5 MB'); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') patchTemplate('exampleImage', reader.result);
+      else setMessage('无法读取示例图片');
+    };
+    reader.onerror = () => setMessage('无法读取示例图片');
+    reader.readAsDataURL(file);
+  };
 
   return (
     <div className="template-page">
       <div className="template-workspace">
         <section className="template-browser">
-          <div className="template-browser-tools"><div className="inline-search"><Search size={14} /><input aria-label="搜索模板" value={templateSearch} placeholder="搜索模板" onChange={(event) => setTemplateSearch(event.target.value)} /></div><label className="template-category-filter"><ListFilter size={14} /><select aria-label="模板分类" value={templateCategory} onChange={(event) => setTemplateCategory(event.target.value)}><option>全部分类</option><option>人像</option><option>风光</option><option>商品</option><option>建筑</option><option>其他</option></select></label><button className="primary-action compact" type="button" onClick={() => { setForm(emptyTemplateForm); setMessage(''); }}><Plus size={15} />新建模板</button></div>
+          <div className="template-browser-tools"><div className="inline-search"><Search size={14} /><input aria-label="搜索模板" value={templateSearch} placeholder="搜索模板" onChange={(event) => setTemplateSearch(event.target.value)} /></div><label className="template-category-filter"><ListFilter size={14} /><select aria-label="模板分类" value={templateCategory} onChange={(event) => setTemplateCategory(event.target.value)}><option>全部分类</option>{categories.map((category) => <option key={category}>{category}</option>)}</select></label><button className="primary-action compact" type="button" onClick={() => { setForm(emptyTemplateForm); setMessage(''); }}><Plus size={15} />新建模板</button></div>
           {templateItems.length === 0 ? (
             <div className="template-empty"><WandSparkles size={30} /><h2>尚未创建模板</h2><p>创建第一个模板，把常用修图要求和保护规则保存下来。</p></div>
           ) : visibleTemplates.length === 0 ? (
             <div className="template-empty"><Search size={30} /><h2>没有匹配模板</h2><p>尝试更换搜索词或分类筛选。</p></div>
           ) : (
             <div className="template-grid">
-              {visibleTemplates.map((template, index) => (
+              {visibleTemplates.map((template) => (
                 <button className={`template-card${form.id === template.id ? ' is-selected' : ''}`} key={template.id} type="button" onClick={() => setForm({
                   id: template.id,
                   name: template.name,
                   description: template.description,
                   category: template.category,
                   body: template.body,
-                  exampleId: template.exampleId
+                  exampleImage: template.exampleImage
                 })}>
-                  <span className="template-card-image"><img src={`./demo/${template.exampleId === 'none' ? ['portrait', 'street', 'coast'][index % 3] : template.exampleId}.jpg`} alt={`${template.name} 示例`} /><i>{template.category}</i></span>
+                  <span className="template-card-image">{template.exampleImage ? <img src={template.exampleImage} alt={`${template.name} 示例`} /> : <span className="template-example-empty"><Image size={20} /></span>}<i>{template.category}</i></span>
                   <span className="template-card-copy"><strong>{template.name}</strong><small>{template.description || '暂无描述'}</small><em>版本 {template.version}</em></span>
                 </button>
               ))}
@@ -6059,14 +6116,13 @@ function TemplatePage(): React.JSX.Element {
         <form className="template-editor" onSubmit={(event) => { event.preventDefault(); void save(); }}>
           <div className="template-editor-head"><div><strong>{form.id ? '编辑模板' : '创建模板'}</strong></div><div className="template-editor-head-actions">{form.id && <button className="secondary-action compact" type="button" onClick={() => setPreviewTemplate(templateItems.find((template) => template.id === form.id) ?? null)}><Maximize2 size={13} />预览模板</button>}</div></div>
           <label><span>模板名称</span><input required maxLength={120} value={form.name} placeholder="例如：自然人像 · 清洁背景" onChange={(event) => patchTemplate('name', event.target.value)} /></label>
-          <div className="form-grid two-columns"><label><span>分类</span><select value={form.category} onChange={(event) => patchTemplate('category', event.target.value)}><option>人像</option><option>风光</option><option>商品</option><option>建筑</option><option>其他</option></select></label><label><span>示例图片</span><select value={form.exampleId} onChange={(event) => patchTemplate('exampleId', event.target.value as SavePromptTemplateInput['exampleId'])}><option value="portrait">人像示例</option><option value="street">街拍示例</option><option value="coast">海岸示例</option><option value="none">不使用示例</option></select></label></div>
-          <label><span>简短描述</span><input maxLength={2_000} value={form.description} placeholder="说明适用场景和效果" onChange={(event) => patchTemplate('description', event.target.value)} /></label>
-          <label className="template-body-field"><span>模板正文</span><textarea required value={form.body} onChange={(event) => patchTemplate('body', event.target.value)} /></label>
-          <details className="template-variable-disclosure"><summary>可用变量</summary><div className="template-variables">{['analysis.summary', 'analysis.generative_actions', 'catalog.subjects', 'user_instruction', 'preservation_rules'].map((variable) => <code key={variable}>{`{{${variable}}}`}</code>)}</div></details>
+          <div className="form-grid two-columns"><label><span>分类</span><input required maxLength={100} list="prompt-template-categories" value={form.category} placeholder="输入或创建分类" onChange={(event) => patchTemplate('category', event.target.value)} /><datalist id="prompt-template-categories">{categories.map((category) => <option key={category} value={category} />)}</datalist></label><div className="template-example-picker"><span>示例图</span><div className="template-example-control"><input type="file" accept="image/*" aria-label="选择模板示例图" onChange={(event) => { setExampleImage(event.target.files?.[0]); event.currentTarget.value = ''; }} /><button type="button" className="template-example-trigger" aria-label={form.exampleImage ? '更换示例图' : '选择模板示例图'} title={form.exampleImage ? '更换示例图' : '选择模板示例图'} onClick={() => document.querySelector<HTMLInputElement>('.template-example-picker input[type=file]')?.click()}>{form.exampleImage ? <img src={form.exampleImage} alt="当前示例图" /> : <span className="template-example-empty"><Image size={18} /><span>选择图片</span></span>}</button>{form.exampleImage && <button type="button" className="quiet-button compact" aria-label="移除示例图" onClick={() => patchTemplate('exampleImage', '')}><X size={13} /></button>}</div></div></div>
+          <label><span>简短描述</span><input required maxLength={2_000} value={form.description} placeholder="说明这段提示词适合解决什么问题" onChange={(event) => patchTemplate('description', event.target.value)} /></label>
+          <div className="template-body-field"><div className="template-body-heading"><label htmlFor="template-body">模板正文</label><div className="template-variable-help"><button type="button" aria-label="查看可用变量说明" aria-describedby="template-variable-popover"><Info size={13} />可用变量</button><div className="template-variable-popover" id="template-variable-popover" role="tooltip"><p>在基于照片的修图流程中，占位符会按当前照片替换。纯文字生图不会替换，请直接填写具体提示词。</p><dl><div><dt>{'{{analysis.summary}}'}</dt><dd>照片分析摘要</dd></div><div><dt>{'{{analysis.generative_actions}}'}</dt><dd>已启用的编辑动作</dd></div><div><dt>{'{{catalog.subjects}}'}</dt><dd>分析识别的画面主体</dd></div><div><dt>{'{{user_instruction}}'}</dt><dd>本次输入的修图要求</dd></div><div><dt>{'{{preservation_rules}}'}</dt><dd>需要保留的内容和特征</dd></div></dl></div></div></div><textarea id="template-body" required value={form.body} onChange={(event) => patchTemplate('body', event.target.value)} /></div>
           <div className="template-editor-footer"><span role="status">{message}</span>{form.id && <button className="danger-action compact" type="button" onClick={() => void archiveTemplate()}>{archiveCandidate === form.id ? '确认归档' : '归档模板'}</button>}<button className="primary-action compact" type="submit">{form.id ? '保存新版本' : '创建模板'}</button></div>
         </form>
       </div>
-      {previewTemplate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPreviewTemplate(null); }}><section className="template-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="template-preview-title"><header><div><span className="dialog-icon"><WandSparkles size={16} /></span><div><h2 id="template-preview-title">{previewTemplate.name}</h2><p>{previewTemplate.category} · 版本 {previewTemplate.version}</p></div></div><IconButton label="关闭模板预览" onClick={() => setPreviewTemplate(null)}><X size={15} /></IconButton></header><div className="template-preview-content">{previewTemplate.exampleId === 'none' ? <div className="template-preview-placeholder"><Image size={28} /><span>未设置示例图片</span></div> : <img className="template-preview-hero" src={`./demo/${previewTemplate.exampleId}.jpg`} alt={`${previewTemplate.name} 示例图片`} />}<div className="template-preview-meta"><span className="template-preview-category">{previewTemplate.category}</span><span>版本 {previewTemplate.version}</span></div><p className="template-preview-description">{previewTemplate.description || '暂无描述'}</p><div className="template-preview-body"><strong>模板正文</strong><pre>{previewTemplate.body}</pre></div></div><footer><button className="quiet-button" type="button" onClick={() => setPreviewTemplate(null)}>关闭</button><button className="primary-action compact" type="button" onClick={() => { setForm({ id: previewTemplate.id, name: previewTemplate.name, description: previewTemplate.description, category: previewTemplate.category, body: previewTemplate.body, exampleId: previewTemplate.exampleId }); setPreviewTemplate(null); }}>编辑模板</button></footer></section></div>}
+      {previewTemplate && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setPreviewTemplate(null); }}><section className="template-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="template-preview-title"><header><div><span className="dialog-icon"><WandSparkles size={16} /></span><div><h2 id="template-preview-title">{previewTemplate.name}</h2><p>{previewTemplate.category} · 版本 {previewTemplate.version}</p></div></div><IconButton label="关闭模板预览" onClick={() => setPreviewTemplate(null)}><X size={15} /></IconButton></header><div className="template-preview-content">{previewTemplate.exampleImage ? <img className="template-preview-hero" src={previewTemplate.exampleImage} alt={`${previewTemplate.name} 示例图片`} /> : <div className="template-preview-placeholder"><Image size={28} /><span>未设置示例图片</span></div>}<div className="template-preview-meta"><span className="template-preview-category">{previewTemplate.category}</span><span>版本 {previewTemplate.version}</span></div><p className="template-preview-description">{previewTemplate.description || '暂无描述'}</p><div className="template-preview-body"><strong>模板正文</strong><pre>{previewTemplate.body}</pre></div></div><footer><button className="quiet-button" type="button" onClick={() => setPreviewTemplate(null)}>关闭</button><button className="primary-action compact" type="button" onClick={() => { setForm({ id: previewTemplate.id, name: previewTemplate.name, description: previewTemplate.description, category: previewTemplate.category, body: previewTemplate.body, exampleImage: previewTemplate.exampleImage }); setPreviewTemplate(null); }}>编辑模板</button></footer></section></div>}
     </div>
   );
 }
@@ -6525,18 +6581,19 @@ export function App(): React.JSX.Element {
   const [currentWorkflowItemId, setCurrentWorkflowItemId] = useState<string | null>(null);
   const [referenceNotice, setReferenceNotice] = useState('');
   const [workflowRules, setWorkflowRules] = useState<WorkflowRule[]>(() => loadWorkflowDraft().globalRules);
+  const [selectedPromptTemplates, setSelectedPromptTemplates] = useState<Array<{ id: string; body: string }>>(() => loadWorkflowDraft().selectedPromptTemplates);
   const [workflowTemplateId, setWorkflowTemplateId] = useState(() => loadWorkflowDraft().templateId);
   useEffect(() => {
     const timeout = window.setTimeout(() => {
       try {
         const draft = loadWorkflowDraft();
-        window.localStorage.setItem(WORKFLOW_DRAFT_KEY, JSON.stringify({ ...draft, workflowAssetIds, workflowAssetMeta, referenceAssetIds: workflowReferenceAssetIds, promptItems: workflowPromptItems, globalRules: workflowRules, templateId: workflowTemplateId } satisfies WorkflowDraft));
+        window.localStorage.setItem(WORKFLOW_DRAFT_KEY, JSON.stringify({ ...draft, workflowAssetIds, workflowAssetMeta, referenceAssetIds: workflowReferenceAssetIds, promptItems: workflowPromptItems, globalRules: workflowRules, selectedPromptTemplates, templateId: workflowTemplateId } satisfies WorkflowDraft));
       } catch {
         // localStorage may be unavailable in restricted sessions; the in-memory queue remains usable.
       }
     }, 250);
     return () => window.clearTimeout(timeout);
-  }, [workflowAssetIds, workflowAssetMeta, workflowReferenceAssetIds, workflowPromptItems, workflowRules, workflowTemplateId]);
+  }, [selectedPromptTemplates, workflowAssetIds, workflowAssetMeta, workflowReferenceAssetIds, workflowPromptItems, workflowRules, workflowTemplateId]);
   useEffect(() => {
     if (currentWorkflowItemId && !workflowAssetIds.includes(currentWorkflowItemId) && !workflowPromptItems.some((item) => item.id === currentWorkflowItemId)) setCurrentWorkflowItemId(null);
   }, [currentWorkflowItemId, workflowAssetIds, workflowPromptItems]);
@@ -7333,7 +7390,7 @@ export function App(): React.JSX.Element {
               <div className="workspace-source-page" inert={Boolean(viewerPhoto)} aria-hidden={viewerPhoto ? true : undefined} style={viewerPhoto ? { visibility: 'hidden' } : undefined}>
               <div className={`workspace-library-layer${activeTab === 'library' ? '' : ' is-inactive'}`} inert={activeTab !== 'library'} aria-hidden={activeTab !== 'library'}>{!catalogReady ? <main className="workspace-loading" role="status"><LoaderCircle size={14} className="loading-spinner" /><span>正在读取图库</span></main> : catalogLoadError ? <main className="workspace-loading" role="alert"><span>图库读取失败：{catalogLoadError}</span><button type="button" className="primary-action compact" onClick={() => void refreshCatalog()}>重试</button></main> : <LibraryWorkspace {...workspaceProps} />}</div>
               {activeTab === 'library' ? null
-                : activeTab === 'batch' || activeTab === 'workflow' ? <AiWorkflowPage photos={availablePhotos} focusId={sharedSelection.focusId} workflowAssetIds={workflowAssetIds} workflowAssetMeta={workflowAssetMeta} tasks={globalTasks} globalRules={workflowRules} onGlobalRulesChange={setWorkflowRules} templateId={workflowTemplateId} outputFolderId={selectedFolderIds.length <= 1 ? selectedFolderId : null} outputFolderName={catalogFolders.find((folder) => folder.id === selectedFolderId)?.name ?? '当前文件夹'} enablePromptItems={activeTab === 'batch'} referenceAssetIds={workflowReferenceAssetIds} onReferenceAssetIdsChange={setWorkflowReferenceAssetIds} promptItems={workflowPromptItems} onPromptItemsChange={setWorkflowPromptItems} currentWorkflowItemId={currentWorkflowItemId} onCurrentWorkflowItemChange={setCurrentWorkflowItemId} onRemoveAsset={removeWorkflowAsset} onMoveAsset={moveWorkflowAsset} onClearAssets={() => { setWorkflowAssetIds([]); setWorkflowAssetMeta({}); }} onOpenTasks={() => openWorkspaceTab('tasks')} onOpenViewer={(assetId, assetIds, options) => void openViewer(assetId, assetIds, options)} onFocusAsset={(id) => setSharedSelection((current) => ({ ...current, focusId: id }))} />
+                : activeTab === 'batch' || activeTab === 'workflow' ? <AiWorkflowPage photos={availablePhotos} focusId={sharedSelection.focusId} workflowAssetIds={workflowAssetIds} workflowAssetMeta={workflowAssetMeta} tasks={globalTasks} globalRules={workflowRules} onGlobalRulesChange={setWorkflowRules} selectedPromptTemplates={selectedPromptTemplates} onSelectedPromptTemplatesChange={setSelectedPromptTemplates} templateId={workflowTemplateId} outputFolderId={selectedFolderIds.length <= 1 ? selectedFolderId : null} outputFolderName={catalogFolders.find((folder) => folder.id === selectedFolderId)?.name ?? '当前文件夹'} enablePromptItems={activeTab === 'batch'} referenceAssetIds={workflowReferenceAssetIds} onReferenceAssetIdsChange={setWorkflowReferenceAssetIds} promptItems={workflowPromptItems} onPromptItemsChange={setWorkflowPromptItems} currentWorkflowItemId={currentWorkflowItemId} onCurrentWorkflowItemChange={setCurrentWorkflowItemId} onRemoveAsset={removeWorkflowAsset} onMoveAsset={moveWorkflowAsset} onClearAssets={() => { setWorkflowAssetIds([]); setWorkflowAssetMeta({}); }} onOpenTasks={() => openWorkspaceTab('tasks')} onOpenViewer={(assetId, assetIds, options) => void openViewer(assetId, assetIds, options)} onFocusAsset={(id) => setSharedSelection((current) => ({ ...current, focusId: id }))} />
                 : activeTab === 'settings' ? <SettingsPage onExportPresetsChange={setExportPresets} />
                   : activeTab === 'tasks' ? <TaskCenterPage onCatalogChanged={refreshCatalog} onOpenViewer={(assetId, assetIds, options) => void openViewer(assetId, assetIds, options)} photos={availablePhotos} />
                     : <TemplatePage />}

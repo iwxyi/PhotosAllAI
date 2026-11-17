@@ -21,20 +21,22 @@ async function service(): Promise<TemplateService> {
 describe('prompt template versions', () => {
   it('creates immutable versions and lists only the latest snapshot', async () => {
     const templates = await service();
-    const first = templates.save({ name: '清洁背景', description: '移除干扰物', category: '人像', body: '移除 {{analysis.generative_actions}}' });
-    const second = templates.save({ id: first.id, name: '清洁背景', description: '移除干扰物', category: '人像', body: '执行：\n{{analysis.generative_actions}}' });
+    const first = templates.save({ name: '清洁背景', description: '移除干扰物', category: '局部修饰', body: '移除 {{analysis.generative_actions}}', exampleImage: 'data:image/png;base64,AA==' });
+    const second = templates.save({ id: first.id, name: '清洁背景', description: '移除干扰物', category: '局部修饰', body: '执行：\n{{analysis.generative_actions}}', exampleImage: 'data:image/png;base64,AA==' });
     expect(first.version).toBe(1);
     expect(second.version).toBe(2);
     expect(templates.list()).toEqual([second]);
+    expect(templates.listSummaries()).toMatchObject([{ id: first.id, category: '局部修饰', description: '移除干扰物' }]);
+    expect(templates.get(first.id)).toEqual(second);
     templates.archive(first.id);
     expect(templates.list()).toEqual([]);
-    expect(() => templates.save({ id: first.id, name: '恢复', description: '', category: '其他', body: 'Body' })).toThrow('TEMPLATE_ARCHIVED');
+    expect(() => templates.save({ id: first.id, name: '恢复', description: '恢复模板', category: '局部修饰', body: 'Body' })).toThrow('TEMPLATE_ARCHIVED');
     templates.close();
   });
 
   it('does not update an unknown template id', async () => {
     const templates = await service();
-    expect(() => templates.save({ id: 'c01c942f-75e5-4fdd-884b-9f31d328ea6f', name: 'Unknown', description: '', category: '其他', body: 'Body' })).toThrow('TEMPLATE_NOT_FOUND');
+    expect(() => templates.save({ id: 'c01c942f-75e5-4fdd-884b-9f31d328ea6f', name: 'Unknown', description: '未知模板', category: '临时', body: 'Body' })).toThrow('TEMPLATE_NOT_FOUND');
     templates.close();
   });
 });

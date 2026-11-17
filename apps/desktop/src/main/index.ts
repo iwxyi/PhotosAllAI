@@ -1100,6 +1100,11 @@ function registerIpc(): void {
     return result;
   });
   ipcMain.handle('templates.list.v1', () => templates.list());
+  ipcMain.handle('templates.get.v1', (_event, input: unknown) => {
+    const templateId = String(input);
+    if (!/^[0-9a-f-]{36}$/iu.test(templateId)) throw new Error('INVALID_TEMPLATE_ID');
+    return templates.get(templateId);
+  });
   ipcMain.handle('templates.save.v1', (_event, input: unknown) =>
     templates.save(savePromptTemplateInputSchema.parse(input))
   );
