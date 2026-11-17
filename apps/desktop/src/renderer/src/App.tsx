@@ -1100,7 +1100,7 @@ function Sidebar({
             <span><button type="button" aria-label="创建子文件夹" title="在选中的文件夹内创建子文件夹" disabled={isDemo || !selectedFolderId || folderActionBusy} onClick={() => { if (selectedFolderId) void createFolder(selectedFolderId); }}><FolderInput size={13} /></button>{selectedOfflineFolder && <button type="button" aria-label={`重新定位 ${selectedOfflineFolder.name}`} title="重新定位离线文件夹" onClick={() => void onRelinkFolder(selectedOfflineFolder.id).catch((error: unknown) => setFolderActionNotice(relinkErrorMessage(error)))}><RotateCcw size={13} /></button>}<button type="button" aria-label="添加关联文件夹" onClick={() => void onImportFolders()}><Plus size={13} /></button></span>
           </div>
           {!folderAppearance.sectionCollapsed && <div className="folder-tree" role="tree" aria-label="关联文件夹" onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFolderDropTargetId(null); }}>
-          {navigationLoading && folders.length === 0 && <div className="sidebar-navigation-loading" role="status"><LoaderCircle size={14} className="batch-generation-spinner" />正在读取文件夹</div>}
+          {navigationLoading && folders.length === 0 && <div className="sidebar-navigation-loading" role="status"><LoaderCircle size={14} className="loading-spinner" />正在读取文件夹</div>}
           {displayedFolders.map((folder, index) => {
             const color = folderAppearance.colors[folder.id] ?? 'none';
             const expanded = folderAppearance.expandedIds.includes(folder.id);
@@ -2626,7 +2626,7 @@ function InspectorInfo({ photo, revision, displayedFile }: { photo: Photo; revis
   ];
   const shootingData = comparedResult || comparedAsset ? undefined : data;
   const shooting = shootingData ? [['相机', shootingData.camera], ['镜头', shootingData.lens], ['拍摄时间', shootingData.takenAt ? new Date(shootingData.takenAt).toLocaleString() : undefined], ['快门', shootingData.exposure], ['光圈', shootingData.aperture ? `f/${shootingData.aperture}` : undefined], ['ISO', shootingData.iso?.toString()], ['焦距', shootingData.focalLength ? `${shootingData.focalLength} mm` : undefined]].filter(([, value]) => value) : [];
-  return <div className="inspector-info"><section className="inspector-section"><div className="inspector-heading"><span>文件信息</span></div><div className="metadata-list">{fields.map(([label, value]) => <div key={label}><span>{label}</span><strong title={value}>{value}</strong></div>)}</div>{!comparedResult && !comparedAsset && details.id === photo.id && details.error && !E2E_DEMO_MODE && <p className="inline-error">{details.error}</p>}{comparedResult && resultDetails[comparedResult.id]?.error && !E2E_DEMO_MODE && <p className="inline-error">{resultDetails[comparedResult.id]?.error}</p>}</section>{shooting.length > 0 && <details className="inspector-section metadata-shooting" aria-busy={!data} open={shootingDetailsOpen} onToggle={(event) => {
+  return <div className="inspector-info"><section className="inspector-section"><div className="inspector-heading"><span>文件信息</span></div><div className="metadata-list">{fields.map(([label, value]) => <div key={label}><span>{label}</span><strong title={value}>{value}</strong></div>)}</div>{!comparedResult && !comparedAsset && details.id === photo.id && details.error && !E2E_DEMO_MODE && <p className="inline-error">文件信息暂不可用</p>}{comparedResult && resultDetails[comparedResult.id]?.error && !E2E_DEMO_MODE && <p className="inline-error">生成文件信息暂不可用</p>}</section>{shooting.length > 0 && <details className="inspector-section metadata-shooting" aria-busy={!data} open={shootingDetailsOpen} onToggle={(event) => {
     const open = event.currentTarget.open;
     setShootingDetailsOpen(open);
     try { localStorage.setItem(SHOOTING_DETAILS_OPEN_KEY, String(open)); } catch { /* storage may be unavailable */ }
@@ -2650,7 +2650,7 @@ function GlobalDetailsPanel({ photo, displayedFile }: { photo: Photo; displayedF
   }, [photo.id, photo.temporary, refresh]);
   const current = state.id === photo.id && !photo.temporary ? state : undefined;
   const displayed = current ?? (!photo.temporary ? state : undefined);
-  return <div className="inspector-details"><InspectorInfo photo={photo} revision={displayed?.revision} displayedFile={displayedFile} />{current?.error && <p className="inline-error">{current.error}</p>}{displayed && (displayed.results.length > 0 || displayed.trashed.length > 0) && <div inert={!current} aria-busy={!current}><InspectorVersions results={displayed.results} trashedResults={displayed.trashed} onTrashResult={async (id) => { await window.desktopApi.trashGenerationResult({ resultId: id }); setRefresh((value) => value + 1); }} onRestoreResult={async (id) => { await window.desktopApi.restoreGenerationResult({ resultId: id }); setRefresh((value) => value + 1); }} /></div>}</div>;
+  return <div className="inspector-details"><InspectorInfo photo={photo} revision={displayed?.revision} displayedFile={displayedFile} />{current?.error && <p className="inline-error">版本信息暂不可用</p>}{displayed && (displayed.results.length > 0 || displayed.trashed.length > 0) && <div inert={!current} aria-busy={!current}><InspectorVersions results={displayed.results} trashedResults={displayed.trashed} onTrashResult={async (id) => { await window.desktopApi.trashGenerationResult({ resultId: id }); setRefresh((value) => value + 1); }} onRestoreResult={async (id) => { await window.desktopApi.restoreGenerationResult({ resultId: id }); setRefresh((value) => value + 1); }} /></div>}</div>;
 }
 
 function InspectorVersions({ results, trashedResults, onTrashResult, onRestoreResult }: { results: GenerationResult[]; trashedResults: TrashedGenerationResult[]; onTrashResult: (resultId: string) => Promise<void>; onRestoreResult: (resultId: string) => Promise<void> }): React.JSX.Element {
@@ -2864,6 +2864,7 @@ type LibraryWorkspaceProps = {
   isDemo: boolean;
   selectedFolderId: string | null;
   selectedFolderIds: string[];
+  catalogPhotoFolderIds: string[];
   selectedAlbumId: string | null;
   selectedSmartCollection: CatalogSmartCollection['id'] | null;
   selectedTagId: string | null;
@@ -3136,7 +3137,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     const entry = groupDetails[photo.id];
     return entry && entry.modifiedAt === photo.modifiedAt ? [[photo.id, entry.data]] : [];
   })) as Record<string, FileDetails | null>, [groupDetails, props.availablePhotos]);
-  const photoGroups = useMemo(() => groupCatalogPhotos(props.availablePhotos, props.photoFilters.groupBy, props.catalogFolders, props.photoFilters.groupOrder, metadata, props.selectedFolderIds), [props.availablePhotos, props.photoFilters.groupBy, props.photoFilters.groupOrder, props.catalogFolders, props.selectedFolderIds, metadata]);
+  const photoGroups = useMemo(() => groupCatalogPhotos(props.availablePhotos, props.photoFilters.groupBy, props.catalogFolders, props.photoFilters.groupOrder, metadata, props.catalogPhotoFolderIds), [props.availablePhotos, props.photoFilters.groupBy, props.photoFilters.groupOrder, props.catalogFolders, props.catalogPhotoFolderIds, metadata]);
   const grouped = props.photoFilters.groupBy.length > 0;
   const defaultGroupTitle = collectionTitle(props);
   const setFilter = <K extends keyof PhotoFilters>(key: K, value: React.SetStateAction<PhotoFilters[K]>) => {
@@ -3178,13 +3179,13 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     let offset = 0;
     return photoGroups.map((group) => {
       const start = offset;
-      offset += (grouped ? 41 : 0) + group.items.length * 57;
+      offset += (grouped ? 49 : 0) + group.items.length * 57;
       return { group, start, end: offset };
     });
   }, [photoGroups, grouped]);
   const listWindow = useMemo(() => {
     if (viewMode !== 'list') return null;
-    const headerHeight = grouped ? 41 : 0;
+    const headerHeight = grouped ? 49 : 0;
     const rowHeight = 57;
     const rangeStart = Math.max(0, listViewport.top - 35 - rowHeight * 15);
     const rangeEnd = listViewport.top + listViewport.height + rowHeight * 20;
@@ -3360,7 +3361,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     scrollSaveTimer.current = null;
     scrollRestore.current = { key: scrollKey, top: readCatalogScroll(scrollKey) };
     scrollRestoredKey.current = null;
-    if (gridRef.current) gridRef.current.scrollTop = 0;
+    if (gridRef.current && props.catalogDataScope === dataScope) gridRef.current.scrollTop = 0;
   }, [scrollKey]);
   useLayoutEffect(() => {
     if (workspaceView !== 'library' || (viewMode !== 'list' && gridWidth <= 0)) return;
@@ -3554,7 +3555,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     return photoGroups.map((group, groupIndex) => {
       const start = offset;
       const startIndex = itemIndex;
-      const rowsStart = start + (groupIndex > 0 ? 14 : 0) + 34 + 10;
+      const rowsStart = start + (groupIndex > 0 ? 20 : 0) + 42 + 10;
       itemIndex += group.items.length;
       offset = rowsStart + Math.ceil(group.items.length / gridColumns) * gridRowStride;
       return { group, start, rowsStart, end: offset, startIndex, endIndex: itemIndex };
@@ -3614,7 +3615,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     const start = low;
     while (low < rows.length && rows[low]!.top < endY) low += 1;
     const visible = rows.slice(start, low);
-    const headings = justifiedLayout.headings.filter((heading) => heading.top + 43 > startY && heading.top < endY);
+    const headings = justifiedLayout.headings.filter((heading) => heading.top + 42 > startY && heading.top < endY);
     return { rows: visible, headings, height: total };
   }, [viewMode, props.availablePhotos.length, justifiedLayout, listViewport.top, listViewport.height]);
   const masonryWindow = useMemo(() => {
@@ -3636,7 +3637,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     let headingEnd = masonryLayout.headings.length;
     while (headingStart < headingEnd) {
       const middle = (headingStart + headingEnd) >>> 1;
-      if (masonryLayout.headings[middle]!.top + 53 <= startY) headingStart = middle + 1;
+      if (masonryLayout.headings[middle]!.top + 42 <= startY) headingStart = middle + 1;
       else headingEnd = middle;
     }
     headingEnd = headingStart;
@@ -3664,7 +3665,8 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     const visible = (viewMode === 'list' ? listGroups : gridVisibleGroups).flatMap((group) => group.items);
     setPreviewWindowPhotos((current) => current.length === visible.length && current.every((photo, index) => photo === visible[index]) ? current : visible);
   }, [viewMode, listGroups, gridVisibleGroups]);
-  const listRows = listGroups.flatMap((group) => [...(group.showHeader ? [<header className="catalog-group-heading" key={`group:${group.key}`}><strong>{group.title}</strong><span title="当前已加载的照片数量">{group.count} 张</span></header>] : []), ...group.items.map((photo) => <div className={`catalog-list-row${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}`} style={listStyle} role="option" aria-selected={selection.selectedIds.has(photo.id)} tabIndex={0} key={photo.id} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable={!props.isDemo} onDragStart={(event) => dragDisplayed(event, photo)} onDragEnd={() => { activePhotoDragIds = null; }} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onKeyDown={(event) => { if (event.key === 'Enter') props.onOpenViewer(photo.id, orderedIds); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onDoubleClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
+  const groupHeadingContent = (title: string, count: number) => <span className="catalog-group-heading-content"><strong>{title}</strong><span title="当前已加载的照片数量">{count} 张</span></span>;
+  const listRows = listGroups.flatMap((group) => [...(group.showHeader ? [<header className="catalog-group-heading" key={`group:${group.key}`}>{groupHeadingContent(group.title, group.count)}</header>] : []), ...group.items.map((photo) => <div className={`catalog-list-row${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}`} style={listStyle} role="option" aria-selected={selection.selectedIds.has(photo.id)} tabIndex={0} key={photo.id} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable={!props.isDemo} onDragStart={(event) => dragDisplayed(event, photo)} onDragEnd={() => { activePhotoDragIds = null; }} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onKeyDown={(event) => { if (event.key === 'Enter') props.onOpenViewer(photo.id, orderedIds); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onDoubleClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
     {selectButton(photo)}{columns.map((column) => <span className={`catalog-list-cell catalog-list-cell-${column.id}`} key={column.id}>{field(photo, column.id)}</span>)}
   </div>)]);
   return (
@@ -3732,9 +3734,9 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
             {gridWindow && gridWindow.startRow > 0 && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: gridWindow.startRow * gridRowStride - 10 }} />}
             {groupedGridWindow && groupedGridWindow.before > 0 && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: groupedGridWindow.before - 10 }} />}
             {justifiedWindow && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: justifiedWindow.height }} />}
-            {justifiedWindow?.headings.map((heading) => <header className={`catalog-photo-group catalog-group-heading${heading.key === photoGroups[0]?.key ? ' is-first-group' : ''}`} key={`group:${heading.key}`} style={{ top: heading.top, left: 16, right: 16 }}><strong>{heading.title}</strong><span title="当前已加载的照片数量">{heading.count} 张</span></header>)}
+            {justifiedWindow?.headings.map((heading) => <header className={`catalog-photo-group catalog-group-heading${heading.key === photoGroups[0]?.key ? ' is-first-group' : ''}`} key={`group:${heading.key}`} style={{ top: heading.top, left: 16, right: 16 }}>{groupHeadingContent(heading.title, heading.count)}</header>)}
             {masonryWindow && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: masonryLayout!.height }} />}
-            {masonryWindow?.headings.map((heading) => <header className={`catalog-photo-group catalog-group-heading${heading.key === photoGroups[0]?.key ? ' is-first-group' : ''}`} key={`group:${heading.key}`} style={{ top: heading.top, left: 16, right: 16 }}><strong>{heading.title}</strong><span title="当前已加载的照片数量">{heading.count} 张</span></header>)}
+            {masonryWindow?.headings.map((heading) => <header className={`catalog-photo-group catalog-group-heading${heading.key === photoGroups[0]?.key ? ' is-first-group' : ''}`} key={`group:${heading.key}`} style={{ top: heading.top, left: 16, right: 16 }}>{groupHeadingContent(heading.title, heading.count)}</header>)}
             {gridVisibleGroups.flatMap((group, groupIndex) => {
               const cards = group.items.map((photo) => {
                 const preview = previewPhoto(photo);
@@ -3747,7 +3749,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
               });
               // Keep cards under the same parent so grouping preserves decoded images and focus.
               return justifiedWindow ? [<div className="catalog-justified-row" key={group.key} style={{ top: justifiedWindow.rows[groupIndex]!.top + 8, left: 16, right: 16, height: justifiedWindow.rows[groupIndex]!.height }}>{cards}</div>]
-                : group.showHeader ? [<header className={`catalog-photo-group catalog-group-heading${group.key === photoGroups[0]?.key ? ' is-first-group' : ''}`} key={`group:${group.key}`}><strong>{group.title}</strong><span title="当前已加载的照片数量">{group.count} 张</span></header>, ...cards] : cards;
+                : group.showHeader ? [<header className={`catalog-photo-group catalog-group-heading${group.key === photoGroups[0]?.key ? ' is-first-group' : ''}`} key={`group:${group.key}`}>{groupHeadingContent(group.title, group.count)}</header>, ...cards] : cards;
             })}
             {gridWindow && gridWindow.endRow * gridColumns < props.availablePhotos.length && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: (Math.ceil(props.availablePhotos.length / gridColumns) - gridWindow.endRow) * gridRowStride - 10 }} />}
             {groupedGridWindow && groupedGridWindow.after > 10 && <div className="catalog-grid-spacer" aria-hidden="true" style={{ height: groupedGridWindow.after - 10 }} />}
@@ -5475,12 +5477,12 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
           <div className="form-feedback" role="status">{storageMessage || '便携模式需要原图目录具有写入权限；失败时任务会明确报错。'}</div>
         </section>
         <section className="settings-section cache-section">
-          <div className="settings-heading"><div><h2>预览缓存</h2></div><span>{cacheStats ? `${cacheStats.files} 个文件 · ${(cacheStats.bytes / 1_073_741_824).toFixed(2)} GiB` : '正在读取'}</span></div>
+          <div className="settings-heading"><div><h2>预览缓存</h2></div><span>{cacheStats ? `${cacheStats.files} 个文件 · ${(cacheStats.bytes / 1_073_741_824).toFixed(2)} GiB` : <><LoaderCircle size={12} className="loading-spinner" />正在读取</>}</span></div>
           <label className="cache-limit"><span><strong>磁盘上限</strong><small>达到上限后优先清理最久未使用的缩略图和屏幕预览。</small></span><select aria-label="预览缓存磁盘上限" value={cacheMaxBytes} disabled={cacheBusy} onChange={(event) => void saveCacheMaxBytes(Number(event.target.value))}><option value={1024 ** 3}>1 GiB</option><option value={5 * 1024 ** 3}>5 GiB</option><option value={10 * 1024 ** 3}>10 GiB</option><option value={20 * 1024 ** 3}>20 GiB</option><option value={50 * 1024 ** 3}>50 GiB</option></select></label>
           <div className="cache-actions"><button className="secondary-action" type="button" disabled={cacheBusy || !cacheStats || cacheStats.bytes === 0} onClick={async () => { setCacheBusy(true); try { const result = await window.desktopApi.pruneImageCache({ maxBytes: 0 }); setCacheMessage(`已清理 ${result.removedFiles} 个缓存文件。`); setCacheStats(await window.desktopApi.getImageCacheStats()); } catch { setCacheMessage('缓存清理失败，请稍后重试。'); } finally { setCacheBusy(false); } }}>{cacheBusy ? '清理中…' : '清理全部可重建缓存'}</button><span role="status">{cacheMessage}</span></div>
         </section>
         <section className="settings-section generation-trash-section">
-          <div className="settings-heading"><div><h2>生成版本回收站</h2><p>回收版本仍可在照片的版本页恢复；永久清理不会触碰原图、活动版本或导出文件。</p></div><span><Trash2 size={14} />{trashSummary ? `${trashSummary.resultCount} 个版本 · ${formatStorageBytes(trashSummary.totalBytes)}` : '正在读取'}</span></div>
+          <div className="settings-heading"><div><h2>生成版本回收站</h2><p>回收版本仍可在照片的版本页恢复；永久清理不会触碰原图、活动版本或导出文件。</p></div><span>{trashSummary ? <><Trash2 size={14} />{`${trashSummary.resultCount} 个版本 · ${formatStorageBytes(trashSummary.totalBytes)}`}</> : <><LoaderCircle size={12} className="loading-spinner" />正在读取</>}</span></div>
           <div className="generation-trash-row">
             <span><strong>{trashSummary?.resultCount ? '可恢复内容' : '回收站为空'}</strong><small>{trashSummary && (trashSummary.missingFiles > 0 || trashSummary.unsafePaths > 0) ? `${trashSummary.missingFiles} 个文件已缺失 · ${trashSummary.unsafePaths} 个异常路径将被保护性跳过` : '永久清理后无法恢复，版本序号仍不会复用。'}</small></span>
             <button className="danger-action" type="button" disabled={trashBusy || !trashSummary || trashSummary.resultCount === 0} onClick={() => setTrashConfirmationOpen(true)}>清空回收站</button>
@@ -5509,7 +5511,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
           <div className="settings-heading"><h2>诊断与维护</h2></div>
           {diagnostics && <div className="diagnostic-health-strip"><span>自动备份：{diagnostics.startupRecovery.automaticBackup.status === 'completed' ? '已完成' : diagnostics.startupRecovery.automaticBackup.status === 'skipped' ? '已跳过' : diagnostics.startupRecovery.automaticBackup.status === 'failed' ? '失败' : '进行中'}</span><span>目录监听：{diagnostics.catalogWatcher.activeWatchers}/{diagnostics.catalogWatcher.watchedFolders}</span><span>监听失败：{diagnostics.catalogWatcher.watchFailures}</span><span>协调失败：{diagnostics.catalogWatcher.reconciliationFailures}</span></div>}
           {diagnostics && <div className="cache-actions"><button className="secondary-action compact" type="button" disabled={integrityBusy} onClick={() => void runIntegrityCheck()}><ShieldCheck size={13} />{integrityBusy ? '检查中…' : '重新检查图库'}</button><button className="secondary-action compact" type="button" onClick={() => void copyDiagnostics()}><Copy size={13} />复制脱敏摘要</button><button className="secondary-action compact" type="button" disabled={diagnosticBusy} onClick={() => void exportDiagnostics()}><Download size={13} />{diagnosticBusy ? '导出中…' : '导出诊断文件'}</button><span role="status">{diagnosticMessage}</span></div>}
-          {diagnostics ? <div className="diagnostic-grid"><span>版本<strong>{diagnostics.appVersion}</strong></span><span>图库<strong>{diagnostics.catalog.assets} 张 · 离线 {diagnostics.catalog.offline}</strong></span><span className={`integrity-result is-${diagnostics.integrity.status}`}>完整性<strong>{diagnostics.integrity.status === 'healthy' ? '正常' : diagnostics.integrity.status === 'warning' ? '需关注' : '发现错误'}</strong><small>数据库 {diagnostics.integrity.databaseStatus === 'ok' ? '正常' : diagnostics.integrity.databaseStatus === 'corrupt' ? '损坏' : '无法读取'} · 活动缺失 {diagnostics.integrity.missingActiveFiles} · 孤立 {diagnostics.integrity.unexpectedGeneratedFiles + diagnostics.integrity.unexpectedTrashFiles} · 待恢复 {diagnostics.integrity.pendingGenerationWrites}（异常 {diagnostics.integrity.unsafeGenerationWriteIntents}）</small></span><span>启动恢复<strong>{diagnostics.startupRecovery.trashPurges.recovered + diagnostics.startupRecovery.fileOperations.resolved + diagnostics.startupRecovery.generationWrites.recovered} 项</strong><small>冲突 {diagnostics.startupRecovery.trashPurges.conflicts} · 失败 {diagnostics.startupRecovery.trashPurges.failed + diagnostics.startupRecovery.fileOperations.failed + diagnostics.startupRecovery.generationWrites.failed}</small></span><span>模型<strong>{diagnostics.providers.enabled}/{diagnostics.providers.total} 已启用</strong></span><span>缓存<strong>{(diagnostics.cache.bytes / 1_073_741_824).toFixed(2)} GiB</strong><small>命中 {diagnostics.cache.performance.hits} · 未命中 {diagnostics.cache.performance.misses}</small></span><span>解码<strong>{diagnostics.cache.performance.decodes} 次</strong><small>运行 {diagnostics.cache.performance.activeDecodes} · 排队 {diagnostics.cache.performance.pendingDecodes} · 累计 {Math.round(diagnostics.cache.performance.decodeMsTotal)} ms</small></span><span>后台索引<strong>{diagnostics.backgroundFiles.running} 项</strong><small>目录复查 {diagnostics.catalogWatcher.reconciling ? '进行中' : '空闲'} · 主线程最大延迟 {diagnostics.cache.performance.eventLoopDelayMaxMs} ms</small></span><span>RAW 代理<strong>{diagnostics.cache.raw.imageMagick ? 'ImageMagick' : diagnostics.cache.raw.sips ? 'sips' : '未安装'}</strong><small>原生入口已启用；完整显影仍按发布计划推进</small></span></div> : <small>正在读取诊断摘要…</small>}
+          {diagnostics ? <div className="diagnostic-grid"><span>版本<strong>{diagnostics.appVersion}</strong></span><span>图库<strong>{diagnostics.catalog.assets} 张 · 离线 {diagnostics.catalog.offline}</strong></span><span className={`integrity-result is-${diagnostics.integrity.status}`}>完整性<strong>{diagnostics.integrity.status === 'healthy' ? '正常' : diagnostics.integrity.status === 'warning' ? '需关注' : '发现错误'}</strong><small>数据库 {diagnostics.integrity.databaseStatus === 'ok' ? '正常' : diagnostics.integrity.databaseStatus === 'corrupt' ? '损坏' : '无法读取'} · 活动缺失 {diagnostics.integrity.missingActiveFiles} · 孤立 {diagnostics.integrity.unexpectedGeneratedFiles + diagnostics.integrity.unexpectedTrashFiles} · 待恢复 {diagnostics.integrity.pendingGenerationWrites}（异常 {diagnostics.integrity.unsafeGenerationWriteIntents}）</small></span><span>启动恢复<strong>{diagnostics.startupRecovery.trashPurges.recovered + diagnostics.startupRecovery.fileOperations.resolved + diagnostics.startupRecovery.generationWrites.recovered} 项</strong><small>冲突 {diagnostics.startupRecovery.trashPurges.conflicts} · 失败 {diagnostics.startupRecovery.fileOperations.failed + diagnostics.startupRecovery.generationWrites.failed + diagnostics.startupRecovery.trashPurges.failed}</small></span><span>模型<strong>{diagnostics.providers.enabled}/{diagnostics.providers.total} 已启用</strong></span><span>缓存<strong>{(diagnostics.cache.bytes / 1_073_741_824).toFixed(2)} GiB</strong><small>命中 {diagnostics.cache.performance.hits} · 未命中 {diagnostics.cache.performance.misses}</small></span><span>解码<strong>{diagnostics.cache.performance.decodes} 次</strong><small>运行 {diagnostics.cache.performance.activeDecodes} · 排队 {diagnostics.cache.performance.pendingDecodes} · 累计 {Math.round(diagnostics.cache.performance.decodeMsTotal)} ms</small></span><span>后台索引<strong>{diagnostics.backgroundFiles.running} 项</strong><small>目录复查 {diagnostics.catalogWatcher.reconciling ? '进行中' : '空闲'} · 主线程最大延迟 {diagnostics.cache.performance.eventLoopDelayMaxMs} ms</small></span><span>RAW 代理<strong>{diagnostics.cache.raw.imageMagick ? 'ImageMagick' : diagnostics.cache.raw.sips ? 'sips' : '未安装'}</strong><small>原生入口已启用；完整显影仍按发布计划推进</small></span></div> : <small className="inline-loading"><LoaderCircle size={12} className="loading-spinner" />正在读取诊断摘要…</small>}
         </section>}
       </main>
       {trashConfirmationOpen && trashSummary && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !trashBusy) setTrashConfirmationOpen(false); }}><section className="removal-dialog is-destructive" role="alertdialog" aria-modal="true" aria-labelledby="empty-trash-title" aria-describedby="empty-trash-description"><header><span className="dialog-icon"><Trash2 size={17} /></span><div><h2 id="empty-trash-title">永久清理 {trashSummary.resultCount} 个生成版本？</h2><p id="empty-trash-description">将释放约 {formatStorageBytes(trashSummary.totalBytes)}。这些版本及生成上下文会从当前图库永久移除，操作无法撤销。</p></div></header><div className="removal-impact"><CircleAlert size={15} /><span>只清理应用内部生成版本回收站。原图、活动生成版本、便携目录中的活动文件和已导出副本不会被删除。</span></div><footer><button autoFocus className="quiet-button" type="button" disabled={trashBusy} onClick={() => setTrashConfirmationOpen(false)}>取消</button><button className="danger-action" type="button" disabled={trashBusy} onClick={() => void emptyGenerationTrash()}>{trashBusy ? '正在清理…' : '永久清理'}</button></footer></section></div>}
@@ -6367,6 +6369,7 @@ export function App(): React.JSX.Element {
   const [openTabs, setOpenTabs] = useState<WorkspaceTab[]>(['library']);
   const [sessionReady, setSessionReady] = useState(false);
   const [catalogPhotos, setCatalogPhotos] = useState<Photo[]>([]);
+  const [catalogPhotoFolderIds, setCatalogPhotoFolderIds] = useState<string[]>([]);
   const [catalogDataScope, setCatalogDataScope] = useState('');
   const [catalogFolders, setCatalogFolders] = useState<CatalogFolder[]>([]);
   const [navigationLoading, setNavigationLoading] = useState(true);
@@ -6740,6 +6743,7 @@ export function App(): React.JSX.Element {
       loadedCatalogCount.current = nextPhotos.length;
       loadedCatalogIds.current = new Set(nextPhotos.map((photo) => photo.id));
       setCatalogPhotos(nextPhotos);
+      setCatalogPhotoFolderIds(folderIds.length ? folderIds : folderId ? [folderId] : []);
       setCatalogDataScope(selectionScope);
       const scope = JSON.stringify([folderId, folderIds, selectedAlbumId, selectedSmartCollection, selectedTagId]);
       if (viewerCatalogScope.current !== null && viewerCatalogScope.current !== scope) {
@@ -7108,7 +7112,7 @@ export function App(): React.JSX.Element {
   }), []);
   const displayTotal = isDemo ? 128 : catalogTotal;
   useEffect(() => {
-    if (!catalogReady) return;
+    if (!catalogReady || catalogDataScope !== selectionScope) return;
     const scopeChanged = selectionScopeRef.current !== selectionScope;
     selectionScopeRef.current = selectionScope;
     const visibleIds = new Set(availablePhotos.map((photo) => photo.id));
@@ -7125,9 +7129,9 @@ export function App(): React.JSX.Element {
       const selectedIds = new Set(retained.length > 0 ? retained : preferred ? [preferred] : []);
       return { selectedIds, anchorId: selectedIds.has(base.anchorId ?? '') ? base.anchorId : preferred, focusId: preferred };
     });
-  }, [availablePhotos, catalogReady, nextCursor, savedSelection, selectedAssetId, selectionScope]);
+  }, [availablePhotos, catalogReady, catalogDataScope, nextCursor, savedSelection, selectedAssetId, selectionScope]);
   useEffect(() => {
-    if (!catalogReady || selectionScopeRef.current !== selectionScope) return;
+    if (!catalogReady || catalogDataScope !== selectionScope || selectionScopeRef.current !== selectionScope) return;
     const save = () => {
       try { localStorage.setItem(CATALOG_SELECTION_KEY, JSON.stringify({ scope: selectionScope, ids: [...sharedSelection.selectedIds].slice(0, 5_000), anchorId: sharedSelection.anchorId, focusId: sharedSelection.focusId })); }
       catch { /* restricted storage */ }
@@ -7135,7 +7139,7 @@ export function App(): React.JSX.Element {
     const timeout = window.setTimeout(save, 250);
     window.addEventListener('beforeunload', save);
     return () => { window.clearTimeout(timeout); window.removeEventListener('beforeunload', save); };
-  }, [catalogReady, selectionScope, sharedSelection]);
+  }, [catalogReady, catalogDataScope, selectionScope, sharedSelection]);
   const workspaceProps: LibraryWorkspaceProps = {
     view: 'library',
     active: !viewerPhoto && !quickPhoto,
@@ -7149,6 +7153,7 @@ export function App(): React.JSX.Element {
     isDemo,
     selectedFolderId,
     selectedFolderIds,
+    catalogPhotoFolderIds,
     selectedAlbumId,
     selectedSmartCollection,
     selectedTagId,
@@ -7320,13 +7325,13 @@ export function App(): React.JSX.Element {
       if (paths.length) void importExternalMedia(paths, target ?? selectedFolderId);
     }}>
       <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
-      {!sessionReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在恢复工作区</span></main>
+      {!sessionReady ? <main className="workspace-loading" role="status"><LoaderCircle size={14} className="loading-spinner" /><span>正在恢复工作区</span></main>
         : <div className="global-workspace-shell" style={{ gridTemplateColumns: `${panelVisibility.left ? globalLayout.leftWidth : 0}px ${panelVisibility.left ? 5 : 0}px minmax(0, 1fr) ${panelVisibility.right ? 5 : 0}px ${panelVisibility.right ? globalLayout.rightWidth : 0}px` }}>
               <div className="workspace-side-panel" hidden={!panelVisibility.left}><Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={catalogTotal} selectedFolderId={selectedFolderId} selectedFolderIds={selectedFolderIds} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} allPhotosSelected={!selectedFolderId && !selectedAlbumId && !selectedSmartCollection && !selectedTagId && !favoriteOnly && !searchDraft.trim() && !photoFilters.minimumRating && photoFilters.flags.length === 0 && photoFilters.colors.length === 0} tags={catalogTags} selectedTagId={selectedTagId} navigationLoading={navigationLoading} onSelectFolder={workspaceProps.onSelectFolder} onSelectFolders={workspaceProps.onSelectFolders} onSelectAlbum={workspaceProps.onSelectAlbum} onSelectSmartCollection={workspaceProps.onSelectSmartCollection} onSelectAllPhotos={() => { workspaceProps.onSelectFolder(null); setSelectedTagId(null); setFavoriteOnly(false); setSearchDraft(''); setSearchQuery(''); setPhotoFilters((current) => ({ ...current, minimumRating: null, flags: [], colors: [] })); }} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onRelinkFolder={relinkFolder} onSynchronizeFolder={synchronizeFolder} onRevealFolder={revealFolder} onUnregisterFolder={unregisterFromNavigation} onTrashFolders={trashFoldersFromNavigation} onMoveFolder={moveFolder} onDropAssets={dropAssetsFromNavigation} onImportExternalMedia={async (paths, folderId) => importExternalMedia(paths, folderId)} onSelectTag={setSelectedTagId} isDemo={isDemo} /></div>
               <div className="workspace-side-splitter" hidden={!panelVisibility.left}><PaneSplitter orientation="vertical" value={globalLayout.leftWidth} minimum={160} maximum={420} label="调整左侧目录栏宽度" onChange={(value) => setGlobalLayout('leftWidth', value)} /></div>
               <div className="workspace-page-stack">
               <div className="workspace-source-page" inert={Boolean(viewerPhoto)} aria-hidden={viewerPhoto ? true : undefined} style={viewerPhoto ? { visibility: 'hidden' } : undefined}>
-              <div className={`workspace-library-layer${activeTab === 'library' ? '' : ' is-inactive'}`} inert={activeTab !== 'library'} aria-hidden={activeTab !== 'library'}>{!catalogReady ? <main className="workspace-loading"><span className="working-pulse" /><span>正在读取图库</span></main> : catalogLoadError ? <main className="workspace-loading" role="alert"><span>图库读取失败：{catalogLoadError}</span><button type="button" className="primary-action compact" onClick={() => void refreshCatalog()}>重试</button></main> : <LibraryWorkspace {...workspaceProps} />}</div>
+              <div className={`workspace-library-layer${activeTab === 'library' ? '' : ' is-inactive'}`} inert={activeTab !== 'library'} aria-hidden={activeTab !== 'library'}>{!catalogReady ? <main className="workspace-loading" role="status"><LoaderCircle size={14} className="loading-spinner" /><span>正在读取图库</span></main> : catalogLoadError ? <main className="workspace-loading" role="alert"><span>图库读取失败：{catalogLoadError}</span><button type="button" className="primary-action compact" onClick={() => void refreshCatalog()}>重试</button></main> : <LibraryWorkspace {...workspaceProps} />}</div>
               {activeTab === 'library' ? null
                 : activeTab === 'batch' || activeTab === 'workflow' ? <AiWorkflowPage photos={availablePhotos} focusId={sharedSelection.focusId} workflowAssetIds={workflowAssetIds} workflowAssetMeta={workflowAssetMeta} tasks={globalTasks} globalRules={workflowRules} onGlobalRulesChange={setWorkflowRules} templateId={workflowTemplateId} outputFolderId={selectedFolderIds.length <= 1 ? selectedFolderId : null} outputFolderName={catalogFolders.find((folder) => folder.id === selectedFolderId)?.name ?? '当前文件夹'} enablePromptItems={activeTab === 'batch'} referenceAssetIds={workflowReferenceAssetIds} onReferenceAssetIdsChange={setWorkflowReferenceAssetIds} promptItems={workflowPromptItems} onPromptItemsChange={setWorkflowPromptItems} currentWorkflowItemId={currentWorkflowItemId} onCurrentWorkflowItemChange={setCurrentWorkflowItemId} onRemoveAsset={removeWorkflowAsset} onMoveAsset={moveWorkflowAsset} onClearAssets={() => { setWorkflowAssetIds([]); setWorkflowAssetMeta({}); }} onOpenTasks={() => openWorkspaceTab('tasks')} onOpenViewer={(assetId, assetIds, options) => void openViewer(assetId, assetIds, options)} onFocusAsset={(id) => setSharedSelection((current) => ({ ...current, focusId: id }))} />
                 : activeTab === 'settings' ? <SettingsPage onExportPresetsChange={setExportPresets} />
@@ -7335,13 +7340,13 @@ export function App(): React.JSX.Element {
               </div>
               {viewerPhoto && <InlinePhotoViewer workspace={workspaceProps} photo={viewerPhoto} items={viewerPhotos} onPhotoChange={(photo) => { setViewerPhoto(photo); setViewerResultId(undefined); }} onClose={closeViewer} resultId={viewerResultId} options={viewerOptions} onSelectResult={selectViewerResult} onRemoveResult={removeViewerResult} onDisplayedFileChange={setViewerDisplayedFile} />}
               {quickSession && quickPhoto && <QuickPhotoViewer key={quickSession.selectedId} session={quickSession} photo={quickPhoto} onPhotoChange={setQuickPhoto} onClose={() => { quickSessionRef.current = null; setQuickSession(null); setQuickPhoto(null); }} />}
-              {viewerPreloading && <div className="viewer-preload-indicator" role="status"><span className="working-pulse" />正在准备预览</div>}
+              {viewerPreloading && <div className="viewer-preload-indicator" role="status"><LoaderCircle size={14} className="loading-spinner" />正在准备预览</div>}
               </div>
               <div className="workspace-side-splitter" hidden={!panelVisibility.right}><PaneSplitter orientation="vertical" value={globalLayout.rightWidth} minimum={240} maximum={520} label="调整右侧 AI 面板宽度" invert onChange={(value) => setGlobalLayout('rightWidth', value)} /></div>
               <div hidden={!panelVisibility.right} className={`workspace-side-panel right-dock-stack${dockLayout.collapsed ? ' is-collapsed' : ''}`}>
                 <div className="inspector unified-dock">
                   <div className="inspector-tabs"><button className={dockTab === 'ai' ? 'is-active' : ''} type="button" onClick={() => { setDockTab('ai'); setAgentDockOpen(false); }}><Bot size={14} />AI</button><button className={dockTab === 'agent' ? 'is-active' : ''} type="button" onClick={() => { setDockTab('agent'); setAgentDockOpen(true); }}><Sparkles size={14} />Agent</button><button className={dockTab === 'details' ? 'is-active' : ''} type="button" onClick={() => { setDockTab('details'); setAgentDockOpen(false); }}><Info size={14} />详情</button></div>
-                  <div className="inspector-scroll">{dockTab === 'agent' ? <AgentDockPanel selectedIds={contextSelectedIds} photos={contextPhotos} onOpenResult={(result, results, assetIds) => { void openViewer(result.assetId, assetIds, { resultId: result.id, results }); }} onOpenAsset={(assetId, assetIds) => { void openViewer(assetId, assetIds); }} onClose={() => { setDockTab('ai'); setAgentDockOpen(false); }} onCollapse={() => saveDockLayout({ ...dockLayout, collapsed: true })} onMove={() => saveDockLayout({ ...dockLayout, order: ['details', 'agent'] })} /> : dockTab === 'details' && globalFocusPhoto ? <GlobalDetailsPanel photo={globalFocusPhoto} displayedFile={viewerPhoto && viewerDisplayedFile && (viewerDisplayedFile.kind === 'result' ? viewerDisplayedFile.result.assetId === viewerPhoto.id : viewerDisplayedFile.photo.id === viewerPhoto.id || viewerPhoto.workflow?.members.some((member) => member.asset.id === viewerDisplayedFile.photo.id)) ? viewerDisplayedFile : undefined} /> : <GlobalAiPanel onOpenBatch={() => openWorkspaceTab('batch')} photo={globalFocusPhoto} selectedIds={contextSelectedIds} isDemo={isDemo} workspaceTab={activeTab} onOpenTemplates={() => openWorkspaceTab('templates')} onAddAssetsToWorkflow={addAssetsToWorkflow} onAddAssetsAsReferences={addAssetsAsReferences} currentWorkflowItemId={currentWorkflowItemId && (workflowAssetIds.includes(currentWorkflowItemId) || workflowPromptItems.some((item) => item.id === currentWorkflowItemId)) ? currentWorkflowItemId : null} referenceNotice={referenceNotice} workflowAssetIds={workflowAssetIds} tasks={globalTasks} workflowRules={workflowRules} onWorkflowRulesChange={setWorkflowRules} workflowTemplateId={workflowTemplateId} onWorkflowTemplateChange={setWorkflowTemplateId} />}</div>
+                  <div className="inspector-scroll">{dockTab === 'agent' ? <AgentDockPanel selectedIds={contextSelectedIds} photos={contextPhotos} onOpenResult={(result, results, assetIds) => { void openViewer(result.assetId, assetIds, { resultId: result.id, results }); }} onOpenAsset={(assetId, assetIds) => { void openViewer(assetId, assetIds); }} onClose={() => { setDockTab('ai'); setAgentDockOpen(false); }} onCollapse={() => saveDockLayout({ ...dockLayout, collapsed: true })} onMove={() => saveDockLayout({ ...dockLayout, order: ['details', 'agent'] })} /> : dockTab === 'details' ? (catalogReady || viewerPhoto || quickPhoto) && globalFocusPhoto ? <GlobalDetailsPanel photo={globalFocusPhoto} displayedFile={viewerPhoto && viewerDisplayedFile && (viewerDisplayedFile.kind === 'result' ? viewerDisplayedFile.result.assetId === viewerPhoto.id : viewerDisplayedFile.photo.id === viewerPhoto.id || viewerPhoto.workflow?.members.some((member) => member.asset.id === viewerDisplayedFile.photo.id)) ? viewerDisplayedFile : undefined} /> : null : <GlobalAiPanel onOpenBatch={() => openWorkspaceTab('batch')} photo={globalFocusPhoto} selectedIds={contextSelectedIds} isDemo={isDemo} workspaceTab={activeTab} onOpenTemplates={() => openWorkspaceTab('templates')} onAddAssetsToWorkflow={addAssetsToWorkflow} onAddAssetsAsReferences={addAssetsAsReferences} currentWorkflowItemId={currentWorkflowItemId && (workflowAssetIds.includes(currentWorkflowItemId) || workflowPromptItems.some((item) => item.id === currentWorkflowItemId)) ? currentWorkflowItemId : null} referenceNotice={referenceNotice} workflowAssetIds={workflowAssetIds} tasks={globalTasks} workflowRules={workflowRules} onWorkflowRulesChange={setWorkflowRules} workflowTemplateId={workflowTemplateId} onWorkflowTemplateChange={setWorkflowTemplateId} />}</div>
                 </div>
                 {dockLayout.collapsed && <button className="dock-restore" type="button" onClick={() => saveDockLayout({ ...dockLayout, collapsed: false })}>展开 Dock 面板</button>}
               </div>

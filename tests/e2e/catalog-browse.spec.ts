@@ -57,6 +57,35 @@ test('gallery dimensions group the complete folder with independent masonry sect
     await expect(page.locator('.catalog-photo-group')).toHaveCount(0);
     await expect(page.locator('[data-catalog-tool="view"]')).toHaveCount(0);
     await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
+    await page.getByRole('checkbox', { name: '分组:文件夹', exact: true }).check();
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: '按文件夹分组', exact: true }).click();
+    await page.getByRole('button', { name: '展开 photos', exact: true }).click();
+    await page.getByRole('treeitem', { name: /^A 2/ }).click();
+    await expect(page.locator('.catalog-photo-group strong')).toHaveText(['当前文件夹']);
+    await page.evaluate(() => {
+      const states: Array<{ titles: string[]; cards: number }> = [];
+      const record = () => states.push({
+        titles: [...document.querySelectorAll('.catalog-photo-group strong')].map((heading) => heading.textContent ?? ''),
+        cards: document.querySelectorAll('.catalog-grid .catalog-card').length
+      });
+      const observer = new MutationObserver(record);
+      observer.observe(document.querySelector('.catalog-grid')!, { childList: true, characterData: true, subtree: true });
+      (window as typeof window & { groupTitleTrace: { states: typeof states; observer: MutationObserver } }).groupTitleTrace = { states, observer };
+      record();
+    });
+    await page.getByRole('treeitem', { name: /^B 4/ }).click();
+    await expect(page.locator('.catalog-photo-group strong')).toHaveText(['当前文件夹', 'sub']);
+    const titleTrace = await page.evaluate(() => {
+      const trace = (window as typeof window & { groupTitleTrace: { states: Array<{ titles: string[]; cards: number }>; observer: MutationObserver } }).groupTitleTrace;
+      trace.observer.disconnect();
+      return trace.states;
+    });
+    expect(titleTrace.flatMap((state) => state.titles)).not.toContain('A');
+    expect(titleTrace.every((state) => state.cards > 0)).toBe(true);
+    await page.getByRole('button', { name: /所有照片 6/ }).click();
+    await page.getByRole('button', { name: '按文件夹分组', exact: true }).click();
+    await page.getByRole('button', { name: '配置图库工具栏', exact: true }).click();
     await page.getByRole('checkbox', { name: '视图', exact: true }).check();
     await page.getByRole('checkbox', { name: '分组:比例', exact: true }).check();
     await page.getByRole('checkbox', { name: '分组:横竖', exact: true }).check();
@@ -170,7 +199,7 @@ test('gallery dimensions group the complete folder with independent masonry sect
     await page.getByRole('button', { name: '月份：逆序，点击切换' }).click();
     await expect(page.locator('.catalog-group-heading').nth(1)).toContainText('2026-01');
     await page.getByRole('button', { name: '月份：正序，点击切换' }).click();
-    await page.getByRole('button', { name: '展开 photos', exact: true }).click();
+    if (await page.getByRole('button', { name: '展开 photos', exact: true }).count()) await page.getByRole('button', { name: '展开 photos', exact: true }).click();
     await page.getByRole('treeitem', { name: /^B 4/ }).click();
     await expect(page.locator('.catalog-card')).toHaveCount(4);
     await expect(page.locator('.catalog-photo-group')).toHaveCount(4);

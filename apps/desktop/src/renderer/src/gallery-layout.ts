@@ -22,9 +22,9 @@ export function layoutJustified<T>({ groups, grouped, width, targetHeight, viewp
   let top = 0;
   for (const [groupIndex, group] of groups.entries()) {
     if (grouped) {
-      if (groupIndex > 0) top += 14;
+      if (groupIndex > 0) top += 20;
       headings.push({ key: group.key, title: group.title, count: group.items.length, top: top + 8 });
-      top += 46;
+      top += 54;
     }
     let row: T[] = [];
     let sum = 0;
@@ -61,9 +61,9 @@ export function layoutMasonry<T>({ groups, grouped, width, targetHeight, ratio, 
   let top = 0;
   let index = 0;
   for (const [groupIndex, group] of groups.entries()) {
-    if (grouped && groupIndex > 0) top += 14;
+    if (grouped && groupIndex > 0) top += 20;
     if (grouped) headings.push({ key: group.key, title: group.title, count: group.items.length, top: top + 8 });
-    heights.fill(top + (grouped ? 46 : 0));
+    heights.fill(top + (grouped ? 54 : 0));
     for (const photo of group.items) {
       const height = Math.ceil(cardWidth / ratio(photo) + metadataHeight(photo));
       let column = 0;
