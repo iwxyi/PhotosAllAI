@@ -10,6 +10,7 @@ import { browseDimensions, emptyBrowseFilters, groupCatalogPhotos, metadataDimen
 import { ViewerZoomControl } from './viewer-zoom-control';
 import { actualPixelZoom, boundPan, zoomAround } from './viewer-geometry';
 import { FileWorkflowControl, FileWorkflowEditor } from './file-workflow-editor';
+import { mediaTypeForFormat } from '@photoallisai/contracts';
 import type {
   CatalogAsset,
   CopyDisplayedFilesInput,
@@ -30,7 +31,9 @@ import type {
   CacheActivity,
   PersistedTask,
   TaskPage,
-  TaskListCursor,
+  TaskGroupSummary,
+  TaskGroupMembersPage,
+  TaskGroupPage,
   PromptTemplate,
   ProviderProfile,
   ExportPreset,
@@ -89,12 +92,16 @@ import {
   LibraryBig,
   ListFilter,
   Maximize2,
+  Minimize2,
+  Pause,
   Plus,
   Search,
   Server,
   Settings,
   RotateCcw,
   Play,
+  Volume2,
+  VolumeX,
   Rows3,
   RefreshCw,
   Sparkles,
@@ -113,6 +120,15 @@ import { photos, type Photo } from './mock-data';
 import { analysisFailureMessage, generationFailureMessage, fileOperationFailureMessage } from './error-messages';
 
 const THEME_CHANGE_EVENT = 'photoallisai-theme-change';
+
+function formatMediaTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+  const total = Math.floor(seconds);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const remainder = total % 60;
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}` : `${minutes}:${String(remainder).padStart(2, '0')}`;
+}
 const CATALOG_FILE_NAME_CENTERED_KEY = 'photoallisai.catalog-file-name-centered';
 const VIEWER_VERSION_TARGET_KEY = 'photoallisai.viewer-version-target';
 const GENERATED_IMAGE_COMPARE_KEY = 'photoallisai.generated-image-compare-parent';
@@ -348,15 +364,25 @@ function PaneSplitter({ orientation, value, minimum, maximum, label, onChange, i
   }}><span /></div>;
 }
 
-function BufferedPreviewImage({ src, alt, className, onReady }: { src: string; alt: string; className: string; onReady?: (image: HTMLImageElement) => void }): React.JSX.Element {
+function BufferedPreviewImage({ src, previewSrc, alt, className, onReady }: { src: string; previewSrc?: string | undefined; alt: string; className: string; onReady?: (image: HTMLImageElement) => void }): React.JSX.Element {
   const [displayed, setDisplayed] = useState({ src, alt });
   const [failedSrc, setFailedSrc] = useState<string | null>(null);
   const [showLoading, setShowLoading] = useState(false);
   const [ready, setReady] = useState(() => DECODED_IMAGE_SOURCES.has(src));
   const onReadyRef = useRef(onReady);
   useLayoutEffect(() => { onReadyRef.current = onReady; }, [onReady]);
+  const visible = src !== displayed.src && DECODED_IMAGE_SOURCES.has(src) ? { src, alt }
+    : src !== displayed.src && previewSrc && DECODED_IMAGE_SOURCES.has(previewSrc) ? { src: previewSrc, alt }
+      : displayed;
   useEffect(() => {
     if (!src || src === displayed.src || src === failedSrc) return;
+    if (DECODED_IMAGE_SOURCES.has(src)) {
+      setDisplayed({ src, alt });
+      setFailedSrc(null);
+      setShowLoading(false);
+      setReady(true);
+      return;
+    }
     let active = true;
     setShowLoading(false);
     const indicatorTimer = window.setTimeout(() => { if (active) setShowLoading(true); }, 1_100);
@@ -384,15 +410,61 @@ function BufferedPreviewImage({ src, alt, className, onReady }: { src: string; a
       setShowLoading(false);
     };
     image.src = src;
-    return () => { active = false; window.clearTimeout(indicatorTimer); };
+    return () => {
+      active = false;
+      window.clearTimeout(indicatorTimer);
+      image.onload = null;
+      image.onerror = null;
+      image.src = '';
+    };
   }, [alt, displayed.src, failedSrc, src]);
-  return <>{displayed.src ? <img className={`${className} buffered-image${ready ? ' is-ready' : ''}`} src={displayed.src} alt={displayed.alt} draggable={false} onLoad={(event) => { rememberDecodedImage(displayed.src); if (event.currentTarget.naturalHeight > 0) rememberImageAspectRatio(displayed.src, event.currentTarget.naturalWidth / event.currentTarget.naturalHeight); setFailedSrc(null); setReady(true); onReadyRef.current?.(event.currentTarget); }} onError={() => { setFailedSrc(displayed.src); setReady(false); }} /> : null}{failedSrc === displayed.src && src === displayed.src && <div className="preview-unavailable"><Image size={36} /><strong>预览暂不可用</strong><span>图像服务将在后台生成屏幕预览</span></div>}{showLoading && <span className="preview-loading" aria-label="正在载入下一张照片"><span className="working-pulse" /></span>}</>;
+  return <>{visible.src ? <img className={`${className} buffered-image${ready || DECODED_IMAGE_SOURCES.has(visible.src) ? ' is-ready' : ''}`} src={visible.src} alt={visible.alt} draggable={false} onLoad={(event) => { rememberDecodedImage(visible.src); if (event.currentTarget.naturalHeight > 0) rememberImageAspectRatio(visible.src, event.currentTarget.naturalWidth / event.currentTarget.naturalHeight); setFailedSrc(null); setReady(true); onReadyRef.current?.(event.currentTarget); }} onError={() => { setFailedSrc(visible.src); setReady(false); }} /> : null}{failedSrc === visible.src && src === visible.src && <div className="preview-unavailable"><Image size={36} /><strong>预览暂不可用</strong><span>图像服务将在后台生成屏幕预览</span></div>}{showLoading && <span className="preview-loading" aria-label="正在载入下一张照片"><span className="working-pulse" /></span>}</>;
 }
 
 const catalogImageVisibility = new Map<Element, (visible: boolean) => void>();
 const catalogImageObservers = new Map<Element | null, { observer: IntersectionObserver; count: number }>();
 const catalogImageUpgradeVisibility = new Map<Element, (visible: boolean) => void>();
 const catalogImageUpgradeObservers = new Map<Element | null, { observer: IntersectionObserver; count: number }>();
+const videoDurationCache = new Map<string, number>();
+
+function VideoDurationBadge({ assetId }: { assetId: string }): React.JSX.Element {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [duration, setDuration] = useState(() => videoDurationCache.get(assetId));
+  useEffect(() => {
+    const element = ref.current;
+    if (!element || videoDurationCache.has(assetId)) return;
+    let active = true;
+    let video: HTMLVideoElement | undefined;
+    const load = () => {
+      if (!active || video) return;
+      const cached = videoDurationCache.get(assetId);
+      if (cached !== undefined) { setDuration(cached); return; }
+      video = document.createElement('video');
+      video.preload = 'metadata';
+      video.onloadedmetadata = () => {
+        const seconds = video?.duration;
+        if (!Number.isFinite(seconds) || !seconds) return;
+        videoDurationCache.set(assetId, seconds);
+        if (active) setDuration(seconds);
+        video?.removeAttribute('src');
+        video?.load();
+      };
+      video.onerror = () => { video?.removeAttribute('src'); };
+      video.src = `photovideo://asset/${assetId}`;
+    };
+    const root = element.closest('.catalog-grid, .catalog-list-view');
+    if (!('IntersectionObserver' in window)) load();
+    else {
+      const observer = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) { observer.disconnect(); load(); }
+      }, { root, rootMargin: '150px' });
+      observer.observe(element);
+      return () => { active = false; observer.disconnect(); video?.removeAttribute('src'); video?.load(); };
+    }
+    return () => { active = false; video?.removeAttribute('src'); video?.load(); };
+  }, [assetId]);
+  return <span ref={ref} className="catalog-video-duration" aria-label={duration === undefined ? '视频时长读取中' : `视频时长 ${formatMediaTime(duration)}`}>{duration === undefined ? '' : formatMediaTime(duration)}</span>;
+}
 
 function CatalogImageImpl({ src, previewSrc, alt = '', onAspectRatio, eager = false }: { src: string; previewSrc?: string; alt?: string; onAspectRatio?: ((ratio: number) => void) | undefined; eager?: boolean }): React.JSX.Element {
   const ref = useRef<HTMLImageElement>(null);
@@ -702,6 +774,7 @@ function mapCatalogAssets(assets: CatalogAsset[]): Photo[] {
     src: `${asset.previewUrl}?v=${asset.modifiedAt}-${asset.sizeBytes}`,
     ...(['JPG', 'JPEG', 'PNG', 'WEBP', 'GIF', 'AVIF', 'BMP', 'ICO'].includes(asset.format.toUpperCase()) ? { originalSrc: `${asset.previewUrl.replace('://preview/', '://original/')}?v=${asset.modifiedAt}-${asset.sizeBytes}` } : {}),
     thumbnailSrc: `${asset.thumbnailUrl}?v=${asset.modifiedAt}-${asset.sizeBytes}`,
+    ...(asset.liveMotionUrl ? { liveMotionUrl: asset.liveMotionUrl } : {}),
     format: asset.format,
     dimensions: `${(asset.sizeBytes / 1_048_576).toFixed(1)} MB`,
     rating: asset.rating,
@@ -1268,14 +1341,15 @@ function FilmstripMenu({ options, onClose }: { options: FilmstripMenuOptions; on
 }
 
 type PhotoFilters = BrowseFilters & {
+  mediaType: 'all' | 'image' | 'video';
   minimumRating: number | null;
   ratingOperator: 'eq' | 'gte' | 'lte';
   flags: NonNullable<Photo['flag']>[];
   colors: NonNullable<Photo['labelColor']>[];
 };
-const emptyPhotoFilters: PhotoFilters = { ...emptyBrowseFilters, minimumRating: null, ratingOperator: 'gte', flags: [], colors: [] };
+const emptyPhotoFilters: PhotoFilters = { ...emptyBrowseFilters, mediaType: 'all', minimumRating: null, ratingOperator: 'gte', flags: [], colors: [] };
 
-function PhotoFilterBar({ leading, onReset, compact = false, scope, search, setSearch, minimumRating, setMinimumRating, ratingOperator, setRatingOperator, flags, setFlags, colors, setColors, onlyFavorites, setOnlyFavorites, favoriteOnly, onFavoriteOnlyChange, temporary = false, renderTools }: {
+function PhotoFilterBar({ leading, onReset, compact = false, scope, search, setSearch, mediaType, setMediaType, minimumRating, setMinimumRating, ratingOperator, setRatingOperator, flags, setFlags, colors, setColors, onlyFavorites, setOnlyFavorites, favoriteOnly, onFavoriteOnlyChange, temporary = false, renderTools }: {
   renderTools?: (tools: Record<string, React.ReactNode>) => React.ReactNode;
   leading?: React.ReactNode;
   onReset?: (() => void) | undefined;
@@ -1283,6 +1357,8 @@ function PhotoFilterBar({ leading, onReset, compact = false, scope, search, setS
   scope: string;
   search: string;
   setSearch: (value: string) => void;
+  mediaType: PhotoFilters['mediaType'];
+  setMediaType: (value: PhotoFilters['mediaType']) => void;
   minimumRating: number | null;
   setMinimumRating: React.Dispatch<React.SetStateAction<number | null>>;
   ratingOperator: PhotoFilters['ratingOperator'];
@@ -1298,14 +1374,15 @@ function PhotoFilterBar({ leading, onReset, compact = false, scope, search, setS
   temporary?: boolean;
 }): React.JSX.Element {
   const [searchOpen, setSearchOpen] = useState(false);
-  const filtered = Boolean(search.trim() || minimumRating !== null || flags.length || colors.length || onlyFavorites || favoriteOnly);
+  const filtered = Boolean(search.trim() || mediaType !== 'all' || minimumRating !== null || flags.length || colors.length || onlyFavorites || favoriteOnly);
   const tools: Record<string, React.ReactNode> = {
     search: !compact || searchOpen || search ? <input autoFocus={compact} aria-label={"筛选" + scope + "文件名"} placeholder="文件名" value={search} onChange={(event) => setSearch(event.target.value)} onBlur={() => { if (!search.trim()) setSearchOpen(false); }} /> : <button type="button" aria-label={"筛选" + scope + "文件名"} title="筛选文件名" onClick={() => setSearchOpen(true)}><Search size={13} /></button>,
+    mediaTypeFilter: <div className="media-type-segmented" role="radiogroup" aria-label={scope + '媒体类型筛选'}>{([{ value: 'all', label: '全部' }, { value: 'image', label: '图片' }, { value: 'video', label: '视频' }] as const).map(({ value, label }) => <button type="button" role="radio" aria-checked={mediaType === value} className={mediaType === value ? 'is-active' : ''} key={value} onClick={() => setMediaType(value)}>{label}</button>)}</div>,
     stars: !temporary && <div className="filmstrip-filter-stars" role="group" aria-label={scope + "星级筛选"}><select aria-label="星级筛选条件" value={ratingOperator} onChange={(event) => setRatingOperator(event.target.value as typeof ratingOperator)}><option value="eq">＝</option><option value="gte">≥</option><option value="lte">≤</option></select>{[1, 2, 3, 4, 5].map((rating) => <button type="button" key={rating} aria-label={`${ratingOperator === 'eq' ? '等于' : ratingOperator === 'lte' ? '至多' : '至少'} ${rating} 星`} title={`${rating} 星，再次点击取消`} aria-pressed={minimumRating === rating} className={(minimumRating ?? 0) >= rating ? 'is-filled' : ''} onClick={() => setMinimumRating((current) => current === rating ? null : rating)}><Star size={13} fill={(minimumRating ?? 0) >= rating ? 'currentColor' : 'none'} /></button>)}</div>,
     flags: !temporary && <div className="filmstrip-filter-colors" role="group" aria-label="筛选旗标">{(['picked', 'rejected', 'unflagged'] as const).map((flag) => <button type="button" key={flag} aria-label={`筛选${flag === 'picked' ? '留用' : flag === 'rejected' ? '排除' : '无旗标'}`} title={flag === 'picked' ? '留用 (P)' : flag === 'rejected' ? '排除 (X)' : '无旗标 (U)'} aria-pressed={flags.includes(flag)} className={flags.includes(flag) ? 'is-active' : ''} onClick={() => setFlags((current) => current.includes(flag) ? current.filter((value) => value !== flag) : [...current, flag])}>{flag === 'rejected' ? <span className="photo-flag-cross"><Flag size={13} fill="currentColor" /><X size={9} /></span> : <Flag size={13} fill={flag === 'picked' ? 'currentColor' : 'none'} />}</button>)}</div>,
     colors: !temporary && <div className="filmstrip-filter-colors" role="group" aria-label="筛选颜色">{(['red', 'yellow', 'green', 'blue', 'purple'] as const).map((color) => <button type="button" key={color} aria-label={`筛选${photoColorName(color)}标签`} aria-pressed={colors.includes(color)} className={colors.includes(color) ? 'is-active' : ''} onClick={() => setColors((current) => current.includes(color) ? current.filter((value) => value !== color) : [...current, color])}><i className={`photo-color-swatch is-${color}`} /></button>)}</div>,
     favorites: !temporary && <button className={onlyFavorites || favoriteOnly ? 'is-active' : ''} type="button" aria-label="仅显示收藏照片" aria-pressed={onlyFavorites || favoriteOnly} title="仅显示收藏照片" onClick={() => { if (favoriteOnly) onFavoriteOnlyChange(false); setOnlyFavorites(!(onlyFavorites || favoriteOnly)); }}><Heart size={13} /></button>,
-    reset: <IconButton label={"重置" + scope + "过滤器"} disabled={!filtered && (!onReset || Boolean(leading))} onClick={() => { setSearchOpen(false); setSearch(''); setMinimumRating(null); setFlags([]); setColors([]); setOnlyFavorites(false); if (favoriteOnly) onFavoriteOnlyChange(false); if (!leading) onReset?.(); }}><RotateCcw size={13} /></IconButton>
+    reset: <IconButton label={"重置" + scope + "过滤器"} disabled={!filtered && (!onReset || Boolean(leading))} onClick={() => { setSearchOpen(false); setSearch(''); setMediaType('all'); setMinimumRating(null); setFlags([]); setColors([]); setOnlyFavorites(false); if (favoriteOnly) onFavoriteOnlyChange(false); if (!leading) onReset?.(); }}><RotateCcw size={13} /></IconButton>
   };
   if (renderTools) return <>{renderTools(tools)}</>;
   return <div className={`filmstrip-filter-bar${leading ? ' has-grouping' : ''}${compact ? ' is-inline' : ''}`} role="group" aria-label={scope + "过滤条件"}>{leading}<div className="photo-filter-controls">{Object.entries(tools).map(([id, tool]) => <Fragment key={id}>{tool}</Fragment>)}</div></div>;
@@ -1523,13 +1600,14 @@ function Filmstrip({
     return next;
   });
   const [search, setSearch] = useState('');
+  const [mediaType, setMediaType] = useState<PhotoFilters['mediaType']>('all');
   const [minimumRating, setMinimumRating] = useState<number | null>(null);
   const [ratingOperator, setRatingOperator] = useState<'eq' | 'gte' | 'lte'>('gte');
   const [flags, setFlags] = useState<NonNullable<Photo['flag']>[]>([]);
   const [colors, setColors] = useState<NonNullable<Photo['labelColor']>[]>([]);
   const [onlyFavorites, setOnlyFavorites] = useState(false);
-  const filtered = Boolean(search.trim() || minimumRating !== null || flags.length || colors.length || onlyFavorites || favoriteOnly);
-  const items = useMemo(() => sourceItems.filter((photo) => (!search.trim() || photo.fileName.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())) && (minimumRating === null || (ratingOperator === 'eq' ? photo.rating === minimumRating : ratingOperator === 'lte' ? photo.rating <= minimumRating : photo.rating >= minimumRating)) && (!flags.length || flags.includes(photo.flag ?? 'unflagged')) && (!colors.length || (photo.labelColor && colors.includes(photo.labelColor))) && (!(onlyFavorites || favoriteOnly) || photo.favorite)), [sourceItems, search, minimumRating, ratingOperator, flags, colors, onlyFavorites, favoriteOnly]);
+  const filtered = Boolean(search.trim() || mediaType !== 'all' || minimumRating !== null || flags.length || colors.length || onlyFavorites || favoriteOnly);
+  const items = useMemo(() => sourceItems.filter((photo) => (!search.trim() || photo.fileName.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())) && (mediaType === 'all' || mediaTypeForFormat(photo.format) === mediaType) && (minimumRating === null || (ratingOperator === 'eq' ? photo.rating === minimumRating : ratingOperator === 'lte' ? photo.rating <= minimumRating : photo.rating >= minimumRating)) && (!flags.length || flags.includes(photo.flag ?? 'unflagged')) && (!colors.length || (photo.labelColor && colors.includes(photo.labelColor))) && (!(onlyFavorites || favoriteOnly) || photo.favorite)), [sourceItems, search, mediaType, minimumRating, ratingOperator, flags, colors, onlyFavorites, favoriteOnly]);
   useEffect(() => {
     const ids = items.map((photo) => photo.id);
     onVisibleIdsChange((current) => current?.length === ids.length && current.every((id, index) => id === ids[index]) ? current : ids);
@@ -1736,7 +1814,7 @@ function Filmstrip({
         toolbarHost.closest('.viewer-footer')?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: event.clientX, clientY: event.clientY }));
       }}>
         <span className="filmstrip-count" title={filtered ? `${collectionName} · 已加载 ${sourceItems.length} / ${totalCount} 张` : collectionName}>{filtered ? `${items.length} / ${sourceItems.length}` : totalCount} 张</span>
-        <PhotoFilterBar compact scope="胶片" search={search} setSearch={setSearch} minimumRating={minimumRating} setMinimumRating={setMinimumRating} ratingOperator={ratingOperator} setRatingOperator={setRatingOperator} flags={flags} setFlags={setFlags} colors={colors} setColors={setColors} onlyFavorites={onlyFavorites} setOnlyFavorites={setOnlyFavorites} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} temporary={Boolean(selected.temporary)} />
+        <PhotoFilterBar compact scope="胶片" search={search} setSearch={setSearch} mediaType={mediaType} setMediaType={setMediaType} minimumRating={minimumRating} setMinimumRating={setMinimumRating} ratingOperator={ratingOperator} setRatingOperator={setRatingOperator} flags={flags} setFlags={setFlags} colors={colors} setColors={setColors} onlyFavorites={onlyFavorites} setOnlyFavorites={setOnlyFavorites} favoriteOnly={favoriteOnly} onFavoriteOnlyChange={onFavoriteOnlyChange} temporary={Boolean(selected.temporary)} />
       </div>, toolbarHost)}
       <div className={`filmstrip${viewMode === 'grid' ? ' is-grid' : ''}`} role="listbox" aria-label="照片" aria-multiselectable="true" tabIndex={0} ref={viewportRef} onKeyDown={(event) => {
         const focusIndex = items.findIndex((photo) => photo.id === (selection.focusId ?? selected.id));
@@ -1924,6 +2002,7 @@ function Viewer({
   const panOriginRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   const touchGestureRef = useRef<{ distance: number; center: { x: number; y: number }; zoom: number; pan: { x: number; y: number } } | null>(null);
   const touchPanRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
+  const videoSeekingRef = useRef(false);
   const wheelEndTimerRef = useRef<number | undefined>(undefined);
   const [imageAspectRatio, setImageAspectRatio] = useState(() => photo.src ? IMAGE_ASPECT_RATIOS.get(photo.src) ?? 3 / 2 : 3 / 2);
   const [fittedSize, setFittedSize] = useState({ width: 0, height: 0 });
@@ -1934,6 +2013,33 @@ function Viewer({
   });
   const [fitMode, setFitMode] = useState<'fit' | 'actual' | 'width' | 'custom'>('fit');
   const [viewerNotice, setViewerNotice] = useTransientNotice();
+  const [videoStatus, setVideoStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  useEffect(() => { setVideoStatus('loading'); }, [photo.id]);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const videoCanvasRef = useRef<HTMLDivElement>(null);
+  const [videoTime, setVideoTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [videoPaused, setVideoPaused] = useState(true);
+  const [videoMuted, setVideoMuted] = useState(false);
+  const [videoVolume, setVideoVolume] = useState(.8);
+  const [videoFullscreen, setVideoFullscreen] = useState(false);
+  useEffect(() => {
+    const updateFullscreen = () => setVideoFullscreen(document.fullscreenElement === videoCanvasRef.current);
+    document.addEventListener('fullscreenchange', updateFullscreen);
+    return () => document.removeEventListener('fullscreenchange', updateFullscreen);
+  }, []);
+  const toggleVideoPlayback = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) void video.play().catch(() => setViewerNotice('视频无法开始播放'));
+    else video.pause();
+  }, [setViewerNotice]);
+  const toggleVideoFullscreen = () => {
+    const container = videoCanvasRef.current;
+    if (!container) return;
+    const operation = document.fullscreenElement === container ? document.exitFullscreen() : container.requestFullscreen();
+    void operation.catch(() => setViewerNotice('无法切换视频全屏'));
+  };
   const canvasWrapRef = useRef<HTMLDivElement>(null);
   const { stages: workflowStages, result: targetResult, member: targetMember, rawMember } = resolveViewerVersion(photo, results, versionTarget);
   const availableRaw = rawMember ? mapCatalogAssets([rawMember.asset])[0] : isRawPhoto(photo) ? photo : rawCompanion;
@@ -1981,6 +2087,7 @@ function Viewer({
   const baseSource = holdPreviousVersion && parentResult ? parentResult.resultUrl
     : holdPreviousVersion && comparisonPhoto ? comparisonPhoto.originalSrc ?? comparisonPhoto.src
       : rawBase.originalSrc ?? rawBase.src;
+  const basePreviewSource = holdPreviousVersion && parentResult ? undefined : holdPreviousVersion && comparisonPhoto ? comparisonPhoto.src : rawBase.src;
   const activeSource = displayedGeneratedSource && !showOriginal && !holdPreviousVersion ? displayedGeneratedSource : baseSource;
   const lastDisplayedFileKey = useRef<string | null>(null);
   useLayoutEffect(() => {
@@ -2042,12 +2149,19 @@ function Viewer({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      const target = event.target;
+      if (mediaTypeForFormat(photo.format) === 'video' && event.code === 'Space' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        if (target instanceof Element && target.closest('button')) return;
+        event.preventDefault();
+        if (event.type === 'keydown' && !event.repeat) toggleVideoPlayback();
+        return;
+      }
       if (event.code === 'Space' && event.type === 'keyup') {
         setHoldPreviousVersion(false);
         return;
       }
-      const target = event.target;
       if (!(target instanceof Element) || shortcutBlocked(event) || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (target.closest('video')) return;
       if (event.code === 'Space') {
         event.preventDefault();
         setHoldPreviousVersion(true);
@@ -2067,7 +2181,7 @@ function Viewer({
       window.removeEventListener('keyup', onKey);
       window.removeEventListener('blur', restore);
     };
-  }, [fitMode, setViewMode]);
+  }, [fitMode, setViewMode, photo.format, toggleVideoPlayback]);
 
   useEffect(() => {
     const onMenuCommand = (event: Event) => {
@@ -2127,10 +2241,31 @@ function Viewer({
     }
   };
 
-  if (photo.temporary && ['MOV', 'MP4', 'M4V', 'WEBM'].includes(photo.format.toUpperCase())) {
-    return <section className="viewer"><div className="canvas-wrap background-neutral" tabIndex={0}>
-      <div className="viewer-title">{onClose && <IconButton label="关闭看图" onClick={onClose}><ChevronLeft size={16} /></IconButton>}<span title={photo.fileName}>{photo.fileName}</span></div>
-      <video className="temporary-video-player" src={`photovideo://temporary/${photo.id}`} controls playsInline preload="metadata" aria-label={photo.fileName} />
+  if (mediaTypeForFormat(photo.format) === 'video') {
+    const videoSource = `photovideo://${photo.temporary ? 'temporary' : 'asset'}/${photo.id}`;
+    return <section className="viewer video-viewer" data-label-color={photo.labelColor ?? undefined}><div className="canvas-wrap video-canvas-wrap background-neutral" ref={videoCanvasRef}>
+      <div className="viewer-title">{onClose && <IconButton label="关闭看图" onClick={onClose}><ChevronLeft size={16} /></IconButton>}<span title={photo.fileName}>{photo.fileName}</span><i>视频</i></div>
+      <video ref={videoRef} key={photo.id} className="viewer-video-player" src={videoSource} poster={photo.thumbnailSrc} playsInline autoPlay preload="auto" aria-label={`播放 ${photo.fileName}`} onLoadStart={() => setVideoStatus('loading')} onLoadedMetadata={(event) => { setVideoStatus('ready'); setVideoDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0); }} onDurationChange={(event) => setVideoDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)} onTimeUpdate={(event) => { if (!videoSeekingRef.current) setVideoTime(event.currentTarget.currentTime); }} onPlay={() => setVideoPaused(false)} onPause={() => setVideoPaused(true)} onCanPlay={(event) => { setVideoStatus('ready'); void event.currentTarget.play().catch(() => undefined); }} onError={() => setVideoStatus('error')} onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose?.(); } }} />
+      <div className="video-controls" role="group" aria-label="视频播放控件" onPointerDown={(event) => event.stopPropagation()}>
+        <input className="video-seek" type="range" min={0} max={Math.max(videoDuration, .01)} step={.01} value={Math.min(videoTime, videoDuration || 0)} style={{ '--video-progress': `${videoDuration ? videoTime / videoDuration * 100 : 0}%` } as React.CSSProperties} aria-label="播放进度" onPointerDown={() => { videoSeekingRef.current = true; }} onPointerUp={() => { videoSeekingRef.current = false; }} onPointerCancel={() => { videoSeekingRef.current = false; }} onBlur={() => { videoSeekingRef.current = false; }} onChange={(event) => { const nextTime = Number(event.target.value); const video = videoRef.current; if (video) video.currentTime = nextTime; setVideoTime(nextTime); }} />
+        <div className="video-control-row">
+          <button className="video-control-button" type="button" aria-label={videoPaused ? '播放' : '暂停'} title={videoPaused ? '播放' : '暂停'} onClick={toggleVideoPlayback}>{videoPaused ? <Play size={17} fill="currentColor" /> : <Pause size={17} fill="currentColor" />}</button>
+          <span className="video-time" aria-live="off">{formatMediaTime(videoTime)} <i>/</i> {formatMediaTime(videoDuration)}</span>
+          <span className="video-controls-spacer" />
+          <button className="video-control-button" type="button" aria-label={videoMuted ? '取消静音' : '静音'} title={videoMuted ? '取消静音' : '静音'} onClick={() => { const next = !videoMuted; setVideoMuted(next); if (videoRef.current) videoRef.current.muted = next; }}>{videoMuted || videoVolume === 0 ? <VolumeX size={16} /> : <Volume2 size={16} />}</button>
+          <input className="video-volume" type="range" min={0} max={1} step={.01} value={videoMuted ? 0 : videoVolume} aria-label="音量" onChange={(event) => { const value = Number(event.target.value); setVideoVolume(value); setVideoMuted(value === 0); if (videoRef.current) { videoRef.current.volume = value; videoRef.current.muted = value === 0; } }} />
+          <button className="video-control-button" type="button" aria-label={videoFullscreen ? '退出视频全屏' : '视频全屏'} title={videoFullscreen ? '退出全屏' : '全屏'} onClick={toggleVideoFullscreen}>{videoFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>
+        </div>
+      </div>
+      {videoStatus === 'loading' && <div className="viewer-video-status" role="status"><LoaderCircle size={15} className="is-spinning" />读取视频中</div>}
+      {videoStatus === 'error' && <div className="viewer-video-status is-error" role="alert"><CircleAlert size={16} />无法播放此视频，请检查文件是否可访问或编码是否受支持。</div>}
+    </div></section>;
+  }
+  if (photo.liveMotionUrl) {
+    return <section className="viewer video-viewer live-photo-viewer" data-label-color={photo.labelColor ?? undefined}><div className="canvas-wrap video-canvas-wrap background-neutral">
+      <div className="viewer-title">{onClose && <IconButton label="关闭看图" onClick={onClose}><ChevronLeft size={16} /></IconButton>}<span title={photo.fileName}>{photo.fileName}</span><i>实况</i></div>
+      <video key={photo.id} className="live-photo-motion" src={photo.liveMotionUrl} poster={photo.thumbnailSrc ?? photo.src} autoPlay muted loop playsInline preload="auto" aria-label={`${photo.fileName}实况片段`} onCanPlay={(event) => { setVideoStatus('ready'); void event.currentTarget.play().catch(() => undefined); }} onError={() => setVideoStatus('error')} />
+      {videoStatus === 'error' && <div className="viewer-video-status is-error" role="status"><CircleAlert size={16} />实况片段暂不可用，仍可查看静态照片。</div>}
     </div></section>;
   }
   return (
@@ -2243,7 +2378,7 @@ function Viewer({
 
         >
           {!baseSource && !displayedGeneratedSource && <div className="preview-unavailable"><Image size={36} /><strong>预览暂不可用</strong><span>图像服务将在后台生成屏幕预览</span></div>}
-          {baseSource ? <BufferedPreviewImage className="base-image" src={baseSource} alt={photo.fileName} onReady={(image) => captureAspectRatio(baseSource, image)} /> : null}
+          {baseSource ? <BufferedPreviewImage className="base-image" src={baseSource} previewSrc={basePreviewSource} alt={photo.fileName} onReady={(image) => captureAspectRatio(baseSource, image)} /> : null}
           {displayedGeneratedSource && !showOriginal && !holdPreviousVersion && (
             <div
               className="generated-layer"
@@ -2755,7 +2890,7 @@ function useTaskPhotos(tasks: PersistedTask[], providedPhotos: Photo[]): Photo[]
   return useAssetPhotos(tasks.flatMap((task) => task.assetId ? [task.assetId] : []), providedPhotos);
 }
 
-function TaskBatchGroup({ tasks, photos: providedPhotos, children, onOpenViewer: openViewer, expanded = false, expandRequest = 0, compact = false }: { tasks: PersistedTask[]; photos: Photo[]; children?: React.ReactNode | (() => React.ReactNode); onOpenViewer?: OpenTaskViewer; expanded?: boolean; expandRequest?: number; compact?: boolean }): React.JSX.Element {
+function TaskBatchGroup({ tasks, photos: providedPhotos, children, onOpenViewer: openViewer, expanded = false, expandRequest = 0, compact = false, summary: groupSummary, onOpenChange }: { tasks: PersistedTask[]; photos: Photo[]; children?: React.ReactNode | (() => React.ReactNode); onOpenViewer?: OpenTaskViewer; expanded?: boolean; expandRequest?: number; compact?: boolean; summary?: TaskGroupSummary; onOpenChange?: (open: boolean) => void }): React.JSX.Element {
   const photos = useTaskPhotos(tasks, providedPhotos);
   const onOpenViewer = useMemo(() => openViewer ? (assetId: string) => openViewer(assetId, tasks.flatMap((task) => task.assetId ? [task.assetId] : []), { target: 'latest-ai' }) : undefined, [openViewer, tasks]);
   const detailRef = useRef<HTMLDetailsElement>(null);
@@ -2776,15 +2911,15 @@ function TaskBatchGroup({ tasks, photos: providedPhotos, children, onOpenViewer:
     return () => element.removeEventListener('dblclick', openRow);
   }, [tasks, photos, onOpenViewer]);
   useEffect(() => { if (expanded && detailRef.current) { detailRef.current.open = true; setOpen(true); detailRef.current.scrollIntoView({ block: 'nearest' }); } }, [expanded, expandRequest]);
-  const stats = batchProgress(tasks);
+  const stats = groupSummary ? { ...groupSummary, settled: groupSummary.completed + groupSummary.failed + groupSummary.canceled } : batchProgress(tasks);
   const first = tasks[0]!;
-  const assetCount = new Set(tasks.map((task) => task.assetId).filter((id): id is string => Boolean(id))).size;
+  const assetCount = groupSummary?.assetCount ?? new Set(tasks.map((task) => task.assetId).filter((id): id is string => Boolean(id))).size;
   const firstPhoto = photos.find((photo) => photo.id === first.assetId);
   const title = first.kind === 'generation'
     ? `生成: ${firstPhoto?.relativePath ?? taskImageName(first, photos)}${assetCount > 1 ? ` 等 ${assetCount} 张图片` : ''}`
     : taskLabels[first.kind];
-  const startedAt = Math.min(...tasks.map((task) => task.createdAt));
-  const lastUpdatedAt = Math.max(...tasks.map((task) => task.updatedAt));
+  const startedAt = groupSummary?.createdAt ?? Math.min(...tasks.map((task) => task.createdAt));
+  const lastUpdatedAt = groupSummary?.updatedAt ?? Math.max(...tasks.map((task) => task.updatedAt));
   const batchPhoto = first.kind === 'generation' ? photos.find((photo) => photo.id === first.assetId) : undefined;
   const batchIcon = batchPhoto?.thumbnailSrc || batchPhoto?.src
     ? <span className="task-batch-image"><img src={batchPhoto.thumbnailSrc || batchPhoto.src} alt="" />{assetCount > 1 && <b>{assetCount}</b>}</span>
@@ -2794,7 +2929,7 @@ function TaskBatchGroup({ tasks, photos: providedPhotos, children, onOpenViewer:
     const photo = photos.find((item) => item.id === task.assetId);
     return <div className="task-batch-member" key={task.id}><div className="task-row task-activity-row" data-task-id={task.id}><button className="task-member-preview" data-label-color={photo?.labelColor ?? undefined} type="button" disabled={!photo || !onOpenViewer} onClick={() => { if (photo && onOpenViewer) onOpenViewer(photo.id); }} aria-label={photo ? `预览 ${photo.fileName}` : '任务图片预览'}>{(photo?.thumbnailSrc || photo?.src) ? <img src={photo.thumbnailSrc || photo.src} alt={photo.fileName} /> : <TaskKindIcon kind={task.kind} />}</button><span className="task-title"><strong>{taskImageName(task, photos)}</strong><small>{taskScope(task)}</small></span><span className={`task-state state-${task.status}`}>{taskStage(task)}</span></div>{task.status === 'failed' && ((task.kind === 'analysis' || task.kind === 'collection-analysis') ? <AnalysisFailure code={task.errorCode} taskId={task.id} className="task-analysis-failure" /> : <div className="task-analysis-failure" role="alert">{task.kind === 'export' ? exportFailureMessage(task.errorCode ?? '') : task.kind === 'generation' ? generationFailureMessage(task.errorCode) : '任务执行失败'} <code>{task.errorCode}</code></div>)}<TaskAnalysisResult task={task} /><TaskOutput task={task} photos={photos} batchTasks={tasks} onOpenViewer={openViewer} />{task.kind === 'export' && task.result && <div className="task-analysis-result">成功 {Number(task.result.succeeded) || 0} · 失败 {Number(task.result.failed) || 0}{exportTaskReport(task)?.files.map((file) => <p key={file.resultId}>{file.fileName}</p>)}{exportTaskReport(task)?.failures.map((failure) => <p key={failure.resultId}>{exportFailureMessage(failure.errorCode)} · {failure.errorCode}</p>)}</div>}</div>;
   });
-  return <details ref={detailRef} className={`task-batch-group${compact ? ' is-compact' : ''}`} data-task-ids={tasks.map((task) => task.id).join(' ')} onToggle={(event) => setOpen(event.currentTarget.open)}><summary className="task-batch-summary" data-task-batch={first.id}>{summary}<TaskBatchButtons tasks={tasks} /></summary>{open && <div className="task-batch-members">{members()}</div>}</details>;
+  return <details ref={detailRef} className={`task-batch-group${compact ? ' is-compact' : ''}`} data-task-ids={tasks.map((task) => task.id).join(' ')} onToggle={(event) => { setOpen(event.currentTarget.open); onOpenChange?.(event.currentTarget.open); }}><summary className="task-batch-summary" data-task-batch={first.id}>{summary}<TaskBatchButtons tasks={tasks} retryable={groupSummary ? groupSummary.failed + groupSummary.canceled > 0 : undefined} /></summary>{open && <div className="task-batch-members">{members()}</div>}</details>;
 }
 
 function TaskBar({ panelVisibility, onTogglePanel, suspended, open, onToggle, onOpenTaskCenter, onOpenViewer: openViewer, tasks, counts, photos }: { panelVisibility: { left: boolean; right: boolean }; onTogglePanel: (side: 'left' | 'right') => void; suspended: boolean; open: boolean; onToggle: () => void; onOpenTaskCenter: () => void; onOpenViewer: OpenTaskViewer; tasks: PersistedTask[] | null; counts?: Pick<TaskPage, 'activeCount' | 'queuedCount' | 'failedCount' | 'pausedCount'>; photos: Photo[] }): React.JSX.Element {
@@ -3108,7 +3243,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     if (items.length === ids.length) window.desktopApi.startDisplayedFilesDrag({ items });
   };
   const { minimumRating, ratingOperator, flags, colors } = props.photoFilters;
-  const filtered = Boolean(props.searchQuery.trim() || minimumRating !== null || flags.length || colors.length || props.favoriteOnly);
+  const filtered = Boolean(props.searchQuery.trim() || props.photoFilters.mediaType !== 'all' || minimumRating !== null || flags.length || colors.length || props.favoriteOnly);
   const [groupDetails, setGroupDetails] = useState<Record<string, { modifiedAt: number | undefined; data: FileDetails | null }>>({});
   const groupDetailsRef = useRef(groupDetails);
   const needsDetails = props.photoFilters.groupBy.some((dimension) => metadataDimensions.has(dimension));
@@ -3155,8 +3290,8 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
   const [viewMode, setViewMode] = useState<CatalogViewMode>(() => {
     try { const saved = window.localStorage.getItem('photoallisai.catalog-view-mode'); return saved === 'analysis' ? 'list' : saved === 'list' || saved === 'masonry' || saved === 'justified' ? saved : saved === 'grid' ? 'grid' : 'justified'; } catch { return 'justified'; }
   });
-  const scrollKey = JSON.stringify([props.selectedFolderId, props.selectedFolderIds, props.selectedAlbumId, props.selectedSmartCollection, props.selectedTagId, props.favoriteOnly, props.searchQuery, props.sortBy, props.sortDirection, props.photoFilters.minimumRating, props.photoFilters.ratingOperator, props.photoFilters.flags, props.photoFilters.colors, props.photoFilters.groupBy, viewMode]);
-  const dataScope = JSON.stringify([props.selectedFolderId, props.selectedFolderIds, props.selectedAlbumId, props.selectedSmartCollection, props.selectedTagId, props.favoriteOnly, props.searchQuery, props.sortBy, props.sortDirection, props.photoFilters.minimumRating, props.photoFilters.ratingOperator, props.photoFilters.flags, props.photoFilters.colors]);
+  const scrollKey = JSON.stringify([props.selectedFolderId, props.selectedFolderIds, props.selectedAlbumId, props.selectedSmartCollection, props.selectedTagId, props.favoriteOnly, props.searchQuery, props.sortBy, props.sortDirection, props.photoFilters.mediaType, props.photoFilters.minimumRating, props.photoFilters.ratingOperator, props.photoFilters.flags, props.photoFilters.colors, props.photoFilters.groupBy, viewMode]);
+  const dataScope = JSON.stringify([props.selectedFolderId, props.selectedFolderIds, props.selectedAlbumId, props.selectedSmartCollection, props.selectedTagId, props.favoriteOnly, props.searchQuery, props.sortBy, props.sortDirection, props.photoFilters.mediaType, props.photoFilters.minimumRating, props.photoFilters.ratingOperator, props.photoFilters.flags, props.photoFilters.colors]);
   const [visibleColumns, setVisibleColumns] = useState<CatalogColumn[]>(() => {
     try {
       const saved: unknown = JSON.parse(localStorage.getItem('photoallisai.catalog-columns') ?? 'null');
@@ -3528,7 +3663,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
   const selectButton = (photo: Photo) => <input className="catalog-list-select" type="checkbox" aria-label={`选择 ${photo.fileName}`} checked={selection.selectedIds.has(photo.id)} onClick={(event) => event.stopPropagation()} onChange={() => selectPhoto(photo, 'toggle')} />;
   const photoImage = (photo: Photo) => {
     const preview = previewPhoto(photo);
-    return <span className="catalog-list-thumb">{preview.thumbnailSrc || preview.src ? <CatalogImage src={preview.thumbnailSrc ?? preview.src} alt="" eager={eagerCatalogIds.has(photo.id)} /> : <Image size={18} />}</span>;
+    return <span className="catalog-list-thumb">{preview.thumbnailSrc || preview.src ? <CatalogImage src={preview.thumbnailSrc ?? preview.src} alt="" eager={eagerCatalogIds.has(photo.id)} /> : <Image size={18} />}{photo.liveMotionUrl && <span className="catalog-media-badge is-live" title="实况照片" aria-label="实况照片"><Sparkles size={11} /></span>}{mediaTypeForFormat(photo.format) === 'video' && <VideoDurationBadge assetId={photo.id} />}</span>;
   };
   const columns = catalogColumns.filter((column) => visibleColumns.includes(column.id));
   const listStyle = { gridTemplateColumns: `24px ${columns.map((column) => column.width).join(' ')}` };
@@ -3673,7 +3808,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     <>
       <main className="catalog-main">
         <header className="catalog-toolbar">
-          <PhotoFilterBar scope="图库" search={props.filterSearch} setSearch={props.onSearchChange} minimumRating={minimumRating} setMinimumRating={(value) => setFilter('minimumRating', value)} ratingOperator={ratingOperator} setRatingOperator={(value) => setFilter('ratingOperator', value)} flags={flags} setFlags={(value) => setFilter('flags', value)} colors={colors} setColors={(value) => setFilter('colors', value)} onlyFavorites={false} setOnlyFavorites={props.onFavoriteOnlyChange} favoriteOnly={props.favoriteOnly} onFavoriteOnlyChange={props.onFavoriteOnlyChange} renderTools={(filterTools) => <CatalogBrowseControls value={props.photoFilters} onChange={(next) => props.onPhotoFiltersChange((current) => ({ ...current, ...next }))} pending={missingDetails.length + (needsDetails ? Math.max(0, props.totalCount - props.availablePhotos.length) : 0)} total={props.totalCount} tools={{
+          <PhotoFilterBar scope="图库" search={props.filterSearch} setSearch={props.onSearchChange} mediaType={props.photoFilters.mediaType} setMediaType={(value) => setFilter('mediaType', value)} minimumRating={minimumRating} setMinimumRating={(value) => setFilter('minimumRating', value)} ratingOperator={ratingOperator} setRatingOperator={(value) => setFilter('ratingOperator', value)} flags={flags} setFlags={(value) => setFilter('flags', value)} colors={colors} setColors={(value) => setFilter('colors', value)} onlyFavorites={false} setOnlyFavorites={props.onFavoriteOnlyChange} favoriteOnly={props.favoriteOnly} onFavoriteOnlyChange={props.onFavoriteOnlyChange} renderTools={(filterTools) => <CatalogBrowseControls value={props.photoFilters} onChange={(next) => props.onPhotoFiltersChange((current) => ({ ...current, ...next }))} pending={missingDetails.length + (needsDetails ? Math.max(0, props.totalCount - props.availablePhotos.length) : 0)} total={props.totalCount} tools={{
             ...filterTools,
             title: <strong className="catalog-toolbar-title" title={defaultGroupTitle}>{defaultGroupTitle}</strong>,
             count: <span className="catalog-toolbar-count" title="当前集合的文件数量">{props.totalCount} 张</span>,
@@ -3741,8 +3876,8 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
               const cards = group.items.map((photo) => {
                 const preview = previewPhoto(photo);
                 const justifiedSize = justifiedSizes[photo.id];
-                return <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} style={masonryWindow ? masonryLayout!.positions.get(photo.id) : viewMode === 'justified' && justifiedSize ? { width: justifiedSize.width, '--thumbnail-height': `${justifiedSize.height}px` } as React.CSSProperties : undefined} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} data-index-width={preview.width ?? undefined} data-index-height={preview.height ?? undefined} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable key={photo.id} onDragStart={(event) => dragDisplayed(event, photo)} onDragEnd={() => { activePhotoDragIds = null; }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
-              <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{preview.thumbnailSrc || preview.src ? <GalleryThumbnail key={preview.thumbnailSrc ?? preview.src} src={preview.thumbnailSrc ?? preview.src} previewSrc={preview.src} eager={eagerCatalogIds.has(photo.id)} /> : null}{selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
+                return <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.selectedIds.size > 1 && selection.selectedIds.has(photo.id) ? ' is-multi-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} style={masonryWindow ? masonryLayout!.positions.get(photo.id) : viewMode === 'justified' && justifiedSize ? { width: justifiedSize.width, '--thumbnail-height': `${justifiedSize.height}px` } as React.CSSProperties : undefined} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} data-index-width={preview.width ?? undefined} data-index-height={preview.height ?? undefined} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable key={photo.id} onDragStart={(event) => dragDisplayed(event, photo)} onDragEnd={() => { activePhotoDragIds = null; }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
+              <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{preview.thumbnailSrc || preview.src ? <GalleryThumbnail key={preview.thumbnailSrc ?? preview.src} src={preview.thumbnailSrc ?? preview.src} previewSrc={preview.src} eager={eagerCatalogIds.has(photo.id)} /> : null}{photo.liveMotionUrl && <span className="catalog-media-badge is-live" title="实况照片" aria-label="实况照片"><Sparkles size={12} /></span>}{mediaTypeForFormat(photo.format) === 'video' && <VideoDurationBadge assetId={photo.id} />}{selection.selectedIds.size > 1 && selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
               <span className="catalog-photo-badges"><PhotoFlag photo={photo} /></span>
               <span className="catalog-card-meta"><strong title={photo.fileName}>{photo.fileName}</strong>{photo.rating > 0 && <span className="catalog-card-rating" aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}{photo.workflow && <small title={`${photo.workflow.name} · 按规则关联`}>{photo.workflow.members.length} 版本</small>}{photo.workflowConflict && <small title="多条流程规则同时匹配，已保留独立显示">规则冲突</small>}</span>
             </button>;
@@ -3877,27 +4012,53 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
     const visible = new Set(filmstripVisibleIds);
     return ids.filter((id) => visible.has(id));
   }, [availablePhotos, filmstripVisibleIds, view]);
+  const previousPreloadIndex = useRef(-1);
   useEffect(() => {
     if (view !== 'viewer') return;
     const currentIndex = orderedIds.indexOf(selected.id);
-    const adjacent = [orderedIds[currentIndex - 1], orderedIds[currentIndex + 1]].map((id) => availablePhotos.find((photo) => photo.id === id));
-    for (const photo of adjacent) {
-      const src = photo?.src;
-      if (!src || DECODED_IMAGE_SOURCES.has(src) || VIEWER_IMAGE_PRELOADS.has(src)) continue;
-      const image = new window.Image();
-      image.decoding = 'async';
-      image.src = src;
-      VIEWER_IMAGE_PRELOADS.set(src, image);
-      void image.decode().then(() => {
-        rememberDecodedImage(src);
-        if (image.naturalHeight > 0) rememberImageAspectRatio(src, image.naturalWidth / image.naturalHeight);
-      }).catch(() => VIEWER_IMAGE_PRELOADS.delete(src));
-    }
-    while (VIEWER_IMAGE_PRELOADS.size > 4) {
-      const oldest = VIEWER_IMAGE_PRELOADS.keys().next().value;
-      if (!oldest) break;
-      VIEWER_IMAGE_PRELOADS.delete(oldest);
-    }
+    if (currentIndex < 0) return;
+    const direction = previousPreloadIndex.current >= 0 && currentIndex < previousPreloadIndex.current ? -1 : 1;
+    previousPreloadIndex.current = currentIndex;
+    const byId = new Map(availablePhotos.map((photo) => [photo.id, photo]));
+    const sources = [currentIndex + direction, currentIndex - direction, currentIndex + direction * 2]
+      .map((index) => byId.get(orderedIds[index] ?? ''))
+      .map((photo) => photo?.src)
+      .filter((src): src is string => Boolean(src));
+    let canceled = false;
+    let pendingImage: HTMLImageElement | null = null;
+    let timer = window.setTimeout(() => {
+      const preload = async (index: number): Promise<void> => {
+        if (canceled || document.visibilityState !== 'visible' || index >= sources.length) return;
+        const src = sources[index]!;
+        if (DECODED_IMAGE_SOURCES.has(src) || VIEWER_IMAGE_PRELOADS.has(src)) {
+          void preload(index + 1);
+          return;
+        }
+        const image = new window.Image();
+        image.decoding = 'async';
+        pendingImage = image;
+        try {
+          image.src = src;
+          await image.decode();
+          if (canceled) return;
+          rememberDecodedImage(src);
+          if (image.naturalHeight > 0) rememberImageAspectRatio(src, image.naturalWidth / image.naturalHeight);
+          VIEWER_IMAGE_PRELOADS.delete(src);
+          VIEWER_IMAGE_PRELOADS.set(src, image);
+          while (VIEWER_IMAGE_PRELOADS.size > 3) VIEWER_IMAGE_PRELOADS.delete(VIEWER_IMAGE_PRELOADS.keys().next().value!);
+        } catch { /* The viewer will load this image if the user navigates to it. */ }
+        finally {
+          if (pendingImage === image) pendingImage = null;
+          if (!canceled) timer = window.setTimeout(() => { void preload(index + 1); }, 60);
+        }
+      };
+      void preload(0);
+    }, 150);
+    return () => {
+      canceled = true;
+      window.clearTimeout(timer);
+      if (pendingImage) pendingImage.src = '';
+    };
   }, [availablePhotos, orderedIds, selected.id, view]);
   const collectionName = selectedFolderId
     ? catalogFolders.find((folder) => folder.id === selectedFolderId)?.name ?? '文件夹'
@@ -3934,7 +4095,9 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
       if (viewerActive === false) return;
       if (shortcutBlocked(event, event.key === 'ArrowLeft' || event.key === 'ArrowRight')) return;
       const target = event.target;
-      if (!(target instanceof Element) || target.closest('input, textarea, select, [contenteditable="true"]') || !target.closest(view === 'viewer' ? '.inline-photo-viewer' : '.filmstrip, .catalog-grid, .catalog-list-view')) return;
+      if (!(target instanceof Element)) return;
+      const inViewer = view === 'viewer' && Boolean(target.closest('.inline-photo-viewer'));
+      if (target.closest('input, textarea, select, [contenteditable="true"]') || target.closest('video') && !inViewer || !target.closest(inViewer ? '.inline-photo-viewer' : '.filmstrip, .catalog-grid, .catalog-list-view')) return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
         if (!target.closest('.filmstrip, .catalog-grid, .catalog-list-view')) return;
         event.preventDefault();
@@ -5640,13 +5803,18 @@ const fileOperationStatusLabels: Record<FileOperationHistoryItem['status'], stri
 };
 
 function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: providedPhotos }: { onCatalogChanged: () => Promise<void>; onOpenViewer: OpenTaskViewer; photos: Photo[] }): React.JSX.Element {
-  const [taskItems, setTaskItems] = useState<PersistedTask[]>([]);
+  const [groups, setGroups] = useState<TaskGroupSummary[]>([]);
+  const [membersByGroup, setMembersByGroup] = useState<Record<string, TaskGroupMembersPage>>({});
+  const [loadingGroup, setLoadingGroup] = useState<string | null>(null);
+  const [groupCursor, setGroupCursor] = useState<TaskGroupPage['nextCursor']>(null);
+  const [previousGroupCursors, setPreviousGroupCursors] = useState<Array<TaskGroupPage['nextCursor']>>([]);
+  const [memberCursors, setMemberCursors] = useState<Record<string, Array<TaskGroupMembersPage['nextCursor']>>>({});
+  const taskItems = [...groups.map((group) => group.first), ...Object.values(membersByGroup).flatMap((page) => page.items)];
   const photos = useTaskPhotos(taskItems, providedPhotos);
-  const [nextTaskCursor, setNextTaskCursor] = useState<TaskListCursor | null>(null);
+  const [nextTaskCursor, setNextTaskCursor] = useState<TaskGroupPage['nextCursor']>(null);
   const [taskTotalCount, setTaskTotalCount] = useState(0);
-  const [taskCounts, setTaskCounts] = useState({ queued: 0, paused: 0, active: 0, failed: 0, failedGeneration: 0 });
   const [loadingMoreTasks, setLoadingMoreTasks] = useState(false);
-  const loadedTaskHistory = useRef(false);
+  const [groupCounts, setGroupCounts] = useState({ all: 0, running: 0, failed: 0, history: 0 });
   const operationHistorySignature = useRef('');
   const [fileOperations, setFileOperations] = useState<FileOperationHistoryItem[]>([]);
   const [backgroundFileTasks, setBackgroundFileTasks] = useState<BackgroundFileTask[]>([]);
@@ -5664,41 +5832,23 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
   const [expandedExportTaskId, setExpandedExportTaskId] = useState<string | null>(null);
   const [taskView, setTaskView] = useState<'all' | 'running' | 'failed' | 'history'>('all');
   const [taskCategory, setTaskCategory] = useState<'all' | 'generation' | 'file'>('all');
-  const taskPageSignature = useRef('');
-  const taskItemsRef = useRef(taskItems);
-  const nextTaskCursorRef = useRef(nextTaskCursor);
-
-  const applyTaskPage = useCallback((page: Awaited<ReturnType<typeof window.desktopApi.listTaskPage>>, append = false) => {
-    const nextItems = append
-      ? [...new Map([...taskItemsRef.current, ...page.items].map((item) => [item.id, item])).values()]
-      : page.items;
-    const signature = nextItems.map((item) => `${item.id}:${item.updatedAt}:${item.status}:${item.progress}:${item.position}`).join('|');
-    if (signature !== taskPageSignature.current) {
-      taskPageSignature.current = signature;
-      taskItemsRef.current = nextItems;
-      setTaskItems(nextItems);
-    }
-    if (!append && JSON.stringify(page.nextCursor) !== JSON.stringify(nextTaskCursorRef.current)) {
-      nextTaskCursorRef.current = page.nextCursor;
-      setNextTaskCursor(page.nextCursor);
-    }
-    setTaskTotalCount((current) => current === page.totalCount ? current : page.totalCount);
-    const nextCounts = {
-      queued: page.queuedCount,
-      paused: page.pausedCount,
-      active: page.activeCount,
-      failed: page.failedCount,
-      failedGeneration: page.failedGenerationCount
-    };
-    setTaskCounts((current) => Object.keys(nextCounts).every((key) => current[key as keyof typeof current] === nextCounts[key as keyof typeof nextCounts]) ? current : nextCounts);
-  }, []);
-  const fetchPage = async (): Promise<TaskPage> => {
-    return window.desktopApi.listTaskPage({ includeBatchMembers: true, limit: 50, cursor: null });
+  const fetchPage = useCallback(() => window.desktopApi.listTaskGroupPage({ category: taskCategory, view: taskView, limit: 30, cursor: groupCursor }), [taskCategory, taskView, groupCursor]);
+  const applyTaskPage = (page: TaskGroupPage) => {
+    setGroups(page.items);
+    setNextTaskCursor(page.nextCursor);
+    setGroupCounts({ all: page.totalCount, running: page.runningCount, failed: page.failedCount, history: page.historyCount });
+    setTaskTotalCount(page.totalCount);
   };
   const refresh = async () => {
     const page = await fetchPage();
-    loadedTaskHistory.current = false;
     applyTaskPage(page);
+    const loaded = Object.keys(membersByGroup);
+    const updated = await Promise.all(loaded.map(async (id) => {
+      const group = page.items.find((item) => item.id === id);
+      return group ? [id, await window.desktopApi.listTaskGroupMembers({ kind: group.kind, batchId: group.batchId, limit: 50, cursor: null })] as const : null;
+    }));
+    setMembersByGroup(Object.fromEntries(updated.filter((item) => item !== null)));
+    setMemberCursors({});
   };
   useEffect(() => {
     let active = true;
@@ -5709,7 +5859,7 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
         window.desktopApi.listBackgroundFileTasks()
       ]);
       if (active) {
-        applyTaskPage(page, loadedTaskHistory.current);
+        applyTaskPage(page);
         const signature = operations.map((item) => `${item.id}:${item.status}:${item.succeeded}:${item.total}`).join('|');
         if (signature !== operationHistorySignature.current) {
           operationHistorySignature.current = signature;
@@ -5724,19 +5874,11 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
     };
     const safePoll = () => poll().catch(() => { if (active) setMessage('任务加载失败，请稍后重试。'); });
     void safePoll();
-    const changed = (event: Event) => {
-      const deleted = new Set((event as CustomEvent<{ deletedIds?: string[] }>).detail?.deletedIds ?? []);
-      if (deleted.size) {
-        taskItemsRef.current = taskItemsRef.current.filter((task) => !deleted.has(task.id));
-        taskPageSignature.current = taskItemsRef.current.map((item) => `${item.id}:${item.updatedAt}:${item.status}:${item.progress}:${item.position}`).join('|');
-        setTaskItems(taskItemsRef.current);
-      }
-      void safePoll();
-    };
+    const changed = () => { void safePoll(); };
     window.addEventListener(TASKS_CHANGED_EVENT, changed);
     let timer = 0;
     const schedule = () => {
-      const activeTasks = taskCounts.active + taskCounts.queued + taskCounts.paused + backgroundFileTasks.filter((task) => task.status === 'running').length;
+      const activeTasks = groupCounts.running + backgroundFileTasks.filter((task) => task.status === 'running').length;
       timer = window.setTimeout(() => {
         if (document.visibilityState === 'visible') void safePoll();
         schedule();
@@ -5744,7 +5886,8 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
     };
     schedule();
     return () => { active = false; window.clearTimeout(timer); window.removeEventListener(TASKS_CHANGED_EVENT, changed); };
-  }, [applyTaskPage, backgroundFileTasks, taskCounts.active, taskCounts.queued, taskCounts.paused]);
+  }, [fetchPage, backgroundFileTasks, groupCounts.running]);
+  useEffect(() => { setGroupCursor(null); setPreviousGroupCursors([]); setGroups([]); setMembersByGroup({}); setNextTaskCursor(null); }, [taskCategory, taskView]);
   useEffect(() => {
     void Promise.all([window.desktopApi.listProviderProfiles(), window.desktopApi.listPromptTemplates()]).then(([profiles, items]) => {
       setGenerationProfiles(profiles.filter((profile) => profile.purpose === 'generation' && profile.enabled));
@@ -5762,20 +5905,46 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
       await refresh();
     } catch { setMessage('重试失败，请刷新任务后重试。'); }
   };
-  const loadMoreTasks = async () => {
-    if (!nextTaskCursor || loadingMoreTasks) return;
+  const changeGroupPage = async (cursor: TaskGroupPage['nextCursor'], previous: Array<TaskGroupPage['nextCursor']>) => {
+    if (loadingMoreTasks) return;
     setLoadingMoreTasks(true);
-    loadedTaskHistory.current = true;
     try {
-      const page = await window.desktopApi.listTaskPage({ includeBatchMembers: true, limit: 50, cursor: nextTaskCursor });
-      applyTaskPage(page, true);
-      setNextTaskCursor(page.nextCursor);
+      const page = await window.desktopApi.listTaskGroupPage({ category: taskCategory, view: taskView, limit: 30, cursor });
+      setGroupCursor(cursor);
+      setPreviousGroupCursors(previous);
+      applyTaskPage(page);
+      setMembersByGroup({});
     } catch {
-      loadedTaskHistory.current = false;
       setMessage('任务历史加载失败，请重试。');
     } finally {
       setLoadingMoreTasks(false);
     }
+  };
+  const loadMoreTasks = () => { if (nextTaskCursor) void changeGroupPage(nextTaskCursor, [...previousGroupCursors, groupCursor]); };
+  const loadGroupMembers = async (group: TaskGroupSummary, append = false) => {
+    const cursor = append ? membersByGroup[group.id]?.nextCursor : null;
+    if (append && !cursor) return;
+    setLoadingGroup(group.id);
+    try {
+      const page = await window.desktopApi.listTaskGroupMembers({ kind: group.kind, batchId: group.batchId, limit: 50, cursor });
+      setMembersByGroup((current) => ({ ...current, [group.id]: {
+        items: page.items,
+        nextCursor: page.nextCursor
+      } }));
+      if (append) setMemberCursors((current) => ({ ...current, [group.id]: [...(current[group.id] ?? []), cursor ?? null] }));
+    } catch { setMessage('批次内容加载失败，请重试。'); }
+    finally { setLoadingGroup(null); }
+  };
+  const loadPreviousGroupMembers = async (group: TaskGroupSummary) => {
+    const cursors = memberCursors[group.id] ?? [];
+    if (!cursors.length) return;
+    setLoadingGroup(group.id);
+    try {
+      const page = await window.desktopApi.listTaskGroupMembers({ kind: group.kind, batchId: group.batchId, limit: 50, cursor: cursors.at(-2) ?? null });
+      setMembersByGroup((current) => ({ ...current, [group.id]: page }));
+      setMemberCursors((current) => ({ ...current, [group.id]: cursors.slice(0, -1) }));
+    } catch { setMessage('批次内容加载失败，请重试。'); }
+    finally { setLoadingGroup(null); }
   };
   const undoFileOperation = async (operation: FileOperationHistoryItem) => {
     setUndoBusyId(operation.id);
@@ -5873,37 +6042,33 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
     }
   };
 
-  const categoryTasks = taskItems.filter((task) => taskCategory === 'all' || (taskCategory === 'generation' ? task.kind === 'generation' : task.kind === 'export'));
   const categoryOperations = taskCategory === 'generation' ? [] : fileOperations;
   const categoryBackground = taskCategory === 'generation' ? [] : backgroundFileTasks;
-  const running = categoryTasks.filter((task) => ['draft', 'queued', 'preparing', 'uploading', 'processing', 'downloading', 'saving'].includes(task.status)).length
+  const running = groupCounts.running
     + categoryOperations.filter((operation) => ['planned', 'executing', 'compensating', 'undoing'].includes(operation.status)).length
     + categoryBackground.filter((task) => task.status === 'running').length;
-  const failed = categoryTasks.filter((task) => task.status === 'failed').length + categoryOperations.filter((operation) => ['failed', 'partial', 'compensation_failed'].includes(operation.status)).length + categoryBackground.filter((task) => task.status === 'failed').length;
-  const taskBatches = groupTaskBatches(taskItems);
-  const onOpenViewer: OpenTaskViewer = (assetId, assetIds, options) => openViewer(assetId, assetIds ?? taskBatches.find((batch) => batch.tasks.some((task) => task.assetId === assetId))?.tasks.flatMap((task) => task.assetId ? [task.assetId] : []), options ?? { target: 'latest-ai' });
-  const filteredBatches = groupTaskBatches(categoryTasks).filter((batch) => taskView === 'all' || (taskView === 'running' ? batch.active + batch.queued > 0
-    : taskView === 'failed' ? batch.failed > 0 : batch.settled === batch.total));
+  const failed = groupCounts.failed + categoryOperations.filter((operation) => ['failed', 'partial', 'compensation_failed'].includes(operation.status)).length + categoryBackground.filter((task) => task.status === 'failed').length;
+  const onOpenViewer: OpenTaskViewer = (assetId, assetIds, options) => openViewer(assetId, assetIds, options ?? { target: 'latest-ai' });
   const filteredOperations = categoryOperations.filter((operation) => taskView === 'all' || (taskView === 'running' ? ['planned', 'executing', 'compensating', 'undoing'].includes(operation.status)
     : taskView === 'failed' ? ['failed', 'partial', 'compensation_failed'].includes(operation.status)
       : ['completed', 'undone', 'partial', 'failed', 'compensation_failed'].includes(operation.status)));
   const filteredBackground = categoryBackground.filter((task) => taskView === 'all' || (taskView === 'running' ? task.status === 'running' : taskView === 'failed' ? task.status === 'failed' : task.status !== 'running'));
   const timeline = [
-    ...filteredBatches.map((batch) => ({ kind: 'task' as const, batch, createdAt: Math.max(...batch.tasks.map((task) => task.createdAt)), priority: batch.active > 0 ? 0 : batch.queued > 0 ? 1 : batch.paused > 0 ? 2 : 3 })),
+    ...groups.map((batch) => ({ kind: 'task' as const, batch, createdAt: batch.createdAt, priority: batch.priority })),
     ...filteredOperations.map((operation) => ({ kind: 'file' as const, operation, createdAt: operation.createdAt, priority: operation.status === 'planned' ? 1 : ['executing', 'compensating', 'undoing'].includes(operation.status) ? 0 : 3 })),
     ...filteredBackground.map((task) => ({ kind: 'background' as const, task, createdAt: task.startedAt, priority: task.status === 'running' ? 0 : 3 }))
   ].sort((a, b) => a.priority - b.priority || b.createdAt - a.createdAt);
-  const visibleTotal = categoryTasks.length + categoryOperations.length + categoryBackground.length;
-  const ended = categoryTasks.filter((task) => ['completed', 'failed', 'canceled'].includes(task.status)).length
+  const visibleTotal = groupCounts.all + categoryOperations.length + categoryBackground.length;
+  const ended = groupCounts.history
     + categoryOperations.filter((operation) => ['completed', 'undone', 'partial', 'failed', 'compensation_failed'].includes(operation.status)).length
     + categoryBackground.filter((task) => task.status !== 'running').length;
 
   return (
-    <TaskActions tasks={taskBatches.flatMap((batch) => batch.tasks)} onOpenViewer={onOpenViewer} onEditTask={openPromptEditor}>
+    <TaskActions tasks={taskItems} onOpenViewer={onOpenViewer} onEditTask={openPromptEditor}>
     <div className="task-center-page">
       <nav className="task-view-switch" aria-label="筛选任务">{([
         ['all', '全部', visibleTotal], ['running', '运行中', running], ['failed', '失败', failed], ['history', '已结束', ended]
-      ] as const).map(([value, label, count]) => <button type="button" key={value} aria-label={label} aria-pressed={taskView === value} onClick={() => setTaskView(value)}>{label}<span className="task-tab-count">{count}</span></button>)}<div className="task-toolbar-actions"><div className="task-category-switch" role="group" aria-label="任务分类">{([['all', '全部'], ['generation', '生成'], ['file', '文件']] as const).map(([value, label]) => <button key={value} type="button" aria-label={`${label}分类`} aria-pressed={taskCategory === value} onClick={() => setTaskCategory(value)}>{label}</button>)}</div>{(taskView === 'all' || taskView === 'failed') && <button className="quiet-button" type="button" disabled={taskCategory === 'file' || (taskCategory === 'generation' ? taskCounts.failedGeneration === 0 : taskCounts.failed === 0)} onClick={() => void retryFailedVisibleTasks()}><RotateCcw size={13} />重试</button>}<TaskClearButton disabled={taskTotalCount === 0} /></div></nav>
+      ] as const).map(([value, label, count]) => <button type="button" key={value} aria-label={label} aria-pressed={taskView === value} onClick={() => setTaskView(value)}>{label}<span className="task-tab-count">{count}</span></button>)}<div className="task-toolbar-actions"><div className="task-category-switch" role="group" aria-label="任务分类">{([['all', '全部'], ['generation', '生成'], ['file', '文件']] as const).map(([value, label]) => <button key={value} type="button" aria-label={`${label}分类`} aria-pressed={taskCategory === value} onClick={() => setTaskCategory(value)}>{label}</button>)}</div>{(taskView === 'all' || taskView === 'failed') && <button className="quiet-button" type="button" disabled={taskCategory === 'file' || groupCounts.failed === 0} onClick={() => void retryFailedVisibleTasks()}><RotateCcw size={13} />重试</button>}<TaskClearButton disabled={taskTotalCount === 0} /></div></nav>
       {message && <span className="task-feedback" role="status">{message}</span>}
       {editingTaskId && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !editBusy) setEditingTaskId(null); }}><form className="rename-dialog task-prompt-editor" role="dialog" aria-modal="true" aria-labelledby="task-prompt-title" onSubmit={(event) => { event.preventDefault(); void savePrompt(); }}><header><div><span className="dialog-icon"><FilePenLine size={16} /></span><div><h2 id="task-prompt-title">编辑等待任务</h2><p>修改只作用于尚未开始的任务；同批生成数量会安全增减队尾任务。</p></div></div><IconButton label="关闭提示词编辑器" disabled={editBusy} onClick={() => setEditingTaskId(null)}><X size={15} /></IconButton></header><div className="form-grid two-columns"><label className="rename-field"><span>生成模型</span><select aria-label="任务生成模型" value={providerDraft} onChange={(event) => setProviderDraft(event.target.value)}>{generationProfiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label><label className="rename-field"><span>生成数量</span><input aria-label="任务生成数量" type="number" min="1" max="20" value={countDraft} onChange={(event) => setCountDraft(Number(event.target.value))} /></label></div><label className="rename-field"><span>提示词模板</span><select aria-label="任务提示词模板" value={templateDraft} disabled={!taskItems.find((item) => item.id === editingTaskId)?.payload.analysisRevisionId} onChange={(event) => void previewTaskTemplate(event.target.value)}><option value="">保留当前通用方案</option>{templates.map((template) => <option key={template.id} value={template.id}>{template.name} · V{template.version}</option>)}</select></label><label className="rename-field"><span>最终生成提示词</span><textarea autoFocus value={promptDraft} maxLength={50_000} onChange={(event) => setPromptDraft(event.target.value)} /></label><footer><span>{promptDraft.length.toLocaleString()} / 50,000</span><div><button className="quiet-button" type="button" disabled={editBusy} onClick={() => setEditingTaskId(null)}>取消</button><button className="primary-action compact" type="submit" disabled={!providerDraft || !promptDraft.trim() || countDraft < 1 || countDraft > 20 || editBusy}>{editBusy ? '保存中…' : '保存修改'}</button></div></footer></form></div>}
       <div className="task-center-scroll">
@@ -5932,12 +6097,16 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
             </div>;
           }
           const batch = entry.batch;
-          return <TaskBatchGroup key={batch.id} tasks={batch.tasks} photos={photos} onOpenViewer={onOpenViewer}>{() => batch.tasks.map((task) => {
+          const page = membersByGroup[batch.id];
+          const batchTasks = page?.items ?? [batch.first];
+          return <TaskBatchGroup key={batch.id} tasks={batchTasks} summary={batch} photos={photos} onOpenViewer={onOpenViewer} onOpenChange={(open) => {
+            if (open && !membersByGroup[batch.id]) void loadGroupMembers(batch);
+          }}>{() => <>{!page && <div className="task-load-more">{loadingGroup === batch.id ? '正在加载批次…' : <button className="secondary-action compact" type="button" onClick={() => void loadGroupMembers(batch)}>重新加载</button>}</div>}{page?.items.map((task) => {
           const report = exportTaskReport(task);
           const reportOpen = expandedExportTaskId === task.id;
           return <Fragment key={task.id}>
           <div className="task-table-row" data-task-id={task.id}>
-            <span className="task-kind"><button className="task-member-preview task-table-preview" data-label-color={photos.find((photo) => photo.id === task.assetId)?.labelColor ?? undefined} type="button" disabled={!photos.find((photo) => photo.id === task.assetId)} onClick={() => { if (task.assetId) onOpenViewer(task.assetId, batch.tasks.flatMap((item) => item.assetId ? [item.assetId] : [])); }} aria-label={`预览 ${taskImageName(task, photos)}`}>{(photos.find((photo) => photo.id === task.assetId)?.thumbnailSrc || photos.find((photo) => photo.id === task.assetId)?.src) ? <img className="task-item-thumbnail" src={photos.find((photo) => photo.id === task.assetId)!.thumbnailSrc || photos.find((photo) => photo.id === task.assetId)!.src} alt={taskImageName(task, photos)} /> : <TaskKindIcon kind={task.kind} />}</button><span><strong title={taskImageName(task, photos)}>{taskImageName(task, photos)}</strong><small>{taskLabels[task.kind]}</small></span></span>
+            <span className="task-kind"><button className="task-member-preview task-table-preview" data-label-color={photos.find((photo) => photo.id === task.assetId)?.labelColor ?? undefined} type="button" disabled={!photos.find((photo) => photo.id === task.assetId)} onClick={() => { if (task.assetId) onOpenViewer(task.assetId, batchTasks.flatMap((item) => item.assetId ? [item.assetId] : [])); }} aria-label={`预览 ${taskImageName(task, photos)}`}>{(photos.find((photo) => photo.id === task.assetId)?.thumbnailSrc || photos.find((photo) => photo.id === task.assetId)?.src) ? <img className="task-item-thumbnail" src={photos.find((photo) => photo.id === task.assetId)!.thumbnailSrc || photos.find((photo) => photo.id === task.assetId)!.src} alt={taskImageName(task, photos)} /> : <TaskKindIcon kind={task.kind} />}</button><span><strong title={taskImageName(task, photos)}>{taskImageName(task, photos)}</strong><small>{taskLabels[task.kind]}</small></span></span>
             <span className="task-scope">{taskScope(task)}</span>
             <span className={`task-state state-${task.status}`}>{taskStage(task)}</span>
             <span>{task.attempt + 1}</span>
@@ -5948,21 +6117,22 @@ function TaskCenterPage({ onCatalogChanged, onOpenViewer: openViewer, photos: pr
           </div>
           {task.status === 'failed' && (task.kind === 'analysis' || task.kind === 'collection-analysis') && <AnalysisFailure code={task.errorCode} taskId={task.id} className="task-analysis-failure" />}
           <TaskAnalysisResult task={task} />
-          <TaskOutput task={task} photos={photos} batchTasks={batch.tasks} onOpenViewer={onOpenViewer} />
+          <TaskOutput task={task} photos={photos} batchTasks={batchTasks} onOpenViewer={onOpenViewer} />
           {task.status === 'failed' && task.kind !== 'analysis' && task.kind !== 'collection-analysis' && <div className="task-analysis-failure" role="alert">{task.kind === 'export' ? exportFailureMessage(task.errorCode ?? '') : task.kind === 'generation' ? generationFailureMessage(task.errorCode) : '任务执行失败'} <code>{task.errorCode}</code></div>}
           {reportOpen && report && <section className="export-task-report" aria-label="导出报告">
             <header><span><strong>导出报告</strong><small>{report.canceled ? '已取消' : report.failed > 0 ? '部分项目未导出' : '所有文件均已导出'}</small></span><button className="secondary-action compact" type="button" onClick={async () => { if (!await window.desktopApi.revealExportDestination(task.id)) setMessage('导出目录已移动或暂时无法打开。'); }}><FolderOpen size={13} />打开导出目录</button></header>
             <div className="export-report-summary"><span>总计 <strong>{report.total}</strong></span><span>成功 <strong>{report.succeeded}</strong></span><span className={report.failed > 0 ? 'has-failures' : ''}>失败 <strong>{report.failed}</strong></span></div>
             <div className="export-report-files">
-              {report.files.map((file) => <div key={file.resultId}><Check size={12} /><span>{file.fileName}</span><em>已导出</em></div>)}
-              {report.failures.map((failure) => <div className="is-failed" key={failure.resultId}><CircleAlert size={12} /><span>{exportFailureMessage(failure.errorCode)}</span><em>{failure.errorCode}</em></div>)}
+              {report.files.slice(0, 100).map((file) => <div key={file.resultId}><Check size={12} /><span>{file.fileName}</span><em>已导出</em></div>)}
+              {report.failures.slice(0, 100).map((failure) => <div className="is-failed" key={failure.resultId}><CircleAlert size={12} /><span>{exportFailureMessage(failure.errorCode)}</span><em>{failure.errorCode}</em></div>)}
+              {report.files.length + report.failures.length > 200 && <div className="is-empty">仅显示前 100 条成功与失败记录</div>}
               {report.files.length === 0 && report.failures.length === 0 && <div className="is-empty">任务取消前没有发布文件</div>}
             </div>
           </section>}
           </Fragment>;
-        })}</TaskBatchGroup>;
+        })}{page && (page.nextCursor || (memberCursors[batch.id]?.length ?? 0) > 0) && <div className="task-load-more">{(memberCursors[batch.id]?.length ?? 0) > 0 && <button className="secondary-action compact" type="button" disabled={loadingGroup === batch.id} onClick={() => void loadPreviousGroupMembers(batch)}>上一页</button>}{page.nextCursor && <button className="secondary-action compact" type="button" disabled={loadingGroup === batch.id} onClick={() => void loadGroupMembers(batch, true)}>{loadingGroup === batch.id ? '加载中…' : '下一页'}</button>}</div>}</>}</TaskBatchGroup>;
         })}
-        {nextTaskCursor && <div className="task-load-more"><button className="secondary-action compact" type="button" disabled={loadingMoreTasks} onClick={() => void loadMoreTasks()}>{loadingMoreTasks ? '加载中…' : '加载更多任务'}</button></div>}
+        {(nextTaskCursor || previousGroupCursors.length > 0) && <div className="task-load-more">{previousGroupCursors.length > 0 && <button className="secondary-action compact" type="button" disabled={loadingMoreTasks} onClick={() => void changeGroupPage(previousGroupCursors.at(-1) ?? null, previousGroupCursors.slice(0, -1))}>上一页</button>}{nextTaskCursor && <button className="secondary-action compact" type="button" disabled={loadingMoreTasks} onClick={loadMoreTasks}>{loadingMoreTasks ? '加载中…' : '下一页'}</button>}</div>}
       </div>
       </div>
     </div>
@@ -6177,7 +6347,6 @@ function InlinePhotoViewer({ workspace, photo, items, onPhotoChange, onClose, re
   }, [options.results, resultId, onSelectResult]);
   return <section className="inline-photo-viewer" aria-label="看图" ref={panelRef} onKeyDown={(event) => {
     if (event.key !== 'Escape' || event.defaultPrevented || document.querySelector('[role="menu"]') || panelRef.current?.querySelector('[role="dialog"], .tag-editor-popover')) return;
-    if (document.fullscreenElement) { event.stopPropagation(); return; }
     event.preventDefault();
     event.stopPropagation();
     onClose();
@@ -6226,7 +6395,7 @@ function QuickPhotoViewer({ session, photo, onPhotoChange, onClose }: { session:
   if (session.indexed && session.sessionId) return <IndexedQuickPhotoViewer session={session} photo={photo} onPhotoChange={onPhotoChange} onClose={onClose} />;
   return <section className="inline-photo-viewer" aria-label="临时看图" ref={panel} onKeyDown={(event) => {
     if (event.defaultPrevented || document.querySelector('[role="dialog"], [role="menu"]') || (event.target instanceof Element && event.target.closest('input, textarea, select'))) return;
-    if (event.key === 'Escape') { if (document.fullscreenElement) { event.stopPropagation(); return; } event.preventDefault(); event.stopPropagation(); onClose(); }
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); }
     if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       event.preventDefault();
       const visibleSet = visibleIds && visibleIds.length !== items.length ? new Set(visibleIds) : null;
@@ -6603,7 +6772,6 @@ export function App(): React.JSX.Element {
     if (!viewerPreloading && !viewerPhoto) return;
     const cancel = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented || document.querySelector('[role="dialog"], [role="menu"], .tag-editor-popover')) return;
-      if (document.fullscreenElement) return;
       event.preventDefault();
       closeViewer();
     };
@@ -6625,7 +6793,7 @@ export function App(): React.JSX.Element {
         const value = current as Partial<PhotoFilters>;
         const groupBy = Array.isArray(value.groupBy) ? value.groupBy.filter((dimension) => typeof dimension === 'string' && dimension in browseDimensions).slice(0, 10) : [];
         const groupOrder = Object.fromEntries(Object.entries(value.groupOrder ?? {}).filter(([dimension, order]) => dimension in browseDimensions && (order === 'asc' || order === 'desc'))) as PhotoFilters['groupOrder'];
-        return { groupBy, groupOrder, minimumRating: typeof value.minimumRating === 'number' && value.minimumRating >= 0 && value.minimumRating <= 5 ? value.minimumRating : null,
+        return { groupBy, groupOrder, mediaType: value.mediaType === 'image' || value.mediaType === 'video' ? value.mediaType : 'all', minimumRating: typeof value.minimumRating === 'number' && value.minimumRating >= 0 && value.minimumRating <= 5 ? value.minimumRating : null,
           ratingOperator: value.ratingOperator === 'eq' || value.ratingOperator === 'lte' ? value.ratingOperator : 'gte',
           flags: Array.isArray(value.flags) ? value.flags.filter((flag) => flag === 'picked' || flag === 'rejected' || flag === 'unflagged') : [],
           colors: Array.isArray(value.colors) ? value.colors.filter((color) => color === 'red' || color === 'yellow' || color === 'green' || color === 'blue' || color === 'purple') : [] };
@@ -6644,7 +6812,7 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     try { localStorage.setItem(CATALOG_FILTERS_KEY, JSON.stringify(photoFilters)); } catch { /* restricted storage */ }
   }, [photoFilters]);
-  const catalogFilterInput = useMemo(() => ({ minimumRating: photoFilters.minimumRating, ratingOperator: photoFilters.ratingOperator, flags: photoFilters.flags, colors: photoFilters.colors }), [photoFilters.minimumRating, photoFilters.ratingOperator, photoFilters.flags, photoFilters.colors]);
+  const catalogFilterInput = useMemo(() => ({ mediaType: photoFilters.mediaType, minimumRating: photoFilters.minimumRating, ratingOperator: photoFilters.ratingOperator, flags: photoFilters.flags, colors: photoFilters.colors }), [photoFilters.mediaType, photoFilters.minimumRating, photoFilters.ratingOperator, photoFilters.flags, photoFilters.colors]);
   const catalogUserActivityAt = useRef(Date.now());
   useEffect(() => {
     let lastSent = 0;
@@ -6670,7 +6838,7 @@ export function App(): React.JSX.Element {
   }, []);
   const [sortBy, setSortBy] = useState<CatalogSort>('fileName');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc' | undefined>('asc');
-  const selectionScope = JSON.stringify([selectedFolderId, selectedFolderIds, selectedAlbumId, selectedSmartCollection, selectedTagId, favoriteOnly, searchQuery, sortBy, sortDirection, photoFilters.minimumRating, photoFilters.ratingOperator, photoFilters.flags, photoFilters.colors]);
+  const selectionScope = JSON.stringify([selectedFolderId, selectedFolderIds, selectedAlbumId, selectedSmartCollection, selectedTagId, favoriteOnly, searchQuery, sortBy, sortDirection, photoFilters.mediaType, photoFilters.minimumRating, photoFilters.ratingOperator, photoFilters.flags, photoFilters.colors]);
   const catalogRequest = useRef(0);
   const smartCollectionsRequest = useRef(0);
   const catalogPagePending = useRef(false);
@@ -6840,6 +7008,7 @@ export function App(): React.JSX.Element {
       && !catalogRefreshInFlight.current
       && !loadingMore
       && sortBy !== 'rating'
+      && photoFilters.mediaType === 'all'
       && photoFilters.minimumRating === null
       && photoFilters.flags.length === 0
       && photoFilters.colors.length === 0
@@ -6859,7 +7028,7 @@ export function App(): React.JSX.Element {
     }).catch(() => {
       if (collectionsRequest === smartCollectionsRequest.current) void refreshCatalog(selectedFolderId, true);
     });
-  }), [favoriteOnly, loadingMore, photoFilters.colors.length, photoFilters.flags.length, photoFilters.minimumRating, refreshCatalog, selectedFolderId, selectedSmartCollection, sortBy]);
+  }), [favoriteOnly, loadingMore, photoFilters.colors.length, photoFilters.flags.length, photoFilters.mediaType, photoFilters.minimumRating, refreshCatalog, selectedFolderId, selectedSmartCollection, sortBy]);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setSearchQuery(searchDraft.trim()), 250);
@@ -7058,6 +7227,7 @@ export function App(): React.JSX.Element {
   const availablePhotos = useMemo(() => {
     if (catalogReady && !isDemo) return catalogPhotos;
     return photos.filter((photo) => (!searchQuery.trim() || photo.fileName.toLocaleLowerCase().includes(searchQuery.trim().toLocaleLowerCase()))
+      && (photoFilters.mediaType === 'all' || mediaTypeForFormat(photo.format) === photoFilters.mediaType)
       && (photoFilters.minimumRating === null || (photoFilters.ratingOperator === 'eq' ? photo.rating === photoFilters.minimumRating : photoFilters.ratingOperator === 'lte' ? photo.rating <= photoFilters.minimumRating : photo.rating >= photoFilters.minimumRating))
       && (!photoFilters.flags.length || photoFilters.flags.includes(photo.flag ?? 'unflagged'))
       && (!photoFilters.colors.length || (photo.labelColor && photoFilters.colors.includes(photo.labelColor)))
@@ -7288,7 +7458,7 @@ export function App(): React.JSX.Element {
         ? options.results?.find((result) => result.id === options.resultId)?.resultUrl
         : undefined;
       const previewSource = openingSource ?? photo.src;
-      if (previewSource) {
+      if (mediaTypeForFormat(photo.format) !== 'video' && !photo.liveMotionUrl && previewSource) {
         const image = new window.Image();
         await new Promise<void>((resolve) => {
           let settled = false;
@@ -7384,7 +7554,7 @@ export function App(): React.JSX.Element {
       <AppHeader active={activeTab} openTabs={openTabs} onChange={setActiveTab} onClose={closeWorkspaceTab} onOpen={openWorkspaceTab} onImport={() => void importFolders()} search={searchDraft} onSearchChange={setSearchDraft} />
       {!sessionReady ? <main className="workspace-loading" role="status"><LoaderCircle size={14} className="loading-spinner" /><span>正在恢复工作区</span></main>
         : <div className="global-workspace-shell" style={{ gridTemplateColumns: `${panelVisibility.left ? globalLayout.leftWidth : 0}px ${panelVisibility.left ? 5 : 0}px minmax(0, 1fr) ${panelVisibility.right ? 5 : 0}px ${panelVisibility.right ? globalLayout.rightWidth : 0}px` }}>
-              <div className="workspace-side-panel" hidden={!panelVisibility.left}><Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={catalogTotal} selectedFolderId={selectedFolderId} selectedFolderIds={selectedFolderIds} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} allPhotosSelected={!selectedFolderId && !selectedAlbumId && !selectedSmartCollection && !selectedTagId && !favoriteOnly && !searchDraft.trim() && !photoFilters.minimumRating && photoFilters.flags.length === 0 && photoFilters.colors.length === 0} tags={catalogTags} selectedTagId={selectedTagId} navigationLoading={navigationLoading} onSelectFolder={workspaceProps.onSelectFolder} onSelectFolders={workspaceProps.onSelectFolders} onSelectAlbum={workspaceProps.onSelectAlbum} onSelectSmartCollection={workspaceProps.onSelectSmartCollection} onSelectAllPhotos={() => { workspaceProps.onSelectFolder(null); setSelectedTagId(null); setFavoriteOnly(false); setSearchDraft(''); setSearchQuery(''); setPhotoFilters((current) => ({ ...current, minimumRating: null, flags: [], colors: [] })); }} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onRelinkFolder={relinkFolder} onSynchronizeFolder={synchronizeFolder} onRevealFolder={revealFolder} onUnregisterFolder={unregisterFromNavigation} onTrashFolders={trashFoldersFromNavigation} onMoveFolder={moveFolder} onDropAssets={dropAssetsFromNavigation} onImportExternalMedia={async (paths, folderId) => importExternalMedia(paths, folderId)} onSelectTag={setSelectedTagId} isDemo={isDemo} /></div>
+              <div className="workspace-side-panel" hidden={!panelVisibility.left}><Sidebar folders={catalogFolders} albums={catalogAlbums} smartCollections={catalogSmartCollections} totalCount={catalogTotal} selectedFolderId={selectedFolderId} selectedFolderIds={selectedFolderIds} selectedAlbumId={selectedAlbumId} selectedSmartCollection={selectedSmartCollection} allPhotosSelected={!selectedFolderId && !selectedAlbumId && !selectedSmartCollection && !selectedTagId && !favoriteOnly && !searchDraft.trim() && photoFilters.mediaType === 'all' && !photoFilters.minimumRating && photoFilters.flags.length === 0 && photoFilters.colors.length === 0} tags={catalogTags} selectedTagId={selectedTagId} navigationLoading={navigationLoading} onSelectFolder={workspaceProps.onSelectFolder} onSelectFolders={workspaceProps.onSelectFolders} onSelectAlbum={workspaceProps.onSelectAlbum} onSelectSmartCollection={workspaceProps.onSelectSmartCollection} onSelectAllPhotos={() => { workspaceProps.onSelectFolder(null); setSelectedTagId(null); setFavoriteOnly(false); setSearchDraft(''); setSearchQuery(''); setPhotoFilters((current) => ({ ...current, mediaType: 'all', minimumRating: null, flags: [], colors: [] })); }} onRefreshAlbums={refreshCatalog} onImportFolders={importFolders} onRelinkFolder={relinkFolder} onSynchronizeFolder={synchronizeFolder} onRevealFolder={revealFolder} onUnregisterFolder={unregisterFromNavigation} onTrashFolders={trashFoldersFromNavigation} onMoveFolder={moveFolder} onDropAssets={dropAssetsFromNavigation} onImportExternalMedia={async (paths, folderId) => importExternalMedia(paths, folderId)} onSelectTag={setSelectedTagId} isDemo={isDemo} /></div>
               <div className="workspace-side-splitter" hidden={!panelVisibility.left}><PaneSplitter orientation="vertical" value={globalLayout.leftWidth} minimum={160} maximum={420} label="调整左侧目录栏宽度" onChange={(value) => setGlobalLayout('leftWidth', value)} /></div>
               <div className="workspace-page-stack">
               <div className="workspace-source-page" inert={Boolean(viewerPhoto)} aria-hidden={viewerPhoto ? true : undefined} style={viewerPhoto ? { visibility: 'hidden' } : undefined}>

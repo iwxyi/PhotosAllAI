@@ -8,7 +8,7 @@ import { browseDimensions, browseLabels, defaultGroupOrder, type BrowseDimension
 import { ToolbarCustomizeRow } from './toolbar-customize-row';
 
 const dimensions = Object.keys(browseDimensions) as BrowseDimension[];
-const toolLabels: Record<string, string> = { title: '标题', count: '文件数量', workflow: '流程配置', version: '流程版本', view: '视图', sort: '排序', search: '搜索', stars: '星级', flags: '留用', colors: '颜色', favorites: '收藏', reset: '重置' };
+const toolLabels: Record<string, string> = { title: '标题', count: '文件数量', workflow: '流程配置', version: '流程版本', view: '视图', sort: '排序', search: '搜索', mediaTypeFilter: '媒体类型筛选', stars: '星级', flags: '留用', colors: '颜色', favorites: '收藏', reset: '重置' };
 const toolIds = Object.keys(toolLabels);
 const defaultTools = toolIds.filter((id) => !['sort', 'search', 'view'].includes(id));
 const allItems = ['title', 'count', 'date', 'folder', ...dimensions.filter((id) => id !== 'date' && id !== 'folder'), 'spacer-default', ...toolIds.filter((id) => id !== 'title' && id !== 'count')];
@@ -43,8 +43,8 @@ export function CatalogBrowseControls({ value, onChange, pending = 0, total = 0,
     try {
       const current = localStorage.getItem(visibleToolsKey);
       const saved: unknown = JSON.parse(current ?? localStorage.getItem('photoallisai.catalog-toolbar-tools.v2') ?? localStorage.getItem('photoallisai.catalog-toolbar-tools') ?? 'null');
-      if (current === null && Array.isArray(saved)) return ['title', 'count', 'version', ...toolIds.filter((id) => saved.includes(id))];
-      if (Array.isArray(saved)) return toolIds.filter((id) => saved.includes(id));
+      if (current === null && Array.isArray(saved)) return ['title', 'count', 'version', 'mediaTypeFilter', ...toolIds.filter((id) => saved.includes(id) && id !== 'mediaType')];
+      if (Array.isArray(saved)) return toolIds.filter((id) => id === 'mediaTypeFilter' || saved.includes(id) && (id !== 'mediaTypeFilter' || !saved.includes('mediaType')));
     } catch { /* restricted storage */ }
     return defaultTools;
   });

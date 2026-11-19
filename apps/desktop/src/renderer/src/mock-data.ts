@@ -13,6 +13,7 @@ export type Photo = {
   fileName: string;
   src: string;
   originalSrc?: string;
+  liveMotionUrl?: string;
   temporary?: boolean;
   thumbnailSrc?: string;
   format: string;

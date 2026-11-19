@@ -9,6 +9,7 @@ import {
   generationTaskPayloadSchema,
   generationResultSchema,
   listTaskPageInputSchema,
+  taskGroupPageInputSchema, taskGroupMembersInputSchema, taskGroupPageSchema, taskGroupMembersPageSchema,
   moveQueuedTaskInputSchema,
   persistedTaskSchema,
   resizeQueuedGenerationBatchInputSchema,
@@ -26,6 +27,7 @@ import {
   type RetryFailedGenerationTasksInput,
   type RetryFailedGenerationTasksReport,
   type TaskPage,
+  type TaskGroupPageInput, type TaskGroupMembersInput, type TaskGroupPage, type TaskGroupMembersPage,
   type UpdateQueuedGenerationTaskInput,
   type UpdateQueuedGenerationTasksInput
 } from '@photoallisai/contracts';
@@ -51,6 +53,7 @@ type TaskPageRow = TaskRow & { sort_group: number; sort_position: number };
 const INTERRUPTED_STATUSES: TaskStatus[] = [
   'preparing', 'uploading', 'processing', 'downloading', 'saving'
 ];
+const TASK_BATCH_ID_SQL = "COALESCE(json_extract(payload_json, '$.submissionId'), json_extract(payload_json, '$.batchId'), id)";
 
 export class TaskService {
   readonly #database: DatabaseSync;
@@ -118,6 +121,7 @@ export class TaskService {
     if (!columns.some((column) => column.name === 'result_json')) {
       this.#database.exec('ALTER TABLE tasks ADD COLUMN result_json TEXT');
     }
+    this.#database.exec(`CREATE INDEX IF NOT EXISTS tasks_group_members_idx ON tasks(kind, ${TASK_BATCH_ID_SQL}, created_at DESC, id DESC)`);
   }
 
   #recoverInterrupted(): void {
@@ -220,6 +224,68 @@ export class TaskService {
 
   listBatch(kind: PersistedTask['kind'], batchId: string): PersistedTask[] {
     return (this.#database.prepare(`SELECT * FROM tasks WHERE kind = ? AND (json_extract(payload_json, '$.submissionId') = ? OR json_extract(payload_json, '$.batchId') = ? OR (json_extract(payload_json, '$.submissionId') IS NULL AND json_extract(payload_json, '$.batchId') IS NULL AND id = ?)) ORDER BY position, created_at, id`).all(kind, batchId, batchId, batchId) as TaskRow[]).map((row) => this.#toTask(row));
+  }
+
+  listGroupMembersPage(rawInput: TaskGroupMembersInput): TaskGroupMembersPage {
+    const input = taskGroupMembersInputSchema.parse(rawInput);
+    const cursor = input.cursor;
+    const rows = this.#database.prepare(`SELECT * FROM tasks WHERE kind = ? AND ${TASK_BATCH_ID_SQL} = ?
+      ${cursor ? 'AND (created_at < ? OR (created_at = ? AND id < ?))' : ''}
+      ORDER BY created_at DESC, id DESC LIMIT ?`).all(input.kind, input.batchId,
+      ...(cursor ? [cursor.createdAt, cursor.createdAt, cursor.id] : []), input.limit + 1) as TaskRow[];
+    const items = rows.slice(0, input.limit).map((row) => this.#toTask(row));
+    const last = rows.length > input.limit ? rows[input.limit - 1] : undefined;
+    return taskGroupMembersPageSchema.parse({ items, nextCursor: last ? { createdAt: last.created_at, id: last.id } : null });
+  }
+
+  listGroupPage(rawInput: TaskGroupPageInput): TaskGroupPage {
+    const input = taskGroupPageInputSchema.parse(rawInput);
+    const category = input.category === 'generation' ? "kind = 'generation'" : input.category === 'file' ? "kind = 'export'" : '1 = 1';
+    const grouped = `WITH grouped AS (
+      SELECT kind || ':' || ${TASK_BATCH_ID_SQL} AS id, kind, ${TASK_BATCH_ID_SQL} AS batch_id,
+        COUNT(*) AS member_count, COUNT(DISTINCT asset_id) AS asset_count,
+        MAX(printf('%013d', created_at) || id) AS latest_key, MIN(created_at) AS created_at, MAX(updated_at) AS updated_at,
+        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+        SUM(CASE WHEN status IN ('preparing', 'uploading', 'processing', 'downloading', 'saving') THEN 1 ELSE 0 END) AS active,
+        SUM(CASE WHEN status IN ('queued', 'draft') THEN 1 ELSE 0 END) AS queued,
+        SUM(CASE WHEN status = 'paused' THEN 1 ELSE 0 END) AS paused,
+        SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN status = 'canceled' THEN 1 ELSE 0 END) AS canceled
+      FROM tasks WHERE ${category} GROUP BY kind, batch_id
+    ), ranked AS (
+      SELECT *, CAST(substr(latest_key, 1, 13) AS INTEGER) AS latest_created_at,
+        substr(latest_key, 14) AS latest_task_id,
+        CASE WHEN active > 0 THEN 0 WHEN queued > 0 THEN 1 WHEN paused > 0 THEN 2 ELSE 3 END AS priority
+      FROM grouped
+    )`;
+    const view = input.view === 'running' ? '(active + queued) > 0' : input.view === 'failed' ? 'failed > 0'
+      : input.view === 'history' ? '(completed + failed + canceled) = member_count' : '1 = 1';
+    const cursor = input.cursor;
+    const cursorWhere = cursor ? 'AND (priority > ? OR (priority = ? AND latest_created_at < ?) OR (priority = ? AND latest_created_at = ? AND id < ?))' : '';
+    const rows = this.#database.prepare(`${grouped} SELECT * FROM ranked WHERE ${view} ${cursorWhere}
+      ORDER BY priority ASC, latest_created_at DESC, id DESC LIMIT ?`).all(
+      ...(cursor ? [cursor.priority, cursor.priority, cursor.createdAt, cursor.priority, cursor.createdAt, cursor.id] : []), input.limit + 1
+    ) as Array<{ id: string; kind: PersistedTask['kind']; batch_id: string; member_count: number; asset_count: number;
+      latest_task_id: string; latest_created_at: number; created_at: number; updated_at: number; priority: number;
+      completed: number; active: number; queued: number; paused: number; failed: number; canceled: number }>;
+    const pageRows = rows.slice(0, input.limit);
+    const firstRows = pageRows.length ? this.#database.prepare(`SELECT * FROM tasks WHERE id IN (${pageRows.map(() => '?').join(',')})`).all(...pageRows.map((row) => row.latest_task_id)) as TaskRow[] : [];
+    const firstById = new Map(firstRows.map((row) => [row.id, this.#toTask(row)]));
+    const counts = this.#database.prepare(`${grouped} SELECT COUNT(*) AS total,
+      SUM(CASE WHEN active + queued > 0 THEN 1 ELSE 0 END) AS running,
+      SUM(CASE WHEN failed > 0 THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN completed + failed + canceled = member_count THEN 1 ELSE 0 END) AS history
+      FROM ranked`).get() as { total: number; running: number | null; failed: number | null; history: number | null };
+    const last = rows.length > input.limit ? pageRows.at(-1) : undefined;
+    return taskGroupPageSchema.parse({
+      items: pageRows.map((row) => ({ id: row.id, kind: row.kind, batchId: row.batch_id, first: firstById.get(row.latest_task_id),
+        memberCount: row.member_count, assetCount: row.asset_count, total: row.member_count,
+        completed: row.completed, active: row.active, queued: row.queued, paused: row.paused, failed: row.failed, canceled: row.canceled,
+        createdAt: row.created_at, updatedAt: row.updated_at, priority: row.priority })),
+      totalCount: counts.total, runningCount: counts.running ?? 0, failedCount: counts.failed ?? 0,
+      historyCount: counts.history ?? 0,
+      nextCursor: last ? { priority: last.priority, createdAt: last.latest_created_at, id: last.id } : null
+    });
   }
 
   hasQueued(kinds: readonly PersistedTask['kind'][]): boolean {

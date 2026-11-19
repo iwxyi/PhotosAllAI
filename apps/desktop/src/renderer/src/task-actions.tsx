@@ -6,10 +6,10 @@ import type { DeleteTasksInput, PersistedTask, TaskBatchActionInput } from '@pho
 export const TASKS_CHANGED_EVENT = 'photoallisai:tasks-changed';
 const TaskActionsContext = createContext<{ busy: boolean; remove: (input: DeleteTasksInput) => void; batchAction: (input: TaskBatchActionInput) => void }>({ busy: false, remove: () => undefined, batchAction: () => undefined });
 
-export function TaskBatchButtons({ tasks }: { tasks: PersistedTask[] }) {
+export function TaskBatchButtons({ tasks, retryable: retryableOverride }: { tasks: PersistedTask[]; retryable?: boolean | undefined }) {
   const { busy, remove, batchAction } = useContext(TaskActionsContext);
   const first = tasks[0]!;
-  const retryable = tasks.some((task) => ['failed', 'canceled'].includes(task.status) && task.errorCode !== 'GENERATION_RESULT_UNCERTAIN');
+  const retryable = retryableOverride ?? tasks.some((task) => ['failed', 'canceled'].includes(task.status) && task.errorCode !== 'GENERATION_RESULT_UNCERTAIN');
   return <span className="task-batch-actions" onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}>
     <button type="button" title="重试失败或取消项" aria-label="重试批次失败项" disabled={busy || !retryable} onClick={() => batchAction({ taskId: first.id, action: 'retry' })}><RotateCcw size={14} /></button>
     <button type="button" title="删除批次" aria-label="删除批次" disabled={busy} onClick={() => remove({ scope: 'batch', taskId: first.id })}><X size={14} /></button>

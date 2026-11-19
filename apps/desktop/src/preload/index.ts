@@ -155,6 +155,8 @@ const api: DesktopApi = {
   testProviderConnection: (input) =>
     ipcRenderer.invoke('providers.test.v1', input) as ReturnType<DesktopApi['testProviderConnection']>,
   listTaskPage: (input) => ipcRenderer.invoke('tasks.page.v1', input) as ReturnType<DesktopApi['listTaskPage']>,
+  listTaskGroupPage: (input) => ipcRenderer.invoke('tasks.groups.page.v1', input) as ReturnType<DesktopApi['listTaskGroupPage']>,
+  listTaskGroupMembers: (input) => ipcRenderer.invoke('tasks.groups.members.v1', input) as ReturnType<DesktopApi['listTaskGroupMembers']>,
   listTaskBatch: (input) => ipcRenderer.invoke('tasks.batch.v1', input) as ReturnType<DesktopApi['listTaskBatch']>,
   getTask: (taskId) => ipcRenderer.invoke('tasks.get.v1', taskId) as ReturnType<DesktopApi['getTask']>,
   enqueueTask: (input) =>

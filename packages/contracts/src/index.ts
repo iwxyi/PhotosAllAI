@@ -257,7 +257,8 @@ const catalogAssetBaseSchema = z.object({
   offline: z.boolean(),
   tags: z.array(catalogTagSchema.omit({ assetCount: true })),
   thumbnailUrl: z.string(),
-  previewUrl: z.string()
+  previewUrl: z.string(),
+  liveMotionUrl: z.string().optional()
 });
 
 export const fileWorkflowGroupSchema = z.object({
@@ -310,6 +311,11 @@ export const catalogAssetCursorSchema = z.object({
 });
 export type CatalogAssetCursor = z.infer<typeof catalogAssetCursorSchema>;
 
+export const videoMediaFormats = ['MOV', 'MP4', 'M4V', 'WEBM'] as const;
+export function mediaTypeForFormat(format: string): 'image' | 'video' {
+  return (videoMediaFormats as readonly string[]).includes(format.replace(/^\./u, '').toUpperCase()) ? 'video' : 'image';
+}
+
 export const listCatalogAssetsInputSchema = z.object({
   assetIds: z.array(z.string().min(1)).min(1).max(500).optional(),
   mergeRawPairs: z.boolean().default(false),
@@ -323,6 +329,7 @@ export const listCatalogAssetsInputSchema = z.object({
   dateTo: z.number().nonnegative().nullable().default(null),
   months: z.array(z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/u)).max(120).default([]),
   formats: z.array(z.string().min(1).max(20)).max(50).default([]),
+  mediaType: z.enum(['all', 'image', 'video']).default('all'),
   minimumRating: z.number().int().min(0).max(5).nullable().default(null),
   ratingOperator: z.enum(['eq', 'gte', 'lte']).default('gte'),
   flags: z.array(z.enum(['picked', 'rejected', 'unflagged'])).default([]),
@@ -773,6 +780,37 @@ export const taskPageSchema = z.object({
 });
 export type TaskPage = z.infer<typeof taskPageSchema>;
 
+export const taskGroupPageInputSchema = z.object({
+  category: z.enum(['all', 'generation', 'file']).default('all'),
+  view: z.enum(['all', 'running', 'failed', 'history']).default('all'),
+  limit: z.number().int().min(1).max(100).default(30),
+  cursor: z.object({ priority: z.number().int().min(0).max(3), createdAt: z.number().nonnegative(), id: z.string().min(1) }).nullable().default(null)
+});
+export type TaskGroupPageInput = z.input<typeof taskGroupPageInputSchema>;
+export const taskGroupSummarySchema = z.object({
+  id: z.string(), batchId: z.string(), kind: taskKindSchema, first: persistedTaskSchema,
+  memberCount: z.number().int().nonnegative(), assetCount: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(), completed: z.number().int().nonnegative(),
+  active: z.number().int().nonnegative(), queued: z.number().int().nonnegative(),
+  paused: z.number().int().nonnegative(), failed: z.number().int().nonnegative(), canceled: z.number().int().nonnegative(),
+  createdAt: z.number().nonnegative(), updatedAt: z.number().nonnegative(), priority: z.number().int().min(0).max(3)
+});
+export type TaskGroupSummary = z.infer<typeof taskGroupSummarySchema>;
+export const taskGroupPageSchema = z.object({
+  items: z.array(taskGroupSummarySchema), totalCount: z.number().int().nonnegative(),
+  runningCount: z.number().int().nonnegative(), failedCount: z.number().int().nonnegative(),
+  historyCount: z.number().int().nonnegative(),
+  nextCursor: taskGroupPageInputSchema.shape.cursor
+});
+export type TaskGroupPage = z.infer<typeof taskGroupPageSchema>;
+export const taskGroupMembersInputSchema = z.object({
+  kind: taskKindSchema, batchId: z.string().min(1).max(160), limit: z.number().int().min(1).max(100).default(50),
+  cursor: z.object({ createdAt: z.number().nonnegative(), id: z.string().uuid() }).nullable().default(null)
+});
+export type TaskGroupMembersInput = z.input<typeof taskGroupMembersInputSchema>;
+export const taskGroupMembersPageSchema = z.object({ items: z.array(persistedTaskSchema), nextCursor: taskGroupMembersInputSchema.shape.cursor });
+export type TaskGroupMembersPage = z.infer<typeof taskGroupMembersPageSchema>;
+
 export const moveQueuedTaskInputSchema = z.object({
   taskId: z.string().uuid(),
   direction: z.union([z.literal(-1), z.literal(1)])
@@ -1020,12 +1058,12 @@ export type PromptTemplate = z.infer<typeof promptTemplateSchema>;
 
 export const savePromptTemplateInputSchema = promptTemplateSchema.omit({
   id: true, version: true, createdAt: true, updatedAt: true
-}).extend({ id: z.string().uuid().optional(), description: z.string().trim().min(1).max(2_000), exampleImage: z.string().max(8_000_000).refine((value) => value === '' || /^data:image\/[a-z0-9.+-]+;base64,/iu.test(value)).optional().default('') });
+}).extend({ id: z.string().uuid().optional(), description: z.string().trim().min(1).max(2_000), exampleImage: z.string().max(8_000_000).refine((value) => value === '' || /^data:image\/[a-z0-9.+-]+;base64,/iu.test(value)).optional() });
 
 export const promptTemplateSummarySchema = promptTemplateSchema.pick({ id: true, name: true, category: true, description: true, version: true, updatedAt: true });
 export type PromptTemplateSummary = z.infer<typeof promptTemplateSummarySchema>;
 
-export type SavePromptTemplateInput = Omit<z.infer<typeof savePromptTemplateInputSchema>, 'exampleImage'> & { exampleImage?: string };
+export type SavePromptTemplateInput = Omit<z.infer<typeof savePromptTemplateInputSchema>, 'exampleImage'> & { exampleImage?: string | undefined };
 
 export const analysisRevisionSchema = z.object({
   id: z.string().uuid(),
@@ -1297,6 +1335,8 @@ export interface DesktopApi {
   deleteProviderProfile(profileId: string): Promise<void>;
   testProviderConnection(input: SaveProviderProfileInput): Promise<ConnectionTest>;
   listTaskPage(input: ListTaskPageInput): Promise<TaskPage>;
+  listTaskGroupPage(input: TaskGroupPageInput): Promise<TaskGroupPage>;
+  listTaskGroupMembers(input: TaskGroupMembersInput): Promise<TaskGroupMembersPage>;
   listTaskBatch(input: TaskBatchInput): Promise<PersistedTask[]>;
   getTask(taskId: string): Promise<PersistedTask | null>;
   enqueueTask(input: EnqueueTaskInput): Promise<PersistedTask>;

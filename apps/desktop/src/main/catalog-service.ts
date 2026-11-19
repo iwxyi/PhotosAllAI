@@ -17,6 +17,7 @@ import {
   catalogTagSchema,
   deleteCatalogTagInputSchema,
   listCatalogAssetsInputSchema,
+  videoMediaFormats,
   saveCatalogAlbumInputSchema,
   updateCatalogAlbumAssetsInputSchema,
   type CatalogAlbum,
@@ -687,6 +688,10 @@ export class CatalogService {
       baseConditions.push(`UPPER(SUBSTR(extension, 2)) IN (${input.formats.map(() => '?').join(', ')})`);
       baseValues.push(...input.formats.map((format) => format.toUpperCase()));
     }
+    if (input.mediaType !== 'all') {
+      baseConditions.push(`UPPER(SUBSTR(extension, 2)) ${input.mediaType === 'video' ? '' : 'NOT '}IN (${videoMediaFormats.map(() => '?').join(', ')})`);
+      baseValues.push(...videoMediaFormats);
+    }
     if (input.minimumRating !== null) {
       const operator = input.ratingOperator === 'eq' ? '=' : input.ratingOperator === 'lte' ? '<=' : '>=';
       baseConditions.push(`rating ${operator} ?`);
@@ -753,7 +758,7 @@ export class CatalogService {
       && input.folderIds.length === 0 && !input.tagId && !input.albumId
       && (!input.smartCollection || input.smartCollection === 'recent')
       && !input.mergeRawPairs && !input.favoriteOnly && !input.query.trim()
-      && !input.formats.length && !input.months.length && !input.flags.length && !input.colors.length
+      && input.mediaType === 'all' && !input.formats.length && !input.months.length && !input.flags.length && !input.colors.length
       && input.minimumRating === null && input.dateFrom === null && input.dateTo === null;
     const browseIndex = plainFolder
       ? input.sortBy === 'fileName' ? `assets_browse_natural_name_${browseDirection}_idx` : `assets_browse_${browseField}_${browseDirection}_idx`
@@ -2294,14 +2299,26 @@ export class CatalogService {
     }
     const roots = this.#database.prepare('SELECT id, path FROM folders').all() as { id: string; path: string }[];
     const rootPaths = new Map(roots.map((root) => [root.id, root.path]));
+    const motionRows = this.#database.prepare(`
+      SELECT still.id AS still_id, motion.id AS motion_id
+      FROM assets AS still
+      JOIN assets AS motion ON motion.folder_id = still.folder_id
+        AND lower(substr(motion.path, 1, length(motion.path) - length(motion.extension))) =
+            lower(substr(still.path, 1, length(still.path) - length(still.extension)))
+        AND motion.extension COLLATE NOCASE = '.mov'
+        AND motion.removed_at IS NULL AND motion.offline_at IS NULL
+      WHERE still.id IN (${placeholders}) AND still.removed_at IS NULL AND still.offline_at IS NULL
+        AND still.extension COLLATE NOCASE IN ('.jpg', '.jpeg', '.heic', '.heif')
+    `).all(...rows.map((row) => row.id)) as { still_id: string; motion_id: string }[];
+    const motionByStill = new Map(motionRows.map((row) => [row.still_id, row.motion_id]));
     return rows.map((row) => {
       const rootPath = rootPaths.get(row.folder_id);
       const relative = rootPath ? path.relative(rootPath, path.dirname(row.path)) : '';
-      return this.#toAsset(row, tagsByAsset.get(row.id) ?? [], relative && relative !== '.' ? stableDirectoryId(row.folder_id, relative) : row.folder_id, rootPath);
+      return this.#toAsset(row, tagsByAsset.get(row.id) ?? [], relative && relative !== '.' ? stableDirectoryId(row.folder_id, relative) : row.folder_id, rootPath, motionByStill.get(row.id));
     });
   }
 
-  #toAsset(row: AssetRow, tags: { id: string; name: string }[], directoryId: string, rootPath?: string): CatalogAsset {
+  #toAsset(row: AssetRow, tags: { id: string; name: string }[], directoryId: string, rootPath?: string, liveMotionId?: string): CatalogAsset {
     return catalogAssetSchema.parse({
       id: row.id,
       folderId: row.folder_id,
@@ -2319,7 +2336,8 @@ export class CatalogService {
       offline: row.offline_at !== null,
       tags,
       thumbnailUrl: `photoasset://thumbnail/${row.id}`,
-      previewUrl: `photoasset://preview/${row.id}`
+      previewUrl: `photoasset://preview/${row.id}`,
+      ...(liveMotionId ? { liveMotionUrl: `photovideo://asset/${liveMotionId}` } : {})
     });
   }
 }

@@ -20,6 +20,23 @@ afterEach(async () => {
 });
 
 describe('catalog image discovery', () => {
+  it('filters media types before counting and paging', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'mixed');
+    await mkdir(photos);
+    for (const name of ['one.jpg', 'two.png', 'clip.mov', 'movie.mp4', 'web.webm']) await writeFile(path.join(photos, name), 'fixture');
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([photos]);
+      expect(catalog.listAssetPage({ mediaType: 'all' }).totalCount).toBe(5);
+      expect(catalog.listAssetPage({ mediaType: 'image' }).items.map((item) => item.fileName).sort()).toEqual(['one.jpg', 'two.png']);
+      const first = catalog.listAssetPage({ mediaType: 'video', sortBy: 'fileName', limit: 2 });
+      expect(first.totalCount).toBe(3);
+      expect(first.items).toHaveLength(2);
+      expect(catalog.listAssetPage({ mediaType: 'video', sortBy: 'fileName', limit: 2, cursor: first.nextCursor }).items).toHaveLength(1);
+      expect(catalog.listAssetPage({ mediaType: 'video', formats: ['JPG'] }).totalCount).toBe(0);
+    } finally { catalog.close(); }
+  });
   it('merges same-directory camera previews and RAWs without hiding physical assets', async () => {
     const root = await createTemporaryDirectory();
     const photos = path.join(root, 'photos');
@@ -45,6 +62,23 @@ describe('catalog image discovery', () => {
       expect(folders.find((folder) => folder.name === 'B')?.assetCount).toBe(1);
       const rawId = catalog.listAssets().find((item) => item.fileName === 'shot.CR3')!.id;
       expect(catalog.listAssetPage({ assetIds: [rawId], mergeRawPairs: true }).items[0]?.id).toBe(rawId);
+    } finally { catalog.close(); }
+  });
+  it('identifies same-directory HEIC/JPEG and MOV pairs as Live Photos', async () => {
+    const root = await createTemporaryDirectory();
+    const photos = path.join(root, 'photos');
+    for (const name of ['live/IMG_1001.HEIC', 'live/IMG_1001.MOV', 'live/IMG_1002.jpg', 'live/IMG_1002.mov', 'live/IMG_1003.jpg', 'other/IMG_1001.MOV']) {
+      const file = path.join(photos, name);
+      await mkdir(path.dirname(file), { recursive: true });
+      await writeFile(file, 'fixture');
+    }
+    const catalog = new CatalogService(path.join(root, 'catalog.sqlite'));
+    try {
+      await catalog.importFolders([photos]);
+      const assets = catalog.listAssetPage({ sortBy: 'fileName' }).items;
+      expect(assets.find((asset) => asset.fileName === 'IMG_1001.HEIC')?.liveMotionUrl).toMatch(/^photovideo:\/\/asset\//u);
+      expect(assets.find((asset) => asset.fileName === 'IMG_1002.jpg')?.liveMotionUrl).toMatch(/^photovideo:\/\/asset\//u);
+      expect(assets.find((asset) => asset.fileName === 'IMG_1003.jpg')?.liveMotionUrl).toBeUndefined();
     } finally { catalog.close(); }
   });
   it('trashes a parent folder once and removes its descendants from the catalog', async () => {

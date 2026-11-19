@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { EventEmitter } from 'node:events';
-import { appendFileSync, constants as fsConstants, existsSync, mkdirSync, statSync } from 'node:fs';
+import { appendFileSync, constants as fsConstants, createReadStream, existsSync, mkdirSync, statSync } from 'node:fs';
 import { copyFile, mkdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { Readable } from 'node:stream';
 import { basename, dirname, extname, isAbsolute, join, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { imageSizeFromFile } from 'image-size/fromFile';
@@ -983,6 +984,18 @@ function registerIpc(): void {
       ...(task.assetId ? { assetFileName: catalog.resolveAssetFile(task.assetId)?.fileName } : {})
     })) };
   });
+  ipcMain.handle('tasks.groups.page.v1', (_event, input: unknown) => {
+    const page = tasks.listGroupPage(input as Parameters<typeof tasks.listGroupPage>[0]);
+    return { ...page, items: page.items.map((group) => ({ ...group, first: {
+      ...toRendererTask(group.first),
+      ...(group.first.assetId ? { assetFileName: catalog.resolveAssetFile(group.first.assetId)?.fileName } : {})
+    } })) };
+  });
+  ipcMain.handle('tasks.groups.members.v1', (_event, input: unknown) => {
+    const page = tasks.listGroupMembersPage(input as Parameters<typeof tasks.listGroupMembersPage>[0]);
+    return { ...page, items: page.items.map((task) => ({ ...toRendererTask(task),
+      ...(task.assetId ? { assetFileName: catalog.resolveAssetFile(task.assetId)?.fileName } : {}) })) };
+  });
   ipcMain.handle('tasks.batch.v1', (_event, input: unknown) => {
     const { kind, batchId } = taskBatchInputSchema.parse(input);
     return tasks.listBatch(kind, batchId).map((task) => ({ ...toRendererTask(task),
@@ -1315,6 +1328,7 @@ if (customUserData) app.setPath('userData', customUserData);
 
 const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) app.exit(0);
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 function showMainWindow(): void {
   if (!startupReady || shuttingDown) return;
@@ -1488,7 +1502,7 @@ app.whenReady().then(async () => {
     wake: () => taskRunner.wake(),
     changed: agentChanged
   }), ...createAgentAppTools({ catalog, generation, files: fileOperations, workflows: fileWorkflows, tasks, wake: () => taskRunner.wake(), changed: agentChanged }),
-  ...createAgentProgramTools({ catalog, generation, files: fileOperations, tasks, templates, exportPresets, settings: appSettings,
+  ...createAgentProgramTools({ catalog, generation, files: fileOperations, tasks, templates, imageCache, exportPresets, settings: appSettings,
     wake: () => taskRunner.wake(), cancelTask: (id) => taskRunner.cancel(id), changed: agentChanged,
     watchFolders: () => catalogWatcher.watchFolders(catalog.listFolderPaths()), diagnostics: createDiagnosticSnapshot,
     relocate: relocatePortableAfterFileOperation,
@@ -1635,12 +1649,41 @@ app.whenReady().then(async () => {
 
   protocol.handle('photovideo', (request) => {
     const url = new URL(request.url);
-    if (url.host !== 'temporary') return new Response('Not found', { status: 404 });
+    if (url.host !== 'temporary' && url.host !== 'asset') return new Response('Not found', { status: 404 });
     const assetId = url.pathname.slice(1);
     if (!/^[0-9a-f-]{20,40}$/i.test(assetId)) return new Response('Invalid asset', { status: 400 });
-    const source = imageFiles.resolve(assetId);
+    const source = url.host === 'asset' ? catalog.resolveAssetFile(assetId)?.path ?? null : imageFiles.resolve(assetId);
     if (!source || identifyMediaFormat(source)?.kind !== 'video') return new Response('Not found', { status: 404 });
-    return net.fetch(pathToFileURL(source).toString(), { headers: request.headers });
+    let size: number;
+    try { size = statSync(source).size; } catch { return new Response('Not found', { status: 404 }); }
+    const extension = extname(source).toLowerCase();
+    const contentType = extension === '.mov' ? 'video/quicktime' : extension === '.webm' ? 'video/webm' : extension === '.m4v' ? 'video/x-m4v' : 'video/mp4';
+    const headers = new Headers({ 'Accept-Ranges': 'bytes', 'Content-Type': contentType });
+    const range = request.headers.get('range');
+    if (range) {
+      const match = /^bytes=(\d*)-(\d*)$/u.exec(range.trim());
+      if (!match || size === 0) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${size}`, 'Accept-Ranges': 'bytes' } });
+      const suffixLength = match[1] === '' ? Number(match[2]) : 0;
+      const start = match[1] === '' ? Math.max(0, size - suffixLength) : Number(match[1]);
+      const end = match[2] === '' || match[1] === '' ? size - 1 : Math.min(Number(match[2]), size - 1);
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= size) {
+        return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${size}`, 'Accept-Ranges': 'bytes' } });
+      }
+      const stream = createReadStream(source, { start, end });
+      const abort = () => stream.destroy(new Error('Video request aborted'));
+      request.signal.addEventListener('abort', abort, { once: true });
+      stream.once('close', () => request.signal.removeEventListener('abort', abort));
+      headers.set('Content-Length', String(end - start + 1));
+      headers.set('Content-Range', `bytes ${start}-${end}/${size}`);
+      return new Response(Readable.toWeb(stream) as ReadableStream, { status: 206, headers });
+    }
+    headers.set('Content-Length', String(size));
+    if (request.method === 'HEAD') return new Response(null, { status: 200, headers });
+    const stream = createReadStream(source);
+    const abort = () => stream.destroy(new Error('Video request aborted'));
+    request.signal.addEventListener('abort', abort, { once: true });
+    stream.once('close', () => request.signal.removeEventListener('abort', abort));
+    return new Response(Readable.toWeb(stream) as ReadableStream, { status: 200, headers });
   });
 
   enterStartupStage('注册应用接口');

@@ -13,6 +13,7 @@ import type { AgentTool, AgentToolContext } from './agent-tools';
 import type { CatalogService } from './catalog-service';
 import type { FileOperationService } from './file-operation-service';
 import type { GenerationService } from './generation-service';
+import type { ImageCacheService } from './image-cache-service';
 import type { TaskService } from './task-service';
 import type { TemplateService } from './template-service';
 import type { ExportPresetService } from './export-preset-service';
@@ -21,7 +22,7 @@ import { toRendererTask } from './task-sanitizer';
 
 export function createAgentProgramTools(d: {
   catalog: CatalogService; files: FileOperationService; generation: GenerationService; tasks: TaskService;
-  templates: TemplateService; exportPresets: ExportPresetService; settings: AppSettingsService;
+  templates: TemplateService; imageCache: ImageCacheService; exportPresets: ExportPresetService; settings: AppSettingsService;
   wake(): void; cancelTask(id: string): void; changed(): void; watchFolders(): void;
   relocate(assetId: string, previous: { path: string; fileName: string } | null): Promise<void>;
   settingsChanged(): Promise<void>; diagnostics(): Promise<unknown>;
@@ -89,6 +90,7 @@ export function createAgentProgramTools(d: {
   const idSchema = z.object({ id: z.string().uuid() }).strict();
   const templateBatchSchema = z.object({ templates: z.array(savePromptTemplateInputSchema).min(1).max(50) }).strict();
   const templateIdsSchema = z.object({ ids: z.array(z.string().uuid()).min(1).max(100) }).strict();
+  const templateExamplesSchema = z.object({ assignments: z.array(z.object({ templateId: z.string().uuid(), assetId: z.string().min(1) }).strict()).min(1).max(50) }).strict();
   const renamePatternSchema = z.object({
     scope: z.enum(['folder', 'all-associated']),
     folderId: z.string().min(1).optional(),
@@ -250,6 +252,25 @@ export function createAgentProgramTools(d: {
     define('templates.get', '按模板 ID 读取单个模板的正文和选择信息，不返回示例图片数据。选择模板前，先从 templates.list 候选目录筛选，再读取少数候选的详细正文进行判断。', z.object({ id: z.string().uuid() }).strict(), false, true, (a) => { const { exampleImage: _exampleImage, ...template } = d.templates.get(a.id); return template; }),
     define('templates.save', '创建提示词模板或保存指定模板的新版本；传 id 表示修改，历史版本会保留。根据用户的简短意图主动扩写为专业、具体、可执行的修图提示词，包含目标、操作边界、主体/身份保护、光影与质感保留、伪影检查和变量占位符；不要只把用户原话复制进 body。保存后再调用 templates.list 核实实际结果。', savePromptTemplateInputSchema, false, false, (a) => { const result = d.templates.save(a); d.changed(); return result; }),
     define('templates.save-batch', '批量创建模板或保存多个模板的新版本，最多 50 项；每项都应根据意图优化为完整、专业、可执行的修图提示词。已有模板传 id 创建新版本。先 templates.list 检查目标，再保存并读取核实；回执会分别列出成功与失败。', templateBatchSchema, false, false, (a) => { const templates: unknown[] = []; const failed: Array<{ name: string; error: string }> = []; for (const item of a.templates) { try { templates.push(d.templates.save(item)); } catch (error) { failed.push({ name: item.name, error: error instanceof Error ? error.message : String(error) }); } } if (templates.length) d.changed(); return { saved: templates.length, templates, failed }; }),
+    define('templates.set-examples', '把当前会话中选中的图片分别设为现有模板的示例图。先用 templates.list 查模板 ID，再将每个 templateId 与 assetId 明确配对；一个模板只能有一张示例图，多个模板可以批量分配。', templateExamplesSchema, false, false, async (a, c) => {
+      scope(a.assignments.map((item) => item.assetId), c);
+      const saved: Array<{ templateId: string; assetId: string; version: number }> = [];
+      const failed: Array<{ templateId: string; assetId: string; error: string }> = [];
+      for (const { templateId, assetId } of a.assignments) {
+        try {
+          const template = d.templates.get(templateId);
+          const path = await d.imageCache.getOrCreate(assetId, 'thumbnail', undefined, 'visible');
+          if (!path) throw new Error('图片不可用或缩略图生成失败');
+          const exampleImage = `data:image/jpeg;base64,${(await readFile(path)).toString('base64')}`;
+          const updated = d.templates.save({ id: templateId, name: template.name, category: template.category, description: template.description, body: template.body, exampleImage });
+          saved.push({ templateId, assetId, version: updated.version });
+        } catch (error) {
+          failed.push({ templateId, assetId, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      if (saved.length) d.changed();
+      return { saved, failed };
+    }),
     define('templates.archive', '归档指定提示词模板，使其不再用于新任务，历史任务和版本保留。', idSchema, true, false, (a) => { d.templates.archive(a.id); d.changed(); return { archived: a.id }; }),
     define('templates.archive-batch', '批量归档指定提示词模板，最多 100 个；只接受 templates.list 返回的现有模板 ID；回执会分别列出成功与失败。', templateIdsSchema, true, false, (a) => { const archived: string[] = []; const failed: Array<{ id: string; error: string }> = []; for (const id of a.ids) { try { d.templates.archive(id); archived.push(id); } catch (error) { failed.push({ id, error: error instanceof Error ? error.message : String(error) }); } } if (archived.length) d.changed(); return { archived, count: archived.length, failed }; }),
     define('export.presets', '读取导出预设。', z.object({}).strict(), false, true, () => d.exportPresets.list()),

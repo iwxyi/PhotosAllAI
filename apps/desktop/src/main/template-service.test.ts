@@ -28,6 +28,10 @@ describe('prompt template versions', () => {
     expect(templates.list()).toEqual([second]);
     expect(templates.listSummaries()).toMatchObject([{ id: first.id, category: '局部修饰', description: '移除干扰物' }]);
     expect(templates.get(first.id)).toEqual(second);
+    const preserved = templates.save({ id: first.id, name: '清洁背景', description: '更新描述', category: '局部修饰', body: '保留已有示例图' });
+    expect(preserved.exampleImage).toBe(first.exampleImage);
+    expect(templates.get(first.id).exampleImage).toBe(first.exampleImage);
+    expect(templates.save({ id: first.id, name: '清洁背景', description: '移除示例', category: '局部修饰', body: '清除', exampleImage: '' }).exampleImage).toBe('');
     templates.archive(first.id);
     expect(templates.list()).toEqual([]);
     expect(() => templates.save({ id: first.id, name: '恢复', description: '恢复模板', category: '局部修饰', body: 'Body' })).toThrow('TEMPLATE_ARCHIVED');

@@ -152,6 +152,37 @@ describe('Agent program tools', () => {
     }
   });
 
+  it('assigns selected photos to separate template examples without returning image data', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-template-examples-'));
+    const templates = new TemplateService(join(root, 'catalog.sqlite'));
+    const first = templates.save({ name: '背景', description: '背景处理', category: '修图', body: '处理背景' });
+    const second = templates.save({ name: '光线', description: '光线处理', category: '修图', body: '处理光线' });
+    const firstPath = join(root, 'first.jpg');
+    const secondPath = join(root, 'second.jpg');
+    await writeFile(firstPath, 'first');
+    await writeFile(secondPath, 'second');
+    const imageCache = { getOrCreate: vi.fn(async (assetId: string) => ({ photo1: firstPath, photo2: secondPath }[assetId])) };
+    const changed = vi.fn();
+    try {
+      const tools = createAgentProgramTools({ templates, imageCache, changed } as unknown as Parameters<typeof createAgentProgramTools>[0]);
+      const setExamples = tools.find((tool) => tool.name === 'templates.set-examples')!;
+      const context = { session: { assetIds: ['photo1', 'photo2'] } } as AgentToolContext;
+      await expect(setExamples.execute({ assignments: [{ templateId: first.id, assetId: 'outside' }] }, context)).rejects.toThrow('超出会话图片范围');
+      const result = (await setExamples.execute({ assignments: [
+        { templateId: first.id, assetId: 'photo1' },
+        { templateId: second.id, assetId: 'photo2' }
+      ] }, context)).result;
+      expect(result).toMatchObject({ saved: [{ templateId: first.id, assetId: 'photo1', version: 2 }, { templateId: second.id, assetId: 'photo2', version: 2 }], failed: [] });
+      expect(JSON.stringify(result)).not.toContain('base64');
+      expect(templates.get(first.id)).toMatchObject({ body: first.body, exampleImage: `data:image/jpeg;base64,${Buffer.from('first').toString('base64')}` });
+      expect(templates.get(second.id)).toMatchObject({ body: second.body, exampleImage: `data:image/jpeg;base64,${Buffer.from('second').toString('base64')}` });
+      expect(changed).toHaveBeenCalledOnce();
+    } finally {
+      templates.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('relocates every affected asset after renaming a folder larger than one page', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-folder-'));
     const catalog = new CatalogService(join(root, 'catalog.sqlite'));

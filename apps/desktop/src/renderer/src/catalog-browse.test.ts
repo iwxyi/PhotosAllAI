@@ -11,6 +11,10 @@ describe('catalog browsing', () => {
     { ...photos[2]!, id: '3', folderId: 'a', modifiedAt: day, format: 'JPG' }
   ];
   const folders: CatalogFolder[] = ['a', 'b'].map((id) => ({ id, name: 'same name', assetCount: 2, offlineCount: 0, parentId: null, rootId: id, depth: 0, isRoot: true }));
+  it('groups images and videos by media type', () => {
+    const mixed = [items[0]!, { ...items[1]!, format: 'MOV', fileName: 'clip.mov' }, { ...items[2]!, format: 'WEBM', fileName: 'clip.webm' }];
+    expect(groupCatalogPhotos(mixed, ['mediaType'], folders).map((group) => [group.title, group.items.length])).toEqual([['图片', 1], ['视频', 2]]);
+  });
   it('uses local dates and preserves every enabled dimension without merging same-name folders', () => {
     expect(localDateKey(day)).toBe('2026-01-15');
     const groups = groupCatalogPhotos(items, ['date', 'month', 'folder'], folders);

@@ -94,6 +94,29 @@ describe('persistent task service', () => {
       expect(page.nextCursor).not.toBeNull();
     } finally { tasks.close(); }
   });
+  it('pages task groups and their members without expanding a large batch', async () => {
+    const tasks = new TaskService(await databasePath());
+    try {
+      const first = tasks.enqueue({ kind: 'analysis', assetId: 'a', payload: { batchId: 'shared' } });
+      const second = tasks.enqueue({ kind: 'analysis', assetId: 'b', payload: { batchId: 'shared' } });
+      const other = tasks.enqueue({ kind: 'analysis', assetId: 'c', payload: { batchId: 'other' } });
+      const exportTask = tasks.enqueue({ kind: 'export', assetId: null, payload: { batchId: 'shared' } });
+      tasks.pause(other.id);
+      const firstPage = tasks.listGroupPage({ limit: 1 });
+      expect(firstPage.items).toHaveLength(1);
+      expect(firstPage.totalCount).toBe(3);
+      expect(firstPage.nextCursor).not.toBeNull();
+      const pages = [firstPage];
+      while (pages.at(-1)?.nextCursor) pages.push(tasks.listGroupPage({ limit: 1, cursor: pages.at(-1)!.nextCursor }));
+      expect(new Set(pages.flatMap((page) => page.items.map((item) => item.id)))).toEqual(new Set(['analysis:shared', 'analysis:other', 'export:shared']));
+      expect(tasks.listGroupPage({ category: 'file' }).items.map((item) => item.first.id)).toEqual([exportTask.id]);
+      expect(tasks.listGroupPage({ view: 'history' }).items).toHaveLength(0);
+      const memberOne = tasks.listGroupMembersPage({ kind: 'analysis', batchId: 'shared', limit: 1 });
+      const memberTwo = tasks.listGroupMembersPage({ kind: 'analysis', batchId: 'shared', limit: 1, cursor: memberOne.nextCursor });
+      expect(new Set([...memberOne.items, ...memberTwo.items].map((item) => item.id))).toEqual(new Set([first.id, second.id]));
+      expect(memberTwo.nextCursor).toBeNull();
+    } finally { tasks.close(); }
+  });
   it('isolates types and submissions while preserving generation groups when resized', async () => {
     const tasks = new TaskService(await databasePath());
     try {

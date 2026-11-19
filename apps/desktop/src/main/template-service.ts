@@ -115,6 +115,7 @@ export class TemplateService {
       .get(id) as { created_at: number; archived_at: number | null } | undefined;
     if (input.id && !existing) throw new Error('TEMPLATE_NOT_FOUND');
     if (existing?.archived_at) throw new Error('TEMPLATE_ARCHIVED');
+    const exampleImage = input.exampleImage ?? (existing ? this.get(id).exampleImage : '');
     const maximum = this.#database
       .prepare('SELECT COALESCE(MAX(version), 0) AS value FROM prompt_template_versions WHERE template_id = ?')
       .get(id) as { value: number };
@@ -129,7 +130,7 @@ export class TemplateService {
         INSERT INTO prompt_template_versions (
           template_id, version, name, description, category, body, example_image, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, version, input.name.trim(), input.description.trim(), input.category.trim(), input.body.trim(), input.exampleImage ?? '', now);
+      `).run(id, version, input.name.trim(), input.description.trim(), input.category.trim(), input.body.trim(), exampleImage, now);
       this.#database.exec('COMMIT');
     } catch (error) {
       this.#database.exec('ROLLBACK');
@@ -142,7 +143,7 @@ export class TemplateService {
       description: input.description.trim(),
       category: input.category.trim(),
       body: input.body.trim(),
-      exampleImage: input.exampleImage ?? '',
+      exampleImage,
       version,
       createdAt: existing?.created_at ?? now,
       updatedAt: now

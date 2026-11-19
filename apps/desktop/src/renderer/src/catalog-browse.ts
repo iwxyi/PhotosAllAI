@@ -1,9 +1,10 @@
-import type { CatalogFolder, FileDetails } from '@photoallisai/contracts';
+import { mediaTypeForFormat, type CatalogFolder, type FileDetails } from '@photoallisai/contracts';
 import type { Photo } from './mock-data';
 
 export const browseDimensions = {
   firstLetter: { label: '首字母', section: 'file' },
   format: { label: '格式', section: 'file' },
+  mediaType: { label: '媒体类型', section: 'file' },
   year: { label: '年份', section: 'file' },
   month: { label: '月份', section: 'file' },
   date: { label: '日期', section: 'file' },
@@ -82,6 +83,7 @@ function groupPart(photo: Photo, dimension: BrowseDimension, folders: Map<string
       return part(key);
     }
     case 'format': return part(photo.format.toUpperCase());
+    case 'mediaType': return mediaTypeForFormat(photo.format) === 'video' ? part('video', '视频') : part('image', '图片');
     case 'year': return datePart(photo.modifiedAt, 'year', '年份');
     case 'month': return datePart(photo.modifiedAt, 'month', '月份');
     case 'date': return datePart(photo.modifiedAt, 'day', '日期');
