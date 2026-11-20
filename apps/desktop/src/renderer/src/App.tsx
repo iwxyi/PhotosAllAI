@@ -194,6 +194,16 @@ function rememberCatalogImage(src: string, loadedUrl: string): void {
 }
 const VIEWER_IMAGE_PRELOADS = new Map<string, HTMLImageElement>();
 let activePhotoDragIds: string[] | null = null;
+let activePhotoDragSources: HTMLElement[] = [];
+let activePhotoDragPreview: HTMLElement | null = null;
+
+function finishPhotoDrag(): void {
+  activePhotoDragSources.forEach((element) => element.classList.remove('is-dragging-source'));
+  activePhotoDragSources = [];
+  activePhotoDragPreview?.remove();
+  activePhotoDragPreview = null;
+  activePhotoDragIds = null;
+}
 
 // Electron's native file drag can omit custom MIME types on macOS and Windows.
 // Keep the in-window selection as a fallback so drops still carry every photo.
@@ -222,16 +232,37 @@ const DEFAULT_GENERATION_TEMPLATE_BODY = [
 
 function preparePhotoDrag(event: React.DragEvent, photo: Photo, selection: SelectionState): string[] {
   const assetIds = selection.selectedIds.has(photo.id) ? [...selection.selectedIds] : [photo.id];
+  finishPhotoDrag();
   activePhotoDragIds = assetIds;
   event.dataTransfer.effectAllowed = 'copyMove';
   event.dataTransfer.setData('application/x-photoallisai-assets', JSON.stringify(assetIds));
   event.dataTransfer.setData('text/plain', assetIds.length === 1 ? photo.fileName : `${assetIds.length} 张照片`);
   const preview = document.createElement('div');
-  preview.className = 'photo-drag-preview';
-  preview.textContent = assetIds.length === 1 ? photo.fileName : `拖拽 ${assetIds.length} 张照片`;
+  preview.className = 'photo-drag-preview photo-drag-booklet';
+  const sources = assetIds.slice(0, 4).map((id) => {
+    const card = document.querySelector<HTMLElement>(`.catalog-card[data-asset-id="${CSS.escape(id)}"], .catalog-list-row[data-asset-id="${CSS.escape(id)}"]`);
+    return card?.querySelector<HTMLImageElement>('img')?.currentSrc || card?.querySelector<HTMLImageElement>('img')?.src;
+  }).filter((src): src is string => Boolean(src));
+  if (!sources.length) sources.push(photo.thumbnailSrc ?? photo.src);
+  sources.forEach((src, index) => {
+    const page = document.createElement('span');
+    page.className = 'photo-drag-page';
+    page.style.setProperty('--page-index', String(index));
+    const image = document.createElement('img');
+    image.src = src;
+    image.alt = '';
+    page.append(image);
+    preview.append(page);
+  });
+  const label = document.createElement('span');
+  label.className = 'photo-drag-count';
+  label.textContent = assetIds.length > 1 ? `${assetIds.length} 张` : photo.fileName;
+  preview.append(label);
   document.body.append(preview);
-  event.dataTransfer.setDragImage(preview, 18, 18);
-  window.setTimeout(() => preview.remove(), 0);
+  activePhotoDragPreview = preview;
+  activePhotoDragSources = assetIds.flatMap((id) => Array.from(document.querySelectorAll<HTMLElement>(`.catalog-card[data-asset-id="${CSS.escape(id)}"], .catalog-list-row[data-asset-id="${CSS.escape(id)}"]`)));
+  activePhotoDragSources.forEach((element) => element.classList.add('is-dragging-source'));
+  event.dataTransfer.setDragImage(preview, 30, 24);
   return assetIds;
 }
 
@@ -712,6 +743,64 @@ const aiShortcut = (key: string): string => navigator.platform.includes('Mac') ?
 function shortcutBlocked(event: KeyboardEvent, allowRepeat = false): boolean {
   return event.defaultPrevented || (!allowRepeat && event.repeat) || document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"], .tag-editor-popover') !== null ||
     event.target instanceof Element && Boolean(event.target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]'));
+}
+
+type ShortcutScope = 'global' | 'catalog' | 'viewer' | 'workflow';
+type ShortcutAction =
+  | 'selectAll' | 'clearSelection' | 'openViewer' | 'toggleFavorite' | 'rename'
+  | 'gridView' | 'listView' | 'fitViewer' | 'actualViewer' | 'showOriginal'
+  | 'nextPhoto' | 'previousPhoto' | 'setPicked' | 'setRejected' | 'clearFlag'
+  | 'rate0' | 'rate1' | 'rate2' | 'rate3' | 'rate4' | 'rate5'
+  | 'analyze' | 'generate' | 'addToWorkflow' | 'togglePanels' | 'toggleLeftPanel' | 'toggleRightPanel';
+type ShortcutDefinition = { action: ShortcutAction; scope: ShortcutScope; label: string; description: string; defaultValue: string };
+const SHORTCUTS_STORAGE_KEY = 'photoallisai.shortcuts.v1';
+const SHORTCUTS_CHANGED_EVENT = 'photoallisai:shortcuts-changed';
+const shortcutDefinitions: ShortcutDefinition[] = [
+  { action: 'selectAll', scope: 'global', label: '选择全部', description: '选择当前列表中的全部项目', defaultValue: 'Mod+A' },
+  { action: 'clearSelection', scope: 'global', label: '取消选择', description: '清除当前选择（Lightroom：Command/Control + D）', defaultValue: 'Mod+D' },
+  { action: 'openViewer', scope: 'catalog', label: '打开看图', description: '打开当前焦点照片', defaultValue: 'Space' },
+  { action: 'toggleFavorite', scope: 'catalog', label: '切换收藏', description: '切换选中照片的收藏状态', defaultValue: 'B' },
+  { action: 'rename', scope: 'catalog', label: '重命名', description: '重命名选中照片或文件夹', defaultValue: 'F2' },
+  { action: 'gridView', scope: 'catalog', label: '网格视图', description: '切换图库网格视图', defaultValue: 'G' },
+  { action: 'listView', scope: 'catalog', label: '列表视图', description: '切换图库列表视图', defaultValue: 'E' },
+  { action: 'previousPhoto', scope: 'viewer', label: '上一张', description: '切换到上一张照片或视频', defaultValue: 'ArrowLeft' },
+  { action: 'nextPhoto', scope: 'viewer', label: '下一张', description: '切换到下一张照片或视频', defaultValue: 'ArrowRight' },
+  { action: 'fitViewer', scope: 'viewer', label: '适应窗口', description: '将照片适应看图窗口', defaultValue: 'F' },
+  { action: 'actualViewer', scope: 'viewer', label: '实际像素', description: '切换实际像素显示', defaultValue: 'Z' },
+  { action: 'showOriginal', scope: 'viewer', label: '临时查看原图', description: '按住查看原图或前一版本', defaultValue: 'O' },
+  { action: 'setPicked', scope: 'catalog', label: '标记留用', description: '将选中照片标记为留用', defaultValue: 'P' },
+  { action: 'setRejected', scope: 'catalog', label: '标记排除', description: '将选中照片标记为排除', defaultValue: 'X' },
+  { action: 'clearFlag', scope: 'catalog', label: '清除旗标', description: '清除选中照片的旗标', defaultValue: 'U' },
+  ...([0, 1, 2, 3, 4, 5] as const).map((rating) => ({ action: `rate${rating}` as ShortcutAction, scope: 'catalog' as ShortcutScope, label: `${rating} 星`, description: `将选中照片设置为 ${rating} 星`, defaultValue: String(rating) })),
+  { action: 'analyze', scope: 'workflow', label: 'AI 分析', description: '分析选中照片', defaultValue: 'Mod+Alt+A' },
+  { action: 'generate', scope: 'workflow', label: '生成 AI 版本', description: '按默认方案生成 AI 版本', defaultValue: 'Mod+Alt+G' },
+  { action: 'addToWorkflow', scope: 'workflow', label: '加入图片生成', description: '将选中照片加入图片生成队列', defaultValue: 'Mod+Alt+B' },
+  { action: 'togglePanels', scope: 'global', label: '隐藏/恢复两侧栏', description: '同时隐藏或恢复左右侧栏', defaultValue: 'Tab' },
+  { action: 'toggleLeftPanel', scope: 'global', label: '切换左侧栏', description: '单独切换左侧栏', defaultValue: 'Shift+L' },
+  { action: 'toggleRightPanel', scope: 'global', label: '切换右侧栏', description: '单独切换右侧栏', defaultValue: 'Shift+R' }
+];
+const defaultShortcutMap = Object.fromEntries(shortcutDefinitions.map((item) => [item.action, item.defaultValue])) as Record<ShortcutAction, string>;
+function loadShortcutMap(): Record<ShortcutAction, string> {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(SHORTCUTS_STORAGE_KEY) ?? '{}') as Record<string, unknown>;
+    return Object.fromEntries(shortcutDefinitions.map((item) => [item.action, typeof saved[item.action] === 'string' ? saved[item.action] : item.defaultValue])) as Record<ShortcutAction, string>;
+  } catch { return { ...defaultShortcutMap }; }
+}
+function normalizeShortcutEvent(event: KeyboardEvent): string | null {
+  const key = event.key === ' ' ? 'Space' : event.key === 'Esc' ? 'Escape' : event.key.length === 1 ? event.key.toUpperCase() : event.key;
+  if (['Control', 'Meta', 'Shift', 'Alt'].includes(key)) return null;
+  const parts: string[] = [];
+  if (event.metaKey || event.ctrlKey) parts.push('Mod');
+  if (event.altKey) parts.push('Alt');
+  if (event.shiftKey) parts.push('Shift');
+  parts.push(key);
+  return parts.join('+');
+}
+function shortcutMatches(event: KeyboardEvent, value: string): boolean {
+  return normalizeShortcutEvent(event) === value;
+}
+function shortcutDisplay(value: string): string {
+  return value.replaceAll('Mod', navigator.platform.includes('Mac') ? '⌘' : 'Ctrl').replaceAll('Alt', navigator.platform.includes('Mac') ? '⌥' : 'Alt').replaceAll('Shift', '⇧').replace('ArrowLeft', '←').replace('ArrowRight', '→').replace('Space', '空格');
 }
 function ContextMenuSurface({ children, style, ...props }: React.HTMLAttributes<HTMLDivElement>): React.JSX.Element {
   const ref = useRef<HTMLDivElement>(null);
@@ -1617,8 +1706,9 @@ function Filmstrip({
     const shortcut = (event: KeyboardEvent) => {
       if (shortcutBlocked(event) || event.metaKey || event.ctrlKey || event.altKey || !(event.target instanceof Element) || !event.target.closest('.filmstrip:not(.result-filmstrip)')) return;
       if (event.shiftKey) return;
-      if (event.key.toLowerCase() === 'g') { event.preventDefault(); setViewMode('grid'); }
-      else if (event.key.toLowerCase() === 'e') { event.preventDefault(); setViewMode('filmstrip'); }
+      const configured = loadShortcutMap();
+      if (shortcutMatches(event, configured.gridView)) { event.preventDefault(); setViewMode('grid'); }
+      else if (shortcutMatches(event, configured.listView)) { event.preventDefault(); setViewMode('filmstrip'); }
     };
     window.addEventListener('keydown', shortcut);
     return () => window.removeEventListener('keydown', shortcut);
@@ -1884,7 +1974,7 @@ function Filmstrip({
             draggable
             aria-grabbed={selection.selectedIds.has(photo.id)}
             onDragStart={(event) => dragDisplayed(event, photo)}
-            onDragEnd={() => { activePhotoDragIds = null; }}
+            onDragEnd={finishPhotoDrag}
             role="option"
             aria-selected={selection.selectedIds.has(photo.id)}
             type="button"
@@ -2166,10 +2256,11 @@ function Viewer({
         event.preventDefault();
         setHoldPreviousVersion(true);
       }
-      if (event.key.toLowerCase() === 'o') setShowOriginal(event.type === 'keydown');
+      const configured = loadShortcutMap();
+      if (shortcutMatches(event, configured.showOriginal)) setShowOriginal(event.type === 'keydown');
       if (event.type === 'keydown' && target.closest('.canvas-wrap')) {
-        if (event.key.toLowerCase() === 'f') { event.preventDefault(); setViewMode('fit'); }
-        else if (event.key.toLowerCase() === 'z') { event.preventDefault(); setViewMode(fitMode === 'actual' ? 'fit' : 'actual'); }
+        if (shortcutMatches(event, configured.fitViewer)) { event.preventDefault(); setViewMode('fit'); }
+        else if (shortcutMatches(event, configured.actualViewer)) { event.preventDefault(); setViewMode(fitMode === 'actual' ? 'fit' : 'actual'); }
       }
     };
     const restore = () => setHoldPreviousVersion(false);
@@ -3642,11 +3733,11 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
   useEffect(() => {
     if (props.active === false) return;
     const shortcut = (event: KeyboardEvent) => {
-      if (shortcutBlocked(event) || event.metaKey || event.ctrlKey || event.altKey || !(event.target instanceof Element) || !event.target.closest('.catalog-grid, .catalog-list-view')) return;
-      if (event.shiftKey) return;
-      if (event.key.toLowerCase() === 'g') { event.preventDefault(); changeViewMode('grid'); }
-      else if (event.key.toLowerCase() === 'e') { event.preventDefault(); changeViewMode('list'); }
-      else if (event.key === ' ') {
+      if (shortcutBlocked(event) || !(event.target instanceof Element) || !event.target.closest('.catalog-grid, .catalog-list-view')) return;
+      const configured = loadShortcutMap();
+      if (shortcutMatches(event, configured.gridView)) { event.preventDefault(); changeViewMode('grid'); }
+      else if (shortcutMatches(event, configured.listView)) { event.preventDefault(); changeViewMode('list'); }
+      else if (shortcutMatches(event, configured.openViewer)) {
         const photo = props.availablePhotos.find((item) => item.id === (selection.focusId ?? props.selectedAssetId)) ?? props.availablePhotos[0];
         if (photo) { event.preventDefault(); props.onOpenViewer(photo.id, orderedIds); }
       }
@@ -3801,7 +3892,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
     setPreviewWindowPhotos((current) => current.length === visible.length && current.every((photo, index) => photo === visible[index]) ? current : visible);
   }, [viewMode, listGroups, gridVisibleGroups]);
   const groupHeadingContent = (title: string, count: number) => <span className="catalog-group-heading-content"><strong>{title}</strong><span title="当前已加载的照片数量">{count} 张</span></span>;
-  const listRows = listGroups.flatMap((group) => [...(group.showHeader ? [<header className="catalog-group-heading" key={`group:${group.key}`}>{groupHeadingContent(group.title, group.count)}</header>] : []), ...group.items.map((photo) => <div className={`catalog-list-row${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}`} style={listStyle} role="option" aria-selected={selection.selectedIds.has(photo.id)} tabIndex={0} key={photo.id} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable={!props.isDemo} onDragStart={(event) => dragDisplayed(event, photo)} onDragEnd={() => { activePhotoDragIds = null; }} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onKeyDown={(event) => { if (event.key === 'Enter') props.onOpenViewer(photo.id, orderedIds); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onDoubleClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
+  const listRows = listGroups.flatMap((group) => [...(group.showHeader ? [<header className="catalog-group-heading" key={`group:${group.key}`}>{groupHeadingContent(group.title, group.count)}</header>] : []), ...group.items.map((photo) => <div className={`catalog-list-row${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}`} style={listStyle} role="option" aria-selected={selection.selectedIds.has(photo.id)} tabIndex={0} key={photo.id} data-asset-id={photo.id} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable={!props.isDemo} onDragStart={(event) => dragDisplayed(event, photo)} onDragEnd={finishPhotoDrag} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onKeyDown={(event) => { if (event.key === 'Enter') props.onOpenViewer(photo.id, orderedIds); }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onDoubleClick={() => { selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
     {selectButton(photo)}{columns.map((column) => <span className={`catalog-list-cell catalog-list-cell-${column.id}`} key={column.id}>{field(photo, column.id)}</span>)}
   </div>)]);
   return (
@@ -3876,7 +3967,7 @@ function CatalogWorkspace(props: LibraryWorkspaceProps & { onOpenPhotoContextMen
               const cards = group.items.map((photo) => {
                 const preview = previewPhoto(photo);
                 const justifiedSize = justifiedSizes[photo.id];
-                return <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.selectedIds.size > 1 && selection.selectedIds.has(photo.id) ? ' is-multi-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} style={masonryWindow ? masonryLayout!.positions.get(photo.id) : viewMode === 'justified' && justifiedSize ? { width: justifiedSize.width, '--thumbnail-height': `${justifiedSize.height}px` } as React.CSSProperties : undefined} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} data-index-width={preview.width ?? undefined} data-index-height={preview.height ?? undefined} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable key={photo.id} onDragStart={(event) => dragDisplayed(event, photo)} onDragEnd={() => { activePhotoDragIds = null; }} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
+                return <button className={`catalog-card${selection.selectedIds.has(photo.id) ? ' is-selected' : ''}${selection.selectedIds.size > 1 && selection.selectedIds.has(photo.id) ? ' is-multi-selected' : ''}${selection.focusId === photo.id ? ' is-focused' : ''}${photo.offline ? ' is-offline' : ''}`} style={masonryWindow ? masonryLayout!.positions.get(photo.id) : viewMode === 'justified' && justifiedSize ? { width: justifiedSize.width, '--thumbnail-height': `${justifiedSize.height}px` } as React.CSSProperties : undefined} type="button" role="option" aria-selected={selection.selectedIds.has(photo.id)} aria-grabbed={selection.selectedIds.has(photo.id)} data-asset-id={photo.id} data-index-width={preview.width ?? undefined} data-index-height={preview.height ?? undefined} data-label-color={photo.labelColor ?? undefined} aria-description={photo.labelColor ? `${photoColorName(photo.labelColor)}标签` : undefined} draggable key={photo.id} onDragStart={(event) => dragDisplayed(event, photo)} onDragEnd={finishPhotoDrag} onContextMenu={(event) => props.onOpenPhotoContextMenu?.(event, photo)} onClick={(event) => selectPhoto(photo, event.shiftKey ? 'range' : event.metaKey || event.ctrlKey ? 'toggle' : 'replace')} onDoubleClick={() => { if (!selection.selectedIds.has(photo.id)) selectPhoto(photo, 'replace'); props.onOpenViewer(photo.id, orderedIds); }}>
               <span className="catalog-card-image"><span className="raw-placeholder"><Image size={25} /><small>{photo.format}</small></span>{preview.thumbnailSrc || preview.src ? <GalleryThumbnail key={preview.thumbnailSrc ?? preview.src} src={preview.thumbnailSrc ?? preview.src} previewSrc={preview.src} eager={eagerCatalogIds.has(photo.id)} /> : null}{photo.liveMotionUrl && <span className="catalog-media-badge is-live" title="实况照片" aria-label="实况照片"><Sparkles size={12} /></span>}{mediaTypeForFormat(photo.format) === 'video' && <VideoDurationBadge assetId={photo.id} />}{selection.selectedIds.size > 1 && selection.selectedIds.has(photo.id) && <span className="selection-check"><Check size={12} /></span>}{photo.offline && <i className="offline-badge">离线</i>}</span>
               <span className="catalog-photo-badges"><PhotoFlag photo={photo} /></span>
               <span className="catalog-card-meta"><strong title={photo.fileName}>{photo.fileName}</strong>{photo.rating > 0 && <span className="catalog-card-rating" aria-label={`${photo.rating} 星`}>{Array.from({ length: photo.rating }, (_, index) => <Star key={index} size={10} fill="currentColor" />)}</span>}{photo.workflow && <small title={`${photo.workflow.name} · 按规则关联`}>{photo.workflow.members.length} 版本</small>}{photo.workflowConflict && <small title="多条流程规则同时匹配，已保留独立显示">规则冲突</small>}</span>
@@ -4093,44 +4184,65 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (viewerActive === false) return;
-      if (shortcutBlocked(event, event.key === 'ArrowLeft' || event.key === 'ArrowRight')) return;
+      const configured = loadShortcutMap();
+      const previousPressed = shortcutMatches(event, configured.previousPhoto);
+      const nextPressed = shortcutMatches(event, configured.nextPhoto);
+      if (shortcutBlocked(event, previousPressed || nextPressed)) return;
       const target = event.target;
       if (!(target instanceof Element)) return;
       const inViewer = view === 'viewer' && Boolean(target.closest('.inline-photo-viewer'));
       if (target.closest('input, textarea, select, [contenteditable="true"]') || target.closest('video') && !inViewer || !target.closest(inViewer ? '.inline-photo-viewer' : '.filmstrip, .catalog-grid, .catalog-list-view')) return;
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'a') {
+      if (shortcutMatches(event, configured.selectAll)) {
         if (!target.closest('.filmstrip, .catalog-grid, .catalog-list-view')) return;
         event.preventDefault();
         setSelection(selectAll(orderedIds));
-      } else if (!isDemo && !event.metaKey && !event.ctrlKey && !event.altKey && /^[pxu]$/i.test(event.key)) {
-        event.preventDefault();
-        const flag = event.key.toLowerCase() === 'p' ? 'picked' : event.key.toLowerCase() === 'x' ? 'rejected' : 'unflagged';
-        const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
-        void window.desktopApi.updateCatalogMetadata({ assetIds, flag });
-      } else if (!isDemo && !event.metaKey && !event.ctrlKey && !event.altKey && /^[0-5]$/.test(event.key)) {
-        const target = event.target;
-        if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+      } else if (!isDemo && shortcutMatches(event, configured.setPicked)) {
         event.preventDefault();
         const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
-        void window.desktopApi.updateCatalogMetadata({ assetIds, rating: Number(event.key) });
+        void window.desktopApi.updateCatalogMetadata({ assetIds, flag: 'picked' });
+      } else if (!isDemo && shortcutMatches(event, configured.setRejected)) {
+        event.preventDefault();
+        const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+        void window.desktopApi.updateCatalogMetadata({ assetIds, flag: 'rejected' });
+      } else if (!isDemo && shortcutMatches(event, configured.clearFlag)) {
+        event.preventDefault();
+        const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+        void window.desktopApi.updateCatalogMetadata({ assetIds, flag: 'unflagged' });
       } else if (!isDemo && !event.metaKey && !event.ctrlKey && !event.altKey && /^[6-9]$/.test(event.key)) {
+        // Color labels retain Lightroom's conventional 6-9 shortcuts.
         const colors = ['red', 'yellow', 'green', 'blue'] as const;
         const color = colors[Number(event.key) - 6]!;
         event.preventDefault();
         const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
         void window.desktopApi.updateCatalogMetadata({ assetIds, labelColor: color });
-      } else if (view === 'viewer' && !event.metaKey && !event.ctrlKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+      } else if (!isDemo) {
+        const rating = ([0, 1, 2, 3, 4, 5] as const).find((value) => shortcutMatches(event, configured[`rate${value}`]));
+        if (rating === undefined) {
+          // Continue to viewer navigation handling below.
+        } else {
+          event.preventDefault();
+          const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+          void window.desktopApi.updateCatalogMetadata({ assetIds, rating });
+        }
+      }
+      if (!isDemo && !event.defaultPrevented && !event.metaKey && !event.ctrlKey && !event.altKey && /^[0-5]$/.test(event.key)) {
+        const target = event.target;
+        if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+        event.preventDefault();
+        const assetIds = selection.selectedIds.size > 0 ? [...selection.selectedIds] : [selected.id];
+        void window.desktopApi.updateCatalogMetadata({ assetIds, rating: Number(event.key) });
+      } else if (view === 'viewer' && (previousPressed || nextPressed)) {
         const target = event.target;
         if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement || (target instanceof Element && (target.closest('.filmstrip') || target.closest('[role="slider"]')))) return;
         event.preventDefault();
         if (resultSequence?.length) {
           const index = resultSequence.findIndex((result) => result.id === initialResultId);
-          const next = resultSequence[clamp(index + (event.key === 'ArrowLeft' ? -1 : 1), 0, resultSequence.length - 1)];
+          const next = resultSequence[clamp(index + (previousPressed ? -1 : 1), 0, resultSequence.length - 1)];
           if (next) onSelectViewerResult?.(next);
           return;
         }
         const currentIndex = orderedIds.indexOf(navigationId.current);
-        const nextId = orderedIds[clamp(currentIndex < 0 ? (event.key === 'ArrowLeft' ? orderedIds.length - 1 : 0) : currentIndex + (event.key === 'ArrowLeft' ? -1 : 1), 0, orderedIds.length - 1)];
+        const nextId = orderedIds[clamp(currentIndex < 0 ? (previousPressed ? orderedIds.length - 1 : 0) : currentIndex + (previousPressed ? -1 : 1), 0, orderedIds.length - 1)];
         const nextPhoto = availablePhotos.find((photo) => photo.id === nextId);
         if (!nextPhoto || nextPhoto.id === navigationId.current) return;
         navigationId.current = nextPhoto.id;
@@ -4568,21 +4680,30 @@ function PopulatedLibraryWorkspace(props: PopulatedLibraryWorkspaceProps): React
       if (shortcutBlocked(event) || !(event.target instanceof Element)) return;
       const inPhotos = Boolean(event.target.closest('.catalog-grid, .catalog-list-view, .filmstrip, .canvas-wrap'));
       if (!inPhotos) return;
-      const key = event.key.toLowerCase();
-      if (event.metaKey || event.ctrlKey) {
-        if (event.shiftKey || !event.altKey || isDemo) return;
-        if (event.code === 'KeyA') { event.preventDefault(); void analyzeSelection(); }
-        else if (event.code === 'KeyG' && generationProfiles[0]) { event.preventDefault(); void generateSelection({ providerProfileId: generationProfiles[0].id, template: null, count: 1, instruction: '', disabledActionIds: new Set() }); }
-        else if (event.code === 'KeyB') { event.preventDefault(); onAddAssetsToBatch?.(selection.selectedIds.size ? [...selection.selectedIds] : [selected.id]); }
-        return;
+      const configured = loadShortcutMap();
+      const ids = selection.selectedIds.size ? [...selection.selectedIds] : [selected.id];
+      if (!isDemo && shortcutMatches(event, configured.toggleFavorite)) {
+        event.preventDefault();
+        void favoriteSelection(!ids.every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite));
+      } else if (!isDemo && shortcutMatches(event, configured.rename)) {
+        event.preventDefault();
+        if (selection.selectedIds.size > 1) setBatchRenameDialogOpen(true); else openRenameDialog();
+      } else if (!isDemo) {
+        const ratingAction = ([0, 1, 2, 3, 4, 5] as const).find((rating) => shortcutMatches(event, configured[`rate${rating}`]));
+        if (ratingAction !== undefined) {
+          event.preventDefault(); void rateSelection(ratingAction);
+        } else if (shortcutMatches(event, configured.analyze)) {
+          event.preventDefault(); void analyzeSelection();
+        } else if (shortcutMatches(event, configured.generate) && generationProfiles[0]) {
+          event.preventDefault(); void generateSelection({ providerProfileId: generationProfiles[0].id, template: null, count: 1, instruction: '', disabledActionIds: new Set() });
+        } else if (shortcutMatches(event, configured.addToWorkflow)) {
+          event.preventDefault(); onAddAssetsToBatch?.(ids);
+        }
       }
-      if (event.altKey || event.shiftKey || isDemo) return;
-      if (key === 'b') { event.preventDefault(); void favoriteSelection(!(selection.selectedIds.size ? [...selection.selectedIds] : [selected.id]).every((id) => availablePhotos.find((photo) => photo.id === id)?.favorite)); }
-      else if (event.key === 'F2') { event.preventDefault(); if (selection.selectedIds.size > 1) setBatchRenameDialogOpen(true); else openRenameDialog(); }
     };
     window.addEventListener('keydown', shortcut);
     return () => window.removeEventListener('keydown', shortcut);
-  });
+  }, [props.active, isDemo, availablePhotos, selection.selectedIds, selected.id, analyzeSelection, generateSelection, generationProfiles, onAddAssetsToBatch, favoriteSelection, rateSelection]);
 
   const renameSelected = async () => {
     if (!renameDraft || renameBusy) return;
@@ -5212,7 +5333,7 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
     } catch (error) { setNotice(`已提交 ${submittedCount} 个生成任务；${error instanceof Error ? error.message : String(error)}`); }
     finally { submitting.current = false; setBusy(false); }
   };
-  return <main className="ai-workflow-page batch-workspace" onDragOver={(event) => { if ((event.target as Element).closest('[data-workflow-asset-id], [data-prompt-generation-item]') && hasPhotoDrag(event)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }} onDrop={(event) => { const target = (event.target as Element).closest<HTMLElement>('[data-workflow-asset-id], [data-prompt-generation-item]'); const ids = photoDragIds(event); if (!target || !ids) return; event.preventDefault(); event.stopPropagation(); addReferences(target.dataset.promptGenerationItem ?? target.dataset.workflowAssetId!, ids, Boolean(target.dataset.promptGenerationItem)); activePhotoDragIds = null; }} onFocusCapture={(event) => { const target = (event.target as HTMLElement).closest<HTMLElement>('[data-workflow-asset-id]'); const id = target?.dataset.workflowAssetId; if (id) { setLocalFocusId(id); onCurrentWorkflowItemChange(id); onFocusAsset(id); } }}>
+  return <main className="ai-workflow-page batch-workspace" onDragOver={(event) => { if ((event.target as Element).closest('[data-workflow-asset-id], [data-prompt-generation-item]') && hasPhotoDrag(event)) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }} onDrop={(event) => { const target = (event.target as Element).closest<HTMLElement>('[data-workflow-asset-id], [data-prompt-generation-item]'); const ids = photoDragIds(event); if (!target || !ids) return; event.preventDefault(); event.stopPropagation(); addReferences(target.dataset.promptGenerationItem ?? target.dataset.workflowAssetId!, ids, Boolean(target.dataset.promptGenerationItem)); finishPhotoDrag(); }} onFocusCapture={(event) => { const target = (event.target as HTMLElement).closest<HTMLElement>('[data-workflow-asset-id]'); const id = target?.dataset.workflowAssetId; if (id) { setLocalFocusId(id); onCurrentWorkflowItemChange(id); onFocusAsset(id); } }}>
     <div className="workflow-body">
       <section className="workflow-main">
         <section className="batch-prompt-card"><div><span>批次整体提示词</span><label className="batch-model-choice"><select aria-label="本批生成模型" value={generationProfileId || (profiles.find((item) => item.purpose === 'generation' && item.enabled && item.isDefault) ?? profiles.find((item) => item.purpose === 'generation' && item.enabled))?.id || ''} onChange={(event) => setGenerationProfileId(event.target.value)}>{!profiles.some((item) => item.purpose === 'generation' && item.enabled) && <option value="">尚未配置生成模型</option>}{profiles.filter((item) => item.purpose === 'generation' && item.enabled).map((item) => <option key={item.id} value={item.id}>{item.name}{item.isDefault ? ' · 默认' : ''}</option>)}</select></label></div><div className="batch-prompt-editor" ref={promptEditorRef}>{enablePromptItems && <><button type="button" className="template-prompt-add" aria-label="插入提示词模板" title="组合提示词模板" aria-expanded={templatePickerOpen} onClick={() => setTemplatePickerOpen((value) => !value)}><Plus size={14} /></button>{selectedPromptTemplates.length > 0 && <div className="template-prompt-chips" aria-label="已选模板">{selectedPromptTemplates.map((item) => <span className="template-prompt-chip" key={item.id} title={templates.find((template) => template.id === item.id)?.name ?? item.id}>{templates.find((template) => template.id === item.id)?.name ?? item.id}</span>)}</div>}</>}<textarea aria-label="批次整体提示词" value={globalRules.filter((item) => item.enabled).map((item) => item.text).join('\n')} onChange={(event) => onGlobalRulesChange([{ id: 'batch-prompt', text: event.target.value, enabled: true }])} placeholder="描述所有照片共有的修图要求" />{enablePromptItems && templatePickerOpen && <div className="template-prompt-picker" role="dialog" aria-label="选择提示词模板"><header><strong>组合模板</strong><select aria-label="模板排序" value={templateOrder} onChange={(event) => { const order = event.target.value as typeof templateOrder; setTemplateOrder(order); try { localStorage.setItem('photoallisai.template-picker-order', order); } catch { /* in-memory order remains */ } }}><option value="recent">最近使用</option><option value="created">创建时间</option><option value="used">使用次数</option><option value="name">名称</option></select><button type="button" aria-label="关闭模板列表" onClick={() => setTemplatePickerOpen(false)}><X size={13} /></button></header><div className="template-prompt-options">{orderedPromptTemplates.map((template) => <label key={template.id}><input type="checkbox" checked={selectedPromptTemplates.some((item) => item.id === template.id)} onChange={() => togglePromptTemplate(template)} /><span><strong>{template.name}</strong><small>{template.category} · {template.description || '暂无描述'}</small></span></label>)}{templates.length === 0 && <p>暂无模板</p>}</div></div>}</div></section>
@@ -5263,6 +5384,32 @@ function AiWorkflowPage({ photos: availablePhotos, focusId, workflowAssetIds, wo
       </section>
     </div>
   </main>;
+}
+
+function ShortcutSettingsPanel(): React.JSX.Element {
+  const [scope, setScope] = useState<ShortcutScope>('global');
+  const [shortcuts, setShortcuts] = useState<Record<ShortcutAction, string>>(() => loadShortcutMap());
+  const [editing, setEditing] = useState<ShortcutAction | null>(null);
+  const [notice, setNotice] = useState('');
+  const save = (next: Record<ShortcutAction, string>) => {
+    setShortcuts(next);
+    try { window.localStorage.setItem(SHORTCUTS_STORAGE_KEY, JSON.stringify(next)); } catch { /* Keep the in-memory map. */ }
+    window.dispatchEvent(new CustomEvent(SHORTCUTS_CHANGED_EVENT, { detail: next }));
+  };
+  const update = (action: ShortcutAction, value: string) => {
+    const conflict = shortcutDefinitions.find((item) => item.action !== action && shortcuts[item.action] && shortcuts[item.action] === value);
+    if (conflict) { setNotice(`与“${conflict.label}”冲突，请选择其他组合键。`); return; }
+    setNotice('');
+    save({ ...shortcuts, [action]: value });
+    setEditing(null);
+  };
+  const visible = shortcutDefinitions.filter((item) => item.scope === scope);
+  return <section className="settings-section shortcut-settings-section">
+    <div className="settings-heading"><div><h2>快捷键</h2><p>点击快捷键输入框后直接按组合键。Command 与 Control 会自动视为同一类修饰键。</p></div><button className="quiet-button compact" type="button" onClick={() => { save({ ...defaultShortcutMap }); setNotice('已恢复默认快捷键'); }}>恢复默认</button></div>
+    <div className="shortcut-scope-tabs" role="tablist" aria-label="快捷键范围">{([['global', '全局'], ['catalog', '图库'], ['viewer', '看图'], ['workflow', 'AI 与任务']] as const).map(([value, label]) => <button key={value} type="button" role="tab" aria-selected={scope === value} className={scope === value ? 'is-active' : ''} onClick={() => { setScope(value); setEditing(null); setNotice(''); }}>{label}</button>)}</div>
+    <div className="shortcut-editor-list">{visible.map((item) => <div className="shortcut-editor-row" key={item.action}><span><strong>{item.label}</strong><small>{item.description}</small></span><button type="button" className={`shortcut-capture${editing === item.action ? ' is-editing' : ''}`} aria-label={`设置快捷键：${item.label}`} onClick={() => { setEditing(item.action); setNotice('请按下快捷键；按 Backspace 清空，Esc 取消。'); }} onKeyDown={(event) => { if (editing !== item.action) return; event.preventDefault(); event.stopPropagation(); if (event.key === 'Escape') { setEditing(null); setNotice(''); return; } if (event.key === 'Backspace' || event.key === 'Delete') { update(item.action, ''); return; } const value = normalizeShortcutEvent(event.nativeEvent); if (value) update(item.action, value); }}>{editing === item.action ? '请按键…' : shortcuts[item.action] ? shortcutDisplay(shortcuts[item.action]!) : '未设置'}</button></div>)}</div>
+    {notice && <p className="shortcut-settings-notice" role="status">{notice}</p>}
+  </section>;
 }
 
 function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (presets: ExportPreset[]) => void }): React.JSX.Element {
@@ -5700,10 +5847,7 @@ function SettingsPage({ onExportPresetsChange }: { onExportPresetsChange: (prese
           <div className="cache-actions"><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void backupDatabase()}>{backupBusy ? '备份中…' : '仅备份数据库'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void backupCompleteLibrary()}>{libraryBackupBusy ? '备份中…' : '完整图库备份'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void verifyCompleteLibraryBackup()}>{backupVerifyBusy ? '验证中…' : '验证备份包'}</button><button className="secondary-action" type="button" disabled={backupBusy || libraryBackupBusy || backupVerifyBusy || restoreBusy} onClick={() => void restoreCompleteLibraryBackup()}>{restoreBusy ? '准备恢复…' : '从完整备份恢复'}</button><span role="status">{backupMessage || '恢复会保留当前图库副本；原图与便携结果不在备份包内。'}</span></div>
         </section>
         </>}
-        {settingsSection === 'shortcuts' && <section className="settings-section settings-info-section">
-          <div className="settings-heading"><h2>快捷键</h2></div>
-          <div className="shortcut-list"><span><kbd>G / E</kbd><em>图库网格 / 列表；胶片带网格 / 横向布局</em></span><span><kbd>空格</kbd><em>从图库打开看图</em></span><span><kbd>← / →</kbd><em>切换照片；胶片带使用方向键移动选择</em></span><span><kbd>F / Z</kbd><em>看图适应窗口 / 切换实际像素</em></span><span><kbd>O</kbd><em>按住临时查看原图</em></span><span><kbd>Tab</kbd><em>同时隐藏或恢复两侧栏</em></span><span><kbd>Shift+L / Shift+R</kbd><em>单独切换左侧栏 / 右侧栏</em></span><span><kbd>⌘ / Ctrl</kbd><strong>+</strong><kbd>A</kbd><em>选择当前列表全部照片</em></span><span><kbd>P / X / U</kbd><em>留用 / 排除 / 清除旗标</em></span><span><kbd>0–5</kbd><em>设置选中照片星级</em></span><span><kbd>6–9</kbd><em>设置红、黄、绿、蓝颜色标签</em></span><span><kbd>B</kbd><em>切换收藏</em></span><span><kbd>F2</kbd><em>重命名选中照片或侧边栏文件夹</em></span><span><kbd>⌘ / Ctrl + Alt + A</kbd><em>AI 分析选中照片</em></span><span><kbd>⌘ / Ctrl + Alt + G</kbd><em>按默认方案生成 AI 版本</em></span><span><kbd>⌘ / Ctrl + Alt + B</kbd><em>加入 AI 批量修图</em></span><span><kbd>Shift</kbd><strong>+</strong><em>范围选择</em></span><span><kbd>⌘ / Ctrl</kbd><strong>+</strong><em>点击追加选择</em></span></div>
-        </section>}
+        {settingsSection === 'shortcuts' && <ShortcutSettingsPanel />}
         {settingsSection === 'advanced' && <section className="settings-section settings-info-section">
           <div className="settings-heading"><h2>MCP</h2></div>
           <label className="enabled-row"><input type="checkbox" aria-label="开启 MCP 服务" checked={mcp?.enabled ?? false} disabled={mcpBusy || !mcp} onChange={(event) => {
@@ -6333,13 +6477,16 @@ function InlinePhotoViewer({ workspace, photo, items, onPhotoChange, onClose, re
   useEffect(() => {
     if (!options.results?.length) return;
     const navigate = (event: KeyboardEvent) => {
-      if ((event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') || event.metaKey || event.ctrlKey || event.altKey || event.defaultPrevented) return;
+      const shortcuts = loadShortcutMap();
+      const previousPressed = shortcutMatches(event, shortcuts.previousPhoto);
+      const nextPressed = shortcutMatches(event, shortcuts.nextPhoto);
+      if ((!previousPressed && !nextPressed) || event.metaKey || event.ctrlKey || event.altKey || event.defaultPrevented) return;
       const target = event.target;
       if (target instanceof Element && target.closest('input, textarea, select, [role="slider"]')) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       const index = options.results!.findIndex((result) => result.id === resultId);
-      const next = options.results![clamp(index + (event.key === 'ArrowLeft' ? -1 : 1), 0, options.results!.length - 1)];
+      const next = options.results![clamp(index + (previousPressed ? -1 : 1), 0, options.results!.length - 1)];
       if (next) onSelectResult(next);
     };
     window.addEventListener('keydown', navigate, true);
@@ -6545,7 +6692,8 @@ export function App(): React.JSX.Element {
   }, [panelVisibility]);
   useEffect(() => {
     const togglePanels = (event: KeyboardEvent) => {
-      if (event.key !== 'Tab' || event.shiftKey || event.metaKey || event.ctrlKey || event.altKey || event.repeat || event.defaultPrevented) return;
+      const configured = loadShortcutMap();
+      if (!shortcutMatches(event, configured.togglePanels) || event.repeat || event.defaultPrevented) return;
       const target = event.target;
       if (target instanceof Element && target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="dialog"], [role="alertdialog"], [role="menu"]')) return;
       if (document.querySelector('[role="dialog"], [role="alertdialog"], [role="menu"]')) return;
@@ -6566,9 +6714,10 @@ export function App(): React.JSX.Element {
   }, []);
   useEffect(() => {
     const shortcut = (event: KeyboardEvent) => {
-      if (shortcutBlocked(event) || !event.shiftKey || event.metaKey || event.ctrlKey || event.altKey || !['l', 'r'].includes(event.key.toLowerCase())) return;
+      const configured = loadShortcutMap();
+      if (shortcutBlocked(event) || (!shortcutMatches(event, configured.toggleLeftPanel) && !shortcutMatches(event, configured.toggleRightPanel))) return;
       event.preventDefault();
-      const side = event.key.toLowerCase() === 'l' ? 'left' : 'right';
+      const side = shortcutMatches(event, configured.toggleLeftPanel) ? 'left' : 'right';
       setPanelVisibility((current) => ({ ...current, [side]: !current[side] }));
     };
     window.addEventListener('keydown', shortcut);
@@ -6612,6 +6761,27 @@ export function App(): React.JSX.Element {
   const [selectedSmartCollection, setSelectedSmartCollection] = useState<CatalogSmartCollection['id'] | null>(null);
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
+  const [shortcutMap, setShortcutMap] = useState<Record<ShortcutAction, string>>(() => loadShortcutMap());
+  useEffect(() => {
+    const updateShortcuts = (event: Event) => {
+      const detail = (event as CustomEvent<Record<ShortcutAction, string>>).detail;
+      if (detail && typeof detail === 'object') setShortcutMap({ ...defaultShortcutMap, ...detail });
+    };
+    window.addEventListener(SHORTCUTS_CHANGED_EVENT, updateShortcuts);
+    return () => window.removeEventListener(SHORTCUTS_CHANGED_EVENT, updateShortcuts);
+  }, []);
+  useEffect(() => {
+    const handleConfigurableShortcut = (event: KeyboardEvent) => {
+      if (!shortcutMap.clearSelection || !shortcutMatches(event, shortcutMap.clearSelection) || shortcutBlocked(event, true)) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest('input, textarea, select, [contenteditable="true"], [role="textbox"], [role="dialog"], [role="menu"]')) return;
+      if (!document.querySelector('.catalog-grid, .catalog-list-view, .filmstrip, .inline-photo-viewer')) return;
+      event.preventDefault();
+      setSharedSelection((current) => ({ selectedIds: new Set(), anchorId: null, focusId: current.focusId }));
+    };
+    window.addEventListener('keydown', handleConfigurableShortcut, true);
+    return () => window.removeEventListener('keydown', handleConfigurableShortcut, true);
+  }, [shortcutMap.clearSelection]);
   const [viewerPhoto, setViewerPhoto] = useState<Photo | null>(null);
   const viewerPhotoRef = useRef<Photo | null>(null);
   viewerPhotoRef.current = viewerPhoto;
@@ -7544,7 +7714,7 @@ export function App(): React.JSX.Element {
 
   return (
     <div className="app-shell" onDragOver={(event) => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; } }} onDrop={(event) => {
-      if (activePhotoDragIds) { event.preventDefault(); activePhotoDragIds = null; return; }
+      if (activePhotoDragIds) { event.preventDefault(); finishPhotoDrag(); return; }
       if (!event.dataTransfer.files.length) return;
       event.preventDefault();
       const paths = window.desktopApi.getDroppedFilePaths([...event.dataTransfer.files]);
